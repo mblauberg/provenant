@@ -2,7 +2,7 @@
   "command": "console overview",
   "data": {
     "counts": {
-      "attention": 3,
+      "attention": 2,
       "needs_you": 3,
       "running": 0
     },
@@ -52,26 +52,6 @@
         "state": "unknown",
         "superseded_by": null,
         "task_label": "Review the change set"
-      },
-      {
-        "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
-        "attention": true,
-        "cause": null,
-        "key": {
-          "attempt": 1,
-          "graph": "run-the-whole-test-suite",
-          "node": "task",
-          "project": "01010101010101010101010101010101"
-        },
-        "presence": null,
-        "project_id": "01010101010101010101010101010101",
-        "project_label": "provenant",
-        "queued_at": "2026-11-02T01:57:31.075623Z",
-        "reason": "the lane failed; inspect its result and local evidence",
-        "retry_of": null,
-        "state": "failed",
-        "superseded_by": null,
-        "task_label": "Run the whole test suite"
       }
     ],
     "needs_you": [

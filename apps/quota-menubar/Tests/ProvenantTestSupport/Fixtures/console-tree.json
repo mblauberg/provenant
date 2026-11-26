@@ -64,6 +64,14 @@
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+              },
+              "root": "/"
+            },
             "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
             "attempt_number": 1,
             "cache_read_share": null,
@@ -162,7 +170,7 @@
             "kind": "continuation"
           }
         ],
-        "depth": 1,
+        "depth": 0,
         "lane_id": {
           "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
           "host": null,
@@ -178,6 +186,14 @@
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+              },
+              "root": "/"
+            },
             "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
             "attempt_number": 1,
             "cache_read_share": null,
@@ -271,7 +287,7 @@
       },
       {
         "children": [],
-        "depth": 1,
+        "depth": 0,
         "lane_id": {
           "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
           "host": null,
@@ -287,6 +303,14 @@
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+              },
+              "root": "/"
+            },
             "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
             "attempt_number": 1,
             "cache_read_share": null,
@@ -380,7 +404,7 @@
       },
       {
         "children": [],
-        "depth": 2,
+        "depth": 0,
         "lane_id": {
           "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
           "host": null,
@@ -396,6 +420,14 @@
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4"
+              },
+              "root": "/"
+            },
             "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
             "attempt_number": 1,
             "cache_read_share": null,
@@ -505,6 +537,14 @@
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
+              },
+              "root": "/"
+            },
             "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
             "attempt_number": 1,
             "cache_read_share": null,
@@ -614,8 +654,16 @@
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+              },
+              "root": "/"
+            },
             "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
-            "attempt_number": 1,
+            "attempt_number": 2,
             "cache_read_share": null,
             "cause": null,
             "continuation": null,
@@ -630,7 +678,7 @@
             "last_event_at": "2026-11-02T01:57:31.075623Z",
             "last_event_source": "queued",
             "last_output_at": null,
-            "node": "task",
+            "node": "task--writer",
             "observed_route": null,
             "overdue": null,
             "partial_signals": [],

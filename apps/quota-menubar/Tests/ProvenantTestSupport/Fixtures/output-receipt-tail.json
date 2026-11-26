@@ -1,0 +1,29 @@
+{
+  "command": "output",
+  "data": {
+    "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "bytes": {
+      "data": "first line\nlast line",
+      "encoding": "utf8"
+    },
+    "clipped": false,
+    "complete": true,
+    "digest": null,
+    "eof": true,
+    "length": 20,
+    "next_offset": 20,
+    "offset": 0,
+    "part": "receipt",
+    "reason": null,
+    "settlement_reason": null,
+    "state": "succeeded",
+    "tail_clamped": false,
+    "tail_lines": 1,
+    "tail_text": "last line"
+  },
+  "error": null,
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}

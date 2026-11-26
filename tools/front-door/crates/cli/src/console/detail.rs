@@ -19,9 +19,12 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
         Err(error) => return Err(error.into()),
     };
     if host.is_some_and(|host| Some(host) != local_host.map(|h| h.to_string()).as_deref()) {
-        return Ok(
-            json!({"schema_version":1,"lane_id":{"host":host,"attempt_id":attempt_id},"status":"unavailable","reason":"remote_detail_requires_host_read"}),
-        );
+        return Ok(super::projection::detail_unavailable(
+            &json!(host),
+            &json!(attempt_id),
+            "remote_detail_requires_host_read",
+            None,
+        ));
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -50,9 +53,12 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
             }
             Err(provenant_run::RunError::NotFound) => continue,
             Err(error) => {
-                return Ok(
-                    json!({"schema_version":1,"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"unavailable","reason":error.to_string()}),
-                );
+                return Ok(super::projection::detail_unavailable(
+                    &json!(local_host),
+                    &json!(attempt_id),
+                    &error.to_string(),
+                    None,
+                ));
             }
         }
     }
@@ -61,9 +67,12 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
         let tree = match super::tree::read_inner(roots, None, 16, 100, true, true) {
             Ok(tree) => tree,
             Err(error) => {
-                return Ok(
-                    json!({"schema_version":1,"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"unavailable","reason":error.to_string(),"coverage":{"nested":"unavailable","peer":"not_searched"}}),
-                );
+                return Ok(super::projection::detail_unavailable(
+                    &json!(local_host),
+                    &json!(attempt_id),
+                    &error.to_string(),
+                    Some("unavailable"),
+                ));
             }
         };
         found = tree["nodes"]
@@ -95,29 +104,14 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
     }
     let Some(record) = found else {
         return Ok(super::projection::detail_missing(
-            &json!({"host": local_host, "attempt_id": attempt_id}),
+            &super::projection::detail_lookup_lane_id(&json!(local_host), &json!(attempt_id)),
             "bounded_tree_search",
         ));
     };
     let key = &record.key;
     let effective = record.effective_usage();
-    let usage = serde_json::to_value(&effective).map_err(|_| Error::Encode)?;
-    let tokens = &effective.tokens;
-    let mut known = Vec::new();
-    let mut missing = Vec::new();
-    for (name, count) in [
-        ("input", tokens.input),
-        ("cache_read", tokens.cache_read),
-        ("cache_write", tokens.cache_write),
-        ("output", tokens.output),
-        ("reasoning", tokens.reasoning),
-    ] {
-        if count.is_some() {
-            known.push(name)
-        } else {
-            missing.push(name)
-        }
-    }
+    let (usage, known, missing) =
+        super::projection::detail_usage(&effective).map_err(|_| Error::Encode)?;
     let artifact = |name: &str, item: Option<&provenant_run::ArtifactRecord>| {
         item.map(|item| {
             let present = item.path.to_relative_path().ok().is_some_and(|path| {

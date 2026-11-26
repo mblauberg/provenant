@@ -1,0 +1,35 @@
+{
+  "command": "output",
+  "data": {
+    "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "bytes": {
+      "data": "the prompt was written",
+      "encoding": "utf8"
+    },
+    "clipped": false,
+    "complete": true,
+    "digest": null,
+    "eof": true,
+    "length": 22,
+    "next_offset": 22,
+    "offset": 0,
+    "part": "prompt",
+    "reason": null,
+    "settlement_reason": null,
+    "state": "running",
+    "to": {
+      "kind": "path",
+      "relative": {
+        "encoding": "utf8",
+        "path": "fixture/project/output.txt"
+      },
+      "root": "/"
+    },
+    "written": 22
+  },
+  "error": null,
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}

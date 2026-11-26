@@ -1,0 +1,21 @@
+{
+  "command": "console detail",
+  "data": {
+    "coverage": {
+      "nested": "unavailable",
+      "peer": "not_searched"
+    },
+    "lane_id": {
+      "attempt_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "host": null
+    },
+    "reason": "fixture tree read error",
+    "schema_version": 1,
+    "status": "unavailable"
+  },
+  "error": null,
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}

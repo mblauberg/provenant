@@ -4,7 +4,9 @@ use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_fabric_runtime::chairs::{ChairIndex, Request as ChairRequest};
 use provenant_os::clock::SystemClock;
 use provenant_records::CanonicalV1;
-use provenant_run::{AttemptState, ExecutionContext, Outcome, RunStore};
+#[cfg(test)]
+use provenant_run::{AttemptState, Outcome};
+use provenant_run::{ExecutionContext, RunStore};
 use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
 
@@ -182,25 +184,8 @@ pub(super) fn read(
                 }
                 _ => None,
             };
-            let effective = attempt.effective_usage();
-            let tokens = &effective.tokens;
-            let mut known = Vec::new();
-            let mut missing = Vec::new();
-            for (name, count) in [
-                ("input", tokens.input),
-                ("cache_read", tokens.cache_read),
-                ("cache_write", tokens.cache_write),
-                ("output", tokens.output),
-                ("reasoning", tokens.reasoning),
-            ] {
-                if count.is_some() {
-                    known.push(name)
-                } else {
-                    missing.push(name)
-                }
-            }
-            let terminal_attention = matches!(attempt.state, AttemptState::Terminal { outcome, .. }
-                if !matches!(outcome, Outcome::Succeeded | Outcome::Cancelled));
+            let (_, known, missing) = super::projection::detail_usage(&attempt.effective_usage())
+                .map_err(|_| Error::Encode)?;
             let projected = crate::run::project_lane_with_census(
                 attempt,
                 &waits,
@@ -209,17 +194,13 @@ pub(super) fn read(
                 attempt.superseded_by.is_none(),
                 census.as_ref().ok_or(()),
             );
-            let liveness_attention = matches!(
-                projected.presence,
-                Some(
-                    provenant_records::wire::LanePresence::Unattended
-                        | provenant_records::wire::LanePresence::Unknown
-                        | provenant_records::wire::LanePresence::Settling
-                )
-            );
-            let attention = terminal_attention || liveness_attention;
+            let attention = super::projection::board_attention(&attempt.state, projected.presence);
             let attempt = serde_json::to_value(projected).map_err(|_| Error::Encode)?;
-            let lane_id = json!({"host":host,"key":work_key,"attempt_id":attempt["attempt_id"]});
+            let lane_id = super::projection::board_lane_id(
+                &json!(host),
+                &serde_json::to_value(work_key).map_err(|_| Error::Encode)?,
+                &attempt["attempt_id"],
+            );
             let operation = serde_json::to_value(&lane.operation).map_err(|_| Error::Encode)?;
             let chair = serde_json::to_value(&chair).map_err(|_| Error::Encode)?;
             let wait = serde_json::to_value(waits.iter().find(|w| w.attempt_id == attempt_id))

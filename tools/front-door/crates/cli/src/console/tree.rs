@@ -3,8 +3,10 @@ use super::Error;
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, RunStore};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
+use std::collections::{BTreeMap, VecDeque};
 
 pub(super) fn read(
     roots: &Roots,
@@ -61,11 +63,6 @@ pub(super) fn read_inner(
     let children_absent = 0u64;
     let mut root_coverage = "empty";
     let mut truncated = false;
-    let mut totals: BTreeMap<&str, (u64, u64)> =
-        ["input", "cache_read", "cache_write", "output", "reasoning"]
-            .into_iter()
-            .map(|key| (key, (0, 0)))
-            .collect();
     while let Some((state, depth, owner)) = stores.pop_front() {
         let call = provenant_run::Request {
             clock: &clock,
@@ -77,7 +74,12 @@ pub(super) fn read_inner(
             });
         if examined == max_nodes {
             truncated = true;
-            unfetched.push(json!({"project_id":owner_project,"parent_attempt":owner_attempt,"reason":"node_limit"}));
+            unfetched.push(super::projection::tree_unfetched_child(
+                &owner_project,
+                &owner_attempt,
+                "node_limit",
+                None,
+            ));
             continue;
         }
         let context = ExecutionContext {
@@ -90,12 +92,23 @@ pub(super) fn read_inner(
             Ok(Some(store)) => store,
             Ok(None) => {
                 if owner.is_some() {
-                    unfetched.push(json!({"project_id":owner_project,"parent_attempt":owner_attempt,"reason":"missing_store"}));
+                    unfetched.push(super::projection::tree_unfetched_child(
+                        &owner_project,
+                        &owner_attempt,
+                        "missing_store",
+                        None,
+                    ));
                 }
                 continue;
             }
             Err(error) if owner.is_some() => {
-                unfetched.push(json!({"project_id":owner_project,"parent_attempt":owner_attempt,"reason":"unavailable","detail":error.to_string()}));
+                let detail = error.to_string();
+                unfetched.push(super::projection::tree_unfetched_child(
+                    &owner_project,
+                    &owner_attempt,
+                    "unavailable",
+                    Some(&detail),
+                ));
                 continue;
             }
             Err(error) => return Err(error.into()),
@@ -110,24 +123,29 @@ pub(super) fn read_inner(
             let remaining = max_nodes.saturating_sub(examined);
             if remaining == 0 {
                 truncated = true;
-                unfetched.push(json!({"project_id":owner_project,"parent_attempt":owner_attempt,"reason":"node_limit"}));
+                unfetched.push(super::projection::tree_unfetched_child(
+                    &owner_project,
+                    &owner_attempt,
+                    "node_limit",
+                    None,
+                ));
                 break;
             }
-            let page = match store.board_page(
-                selected,
-                true,
-                remaining.min(100),
-                after,
-                through,
-                &call,
-            ) {
-                Ok(page) => page,
-                Err(error) if owner.is_some() => {
-                    unfetched.push(json!({"project_id":owner_project,"parent_attempt":owner_attempt,"reason":"unavailable","detail":error.to_string()}));
-                    break;
-                }
-                Err(error) => return Err(error.into()),
-            };
+            let page =
+                match store.board_page(selected, true, remaining.min(100), after, through, &call) {
+                    Ok(page) => page,
+                    Err(error) if owner.is_some() => {
+                        let detail = error.to_string();
+                        unfetched.push(super::projection::tree_unfetched_child(
+                            &owner_project,
+                            &owner_attempt,
+                            "unavailable",
+                            Some(&detail),
+                        ));
+                        break;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
             through = Some(page.high_water);
             for lane in page.lanes {
                 examined += 1;
@@ -140,31 +158,38 @@ pub(super) fn read_inner(
                 if let Some((existing, existing_parents, existing_store)) = seen.get(&key) {
                     duplicate_count += 1;
                     if *existing != work_key {
-                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_work_key","values":{"stored":existing,"observed":work_key},"store":{"stored":existing_store,"observed":store_path.clone()}}));
+                        conflicts.push(super::projection::tree_identity_conflict(
+                            &attempt.project_id,
+                            &attempt.attempt_id,
+                            "conflicting_work_key",
+                            existing,
+                            &work_key,
+                            existing_store,
+                            &store_path,
+                        ));
                     }
                     if *existing_parents != parents {
-                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_parents","values":{"stored":{"dispatch":existing_parents.0,"continuation":existing_parents.1},"observed":{"dispatch":parents.0,"continuation":parents.1}},"store":{"stored":existing_store,"observed":store_path.clone()}}));
+                        let stored = super::projection::tree_parent_values(
+                            &existing_parents.0,
+                            &existing_parents.1,
+                        );
+                        let observed =
+                            super::projection::tree_parent_values(&parents.0, &parents.1);
+                        conflicts.push(super::projection::tree_identity_conflict(
+                            &attempt.project_id,
+                            &attempt.attempt_id,
+                            "conflicting_parents",
+                            &stored,
+                            &observed,
+                            existing_store,
+                            &store_path,
+                        ));
                     }
                     continue;
                 }
                 seen.insert(key, (work_key.clone(), parents, store_path.clone()));
                 let effective = attempt.effective_usage();
                 let usage = serde_json::to_value(&effective).map_err(|_| Error::Encode)?;
-                let tokens = &effective.tokens;
-                for (name, count) in [
-                    ("input", tokens.input),
-                    ("cache_read", tokens.cache_read),
-                    ("cache_write", tokens.cache_write),
-                    ("output", tokens.output),
-                    ("reasoning", tokens.reasoning),
-                ] {
-                    let (sum, missing) = totals.get_mut(name).ok_or(Error::Encode)?;
-                    if let Some(count) = count {
-                        *sum = sum.checked_add(count).ok_or(Error::Encode)?;
-                    } else {
-                        *missing += 1;
-                    }
-                }
                 let projected = crate::run::project_lane_with_census(
                     attempt,
                     &[],
@@ -180,8 +205,8 @@ pub(super) fn read_inner(
                     &serde_json::to_value(work_key).map_err(|_| Error::Encode)?,
                     &projected["attempt_id"],
                 );
-                let parents = json!({"dispatch":parents.0,"continuation":parents.1});
                 let operation = serde_json::to_value(&lane.operation).map_err(|_| Error::Encode)?;
+                let parents = super::projection::tree_parents(&operation, &projected);
                 nodes.push(super::projection::tree_node(
                     super::projection::TreeNodeInput {
                         lane_id: &lane_id,
@@ -203,66 +228,14 @@ pub(super) fn read_inner(
             }
         }
     }
-    let ids: BTreeSet<_> = nodes
-        .iter()
-        .filter_map(|n| {
-            Some((
-                n["lane_id"]["project_id"].as_str()?,
-                n["lane_id"]["attempt_id"].as_str()?,
-            ))
-        })
-        .collect();
-    let mut edges = Vec::new();
-    for node in &nodes {
-        for kind in ["dispatch", "continuation"] {
-            if let Some(parent) = node["parents"][kind].as_str() {
-                edges.push(super::projection::tree_edge(
-                    &node["lane_id"]["project_id"],
-                    kind,
-                    parent,
-                    node["lane_id"]["attempt_id"]
-                        .as_str()
-                        .ok_or(Error::Encode)?,
-                    if ids.contains(&(node["lane_id"]["project_id"].as_str().unwrap_or(""), parent))
-                    {
-                        "present"
-                    } else {
-                        "missing"
-                    },
-                ));
-            }
-        }
-    }
+    let edges = super::projection::tree_edges(&nodes).ok_or(Error::Encode)?;
     let partial = truncated
         || !unfetched.is_empty()
         || !conflicts.is_empty()
         || edges.iter().any(|edge| edge["parent_status"] == "missing");
-    for node in &mut nodes {
-        let children = super::projection::tree_children(
-            &edges,
-            &node["lane_id"]["project_id"],
-            &node["lane_id"]["attempt_id"],
-        );
-        let metadata = node["metadata"].clone();
-        if !include_store_path {
-            node.as_object_mut()
-                .ok_or(Error::Encode)?
-                .remove("store_path");
-        }
-        node["children"] = json!(children);
-        node["status"] = metadata["attempt"]["state"].clone();
-        node["title"] = metadata["attempt"]["title"].clone();
-        if !detail {
-            node.as_object_mut()
-                .ok_or(Error::Encode)?
-                .remove("metadata");
-        }
-    }
-    let usage: BTreeMap<_, _> = totals
-        .into_iter()
-        .map(|(key, (known, missing))| (key, json!({"known_sum":known,"missing":missing})))
-        .collect();
-    let usage = serde_json::to_value(usage).map_err(|_| Error::Encode)?;
+    super::projection::tree_finalize_nodes(&mut nodes, &edges, include_store_path, detail)
+        .ok_or(Error::Encode)?;
+    let usage = super::projection::tree_usage_totals(&nodes).ok_or(Error::Encode)?;
     let totals = super::projection::tree_totals(seen.len(), duplicate_count, &usage);
     Ok(super::projection::tree(
         &nodes,
@@ -283,104 +256,7 @@ pub(super) fn read_inner(
 /// Select descendants across dispatch and continuation edges from a bounded snapshot.
 /// Missing roots and depth cuts remain explicit because the snapshot may be partial.
 pub(super) fn select_subtree(tree: &mut Value, root: &str, max_depth: u64) -> Result<(), Error> {
-    let nodes = tree["nodes"].as_array().ok_or(Error::Encode)?;
-    let edges = tree["edges"].as_array().ok_or(Error::Encode)?;
-    let roots: Vec<_> = nodes
-        .iter()
-        .filter(|n| n["lane_id"]["attempt_id"] == root)
-        .map(|n| n["lane_id"]["project_id"].clone())
-        .collect();
-    let mut selected = BTreeMap::new();
-    for project in roots {
-        selected.insert(
-            (
-                project.as_str().ok_or(Error::Encode)?.to_owned(),
-                root.to_owned(),
-            ),
-            0u64,
-        );
-    }
-    let mut cut = false;
-    loop {
-        let mut changed = false;
-        for edge in edges {
-            let project = edge["project_id"].as_str().ok_or(Error::Encode)?;
-            let parent = edge["parent_attempt"].as_str().ok_or(Error::Encode)?;
-            let child = edge["child_attempt"].as_str().ok_or(Error::Encode)?;
-            if let Some(depth) = selected
-                .get(&(project.to_owned(), parent.to_owned()))
-                .copied()
-            {
-                let key = (project.to_owned(), child.to_owned());
-                if let std::collections::btree_map::Entry::Vacant(entry) = selected.entry(key) {
-                    if depth + 1 >= max_depth {
-                        cut = true;
-                    } else {
-                        entry.insert(depth + 1);
-                        changed = true;
-                    }
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    let missing = selected.is_empty();
-    let selected_node = |node: &Value| {
-        selected.contains_key(&(
-            node["lane_id"]["project_id"]
-                .as_str()
-                .unwrap_or("")
-                .to_owned(),
-            node["lane_id"]["attempt_id"]
-                .as_str()
-                .unwrap_or("")
-                .to_owned(),
-        ))
-    };
-    let mut kept: Vec<_> = nodes.iter().filter(|n| selected_node(n)).cloned().collect();
-    let kept_edges: Vec<_> = edges
-        .iter()
-        .filter(|edge| {
-            let project = edge["project_id"].as_str().unwrap_or("").to_owned();
-            selected.contains_key(&(
-                project.clone(),
-                edge["parent_attempt"].as_str().unwrap_or("").to_owned(),
-            )) && selected.contains_key(&(
-                project,
-                edge["child_attempt"].as_str().unwrap_or("").to_owned(),
-            ))
-        })
-        .cloned()
-        .collect();
-    for node in &mut kept {
-        let project = node["lane_id"]["project_id"]
-            .as_str()
-            .unwrap_or("")
-            .to_owned();
-        let attempt = node["lane_id"]["attempt_id"]
-            .as_str()
-            .unwrap_or("")
-            .to_owned();
-        node["depth"] = json!(selected[&(project.clone(), attempt.clone())]);
-        node["children"] = json!(
-            kept_edges
-                .iter()
-                .filter(|e| e["project_id"] == project && e["parent_attempt"] == attempt)
-                .map(|e| json!({"kind":e["kind"],"attempt_id":e["child_attempt"]}))
-                .collect::<Vec<_>>()
-        );
-    }
-    tree["nodes"] = json!(kept);
-    tree["edges"] = json!(kept_edges);
-    // Host-wide totals cannot describe a selected subtree.
-    tree["totals"] = json!({"attempts":kept.len()});
-    tree["subtree"] =
-        json!({"root":root,"status":if missing { "missing" } else { "found" },"depth_limited":cut});
-    if missing || cut {
-        tree["coverage"]["nested_runs"] = json!("partial");
-    }
+    *tree = super::projection::tree_selected_subtree(tree, root, max_depth).ok_or(Error::Encode)?;
     Ok(())
 }
 

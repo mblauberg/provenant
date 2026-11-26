@@ -12,6 +12,8 @@
 
 use provenant_core::ProjectId;
 use provenant_records::CanonicalV1;
+use provenant_records::wire::LanePresence;
+use provenant_run::AttemptState;
 use provenant_workflow::session::{SummaryLine, SummarySource};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -48,6 +50,32 @@ pub fn overview_needs_you(
         "project_id":project_id,"project_label":project_label})
 }
 
+/// Whether a projected overview lane counts as running or needs attention.
+/// Presence is authoritative when observed; durable state is the fallback
+/// only when no presence observation exists.
+pub fn overview_activity(presence: Option<LanePresence>, state: &AttemptState) -> (bool, bool) {
+    let active = match presence {
+        Some(LanePresence::Live) => true,
+        Some(LanePresence::Unattended | LanePresence::Unknown | LanePresence::Settling) => false,
+        None => !matches!(state, AttemptState::Terminal { .. }),
+    };
+    let attention = matches!(
+        presence,
+        Some(LanePresence::Unattended | LanePresence::Unknown | LanePresence::Settling)
+    );
+    (active, attention)
+}
+
+/// Whether a board attempt needs attention from its outcome or observation.
+pub fn board_attention(state: &AttemptState, presence: Option<LanePresence>) -> bool {
+    matches!(state, AttemptState::Terminal { outcome, .. }
+        if !matches!(outcome, provenant_run::Outcome::Succeeded | provenant_run::Outcome::Cancelled))
+        || matches!(
+            presence,
+            Some(LanePresence::Unattended | LanePresence::Unknown | LanePresence::Settling)
+        )
+}
+
 /// Inputs for one board lane, including owner metadata and census coverage.
 pub struct BoardLaneInput<'a> {
     pub lane_id: &'a Value,
@@ -59,6 +87,11 @@ pub struct BoardLaneInput<'a> {
     pub known: &'a [&'a str],
     pub missing: &'a [&'a str],
     pub observation: &'a str,
+}
+
+/// Identity for a board row assembled from the observed host, key and attempt.
+pub fn board_lane_id(host: &Value, key: &Value, attempt_id: &Value) -> Value {
+    json!({"host":host,"key":key,"attempt_id":attempt_id})
 }
 
 /// One board lane, including the owner operation metadata and census coverage.
@@ -115,6 +148,45 @@ pub fn tree_node(input: TreeNodeInput<'_>) -> Value {
     node
 }
 
+/// Parent identities projected from the operation and attempt records.
+pub fn tree_parents(operation: &Value, attempt: &Value) -> Value {
+    tree_parent_values(&operation["parent_attempt"], &attempt["retry_of"])
+}
+
+/// Parent identities with the dispatch and continuation sources made explicit.
+pub fn tree_parent_values(dispatch: &impl Serialize, continuation: &impl Serialize) -> Value {
+    json!({"dispatch":dispatch,"continuation":continuation})
+}
+
+/// One bounded child-store failure, with optional underlying detail.
+pub fn tree_unfetched_child<P: Serialize, A: Serialize>(
+    project_id: &P,
+    parent_attempt: &A,
+    reason: &str,
+    detail: Option<&str>,
+) -> Value {
+    let mut item = json!({"project_id":project_id,"parent_attempt":parent_attempt,"reason":reason});
+    if let Some(detail) = detail {
+        item["detail"] = json!(detail);
+    }
+    item
+}
+
+/// Conflicting observations for one attempt identity.
+pub fn tree_identity_conflict(
+    project_id: &impl Serialize,
+    attempt_id: &impl Serialize,
+    reason: &str,
+    stored: &impl Serialize,
+    observed: &impl Serialize,
+    stored_store: &str,
+    observed_store: &str,
+) -> Value {
+    json!({"project_id":project_id,"attempt_id":attempt_id,"reason":reason,
+        "values":{"stored":stored,"observed":observed},
+        "store":{"stored":stored_store,"observed":observed_store}})
+}
+
 /// One parent/child edge in the tree projection.
 pub fn tree_edge(
     project_id: &Value,
@@ -127,6 +199,40 @@ pub fn tree_edge(
         "child_attempt":child,"parent_status":parent_status})
 }
 
+/// Project parent edges and whether each parent is present in the bounded tree.
+pub fn tree_edges(nodes: &[Value]) -> Option<Vec<Value>> {
+    let ids: std::collections::BTreeSet<_> = nodes
+        .iter()
+        .map(|node| {
+            Some((
+                node["lane_id"]["project_id"].as_str()?.to_owned(),
+                node["lane_id"]["attempt_id"].as_str()?.to_owned(),
+            ))
+        })
+        .collect::<Option<_>>()?;
+    let mut edges = Vec::new();
+    for node in nodes {
+        let project_id = node["lane_id"]["project_id"].as_str()?;
+        let child = node["lane_id"]["attempt_id"].as_str()?;
+        for kind in ["dispatch", "continuation"] {
+            if let Some(parent) = node["parents"][kind].as_str() {
+                edges.push(tree_edge(
+                    &node["lane_id"]["project_id"],
+                    kind,
+                    parent,
+                    child,
+                    if ids.contains(&(project_id.to_owned(), parent.to_owned())) {
+                        "present"
+                    } else {
+                        "missing"
+                    },
+                ));
+            }
+        }
+    }
+    Some(edges)
+}
+
 /// Child links projected from the same tree edges exposed at top level.
 pub fn tree_children(edges: &[Value], project_id: &Value, parent: &Value) -> Vec<Value> {
     edges
@@ -136,6 +242,217 @@ pub fn tree_children(edges: &[Value], project_id: &Value, parent: &Value) -> Vec
         })
         .map(|edge| json!({"kind":edge["kind"],"attempt_id":edge["child_attempt"]}))
         .collect()
+}
+
+/// Apply the display fields derived from tree edges and hide optional detail.
+pub fn tree_finalize_nodes(
+    nodes: &mut [Value],
+    edges: &[Value],
+    include_store_path: bool,
+    detail: bool,
+) -> Option<()> {
+    for node in nodes {
+        let children = tree_children(
+            edges,
+            &node["lane_id"]["project_id"],
+            &node["lane_id"]["attempt_id"],
+        );
+        let status = node["metadata"]["attempt"]["state"].clone();
+        let title = node["metadata"]["attempt"]["title"].clone();
+        if !include_store_path {
+            node.as_object_mut()?.remove("store_path");
+        }
+        node["children"] = json!(children);
+        node["status"] = status;
+        node["title"] = title;
+        if !detail {
+            node.as_object_mut()?.remove("metadata");
+        }
+    }
+    Some(())
+}
+
+/// Aggregate token totals from the unique projected nodes.
+pub fn tree_usage_totals(nodes: &[Value]) -> Option<Value> {
+    let mut totals: std::collections::BTreeMap<&str, (u64, u64)> =
+        ["input", "cache_read", "cache_write", "output", "reasoning"]
+            .into_iter()
+            .map(|key| (key, (0, 0)))
+            .collect();
+    for node in nodes {
+        for (name, count) in [
+            ("input", node["usage"]["tokens"]["input"].as_u64()),
+            ("cache_read", node["usage"]["tokens"]["cache_read"].as_u64()),
+            (
+                "cache_write",
+                node["usage"]["tokens"]["cache_write"].as_u64(),
+            ),
+            ("output", node["usage"]["tokens"]["output"].as_u64()),
+            ("reasoning", node["usage"]["tokens"]["reasoning"].as_u64()),
+        ] {
+            let (sum, missing) = totals.get_mut(name)?;
+            if let Some(count) = count {
+                *sum = sum.checked_add(count)?;
+            } else {
+                *missing = missing.checked_add(1)?;
+            }
+        }
+    }
+    let mut result = serde_json::Map::new();
+    for (key, (known_sum, missing)) in totals {
+        result.insert(
+            key.to_owned(),
+            json!({"known_sum":known_sum,"missing":missing}),
+        );
+    }
+    Some(Value::Object(result))
+}
+
+#[cfg(test)]
+#[test]
+fn tree_finalization_and_usage_totals_follow_projected_nodes_and_edges() {
+    let mut nodes = vec![
+        json!({
+            "lane_id":{"project_id":"project-1","attempt_id":"parent"},
+            "parents":{"dispatch":null,"continuation":null},
+            "store_path":"/private/store",
+            "metadata":{"operation":{"kind":"dispatch"},"attempt":{"state":"succeeded","title":"parent task"}},
+            "usage":{"tokens":{"input":3,"cache_read":null,"cache_write":null,"output":null,"reasoning":null}}
+        }),
+        json!({
+            "lane_id":{"project_id":"project-1","attempt_id":"child"},
+            "parents":{"dispatch":"parent","continuation":null},
+            "store_path":"/private/store",
+            "metadata":{"operation":{"kind":"dispatch"},"attempt":{"state":"failed","title":"child task"}},
+            "usage":{"tokens":{"input":null,"cache_read":null,"cache_write":null,"output":2,"reasoning":null}}
+        }),
+    ];
+    let edges = tree_edges(&nodes).expect("tree edges");
+
+    tree_finalize_nodes(&mut nodes, &edges, false, false).expect("tree nodes finalize");
+    assert_eq!(nodes[0]["children"][0]["attempt_id"], "child");
+    assert_eq!(nodes[0]["status"], "succeeded");
+    assert_eq!(nodes[0]["title"], "parent task");
+    assert!(nodes[0].get("metadata").is_none());
+    assert!(nodes[0].get("store_path").is_none());
+
+    let totals = tree_usage_totals(&nodes).expect("tree usage totals");
+    assert_eq!(totals["input"], json!({"known_sum":3,"missing":1}));
+    assert_eq!(totals["output"], json!({"known_sum":2,"missing":1}));
+    assert_eq!(totals["reasoning"], json!({"known_sum":0,"missing":2}));
+
+    let tree = json!({
+        "nodes":nodes,
+        "edges":edges,
+        "totals":{"attempts":2},
+        "coverage":{"nested_runs":"complete"}
+    });
+    let subtree = tree_selected_subtree(&tree, "parent", 1).expect("selected subtree");
+    assert_eq!(subtree["nodes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(subtree["nodes"][0]["depth"], 0);
+    assert_eq!(subtree["nodes"][0]["children"], json!([]));
+    assert_eq!(subtree["totals"], json!({"attempts":1}));
+    assert_eq!(
+        subtree["subtree"],
+        json!({"root":"parent","status":"found","depth_limited":true})
+    );
+    assert_eq!(subtree["coverage"]["nested_runs"], "partial");
+}
+
+/// Restrict tree output to a selected node and its bounded descendants.
+pub fn tree_selected_subtree(tree: &Value, root: &str, max_depth: u64) -> Option<Value> {
+    let nodes = tree.get("nodes")?.as_array()?;
+    let edges = tree.get("edges")?.as_array()?;
+    let roots: Vec<_> = nodes
+        .iter()
+        .filter(|node| node["lane_id"]["attempt_id"] == root)
+        .map(|node| node["lane_id"]["project_id"].as_str().map(str::to_owned))
+        .collect::<Option<_>>()?;
+    let mut selected = std::collections::BTreeMap::new();
+    for project in roots {
+        selected.insert((project, root.to_owned()), 0u64);
+    }
+    let mut cut = false;
+    loop {
+        let mut changed = false;
+        for edge in edges {
+            let project = edge["project_id"].as_str()?;
+            let parent = edge["parent_attempt"].as_str()?;
+            let child = edge["child_attempt"].as_str()?;
+            if let Some(depth) = selected
+                .get(&(project.to_owned(), parent.to_owned()))
+                .copied()
+            {
+                let key = (project.to_owned(), child.to_owned());
+                if let std::collections::btree_map::Entry::Vacant(entry) = selected.entry(key) {
+                    if depth + 1 >= max_depth {
+                        cut = true;
+                    } else {
+                        entry.insert(depth + 1);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let missing = selected.is_empty();
+    let selected_node = |node: &Value| {
+        selected.contains_key(&(
+            node["lane_id"]["project_id"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+            node["lane_id"]["attempt_id"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+        ))
+    };
+    let kept_edges: Vec<_> = edges
+        .iter()
+        .filter(|edge| {
+            let project = edge["project_id"].as_str().unwrap_or("").to_owned();
+            selected.contains_key(&(
+                project.clone(),
+                edge["parent_attempt"].as_str().unwrap_or("").to_owned(),
+            )) && selected.contains_key(&(
+                project,
+                edge["child_attempt"].as_str().unwrap_or("").to_owned(),
+            ))
+        })
+        .cloned()
+        .collect();
+    let mut kept = Vec::new();
+    for node in nodes.iter().filter(|node| selected_node(node)) {
+        let project = node["lane_id"]["project_id"].as_str()?;
+        let attempt = node["lane_id"]["attempt_id"].as_str()?;
+        let depth = *selected.get(&(project.to_owned(), attempt.to_owned()))?;
+        kept.push(tree_subtree_node(node, depth, &kept_edges));
+    }
+
+    let mut result = tree.clone();
+    result["nodes"] = json!(kept);
+    result["edges"] = json!(kept_edges);
+    result["totals"] = json!({"attempts":kept.len()});
+    result["subtree"] =
+        json!({"root":root,"status":if missing { "missing" } else { "found" },"depth_limited":cut});
+    if missing || cut {
+        result["coverage"]["nested_runs"] = json!("partial");
+    }
+    Some(result)
+}
+
+/// Project one selected node with its relative depth and retained children.
+fn tree_subtree_node(node: &Value, depth: u64, edges: &[Value]) -> Value {
+    let mut selected = node.clone();
+    let project = selected["lane_id"]["project_id"].clone();
+    let attempt = selected["lane_id"]["attempt_id"].clone();
+    selected["depth"] = json!(depth);
+    selected["children"] = json!(tree_children(edges, &project, &attempt));
+    selected
 }
 
 /// Totals are a projection of observed tree records, not a fixture constant.
@@ -175,6 +492,29 @@ pub fn detail_timings(
     json!({"queued_at":queued,"started_at":started,"provider_ms":provider_ms,"finished_at":finished})
 }
 
+/// Usage data and bucket coverage from the same effective attempt usage.
+pub fn detail_usage(
+    usage: &provenant_run::UsageRecord,
+) -> Result<(Value, Vec<&'static str>, Vec<&'static str>), serde_json::Error> {
+    let tokens = &usage.tokens;
+    let mut known = Vec::new();
+    let mut missing = Vec::new();
+    for (name, count) in [
+        ("input", tokens.input),
+        ("cache_read", tokens.cache_read),
+        ("cache_write", tokens.cache_write),
+        ("output", tokens.output),
+        ("reasoning", tokens.reasoning),
+    ] {
+        if count.is_some() {
+            known.push(name);
+        } else {
+            missing.push(name);
+        }
+    }
+    Ok((serde_json::to_value(usage)?, known, missing))
+}
+
 /// Attach result-only owner evidence to the common output projection.
 pub fn output_result_evidence(
     data: &mut Value,
@@ -191,6 +531,103 @@ pub fn output_result_evidence(
     data["publication"] = publication.clone();
     data["changed_files"] = changed_files.clone();
     data["changed_files_total"] = changed_files_total.clone();
+}
+
+/// Optional fields added by the output owner after reading an artifact. Keeping
+/// their wire shape here lets the fixture generator exercise the same branches.
+#[derive(Default)]
+pub struct OutputExtras<'a> {
+    pub budget_usage: Option<&'a Value>,
+    pub stop_work: Option<&'a Value>,
+    pub payload_evicted: bool,
+    pub planner_fallback: Option<&'a str>,
+    /// Outer `None` omits the field; `Some(None)` preserves a reported null.
+    pub provider_error: Option<Option<&'a str>>,
+}
+
+/// Add the optional output metadata present for one loaded attempt state.
+pub fn output_extras(data: &mut Value, extras: OutputExtras<'_>) {
+    if let Some(budget_usage) = extras.budget_usage {
+        data["budget_usage"] = budget_usage.clone();
+    }
+    if let Some(stop_work) = extras.stop_work {
+        data["stop_work"] = stop_work.clone();
+    }
+    if extras.payload_evicted {
+        data["payload"] = json!("evicted");
+    }
+    if let Some(reason) = extras.planner_fallback {
+        data["planner_fallback"] = json!({"stage":"static", "reason":reason});
+    }
+    if let Some(provider_error) = extras.provider_error {
+        data["provider_error"] = json!(provider_error);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum OutputTail {
+    Bytes(u64),
+    Lines(u64),
+}
+
+pub struct OutputWrite<'a> {
+    pub path: &'a Value,
+    pub bytes: usize,
+    pub final_result: bool,
+}
+
+#[derive(Default)]
+pub struct OutputRenderFields<'a> {
+    pub headed: bool,
+    pub tail: Option<OutputTail>,
+    pub tail_clamped: bool,
+    pub tail_text: Option<&'a str>,
+    pub written: Option<OutputWrite<'a>>,
+}
+
+pub struct OutputProgress {
+    pub state: String,
+    pub pending: bool,
+}
+
+/// Project fields added by the final output rendering stage.
+pub fn output_render_fields(
+    data: &mut Value,
+    fields: OutputRenderFields<'_>,
+) -> Option<OutputProgress> {
+    let progress = if fields.headed
+        && let Some(state) = data["state"].as_str()
+        && matches!(state, "queued" | "starting" | "running" | "settling")
+    {
+        let state = state.to_owned();
+        let pending = data["length"].as_u64().unwrap_or(0) == 0;
+        data["status"] = json!(state);
+        data["result"] = json!(if pending { "pending" } else { "partial" });
+        Some(OutputProgress { state, pending })
+    } else {
+        None
+    };
+
+    if let Some(tail) = fields.tail {
+        match tail {
+            OutputTail::Bytes(bytes) => data["tail"] = json!(bytes),
+            OutputTail::Lines(lines) => data["tail_lines"] = json!(lines),
+        }
+        data["tail_clamped"] = json!(fields.tail_clamped);
+    }
+    if let Some(text) = fields.tail_text {
+        data["tail_text"] = json!(text);
+    }
+    if let Some(written) = fields.written {
+        data["to"] = written.path.clone();
+        data["written"] = json!(written.bytes);
+        if written.final_result {
+            data["bytes"] = json!(
+                provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(Vec::new(),)
+            );
+        }
+    }
+    progress
 }
 
 /// `console projects` data from the registered local projects.
@@ -440,6 +877,11 @@ pub fn detail(
     })
 }
 
+/// Lane identity before the command has resolved a project or work key.
+pub fn detail_lookup_lane_id(host: &Value, attempt_id: &Value) -> Value {
+    json!({"host":host,"attempt_id":attempt_id})
+}
+
 /// `console detail` data when the target is not present locally.
 pub fn detail_missing(lane_id: &Value, nested: &str) -> Value {
     json!({
@@ -448,6 +890,31 @@ pub fn detail_missing(lane_id: &Value, nested: &str) -> Value {
         "status": "missing",
         "coverage": {"nested": nested, "peer": "not_searched"},
     })
+}
+
+/// `console detail` data when its local record or tree lookup is unavailable.
+/// Coverage is absent when the command did not attempt a nested tree search.
+pub fn detail_unavailable(
+    host: &Value,
+    attempt_id: &Value,
+    reason: &str,
+    nested_coverage: Option<&str>,
+) -> Value {
+    let mut data = json!({
+        "schema_version": 1,
+        "lane_id": detail_lookup_lane_id(host, attempt_id),
+        "status": "unavailable",
+        "reason": reason,
+    });
+    if let Some(nested) = nested_coverage {
+        data["coverage"] = json!({"nested": nested, "peer": "not_searched"});
+    }
+    data
+}
+
+/// One artifact-read failure in a bounded `console search` scan.
+pub fn search_artifact_error(attempt_id: &Value, reason: &str) -> Value {
+    json!({"attempt_id":attempt_id,"reason":reason})
 }
 
 /// `console search` data from one bounded page of matches.
@@ -510,8 +977,8 @@ pub fn search_snapshot(
 pub fn output(
     attempt_id: &str,
     state: &str,
-    reason: &Value,
-    settlement_reason: &Value,
+    reason: Option<Value>,
+    settlement_reason: Option<Value>,
     part: &str,
     offset: u64,
     next_offset: u64,
@@ -522,11 +989,9 @@ pub fn output(
     digest: &Value,
     bytes: &Value,
 ) -> Value {
-    json!({
+    let mut data = json!({
         "attempt_id": attempt_id,
         "state": state,
-        "reason": reason,
-        "settlement_reason": settlement_reason,
         "part": part,
         "offset": offset,
         "next_offset": next_offset,
@@ -536,7 +1001,14 @@ pub fn output(
         "complete": complete,
         "digest": digest,
         "bytes": bytes,
-    })
+    });
+    if let Some(reason) = reason {
+        data["reason"] = reason;
+    }
+    if let Some(settlement_reason) = settlement_reason {
+        data["settlement_reason"] = settlement_reason;
+    }
+    data
 }
 
 #[cfg(test)]
@@ -544,9 +1016,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn overview_activity_preserves_unsettled_fallback_and_excludes_terminal_outcomes() {
+        let state =
+            |value| serde_json::from_value::<AttemptState>(value).expect("synthetic attempt state");
+        for value in [
+            json!({"state":"queued"}),
+            json!({"state":"starting"}),
+            json!({"state":"running"}),
+            json!({"state":"settling", "publication_pending":true}),
+        ] {
+            assert!(overview_activity(None, &state(value)).0);
+        }
+        for outcome in ["succeeded", "failed", "timed_out", "cancelled"] {
+            let terminal = state(json!({
+                "state":"terminal", "outcome":outcome, "exit_code":1,
+                "finished_at":"2026-11-02T02:00:00.000000Z", "reason":null
+            }));
+            assert_eq!(overview_activity(None, &terminal), (false, false));
+        }
+        let running = state(json!({"state":"running"}));
+        assert_eq!(
+            overview_activity(Some(LanePresence::Live), &running),
+            (true, false)
+        );
+        assert_eq!(
+            overview_activity(Some(LanePresence::Unknown), &running),
+            (false, true)
+        );
+    }
+
+    #[test]
     fn board_lane_projection_keeps_owner_fields_and_coverage_together() {
+        let lane_id = board_lane_id(
+            &Value::Null,
+            &json!({"graph":"fixture"}),
+            &json!("attempt-1"),
+        );
         let lane = board_lane(BoardLaneInput {
-            lane_id: &json!({"attempt_id":"attempt-1"}),
+            lane_id: &lane_id,
             chair: &json!({"session_id":"session-1"}),
             operation: &json!({"name":"review"}),
             attempt: &json!({"state":"running"}),
@@ -558,6 +1065,7 @@ mod tests {
         });
 
         assert_eq!(lane["lane_id"]["attempt_id"], "attempt-1");
+        assert_eq!(lane["lane_id"]["key"]["graph"], "fixture");
         assert_eq!(lane["metadata"]["operation"]["name"], "review");
         assert_eq!(lane["metadata"]["attempt"]["state"], "running");
         assert_eq!(lane["usage_coverage"]["known"][0], "input");
@@ -578,5 +1086,111 @@ mod tests {
         );
 
         assert_eq!(lane["task_label"], Value::Null);
+    }
+
+    #[test]
+    fn detail_usage_coverage_projects_the_effective_token_buckets() {
+        let usage = provenant_run::UsageRecord {
+            tokens: provenant_records::usage::Tokens {
+                input: Some(12),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let (value, known, missing) = detail_usage(&usage).expect("typed usage serializes");
+
+        assert_eq!(value["tokens"]["input"], 12);
+        assert_eq!(known, ["input"]);
+        assert_eq!(
+            missing,
+            ["cache_read", "cache_write", "output", "reasoning"]
+        );
+    }
+
+    #[test]
+    fn detail_unavailable_omits_unattempted_coverage_and_keeps_error_coverage() {
+        let remote = detail_unavailable(
+            &json!("remote-host"),
+            &json!("attempt-1"),
+            "remote_detail_requires_host_read",
+            None,
+        );
+        assert_eq!(
+            remote,
+            json!({
+                "schema_version":1,
+                "lane_id":{"host":"remote-host","attempt_id":"attempt-1"},
+                "status":"unavailable",
+                "reason":"remote_detail_requires_host_read"
+            })
+        );
+
+        let tree_error = detail_unavailable(
+            &Value::Null,
+            &json!("attempt-2"),
+            "tree read failed",
+            Some("unavailable"),
+        );
+        assert_eq!(
+            tree_error["coverage"],
+            json!({"nested":"unavailable","peer":"not_searched"})
+        );
+
+        let missing = detail_missing(
+            &detail_lookup_lane_id(&Value::Null, &json!("attempt-3")),
+            "bounded_tree_search",
+        );
+        assert_eq!(
+            missing,
+            json!({
+                "schema_version":1,
+                "lane_id":{"host":null,"attempt_id":"attempt-3"},
+                "status":"missing",
+                "coverage":{"nested":"bounded_tree_search","peer":"not_searched"}
+            })
+        );
+    }
+
+    #[test]
+    fn search_artifact_error_projection_keeps_attempt_and_reason() {
+        assert_eq!(
+            search_artifact_error(&json!("attempt-1"), "fixture read error"),
+            json!({"attempt_id":"attempt-1","reason":"fixture read error"})
+        );
+    }
+
+    #[test]
+    fn output_extras_preserve_optional_fields_and_null_provider_error() {
+        let budget = json!({"unit":"fresh_tokens","counted":742});
+        let stop_work = json!({"trigger":"explicit_cancellation","push":"not_granted"});
+        let mut data = json!({"attempt_id":"attempt-1"});
+
+        output_extras(
+            &mut data,
+            OutputExtras {
+                budget_usage: Some(&budget),
+                stop_work: Some(&stop_work),
+                payload_evicted: true,
+                planner_fallback: Some("planner route failed"),
+                provider_error: Some(None),
+            },
+        );
+
+        assert_eq!(
+            data,
+            json!({
+                "attempt_id":"attempt-1",
+                "budget_usage":{"unit":"fresh_tokens","counted":742},
+                "stop_work":{"trigger":"explicit_cancellation","push":"not_granted"},
+                "payload":"evicted",
+                "planner_fallback":{"stage":"static","reason":"planner route failed"},
+                "provider_error":null
+            })
+        );
+
+        let mut absent = json!({"attempt_id":"attempt-2"});
+        output_extras(&mut absent, OutputExtras::default());
+        assert_eq!(absent, json!({"attempt_id":"attempt-2"}));
     }
 }

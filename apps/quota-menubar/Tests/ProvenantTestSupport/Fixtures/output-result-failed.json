@@ -1,0 +1,38 @@
+{
+  "command": "output",
+  "data": {
+    "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "bytes": {
+      "data": "provider exited with an error",
+      "encoding": "utf8"
+    },
+    "changed_files": null,
+    "changed_files_total": null,
+    "clipped": false,
+    "complete": true,
+    "digest": null,
+    "eof": true,
+    "length": 29,
+    "next_offset": 29,
+    "offset": 0,
+    "part": "result",
+    "payload": "evicted",
+    "planner_fallback": {
+      "reason": "planner route failed; static stage selected",
+      "stage": "static"
+    },
+    "provider_error": "provider exited with an error",
+    "publication": null,
+    "reason": "the lane failed; inspect its result and local evidence",
+    "residual_tree": null,
+    "settlement_reason": "failed",
+    "state": "failed",
+    "writer_base": null,
+    "writer_head": null
+  },
+  "error": null,
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}

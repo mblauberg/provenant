@@ -23,7 +23,7 @@
       "host": null,
       "key": {
         "attempt": 1,
-        "graph": "fixture",
+        "graph": "board-fixture",
         "node": "task",
         "project": "01010101010101010101010101010101"
       },

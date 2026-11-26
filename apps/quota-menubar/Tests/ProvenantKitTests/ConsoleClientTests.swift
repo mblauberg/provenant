@@ -12,8 +12,8 @@ final class ConsoleClientTests: XCTestCase {
     func testOverviewKeepsNullCountsUnknownAndNamesCoverage() async throws {
         let (active, _) = client([(["console", "overview"], "console-overview-active", 0)])
         let lanes = try await active.overview().lanes
-        XCTAssertEqual(lanes.map(\.title), ["implement-console-overview", "review-the-change-set", "run-the-whole-test-suite"])
-        XCTAssertEqual(lanes.last?.state, "failed")
+        XCTAssertEqual(lanes.map(\.title), ["implement-console-overview", "review-the-change-set"])
+        XCTAssertEqual(lanes.last?.state, "unknown")
         XCTAssertEqual(lanes.last?.attention, true)
         XCTAssertNotNil(lanes.last?.key)
         XCTAssertEqual(lanes.first?.projectLabel, "provenant")
@@ -143,7 +143,7 @@ final class ConsoleClientTests: XCTestCase {
                                         (["output"], "output-result", 0), (["quota", "show"], "quota-show", 0),
                                         (["quota", "history"], "quota-history", 0)])
         let tree = try await console.tree()
-        XCTAssertEqual(tree.nodes.map(\.depth), [0, 1, 1, 2, 0, 0])
+        XCTAssertEqual(tree.nodes.map(\.depth), [0, 0, 0, 0, 0, 0])
         XCTAssertEqual(tree.nodes.first?.title, "implement-console-overview")
         XCTAssertEqual(tree.nodes.last?.title, "run-the-whole-test-suite · task--writer · attempt 2")
         XCTAssertEqual(tree.nodes.first?.children?.map(\.kind), ["dispatch", "dispatch"])
@@ -161,6 +161,57 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(calls[0], ["console", "tree", "--detail", "--max-nodes", "100", "--json"])
         XCTAssertEqual(calls[1], ["console", "search", "--part", "result", "--limit", "50", "--", "fixture", "--json"])
         XCTAssertEqual(calls[2], ["output", "c1c1", "--part", "result", "--max-bytes", "16384", "--json"])
+    }
+
+    func testOutputMetadataScenariosDecodeTheirSharedProjectionFixtures() async throws {
+        func data(_ fixture: String) throws -> [String: Any] {
+            let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: Replay.fixture(fixture)) as? [String: Any])
+            return try XCTUnwrap(envelope["data"] as? [String: Any])
+        }
+
+        let (stoppedConsole, stoppedReplay) = client([(["output"], "output-result-stopped", 0)])
+        let stopped = try await stoppedConsole.output("c1c1")
+        XCTAssertEqual(stopped.state, "cancelled")
+        XCTAssertEqual(stopped.text, "")
+        let stoppedData = try data("output-result-stopped")
+        XCTAssertEqual((stoppedData["budget_usage"] as? [String: Any])?["unit"] as? String, "fresh_tokens")
+        XCTAssertNotNil(stoppedData["stop_work"])
+        XCTAssertEqual(stoppedReplay.recorded.first, ["output", "c1c1", "--part", "result", "--max-bytes", "16384", "--json"])
+
+        let (failedConsole, _) = client([(["output"], "output-result-failed", 0)])
+        let failed = try await failedConsole.output("c1c1")
+        XCTAssertEqual(failed.state, "failed")
+        let failedData = try data("output-result-failed")
+        XCTAssertEqual(failedData["payload"] as? String, "evicted")
+        XCTAssertEqual((failedData["planner_fallback"] as? [String: Any])?["stage"] as? String, "static")
+        XCTAssertEqual(failedData["provider_error"] as? String, "provider exited with an error")
+
+        let (evictedConsole, _) = client([(["output"], "output-transcript-evicted", 0)])
+        let evicted = try await evictedConsole.output("c1c1", part: "transcript")
+        XCTAssertEqual(evicted.state, "succeeded")
+        XCTAssertEqual(try data("output-transcript-evicted")["payload"] as? String, "evicted")
+
+        let partial = try data("output-result")
+        XCTAssertEqual(partial["status"] as? String, "running")
+        XCTAssertEqual(partial["result"] as? String, "partial")
+        let pending = try data("output-result-pending")
+        XCTAssertEqual(pending["status"] as? String, "running")
+        XCTAssertEqual(pending["result"] as? String, "pending")
+
+        let byteTail = try data("output-result-tail-bytes")
+        XCTAssertEqual(byteTail["tail"] as? Int, 10)
+        XCTAssertEqual(byteTail["tail_clamped"] as? Bool, true)
+        let receiptTail = try data("output-receipt-tail")
+        XCTAssertEqual(receiptTail["tail_lines"] as? Int, 1)
+        XCTAssertEqual(receiptTail["tail_clamped"] as? Bool, false)
+        XCTAssertEqual(receiptTail["tail_text"] as? String, "last line")
+
+        let resultWritten = try data("output-result-written")
+        XCTAssertEqual(resultWritten["written"] as? Int, 22)
+        XCTAssertEqual((resultWritten["bytes"] as? [String: Any])?["data"] as? String, "")
+        let promptWritten = try data("output-prompt-written")
+        XCTAssertEqual(promptWritten["written"] as? Int, 22)
+        XCTAssertEqual((promptWritten["bytes"] as? [String: Any])?["data"] as? String, "the prompt was written")
     }
 
     func testAReplyToAnotherCommandIsRefused() async throws {

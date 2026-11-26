@@ -113,37 +113,40 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full:
             // A live attempt has no decoded result artifact yet. When nothing
             // is returned the caller labels the page as no-result-yet: an empty
             // page is not evidence that the attempt produced nothing.
-            if headed
-                && let Some(state) = data["state"].as_str()
-                && matches!(state, "queued" | "starting" | "running" | "settling")
-            {
-                let state = state.to_owned();
-                data["status"] = json!(state);
-                if data["length"].as_u64().unwrap_or(0) == 0 {
-                    data["result"] = json!("pending");
+            let tail_selection = command.tail_selection().map(|tail| match tail {
+                crate::Tail::Bytes(bytes) => crate::console::projection::OutputTail::Bytes(bytes),
+                crate::Tail::Lines(lines) => crate::console::projection::OutputTail::Lines(lines),
+            });
+            let progress = crate::console::projection::output_render_fields(
+                &mut data,
+                crate::console::projection::OutputRenderFields {
+                    headed,
+                    tail: tail_selection,
+                    tail_clamped: command.tail_clamped(),
+                    ..Default::default()
+                },
+            );
+            if let Some(progress) = progress {
+                if progress.pending {
                     text = format!(
-                        "{state}\nno result yet: the result is not sealed while the attempt is {state}\n{text}"
+                        "{}\nno result yet: the result is not sealed while the attempt is {}\n{text}",
+                        progress.state, progress.state
                     );
                 } else {
-                    data["result"] = json!("partial");
-                    text = format!("{state}\npartial result\n{text}");
+                    text = format!("{}\npartial result\n{text}", progress.state);
                 }
             }
-            if let Some(tail) = command.tail_selection() {
-                match tail {
-                    crate::Tail::Bytes(bytes) => data["tail"] = json!(bytes),
-                    crate::Tail::Lines(lines) => data["tail_lines"] = json!(lines),
-                }
-                data["tail_clamped"] = json!(command.tail_clamped());
-            }
+            let mut tail_text = None;
             if let Some(tail) = receipt_tail {
                 let start = match tail {
                     crate::Tail::Bytes(bytes) => tail_start_bytes(text.as_bytes(), bytes),
                     crate::Tail::Lines(lines) => tail_start_lines(text.as_bytes(), lines),
                 };
                 text = text[start..].to_owned();
-                data["tail_text"] = json!(text);
+                tail_text = Some(text.clone());
             }
+            let mut written_path = None;
+            let mut written_bytes = 0;
             if let Some(path) = &to {
                 let bytes = chunk_bytes(&data).ok_or_else(|| {
                     Fail::new(
@@ -155,14 +158,29 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full:
                 std::fs::write(path, &bytes).map_err(|error| {
                     Fail::new(Status::Error, ErrorKind::Io, error.to_string())
                 })?;
-                let written_path = std::fs::canonicalize(path).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
-                data["to"] = json!(provenant_records::StructuredPathWire::from_path(&written_path).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?);
-                data["written"] = json!(bytes.len());
-                if final_result {
-                    data["bytes"] = json!({"encoding": "utf8", "data": ""});
-                }
+                let canonical_path = std::fs::canonicalize(path)
+                    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+                written_path = Some(json!(provenant_records::StructuredPathWire::from_path(
+                    &canonical_path,
+                )
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?));
+                written_bytes = bytes.len();
                 text = format!("wrote {} bytes to {}\n", bytes.len(), path.display());
             }
+            crate::console::projection::output_render_fields(
+                &mut data,
+                crate::console::projection::OutputRenderFields {
+                    tail_text: tail_text.as_deref(),
+                    written: written_path.as_ref().map(|path| {
+                        crate::console::projection::OutputWrite {
+                            path,
+                            bytes: written_bytes,
+                            final_result,
+                        }
+                    }),
+                    ..Default::default()
+                },
+            );
             Ok((data, text))
         }),
     );
@@ -996,18 +1014,33 @@ fn output_read_part(
     {
         // There may be useful admission evidence before a result exists. Do
         // not invent an artefact length, digest or completeness for it.
-        let mut data = json!({
-            "attempt_id": id, "state": state_and_reason(&record.state).0,
-            "reason": reason, "part": "result", "offset": 0, "next_offset": 0,
-            "length": null, "eof": true, "clipped": null, "complete": null,
-            "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
-        });
-        if let Some(stop_work) = &record.stop_work {
-            data["stop_work"] = json!(stop_work);
-        }
-        if let Some(usage) = budget_usage(&record) {
-            data["budget_usage"] = usage;
-        }
+        let mut data = crate::console::projection::output(
+            &id.to_string(),
+            &state_and_reason(&record.state).0,
+            Some(json!(reason)),
+            None,
+            "result",
+            0,
+            0,
+            None,
+            true,
+            None,
+            None,
+            &Value::Null,
+            &json!(
+                provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(Vec::new(),)
+            ),
+        );
+        let budget_usage = budget_usage(&record);
+        let stop_work = record.stop_work.as_ref().map(|stop_work| json!(stop_work));
+        crate::console::projection::output_extras(
+            &mut data,
+            crate::console::projection::OutputExtras {
+                budget_usage: budget_usage.as_ref(),
+                stop_work: stop_work.as_ref(),
+                ..Default::default()
+            },
+        );
         return Ok((data, format!("{reason}\n")));
     }
     let evicted = status::artifact(
@@ -1017,13 +1050,32 @@ fn output_read_part(
     )
     .exists();
     if evicted && matches!(part, run::ArtifactPart::Transcript) {
+        let mut data = crate::console::projection::output(
+            &id.to_string(),
+            &state_and_reason(&record.state).0,
+            None,
+            None,
+            "transcript",
+            0,
+            0,
+            None,
+            true,
+            None,
+            None,
+            &Value::Null,
+            &json!(
+                provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(Vec::new(),)
+            ),
+        );
+        crate::console::projection::output_extras(
+            &mut data,
+            crate::console::projection::OutputExtras {
+                payload_evicted: true,
+                ..Default::default()
+            },
+        );
         return Ok((
-            json!({
-                "attempt_id": id, "state": state_and_reason(&record.state).0,
-                "payload": "evicted", "part": "transcript", "offset": 0, "next_offset": 0,
-                "length": null, "eof": true, "clipped": null, "complete": null,
-                "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
-            }),
+            data,
             "payload evicted by retention; the transcript is no longer retained\n".into(),
         ));
     }
@@ -1069,8 +1121,8 @@ fn output_read_part(
     let mut data = crate::console::projection::output(
         &id_text,
         &state,
-        &json!(reason),
-        &json!(record.settlement_reason),
+        Some(json!(reason)),
+        Some(json!(record.settlement_reason)),
         &part,
         chunk.offset,
         chunk.next_offset,
@@ -1083,13 +1135,9 @@ fn output_read_part(
             provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes)
         ),
     );
-    if let Some(usage) = budget_usage(&record) {
-        data["budget_usage"] = usage;
-    }
     if evicted {
         // Retention removed the bulk payload; the record, result and capture
         // tails remain.
-        data["payload"] = json!("evicted");
         if matches!(command.part, Part::Stderr) && text.is_empty() {
             text = "payload evicted by retention; the retained capture tail is empty\n".into();
         }
@@ -1123,26 +1171,37 @@ fn output_read_part(
             &paths,
             &total,
         );
-        // The wire schema declares `stop_work` an optional object: absent,
-        // never null, when no stop evidence was recorded.
-        if let Some(stop_work) = &record.stop_work {
-            data["stop_work"] = json!(stop_work);
-        }
     }
     if let Some(reason) = fallback_reason {
         add_planner_fallback(&mut data, &mut text, reason);
     }
-    if matches!(command.part, Part::Result)
+    let failed_result = matches!(command.part, Part::Result)
         && matches!(
             record.state,
             run::AttemptState::Terminal {
                 outcome: run::Outcome::Failed,
                 ..
             }
-        )
-    {
-        data["provider_error"] = json!(provider_error_line(session, id, call));
-    }
+        );
+    let provider_error = failed_result
+        .then(|| provider_error_line(session, id, call))
+        .flatten();
+    let budget_usage = budget_usage(&record);
+    let stop_work = (matches!(command.part, Part::Result)
+        && command.tail_selection().is_none()
+        && command.offset == 0)
+        .then(|| record.stop_work.as_ref().map(|stop_work| json!(stop_work)))
+        .flatten();
+    crate::console::projection::output_extras(
+        &mut data,
+        crate::console::projection::OutputExtras {
+            budget_usage: budget_usage.as_ref(),
+            stop_work: stop_work.as_ref(),
+            payload_evicted: evicted,
+            provider_error: failed_result.then_some(provider_error.as_deref()),
+            ..Default::default()
+        },
+    );
     Ok((data, text))
 }
 
@@ -1153,7 +1212,13 @@ pub(super) fn add_planner_fallback(data: &mut Value, text: &mut String, reason: 
         "\nPlanner fallback: static stage\nReason: {}\n",
         plain_text(&reason, 1024)
     ));
-    data["planner_fallback"] = json!({"stage":"static", "reason":reason});
+    crate::console::projection::output_extras(
+        data,
+        crate::console::projection::OutputExtras {
+            planner_fallback: Some(&reason),
+            ..Default::default()
+        },
+    );
 }
 
 /// The reason the attempt's graph planner fell back to its static stage, read

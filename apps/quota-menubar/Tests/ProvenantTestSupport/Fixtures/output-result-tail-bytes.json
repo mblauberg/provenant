@@ -1,0 +1,30 @@
+{
+  "command": "output",
+  "data": {
+    "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "bytes": {
+      "data": "tail bytes",
+      "encoding": "utf8"
+    },
+    "clipped": true,
+    "complete": false,
+    "digest": null,
+    "eof": true,
+    "length": 132,
+    "next_offset": 132,
+    "offset": 122,
+    "part": "result",
+    "reason": null,
+    "result": "partial",
+    "settlement_reason": null,
+    "state": "running",
+    "status": "running",
+    "tail": 10,
+    "tail_clamped": true
+  },
+  "error": null,
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}

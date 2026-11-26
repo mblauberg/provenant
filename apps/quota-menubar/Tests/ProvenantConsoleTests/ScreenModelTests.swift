@@ -96,21 +96,52 @@ final class ConsoleModelTests: XCTestCase {
         return (ConsoleModel(cli: replay.client, defaults: nil), replay)
     }
 
-    func testAFailedOverviewLaneKeepsItsStateInRowAndHeading() async throws {
+    func testUnknownOverviewLaneKeepsItsStateInRowAndHeading() async throws {
         let replay = Replay([(["console", "overview"], "console-overview-active", 0), (["inbox"], "inbox-console", 0)])
         let model = ConsoleModel(cli: replay.client, defaults: nil)
         await model.load(.overview)
         let lane = try XCTUnwrap(model.overview.reader.value?.overview.lanes.last)
-        XCTAssertEqual(lane.state, "failed")
+        XCTAssertEqual(lane.state, "unknown")
         let row = LaneRow(lane)
-        XCTAssertEqual(row.style, StatusStyle.attempt(state: "failed"))
-        XCTAssertEqual(row.style.tone, .bad)
-        XCTAssertNotEqual(row.style.label, "Finished")
+        XCTAssertEqual(row.style, StatusStyle.attempt(state: "unknown"))
+        XCTAssertEqual(row.style.tone, .neutral)
         let heading = try XCTUnwrap(model.heading(lane.id))
-        XCTAssertEqual(StatusStyle.attempt(state: heading.state).tone, .bad)
+        XCTAssertEqual(StatusStyle.attempt(state: heading.state).tone, .neutral)
         // The project label is context beside the state, not what the attempt waits on.
         XCTAssertNil(row.waiting)
         XCTAssertEqual(row.project, "provenant")
+    }
+
+    func testFailedOverviewStateKeepsItsRedRowAndHeadingStyle() throws {
+        let json = #"""
+        {
+          "counts": {"needs_you": 0, "running": 0, "attention": 0},
+          "coverage": {"scope": "local", "inbox": "complete", "runs": "complete", "nested_runs": "unavailable"},
+          "needs_you": [],
+          "lanes": [{
+            "project_id": "01010101010101010101010101010101",
+            "project_label": "provenant",
+            "attempt_id": "failed-attempt",
+            "task_label": "Synthetic failure",
+            "state": "failed",
+            "attention": true,
+            "key": {"attempt": 1, "graph": "synthetic-failure", "node": "task", "project": "01010101010101010101010101010101"}
+          }]
+        }
+        """#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let overview = try decoder.decode(Overview.self, from: Data(json.utf8))
+        let lane = try XCTUnwrap(overview.lanes.first)
+        let model = ConsoleModel(cli: Replay().client, defaults: nil)
+        model.overview.reader.replace(OverviewSnapshot(overview: overview, needsYou: [], inboxJoined: true))
+
+        let row = LaneRow(lane)
+        XCTAssertEqual(row.style, StatusStyle.attempt(state: "failed"))
+        XCTAssertEqual(row.style.tone, .bad)
+        let heading = try XCTUnwrap(model.heading(lane.id))
+        XCTAssertEqual(heading.state, "failed")
+        XCTAssertEqual(StatusStyle.attempt(state: heading.state).tone, .bad)
     }
 
     func testLoadedAgesUseTheSameClockAsDisplayedAges() async throws {

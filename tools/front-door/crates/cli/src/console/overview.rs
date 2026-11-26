@@ -2,7 +2,7 @@
 use super::{Error, Project};
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::clock::SystemClock;
-use provenant_run::{ExecutionContext, OverviewState, RunStore};
+use provenant_run::{ExecutionContext, RunStore};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -158,23 +158,8 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                         true,
                         census.as_ref().ok_or(()),
                     );
-                    let active = match row.presence {
-                        Some(provenant_records::wire::LanePresence::Live) => true,
-                        Some(
-                            provenant_records::wire::LanePresence::Unattended
-                            | provenant_records::wire::LanePresence::Unknown
-                            | provenant_records::wire::LanePresence::Settling,
-                        ) => false,
-                        None => is_live(item.state),
-                    };
-                    let attention = matches!(
-                        row.presence,
-                        Some(
-                            provenant_records::wire::LanePresence::Unattended
-                                | provenant_records::wire::LanePresence::Unknown
-                                | provenant_records::wire::LanePresence::Settling
-                        )
-                    );
+                    let (active, attention) =
+                        super::projection::overview_activity(row.presence, &item.record.state);
                     running += usize::from(active);
                     attention_count += usize::from(attention);
                     if active || attention {
@@ -218,33 +203,9 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
     ))
 }
 
-fn is_live(state: OverviewState) -> bool {
-    !matches!(state, OverviewState::Terminal(_))
-}
-
 #[cfg(test)]
 mod comparison_tests {
     use super::*;
-
-    #[test]
-    fn overview_only_contains_unsettled_attempts() {
-        for state in [
-            OverviewState::Queued,
-            OverviewState::Starting,
-            OverviewState::Running,
-            OverviewState::Settling,
-        ] {
-            assert!(is_live(state));
-        }
-        for outcome in [
-            provenant_run::Outcome::Succeeded,
-            provenant_run::Outcome::Failed,
-            provenant_run::Outcome::TimedOut,
-            provenant_run::Outcome::Cancelled,
-        ] {
-            assert!(!is_live(OverviewState::Terminal(outcome)));
-        }
-    }
 
     use provenant_fabric_runtime::inbox::{OverviewBatch, OverviewItem};
 

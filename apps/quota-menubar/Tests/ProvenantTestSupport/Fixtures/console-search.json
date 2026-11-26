@@ -23,7 +23,8 @@
             "graph": "fixture",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "part": "result",
         "snippet": "…regenerated every fixture under tests/fixtures/console…"
@@ -38,7 +39,8 @@
             "graph": "fixture",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "part": "result",
         "snippet": "2 tests failed: fixture drift in board.json"

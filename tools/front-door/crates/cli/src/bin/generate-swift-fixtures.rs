@@ -149,18 +149,69 @@ mod fixtures {
         serde_json::from_value(value).map_err(|error| format!("synthetic attempt: {error}"))
     }
 
-    /// The board's row is the real projected wire type, so a change to any of
-    /// its fields (including the state string) changes the generated fixtures.
-    fn lane(row: &AttemptRecord) -> Result<Value, String> {
-        serde_json::to_value(provenant_cli::run::project_lane_with_census(
+    fn lane_local(row: &AttemptRecord) -> Result<Value, String> {
+        lane_with_facts(row, true, &[])
+    }
+
+    fn lane_local_with_waits(
+        row: &AttemptRecord,
+        waits: &[provenant_run::LaneWait],
+    ) -> Result<Value, String> {
+        lane_with_facts(row, true, waits)
+    }
+
+    /// Assemble the same wire row as the owner from deterministic synthetic
+    /// observations. `LaneRow::project` is the pure typed projector used by
+    /// the owner after its bounded host reads; no ambient fixture paths are read.
+    fn lane_with_facts(
+        row: &AttemptRecord,
+        local_paths: bool,
+        waits: &[provenant_run::LaneWait],
+    ) -> Result<Value, String> {
+        use provenant_records::wire::{
+            LanePresence, LaneProjectionFacts, LaneRow, LastEventSource,
+        };
+
+        let wait = waits.iter().find(|wait| wait.attempt_id == row.attempt_id);
+        let (last_event_at, last_event_source) = row
+            .last_output_at
+            .map(|at| (at, LastEventSource::Output))
+            .or_else(|| row.started_at.map(|at| (at, LastEventSource::Started)))
+            .unwrap_or((row.queued_at, LastEventSource::Queued));
+        let presence = matches!(&row.state, provenant_run::AttemptState::Running { .. })
+            .then_some(LanePresence::Unknown);
+        let attempt_directory = if local_paths {
+            let path = Path::new("/fixture")
+                .join("attempts")
+                .join(row.attempt_id.to_string());
+            Some(
+                provenant_records::StructuredPathWire::from_path(&path)
+                    .map_err(|error| format!("synthetic attempt directory: {error}"))?,
+            )
+        } else {
+            None
+        };
+        let usage = row.effective_usage();
+        let projected = LaneRow::project(
             row,
-            &[],
-            Path::new("/fixture"),
-            None,
-            false,
-            Err(()),
-        ))
-        .map_err(|error| format!("lane projection: {error}"))
+            LaneProjectionFacts {
+                superseded_by: row.superseded_by,
+                waiting_for: wait.map(|wait| wait.waiting_for.description()),
+                lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
+                last_event_at: Some(last_event_at),
+                last_event_source: Some(last_event_source),
+                attempt_directory,
+                presence,
+                payload_evicted: false,
+                cache_read_share: provenant_routing::cache_read_share(
+                    usage.tokens.input,
+                    usage.tokens.cache_read,
+                    usage.tokens.cache_write,
+                ),
+                ..Default::default()
+            },
+        );
+        serde_json::to_value(projected).map_err(|error| format!("lane projection: {error}"))
     }
 
     /// An admitted operation stored beside the fixture attempt.
@@ -179,13 +230,13 @@ mod fixtures {
         serde_json::to_value(record).map_err(|error| format!("operation projection: {error}"))
     }
 
-    fn lane_wait(id: &str) -> Result<Value, String> {
+    fn lane_wait(id: &str) -> Result<provenant_run::LaneWait, String> {
         let wait: provenant_run::LaneWait = serde_json::from_value(json!({
             "attempt_id":id,"lane_class":"read_only",
             "waiting_for":{"kind":"launch_preparation"}
         }))
         .map_err(|error| format!("synthetic lane wait: {error}"))?;
-        serde_json::to_value(wait).map_err(|error| format!("lane wait projection: {error}"))
+        Ok(wait)
     }
 
     fn lane_id(graph: &str, id: &str) -> Value {
@@ -204,11 +255,6 @@ mod fixtures {
         json!({"state": "running"})
     }
 
-    fn failed() -> Value {
-        json!({"state": "terminal", "outcome": "failed", "exit_code": 1,
-               "finished_at": "2026-11-02T02:00:00.000000Z", "reason": null})
-    }
-
     pub(super) fn console() -> Result<Vec<(&'static str, Value)>, String> {
         use provenant_cli::console::projection as p;
 
@@ -222,9 +268,13 @@ mod fixtures {
             json!({"state": "queued"}),
             "Board fixture",
         )?;
-        let board_lane = lane(&board)?;
-        let detail_usage = serde_json::to_value(board.effective_usage())
-            .map_err(|error| format!("synthetic detail usage: {error}"))?;
+        let board_wait = lane_wait("65656565656565656565656565656565")?;
+        let board_lane = lane_local_with_waits(&board, std::slice::from_ref(&board_wait))?;
+        let board_wait_value = serde_json::to_value(&board_wait)
+            .map_err(|error| format!("synthetic board wait: {error}"))?;
+        let (detail_usage, detail_usage_known, detail_usage_missing) =
+            p::detail_usage(&board.effective_usage())
+                .map_err(|error| format!("synthetic detail usage: {error}"))?;
         let detail_trace = serde_json::to_value(&board.trace)
             .map_err(|error| format!("synthetic detail trace: {error}"))?;
         let detail_requested_route = serde_json::to_value(&board.requested_route)
@@ -258,44 +308,40 @@ mod fixtures {
         );
         let overview_active = [
             (
-                "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+                "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
                 "implement-console-overview",
                 running(),
                 "Implement console overview",
-                true,
             ),
             (
-                "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+                "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
                 "review-the-change-set",
                 running(),
                 "Review the change set",
-                true,
-            ),
-            (
-                "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
-                "run-the-whole-test-suite",
-                failed(),
-                "Run the whole test suite",
-                true,
             ),
         ];
-        let active_lanes: Vec<Value> = overview_active
-            .iter()
-            .map(
-                |(id, graph, state, title, attention)| -> Result<Value, String> {
-                    let row = lane(&attempt(id, graph, state.clone(), title)?)?;
-                    Ok(p::overview_lane(
-                        &json!("01010101010101010101010101010101"),
-                        "provenant",
-                        &lane_id(graph, id)["key"],
-                        title,
-                        &row,
-                        &row["queued_at"],
-                        *attention,
-                    ))
-                },
-            )
-            .collect::<Result<_, _>>()?;
+        let mut active_lanes = Vec::new();
+        let (mut overview_running, mut overview_attention) = (0, 0);
+        for (id, graph, state, title) in &overview_active {
+            let record = attempt(id, graph, state.clone(), title)?;
+            let presence = matches!(&record.state, provenant_run::AttemptState::Running { .. })
+                .then_some(provenant_records::wire::LanePresence::Unknown);
+            let row = lane_with_facts(&record, true, &[])?;
+            let (active, attention) = p::overview_activity(presence, &record.state);
+            overview_running += usize::from(active);
+            overview_attention += usize::from(attention);
+            if active || attention {
+                active_lanes.push(p::overview_lane(
+                    &json!("01010101010101010101010101010101"),
+                    "provenant",
+                    &lane_id(graph, id)["key"],
+                    title,
+                    &row,
+                    &row["queued_at"],
+                    attention,
+                ));
+            }
+        }
         let active_needs_you = vec![
             p::overview_needs_you(
                 &json!("11111111111111111111111111111111"),
@@ -320,52 +366,102 @@ mod fixtures {
             ),
         ];
 
-        let summary = json!({"now":"Implementing console","next":"Review","needs_you":[],"risk":"none","revision":1,"schema_version":1,"updated_at":"2026-11-02T01:58:26.745295Z"});
-        let later = json!({"now":"Implementing the console","next":"Review","needs_you":[],"risk":"none","revision":1,"schema_version":1,"updated_at":"2026-11-02T02:18:00.000000Z"});
-        let session_record = |summary: Value,
-                              revision,
-                              parent: Option<u64>,
-                              saved: &str|
+        let summary =
+            |now: &str, next: &str, updated_at: &str| provenant_workflow::session::Summary {
+                schema_version: 1,
+                revision: 1,
+                updated_at: updated_at.to_owned(),
+                now: now.to_owned(),
+                next: next.to_owned(),
+                needs_you: Vec::new(),
+                risk: "none".to_owned(),
+                extra: Default::default(),
+            };
+        let summary = summary(
+            "Implementing console",
+            "Review",
+            "2026-11-02T01:58:26.745295Z",
+        );
+        let later = summary(
+            "Implementing the console",
+            "Review",
+            "2026-11-02T02:18:00.000000Z",
+        );
+        let session_record =
+            |summary: Option<provenant_workflow::session::Summary>,
+             revision: u64,
+             parent: Option<u64>,
+             saved: &str|
+             -> Result<provenant_workflow::session::SessionDiscovery, String> {
+                let saved_at = provenant_core::UtcMicros::parse(saved)
+                    .map_err(|error| format!("synthetic session save time: {error}"))?;
+                let created_at = provenant_core::UtcMicros::parse("2026-11-02T01:58:26.511922Z")
+                    .map_err(|error| format!("synthetic session creation time: {error}"))?;
+                let bytes = u64::try_from(CHECKPOINT.len())
+                    .map_err(|error| format!("synthetic checkpoint length: {error}"))?;
+                Ok(provenant_workflow::session::SessionDiscovery {
+                    chair_actor: provenant_core::ActorId::parse("c7b11347fb1be62dc783521ee94e45bf")
+                        .map_err(|error| format!("synthetic session actor: {error}"))?,
+                    checkpoint: provenant_workflow::session::Revision {
+                        revision,
+                        parent,
+                        sha256: provenant_records::CanonicalV1::file_digest(CHECKPOINT.as_bytes()),
+                        bytes,
+                        saved_at,
+                        extra: Default::default(),
+                    },
+                    created_at,
+                    host: provenant_core::HostId::parse("7249da8d9cb98a25696aa69922cc1866")
+                        .map_err(|error| format!("synthetic session host: {error}"))?,
+                    host_session_id: provenant_workflow::session::HostSessionId::parse(
+                        "console-chair",
+                    )
+                    .map_err(|error| format!("synthetic host session: {error}"))?,
+                    last_saved_at: saved_at,
+                    project_id: provenant_core::ProjectId::parse(
+                        "47e56ec3dd1b387241e80489127d81e9",
+                    )
+                    .map_err(|error| format!("synthetic session project: {error}"))?,
+                    schema_version: 1,
+                    summary,
+                    rebound_from: Vec::new(),
+                    extra: Default::default(),
+                })
+            };
+        let session_row = |summary: Option<&provenant_workflow::session::Summary>,
+                           record: provenant_workflow::session::SessionDiscovery|
          -> Result<Value, String> {
-            // A chair without a structured summary omits the field entirely,
-            // as `SessionDiscovery::summary` does on the wire.
-            let mut record = json!({
-                "chair_actor": "c7b11347fb1be62dc783521ee94e45bf",
-                "checkpoint": {"bytes": CHECKPOINT.len(), "parent": parent, "revision": revision,
-                    "saved_at": saved, "sha256": provenant_records::CanonicalV1::file_digest(CHECKPOINT.as_bytes()).to_string()},
-                "created_at": "2026-11-02T01:58:26.511922Z",
-                "host": "7249da8d9cb98a25696aa69922cc1866",
-                "host_session_id": "console-chair",
-                "last_saved_at": saved,
-                "project_id": "47e56ec3dd1b387241e80489127d81e9",
-                "schema_version": 1
-            });
-            if !summary.is_null() {
-                record["summary"] = summary;
-            }
-            let typed: provenant_workflow::session::SessionDiscovery =
-                serde_json::from_value(record)
-                    .map_err(|error| format!("synthetic session record: {error}"))?;
-            serde_json::to_value(typed).map_err(|error| format!("session record: {error}"))
-        };
-        let session_row = |summary: &Value, record: Value| -> Result<Value, String> {
-            let structured = summary["now"].as_str().filter(|now| !now.trim().is_empty());
-            let (line, source) = p::session_line(structured, checkpoint_summary_line(CHECKPOINT));
+            let (line, source) = p::session_line(
+                summary.map(|summary| summary.now.as_str()),
+                checkpoint_summary_line(CHECKPOINT),
+            );
+            let record =
+                serde_json::to_value(record).map_err(|error| format!("session record: {error}"))?;
             Ok(p::session_row(&record, &json!("current"), &line, &source))
         };
         let sessions_rows = vec![
             session_row(
-                &summary,
-                session_record(summary.clone(), 2, None, "2026-11-02T01:58:26.745295Z")?,
+                Some(&summary),
+                session_record(
+                    Some(summary.clone()),
+                    2,
+                    None,
+                    "2026-11-02T01:58:26.745295Z",
+                )?,
             )?,
             session_row(
-                &later,
-                session_record(later.clone(), 3, Some(2), "2026-11-02T02:18:00.000000Z")?,
+                Some(&later),
+                session_record(
+                    Some(later.clone()),
+                    3,
+                    Some(2),
+                    "2026-11-02T02:18:00.000000Z",
+                )?,
             )?,
         ];
         let without_summary_rows = vec![session_row(
-            &Value::Null,
-            session_record(Value::Null, 1, None, "2026-11-02T01:58:26.511922Z")?,
+            None,
+            session_record(None, 1, None, "2026-11-02T01:58:26.511922Z")?,
         )?];
         let sessions_snapshot = p::session_snapshot(None, None, 50, false, &sessions_rows)?;
         let without_summary_snapshot =
@@ -393,140 +489,207 @@ mod fixtures {
                 "implement-console-overview",
                 "task",
                 1,
-                0,
-                json!([{"kind":"dispatch","attempt_id":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"},
-                       {"kind":"dispatch","attempt_id":"c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"}]),
             ),
             (
-                "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+                "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
                 "review-the-change-set",
                 "task",
                 1,
-                1,
-                json!([{"kind":"retry","attempt_id":"c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4"}]),
             ),
             (
-                "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
                 "write-the-migration-notes",
                 "task",
                 1,
-                1,
-                json!([]),
             ),
             (
-                "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+                "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
                 "settle-quota-fixtures",
                 "task",
                 1,
-                2,
-                json!([]),
             ),
             (
-                "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+                "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
                 "regenerate-cli-fixtures",
                 "task",
                 1,
-                0,
-                json!([]),
             ),
             (
-                "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+                "c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
                 "run-the-whole-test-suite",
                 "task--writer",
                 2,
-                0,
-                json!([]),
             ),
         ]
         .iter()
         .map(
-            |(id, graph, node, attempt_number, depth, _children)| -> Result<Value, String> {
+            |(id, graph, node, attempt_number)| -> Result<Value, String> {
                 let mut record = attempt(id, graph, running(), &format!("node {graph}"))?;
+                let work_key: provenant_records::WorkKey = serde_json::from_value(
+                    lane_key(graph, node, *attempt_number, id)["key"].clone(),
+                )
+                .map_err(|error| format!("synthetic tree work key: {error}"))?;
+                record.attempt_number = u64::from(*attempt_number);
+                record.key = work_key;
                 if *graph == "settle-quota-fixtures" {
                     record.retry_of = Some(
                         provenant_core::AttemptId::parse("c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2")
                             .map_err(|error| format!("synthetic retry parent: {error}"))?,
                     );
                 }
-                let row = lane(&record)?;
-                let parents = match *graph {
-                    "review-the-change-set" => json!({"dispatch":"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1","continuation":null}),
-                    "write-the-migration-notes" => json!({"dispatch":"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1","continuation":null}),
-                    "settle-quota-fixtures" => json!({"dispatch":null,"continuation":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}),
-                    _ => json!({"dispatch":null,"continuation":null}),
+                let row = lane_local(&record)?;
+                let dispatch_parent = match *graph {
+                    "review-the-change-set" | "write-the-migration-notes" => {
+                        Some("c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1")
+                    }
+                    _ => None,
                 };
-                let operation = operation(&format!("tree-{graph}"), parents["dispatch"].as_str())?;
+                let operation = operation(&format!("tree-{graph}"), dispatch_parent)?;
+                let operation_value = serde_json::to_value(&operation)
+                    .map_err(|error| format!("synthetic tree operation: {error}"))?;
+                let parents = p::tree_parents(&operation_value, &row);
                 let child_rows = Vec::new();
-                let project_id = json!("01010101010101010101010101010101");
-                let tree_lane_id = p::lane_id(
-                    &Value::Null, &project_id, &lane_key(graph, node, *attempt_number, id)["key"], &json!(id),
-                );
+                let usage = row["usage"].clone();
+                let project_id = serde_json::to_value(record.project_id)
+                    .map_err(|error| format!("synthetic tree project: {error}"))?;
+                let work_key = serde_json::to_value(&record.key)
+                    .map_err(|error| format!("synthetic tree work key: {error}"))?;
+                let tree_lane_id = p::lane_id(&Value::Null, &project_id, &work_key, &json!(id));
                 Ok(p::tree_node(p::TreeNodeInput {
                     lane_id: &tree_lane_id,
-                    depth: *depth,
+                    depth: 0,
                     store_parent_attempt: &Value::Null,
                     store_path: None,
-                    usage: &json!({"tokens":{"input":null,"cache_read":null,"cache_write":null,"cache_write_1h":null,"output":null,"reasoning":null},"source":"stream","context_basis_points":null}),
+                    usage: &usage,
                     parents: &parents,
-                    operation: &operation,
+                    operation: &operation_value,
                     attempt: &row,
                     children: &child_rows,
                 }))
             },
         )
         .collect::<Result<_, _>>()?;
-        let tree_ids: Vec<_> = tree_nodes
-            .iter()
-            .map(|node| node["lane_id"]["attempt_id"].clone())
-            .collect();
-        let mut tree_edges = Vec::new();
-        for node in &tree_nodes {
-            for kind in ["dispatch", "continuation"] {
-                if let Some(parent) = node["parents"][kind].as_str() {
-                    let present = tree_ids.iter().any(|id| id.as_str() == Some(parent));
-                    tree_edges.push(p::tree_edge(
-                        &node["lane_id"]["project_id"],
-                        kind,
-                        parent,
-                        node["lane_id"]["attempt_id"].as_str().unwrap_or_default(),
-                        if present { "present" } else { "missing" },
-                    ));
-                }
-            }
-        }
-        let tree_nodes: Vec<_> = tree_nodes
-            .into_iter()
-            .map(|mut node| {
-                node["children"] = json!(p::tree_children(
-                    &tree_edges,
-                    &node["lane_id"]["project_id"],
-                    &node["lane_id"]["attempt_id"]
-                ));
-                node
-            })
-            .collect();
-        let tree_usage = json!({
-            "input":{"known_sum":0,"missing":6},"cache_read":{"known_sum":0,"missing":6},
-            "cache_write":{"known_sum":0,"missing":6},"output":{"known_sum":0,"missing":6},
-            "reasoning":{"known_sum":0,"missing":6}
-        });
+        let tree_edges =
+            p::tree_edges(&tree_nodes).ok_or_else(|| "synthetic tree edges failed".to_owned())?;
+        let mut tree_nodes = tree_nodes;
+        p::tree_finalize_nodes(&mut tree_nodes, &tree_edges, false, true)
+            .ok_or_else(|| "synthetic tree finalization failed".to_owned())?;
+        let tree_usage = p::tree_usage_totals(&tree_nodes)
+            .ok_or_else(|| "synthetic tree usage totals failed".to_owned())?;
         let tree_totals = p::tree_totals(tree_nodes.len(), 0, &tree_usage);
+        let tree_data = p::tree(
+            &tree_nodes,
+            &tree_edges,
+            &tree_totals,
+            &[],
+            false,
+            0,
+            &[],
+            &Value::Null,
+            "complete",
+            false,
+            8,
+            100,
+        );
+        let tree_root = tree_nodes[0]["lane_id"]["attempt_id"]
+            .as_str()
+            .ok_or_else(|| "synthetic tree root missing".to_owned())?;
+        let tree_subtree_data = p::tree_selected_subtree(&tree_data, tree_root, 2)
+            .ok_or_else(|| "synthetic tree subtree projection failed".to_owned())?;
+        let limited_nodes = &tree_nodes[..1];
+        let limited_usage = p::tree_usage_totals(limited_nodes)
+            .ok_or_else(|| "synthetic limited tree usage totals failed".to_owned())?;
+        let limited_totals = p::tree_totals(limited_nodes.len(), 0, &limited_usage);
+        let no_project: Option<provenant_core::ProjectId> = None;
+        let no_parent: Option<provenant_core::AttemptId> = None;
+        let limit_unfetched = p::tree_unfetched_child(&no_project, &no_parent, "node_limit", None);
+        let tree_limited_data = p::tree(
+            limited_nodes,
+            &[],
+            &limited_totals,
+            &[],
+            true,
+            0,
+            &[limit_unfetched],
+            &Value::Null,
+            "complete",
+            true,
+            8,
+            1,
+        );
+        let alternate_work_key = json!({
+            "project":tree_nodes[1]["lane_id"]["project_id"],
+            "graph":"review-the-change-set-alternate",
+            "node":"task",
+            "attempt":1
+        });
+        let tree_conflict = p::tree_identity_conflict(
+            &tree_nodes[1]["lane_id"]["project_id"],
+            &tree_nodes[1]["lane_id"]["attempt_id"],
+            "conflicting_work_key",
+            &tree_nodes[1]["lane_id"]["key"],
+            &alternate_work_key,
+            "/fixture/run.sqlite3",
+            "/fixture/children/run.sqlite3",
+        );
+        let unavailable_child_store = p::tree_unfetched_child(
+            &tree_nodes[0]["lane_id"]["project_id"],
+            &tree_nodes[0]["lane_id"]["attempt_id"],
+            "unavailable",
+            Some("synthetic child store unavailable"),
+        );
+        let tree_conflicts_data = p::tree(
+            &tree_nodes,
+            &tree_edges,
+            &tree_totals,
+            &[tree_conflict],
+            false,
+            0,
+            &[unavailable_child_store],
+            &Value::Null,
+            "complete",
+            true,
+            8,
+            100,
+        );
 
+        let search_lane_id = |id| {
+            let key = lane_key("fixture", "task", 1, id);
+            p::lane_id(
+                &Value::Null,
+                &json!("01010101010101010101010101010101"),
+                &key["key"],
+                &json!(id),
+            )
+        };
         let search_matches = vec![
             p::search_match(
-                &lane_id("fixture", "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"),
+                &search_lane_id("c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"),
                 "result",
                 "…regenerated every fixture under tests/fixtures/console…",
                 512,
             ),
             p::search_match(
-                &lane_id("fixture", "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"),
+                &search_lane_id("c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"),
                 "result",
                 "2 tests failed: fixture drift in board.json",
                 900,
             ),
         ];
         let search_snapshot = p::search_snapshot("fixture", "result", None, &[], 0, 0, false)?;
+        let search_artifact_error = p::search_artifact_error(
+            &json!("dddddddddddddddddddddddddddddddd"),
+            "fixture artifact read error",
+        );
+        let search_error_snapshot = p::search_snapshot(
+            "fixture",
+            "result",
+            None,
+            &[(board.project_id, "fixture-generation".to_owned(), 101)],
+            1,
+            512,
+            false,
+        )?;
 
         let generations: Value = serde_json::from_value(json!({
             "epoch": 6872134465275348u64, "inbox": 14, "board": 14, "chair": 2,
@@ -544,12 +707,18 @@ mod fixtures {
         }))
         .map_err(|error| format!("generations baseline: {error}"))?;
 
-        let output_bytes = |data: &str| json!({"encoding": "utf8", "data": data});
+        let output_bytes = |data: &str| {
+            json!(
+                provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(
+                    data.as_bytes().to_vec(),
+                )
+            )
+        };
         let mut output_result = p::output(
             "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
             "running",
-            &Value::Null,
-            &Value::Null,
+            Some(Value::Null),
+            Some(Value::Null),
             "result",
             0,
             132,
@@ -571,6 +740,329 @@ mod fixtures {
             &json!([]),
             &json!(0),
         );
+        p::output_render_fields(
+            &mut output_result,
+            p::OutputRenderFields {
+                headed: true,
+                ..Default::default()
+            },
+        );
+        let budget_usage = serde_json::to_value(provenant_records::TokenBudgetUsage {
+            unit: "fresh_tokens".into(),
+            unit_detail:
+                "uncached input + cache writes + output and reasoning; cache reads excluded".into(),
+            limit: 1_000,
+            source: provenant_records::Layer::Host,
+            counted: Some(742),
+            reported_input: Some(801),
+            basis: "attempt".into(),
+            notice: None,
+        })
+        .map_err(|error| format!("output budget usage: {error}"))?;
+        let stop_work_head = provenant_core::GitOid::parse(&"a".repeat(40))
+            .map_err(|error| format!("output stop work head: {error}"))?;
+        let stop_work = serde_json::to_value(provenant_records::run::StopWorkSummary {
+            extra: Default::default(),
+            schema_version: 1,
+            trigger: provenant_records::run::StopWorkTrigger::ExplicitCancellation,
+            head: Some(stop_work_head),
+            ahead: Some(1),
+            dirty_paths: Some(2),
+            push: provenant_records::run::StopWorkPush::NotGranted,
+        })
+        .map_err(|error| format!("output stop work: {error}"))?;
+        let cancelled_state = provenant_records::run::AttemptState::Terminal {
+            extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
+            outcome: provenant_records::run::Outcome::Cancelled,
+            exit_code: None,
+            finished_at: provenant_core::WallTime::from_micros(1)
+                .map_err(|error| format!("output cancellation time: {error}"))?,
+            reason: Some("writer cancelled before returning a result".into()),
+        };
+        let (cancelled_label, cancelled_reason) =
+            provenant_records::wire::LaneRow::state_and_reason(&cancelled_state);
+        let mut output_result_stopped = p::output(
+            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            &cancelled_label,
+            Some(json!(cancelled_reason)),
+            None,
+            "result",
+            0,
+            0,
+            None,
+            true,
+            None,
+            None,
+            &Value::Null,
+            &output_bytes(""),
+        );
+        p::output_extras(
+            &mut output_result_stopped,
+            p::OutputExtras {
+                budget_usage: Some(&budget_usage),
+                stop_work: Some(&stop_work),
+                ..Default::default()
+            },
+        );
+        p::output_render_fields(
+            &mut output_result_stopped,
+            p::OutputRenderFields {
+                headed: true,
+                ..Default::default()
+            },
+        );
+        let failed_state = provenant_records::run::AttemptState::Terminal {
+            extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
+            outcome: provenant_records::run::Outcome::Failed,
+            exit_code: Some(1),
+            finished_at: provenant_core::WallTime::from_micros(2)
+                .map_err(|error| format!("output failure time: {error}"))?,
+            reason: Some("provider exited with an error".into()),
+        };
+        let (failed_label, failed_reason) =
+            provenant_records::wire::LaneRow::state_and_reason(&failed_state);
+        let failed_settlement = provenant_records::run::SettlementReason::derive(
+            provenant_records::run::Outcome::Failed,
+            None,
+            &[],
+            None,
+            Ok(None),
+        );
+        let failed_settlement = serde_json::to_value(failed_settlement)
+            .map_err(|error| format!("output failure settlement: {error}"))?;
+        let mut output_result_failed = p::output(
+            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            &failed_label,
+            Some(json!(failed_reason)),
+            Some(failed_settlement),
+            "result",
+            0,
+            29,
+            Some(29),
+            true,
+            Some(false),
+            Some(true),
+            &Value::Null,
+            &output_bytes("provider exited with an error"),
+        );
+        p::output_result_evidence(
+            &mut output_result_failed,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+        );
+        p::output_extras(
+            &mut output_result_failed,
+            p::OutputExtras {
+                payload_evicted: true,
+                planner_fallback: Some("planner route failed; static stage selected"),
+                provider_error: Some(Some("provider exited with an error")),
+                ..Default::default()
+            },
+        );
+        p::output_render_fields(
+            &mut output_result_failed,
+            p::OutputRenderFields {
+                headed: true,
+                ..Default::default()
+            },
+        );
+        let succeeded_state = provenant_records::run::AttemptState::Terminal {
+            extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
+            outcome: provenant_records::run::Outcome::Succeeded,
+            exit_code: Some(0),
+            finished_at: provenant_core::WallTime::from_micros(3)
+                .map_err(|error| format!("output transcript time: {error}"))?,
+            reason: None,
+        };
+        let (succeeded_label, _) =
+            provenant_records::wire::LaneRow::state_and_reason(&succeeded_state);
+        let mut output_transcript_evicted = p::output(
+            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            &succeeded_label,
+            None,
+            None,
+            "transcript",
+            0,
+            0,
+            None,
+            true,
+            None,
+            None,
+            &Value::Null,
+            &output_bytes(""),
+        );
+        p::output_extras(
+            &mut output_transcript_evicted,
+            p::OutputExtras {
+                payload_evicted: true,
+                ..Default::default()
+            },
+        );
+        p::output_render_fields(
+            &mut output_transcript_evicted,
+            p::OutputRenderFields::default(),
+        );
+        let mut output_result_pending = p::output(
+            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "running",
+            Some(Value::Null),
+            Some(Value::Null),
+            "result",
+            0,
+            0,
+            Some(0),
+            true,
+            Some(false),
+            Some(false),
+            &Value::Null,
+            &output_bytes(""),
+        );
+        p::output_render_fields(
+            &mut output_result_pending,
+            p::OutputRenderFields {
+                headed: true,
+                ..Default::default()
+            },
+        );
+        let tail_bytes = "tail bytes";
+        let tail_bytes_len = tail_bytes.len() as u64;
+        let mut output_result_tail_bytes = p::output(
+            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "running",
+            Some(Value::Null),
+            Some(Value::Null),
+            "result",
+            132 - tail_bytes_len,
+            132,
+            Some(132),
+            true,
+            Some(true),
+            Some(false),
+            &Value::Null,
+            &output_bytes(tail_bytes),
+        );
+        p::output_render_fields(
+            &mut output_result_tail_bytes,
+            p::OutputRenderFields {
+                headed: true,
+                tail: Some(p::OutputTail::Bytes(tail_bytes_len)),
+                tail_clamped: true,
+                ..Default::default()
+            },
+        );
+        let receipt_text = "first line\nlast line";
+        let mut output_receipt_tail = p::output(
+            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            &succeeded_label,
+            Some(Value::Null),
+            Some(Value::Null),
+            "receipt",
+            0,
+            receipt_text.len() as u64,
+            Some(receipt_text.len() as u64),
+            true,
+            Some(false),
+            Some(true),
+            &Value::Null,
+            &output_bytes(receipt_text),
+        );
+        p::output_render_fields(
+            &mut output_receipt_tail,
+            p::OutputRenderFields {
+                tail: Some(p::OutputTail::Lines(1)),
+                tail_text: Some("last line"),
+                ..Default::default()
+            },
+        );
+        let output_path = provenant_records::StructuredPathWire::from_path(Path::new(
+            "/fixture/project/output.txt",
+        ))
+        .map_err(|error| format!("output destination: {error}"))?;
+        let output_path = serde_json::to_value(output_path)
+            .map_err(|error| format!("output destination: {error}"))?;
+        let result_write = "the result was written";
+        let mut output_result_written = p::output(
+            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            &succeeded_label,
+            Some(Value::Null),
+            Some(Value::Null),
+            "result",
+            0,
+            result_write.len() as u64,
+            Some(result_write.len() as u64),
+            true,
+            Some(false),
+            Some(true),
+            &Value::Null,
+            &output_bytes(result_write),
+        );
+        p::output_render_fields(
+            &mut output_result_written,
+            p::OutputRenderFields {
+                written: Some(p::OutputWrite {
+                    path: &output_path,
+                    bytes: result_write.len(),
+                    final_result: true,
+                }),
+                ..Default::default()
+            },
+        );
+        let prompt_write = "the prompt was written";
+        let mut output_prompt_written = p::output(
+            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "running",
+            Some(Value::Null),
+            Some(Value::Null),
+            "prompt",
+            0,
+            prompt_write.len() as u64,
+            Some(prompt_write.len() as u64),
+            true,
+            Some(false),
+            Some(true),
+            &Value::Null,
+            &output_bytes(prompt_write),
+        );
+        p::output_render_fields(
+            &mut output_prompt_written,
+            p::OutputRenderFields {
+                written: Some(p::OutputWrite {
+                    path: &output_path,
+                    bytes: prompt_write.len(),
+                    final_result: false,
+                }),
+                ..Default::default()
+            },
+        );
+        let mut output_prompt = p::output(
+            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "running",
+            Some(Value::Null),
+            Some(Value::Null),
+            "prompt",
+            0,
+            38,
+            Some(38),
+            true,
+            Some(false),
+            Some(true),
+            &Value::Null,
+            &output_bytes("Implement the console overview screen."),
+        );
+        p::output_render_fields(&mut output_prompt, p::OutputRenderFields::default());
         let project_id = provenant_core::ProjectId::parse("47e56ec3dd1b387241e80489127d81e9")
             .map_err(|error| format!("synthetic project ID: {error}"))?;
         let project =
@@ -604,8 +1096,8 @@ mod fixtures {
                     p::overview(
                         &active_needs_you,
                         &active_lanes,
-                        0,
-                        3,
+                        overview_running,
+                        overview_attention,
                         "complete",
                         "complete",
                     ),
@@ -622,14 +1114,18 @@ mod fixtures {
                         &json!("2026-11-02T01:58:27.161938Z"),
                         &board_filters,
                         &[p::board_lane(p::BoardLaneInput {
-                            lane_id: &json!({"host":null,"key":board.key,"attempt_id":board.attempt_id}),
+                            lane_id: &p::board_lane_id(
+                                &Value::Null,
+                                &json!(board.key),
+                                &json!(board.attempt_id),
+                            ),
                             chair: &Value::Null,
                             operation: &operation("board-101", None)?,
                             attempt: &board_lane,
-                            wait: &lane_wait("65656565656565656565656565656565")?,
-                            attention: false,
-                            known: &[],
-                            missing: &["input", "cache_read", "cache_write", "output", "reasoning"],
+                            wait: &board_wait_value,
+                            attention: p::board_attention(&board.state, None),
+                            known: &detail_usage_known,
+                            missing: &detail_usage_missing,
                             observation: "complete",
                         })],
                         Some(
@@ -661,25 +1157,18 @@ mod fixtures {
                     ),
                 )?,
             ),
+            ("console-tree", envelope("console tree", tree_data)?),
             (
-                "console-tree",
-                envelope(
-                    "console tree",
-                    p::tree(
-                        &tree_nodes,
-                        &tree_edges,
-                        &tree_totals,
-                        &[],
-                        false,
-                        0,
-                        &[],
-                        &Value::Null,
-                        "complete",
-                        false,
-                        8,
-                        100,
-                    ),
-                )?,
+                "console-tree-subtree",
+                envelope("console tree", tree_subtree_data)?,
+            ),
+            (
+                "console-tree-limited",
+                envelope("console tree", tree_limited_data)?,
+            ),
+            (
+                "console-tree-conflicts",
+                envelope("console tree", tree_conflicts_data)?,
             ),
             (
                 "console-detail",
@@ -698,8 +1187,8 @@ mod fixtures {
                         &detail_applied_route,
                         &detail_observed_route,
                         &detail_usage,
-                        &[],
-                        &["input", "cache_read", "cache_write", "output", "reasoning"],
+                        &detail_usage_known,
+                        &detail_usage_missing,
                         &detail_trace,
                         &detail_timings,
                         &[detail_artifact],
@@ -707,6 +1196,43 @@ mod fixtures {
                         &[],
                         "not_searched",
                         "complete",
+                    ),
+                )?,
+            ),
+            (
+                "console-detail-unavailable-remote",
+                envelope(
+                    "console detail",
+                    p::detail_unavailable(
+                        &json!("remote-host"),
+                        &json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                        "remote_detail_requires_host_read",
+                        None,
+                    ),
+                )?,
+            ),
+            (
+                "console-detail-unavailable-tree",
+                envelope(
+                    "console detail",
+                    p::detail_unavailable(
+                        &Value::Null,
+                        &json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                        "fixture tree read error",
+                        Some("unavailable"),
+                    ),
+                )?,
+            ),
+            (
+                "console-detail-missing",
+                envelope(
+                    "console detail",
+                    p::detail_missing(
+                        &p::detail_lookup_lane_id(
+                            &Value::Null,
+                            &json!("cccccccccccccccccccccccccccccccc"),
+                        ),
+                        "bounded_tree_search",
                     ),
                 )?,
             ),
@@ -766,27 +1292,59 @@ mod fixtures {
                 )?,
             ),
             (
-                "output-prompt",
+                "console-search-artifact-error",
                 envelope(
-                    "output",
-                    p::output(
-                        "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
-                        "running",
-                        &Value::Null,
-                        &Value::Null,
-                        "prompt",
-                        0,
-                        38,
-                        Some(38),
-                        true,
-                        Some(false),
-                        Some(true),
-                        &Value::Null,
-                        &output_bytes("Implement the console overview screen."),
+                    "console search",
+                    p::search(
+                        &search_error_snapshot,
+                        "fixture",
+                        "result",
+                        &[],
+                        None,
+                        false,
+                        1,
+                        512,
+                        &[search_artifact_error],
+                        1000,
+                        65536,
+                        8388608,
                     ),
                 )?,
             ),
+            ("output-prompt", envelope("output", output_prompt)?),
             ("output-result", envelope("output", output_result)?),
+            (
+                "output-result-pending",
+                envelope("output", output_result_pending)?,
+            ),
+            (
+                "output-result-tail-bytes",
+                envelope("output", output_result_tail_bytes)?,
+            ),
+            (
+                "output-receipt-tail",
+                envelope("output", output_receipt_tail)?,
+            ),
+            (
+                "output-result-written",
+                envelope("output", output_result_written)?,
+            ),
+            (
+                "output-prompt-written",
+                envelope("output", output_prompt_written)?,
+            ),
+            (
+                "output-result-stopped",
+                envelope("output", output_result_stopped)?,
+            ),
+            (
+                "output-result-failed",
+                envelope("output", output_result_failed)?,
+            ),
+            (
+                "output-transcript-evicted",
+                envelope("output", output_transcript_evicted)?,
+            ),
         ])
     }
 
@@ -1492,6 +2050,74 @@ mod tests {
                         && child["kind"] == edge["kind"])
             );
         }
+    }
+
+    #[test]
+    fn synthetic_tree_nodes_match_source_identity_and_root_store_depth() {
+        let generated = fixtures::console().expect("synthetic console fixtures");
+        let (_, tree) = generated
+            .iter()
+            .find(|(name, _)| *name == "console-tree")
+            .expect("tree fixture");
+        let nodes = tree["data"]["nodes"].as_array().expect("tree nodes");
+        for node in nodes {
+            let key = &node["lane_id"]["key"];
+            assert_eq!(node["metadata"]["attempt"]["graph"], key["graph"]);
+            assert_eq!(node["metadata"]["attempt"]["node"], key["node"]);
+            assert_eq!(
+                node["metadata"]["attempt"]["attempt_number"],
+                key["attempt"]
+            );
+            assert_eq!(node["depth"], 0);
+            assert_eq!(node["store_parent_attempt"], serde_json::Value::Null);
+            assert_eq!(
+                node["metadata"]["attempt"]["attempt_directory"]["relative"]["path"],
+                format!(
+                    "fixture/attempts/{}",
+                    node["lane_id"]["attempt_id"].as_str().unwrap()
+                )
+            );
+        }
+
+        let (_, subtree) = generated
+            .iter()
+            .find(|(name, _)| *name == "console-tree-subtree")
+            .expect("tree subtree fixture");
+        assert_eq!(subtree["data"]["nodes"].as_array().map(Vec::len), Some(3));
+        assert_eq!(subtree["data"]["subtree"]["status"], "found");
+        assert!(
+            subtree["data"]["subtree"]["depth_limited"]
+                .as_bool()
+                .unwrap()
+        );
+        assert_eq!(subtree["data"]["coverage"]["nested_runs"], "partial");
+
+        let (_, limited) = generated
+            .iter()
+            .find(|(name, _)| *name == "console-tree-limited")
+            .expect("limited tree fixture");
+        assert!(limited["data"]["truncated"].as_bool().unwrap());
+        assert_eq!(
+            limited["data"]["unfetched_children"][0]["reason"],
+            "node_limit"
+        );
+
+        let (_, conflicts) = generated
+            .iter()
+            .find(|(name, _)| *name == "console-tree-conflicts")
+            .expect("tree conflict fixture");
+        assert_eq!(
+            conflicts["data"]["identity_conflicts"][0]["reason"],
+            "conflicting_work_key"
+        );
+        assert_eq!(
+            conflicts["data"]["identity_conflicts"][0]["store"]["stored"],
+            "/fixture/run.sqlite3"
+        );
+        assert_eq!(
+            conflicts["data"]["unfetched_children"][0]["detail"],
+            "synthetic child store unavailable"
+        );
     }
 
     #[test]

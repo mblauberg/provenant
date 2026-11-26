@@ -111,9 +111,10 @@ pub(super) fn read(
                     Ok(Some(bytes)) => bytes,
                     Ok(None) => continue,
                     Err(error) => {
-                        artifact_errors.push(
-                            json!({"attempt_id":attempt.attempt_id,"reason":error.to_string()}),
-                        );
+                        artifact_errors.push(super::projection::search_artifact_error(
+                            &json!(attempt.attempt_id),
+                            &error.to_string(),
+                        ));
                         continue;
                     }
                 };
@@ -301,6 +302,10 @@ mod tests {
         );
         let result = read(&roots, "searchable", "prompt", None, 100, None)?;
         assert!(result["coverage"]["files_scanned"].as_u64().unwrap() > 0);
+        assert_eq!(
+            result["matches"][0]["lane_id"]["project_id"],
+            json!(binding.project_id())
+        );
         assert!(result["matches"][0]["lane_id"]["key"].is_object());
         assert!(result["matches"][0]["lane_id"].get("run_id").is_none());
         assert!(result["matches"][0]["lane_id"].get("task_id").is_none());

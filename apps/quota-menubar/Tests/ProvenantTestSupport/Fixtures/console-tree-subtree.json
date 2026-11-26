@@ -1,0 +1,411 @@
+{
+  "command": "console tree",
+  "data": {
+    "children_absent": 0,
+    "coverage": {
+      "host": null,
+      "nested_runs": "partial",
+      "runs": "complete",
+      "scope": "local"
+    },
+    "edges": [
+      {
+        "child_attempt": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+        "kind": "dispatch",
+        "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "parent_status": "present",
+        "project_id": "01010101010101010101010101010101"
+      },
+      {
+        "child_attempt": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "kind": "dispatch",
+        "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "parent_status": "present",
+        "project_id": "01010101010101010101010101010101"
+      }
+    ],
+    "identity_conflicts": [],
+    "limits": {
+      "depth": 8,
+      "nodes": 100
+    },
+    "nodes": [
+      {
+        "children": [
+          {
+            "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+            "kind": "dispatch"
+          },
+          {
+            "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+            "kind": "dispatch"
+          }
+        ],
+        "depth": 0,
+        "lane_id": {
+          "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+          "host": null,
+          "key": {
+            "attempt": 1,
+            "graph": "implement-console-overview",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          },
+          "project_id": "01010101010101010101010101010101"
+        },
+        "metadata": {
+          "attempt": {
+            "account": null,
+            "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+              },
+              "root": "/"
+            },
+            "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "attempt_number": 1,
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
+            "delivery_id": null,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "implement-console-overview",
+            "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
+            "observed_route": null,
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
+            "project_id": "01010101010101010101010101010101",
+            "protected_paths": [],
+            "queued_at": "2026-11-02T01:57:31.075623Z",
+            "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile implement-console-overview/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
+            "requested_route": {
+              "effort": "high",
+              "kind": "model",
+              "model": "fixture/model",
+              "provider": "fixture"
+            },
+            "result_path": null,
+            "retry_of": null,
+            "runtime_deadline": null,
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
+            "started_at": null,
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node implement-console-overview",
+            "transcript": null,
+            "usage": {
+              "context_basis_points": null,
+              "source": "stream",
+              "tokens": {
+                "cache_read": null,
+                "cache_write": null,
+                "cache_write_1h": null,
+                "input": null,
+                "output": null,
+                "reasoning": null
+              }
+            },
+            "waiting_for": null,
+            "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-implement-console-overview",
+            "parent_attempt": null,
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
+          }
+        },
+        "parents": {
+          "continuation": null,
+          "dispatch": null
+        },
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node implement-console-overview",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
+      },
+      {
+        "children": [],
+        "depth": 1,
+        "lane_id": {
+          "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+          "host": null,
+          "key": {
+            "attempt": 1,
+            "graph": "review-the-change-set",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          },
+          "project_id": "01010101010101010101010101010101"
+        },
+        "metadata": {
+          "attempt": {
+            "account": null,
+            "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+              },
+              "root": "/"
+            },
+            "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+            "attempt_number": 1,
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
+            "delivery_id": null,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "review-the-change-set",
+            "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
+            "observed_route": null,
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
+            "project_id": "01010101010101010101010101010101",
+            "protected_paths": [],
+            "queued_at": "2026-11-02T01:57:31.075623Z",
+            "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile review-the-change-set/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
+            "requested_route": {
+              "effort": "high",
+              "kind": "model",
+              "model": "fixture/model",
+              "provider": "fixture"
+            },
+            "result_path": null,
+            "retry_of": null,
+            "runtime_deadline": null,
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
+            "started_at": null,
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node review-the-change-set",
+            "transcript": null,
+            "usage": {
+              "context_basis_points": null,
+              "source": "stream",
+              "tokens": {
+                "cache_read": null,
+                "cache_write": null,
+                "cache_write_1h": null,
+                "input": null,
+                "output": null,
+                "reasoning": null
+              }
+            },
+            "waiting_for": null,
+            "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-review-the-change-set",
+            "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
+          }
+        },
+        "parents": {
+          "continuation": null,
+          "dispatch": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+        },
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node review-the-change-set",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
+      },
+      {
+        "children": [],
+        "depth": 1,
+        "lane_id": {
+          "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+          "host": null,
+          "key": {
+            "attempt": 1,
+            "graph": "write-the-migration-notes",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          },
+          "project_id": "01010101010101010101010101010101"
+        },
+        "metadata": {
+          "attempt": {
+            "account": null,
+            "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+              },
+              "root": "/"
+            },
+            "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+            "attempt_number": 1,
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
+            "delivery_id": null,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "write-the-migration-notes",
+            "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
+            "observed_route": null,
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
+            "project_id": "01010101010101010101010101010101",
+            "protected_paths": [],
+            "queued_at": "2026-11-02T01:57:31.075623Z",
+            "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile write-the-migration-notes/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
+            "requested_route": {
+              "effort": "high",
+              "kind": "model",
+              "model": "fixture/model",
+              "provider": "fixture"
+            },
+            "result_path": null,
+            "retry_of": null,
+            "runtime_deadline": null,
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
+            "started_at": null,
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node write-the-migration-notes",
+            "transcript": null,
+            "usage": {
+              "context_basis_points": null,
+              "source": "stream",
+              "tokens": {
+                "cache_read": null,
+                "cache_write": null,
+                "cache_write_1h": null,
+                "input": null,
+                "output": null,
+                "reasoning": null
+              }
+            },
+            "waiting_for": null,
+            "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-write-the-migration-notes",
+            "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
+          }
+        },
+        "parents": {
+          "continuation": null,
+          "dispatch": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+        },
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node write-the-migration-notes",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
+      }
+    ],
+    "schema_version": 1,
+    "subtree": {
+      "depth_limited": true,
+      "root": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+      "status": "found"
+    },
+    "totals": {
+      "attempts": 3
+    },
+    "truncated": false,
+    "unfetched_children": []
+  },
+  "error": null,
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}

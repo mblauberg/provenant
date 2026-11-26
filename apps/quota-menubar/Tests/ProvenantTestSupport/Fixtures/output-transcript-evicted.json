@@ -1,0 +1,25 @@
+{
+  "command": "output",
+  "data": {
+    "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "bytes": {
+      "data": "",
+      "encoding": "utf8"
+    },
+    "clipped": null,
+    "complete": null,
+    "digest": null,
+    "eof": true,
+    "length": null,
+    "next_offset": 0,
+    "offset": 0,
+    "part": "transcript",
+    "payload": "evicted",
+    "state": "succeeded"
+  },
+  "error": null,
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}
