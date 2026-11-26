@@ -39,7 +39,7 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
     let AttemptState::Terminal { terminal_cause, .. } = &record.state else {
         return Err("cancelled attempt is not terminal".into());
     };
-    assert_eq!(*terminal_cause, Some(TerminalCause::HandoffRefused));
+    assert_eq!(*terminal_cause, Some(CauseKind::HandoffRefused));
     assert_eq!(record.provider_launched, Some(false));
     Ok(())
 }

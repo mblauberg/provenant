@@ -7,7 +7,7 @@
 
 use crate::graph::AttemptOutcome;
 use crate::run::{
-    AttemptRecord, AttemptState, Outcome, PartialSignal, PreparationFailure, TerminalCause,
+    AttemptRecord, AttemptState, Outcome, PartialSignal, PreparationFailure, CauseKind,
 };
 
 /// The settlement part of a terminal attempt's graph outcome.
@@ -36,7 +36,7 @@ pub fn graph_outcome(record: &AttemptRecord) -> Option<AttemptOutcome> {
             .preparation_failure
             .is_none_or(|failure| failure == PreparationFailure::AdapterUnavailable)
         && let Some(cause) = cause
-        && cause != TerminalCause::CommandUnavailable
+        && cause != CauseKind::CommandUnavailable
     {
         return Some(AttemptOutcome::PreparationRefused(cause));
     }
@@ -46,7 +46,7 @@ pub fn graph_outcome(record: &AttemptRecord) -> Option<AttemptOutcome> {
             PreparationFailure::UsageLimited => AttemptOutcome::UsageLimited,
             PreparationFailure::AdapterUnavailable => AttemptOutcome::AdapterUnavailable,
             PreparationFailure::GitSetup => AttemptOutcome::PreparationRefused(
-                cause.unwrap_or(TerminalCause::PreparationRefused),
+                cause.unwrap_or(CauseKind::PreparationRefused),
             ),
         });
     }
@@ -55,17 +55,17 @@ pub fn graph_outcome(record: &AttemptRecord) -> Option<AttemptOutcome> {
         Outcome::Succeeded => AttemptOutcome::Succeeded,
         Outcome::AuthRequired => AttemptOutcome::AuthRequired,
         Outcome::RateLimited | Outcome::QuotaLimited => AttemptOutcome::UsageLimited,
-        Outcome::TimedOut if cause == Some(TerminalCause::TokenBudget) => {
+        Outcome::TimedOut if cause == Some(CauseKind::TokenBudget) => {
             AttemptOutcome::OtherFailure
         }
         Outcome::TimedOut => AttemptOutcome::OtherFailure,
         Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
         Outcome::Unclassified => AttemptOutcome::Unclassified,
-        Outcome::Rejected if !launched => cause.or(Some(TerminalCause::Unrecorded)).map_or(
+        Outcome::Rejected if !launched => cause.or(Some(CauseKind::Unrecorded)).map_or(
             AttemptOutcome::OtherFailure,
             AttemptOutcome::PreparationRefused,
         ),
-        Outcome::ReviewRequired if cause == Some(TerminalCause::StoppedNoWork) => {
+        Outcome::ReviewRequired if cause == Some(CauseKind::StoppedNoWork) => {
             AttemptOutcome::StoppedNoWork
         }
         // A declared stop is one fact whether or not the writer left
@@ -83,7 +83,7 @@ pub fn graph_outcome(record: &AttemptRecord) -> Option<AttemptOutcome> {
         {
             AttemptOutcome::DeclaredStop
         }
-        Outcome::Failed if cause == Some(TerminalCause::ProviderStalledRetry) => {
+        Outcome::Failed if cause == Some(CauseKind::ProviderStalledRetry) => {
             AttemptOutcome::ProviderStalledRetry
         }
         Outcome::Failed => AttemptOutcome::TaskFailed,

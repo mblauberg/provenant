@@ -1212,7 +1212,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
             };
             route.set_guard_facts(None, Some(self.0.clone())).unwrap();
             let mut refusal = provenant_run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                provenant_records::run::CauseKind::RouteResolutionRefused,
                 "PRIVATE_PACING_SENTINEL",
             );
             refusal.skipped_routes.push(route);
@@ -1347,7 +1347,7 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             _: Option<&provenant_run::AttemptRecord>,
         ) -> Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>> {
             let mut refusal = provenant_run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                provenant_records::run::CauseKind::RouteResolutionRefused,
                 "allowance spent",
             );
             refusal

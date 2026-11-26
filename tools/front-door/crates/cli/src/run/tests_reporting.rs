@@ -240,7 +240,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
-                terminal_cause: provenant_records::run::TerminalCause::AccessPolicyRefused,
+                terminal_cause: provenant_records::run::CauseKind::AccessPolicyRefused,
                 terminal_note: self.note.clone(),
                 message: "PROVIDER_SENTINEL must not become a public diagnostic".into(),
                 host_message: None,
@@ -284,7 +284,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             )?;
             let expected = format!(
                 "{}; {note}",
-                provenant_records::run::TerminalCause::AccessPolicyRefused.detail()
+                provenant_records::run::CauseKind::AccessPolicyRefused.detail()
             );
             let attempt = prepared.attempt_id;
             let output_command = || Output {

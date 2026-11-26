@@ -12,7 +12,7 @@ use provenant_records::declaration::{
 };
 use provenant_records::handoff::{Handoff, HandoffError, HandoffStatus};
 use provenant_records::provenance::{Layer, Source, Sourced};
-use provenant_records::run::{Outcome, PartialSignal, SettlementReason, TerminalCause};
+use provenant_records::run::{Outcome, PartialSignal, SettlementReason, CauseKind};
 use provenant_records::settlement::{
     CustodyFacts, GitEvidence, HandoffSource, HostVerdict, IdentityEvidence, IdentityPolicyEffect,
     LaneRole, PrimaryCheckout, Progress, SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
@@ -50,7 +50,7 @@ fn accepted(handoff: Handoff) -> DeclarationEvidence {
     })
 }
 
-fn base(lane: LaneRole, outcome: Outcome, cause: Option<TerminalCause>) -> SettlementEvidence {
+fn base(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> SettlementEvidence {
     SettlementEvidence {
         schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
         lane,
@@ -101,7 +101,7 @@ struct Row {
     name: &'static str,
     evidence: SettlementEvidence,
     outcome: Outcome,
-    cause: Option<TerminalCause>,
+    cause: Option<CauseKind>,
     reason: SettlementReason,
     stop: Option<StopCause>,
     signals: Vec<PartialSignal>,
@@ -193,13 +193,13 @@ fn rows() -> Vec<Row> {
     let capture = base(
         LaneRole::ModelWriter,
         Outcome::Failed,
-        Some(TerminalCause::ProviderCaptureDefect { line: 42 }),
+        Some(CauseKind::ProviderCaptureDefect { line: 42 }),
     );
 
     let mut budget = base(
         LaneRole::ModelWriter,
         Outcome::Failed,
-        Some(TerminalCause::TokenBudget),
+        Some(CauseKind::TokenBudget),
     );
     budget.handoff = accepted(handoff(HandoffStatus::Done, "Delivered and pushed"));
 
@@ -212,7 +212,7 @@ fn rows() -> Vec<Row> {
             name: "pushed then blocked",
             evidence: pushed_blocked,
             outcome: Outcome::ReviewRequired,
-            cause: Some(TerminalCause::Blocked),
+            cause: Some(CauseKind::Blocked),
             reason: SettlementReason::DeclaredStop,
             stop: Some(StopCause::Blocked),
             signals: vec![PartialSignal::DeclaredStop],
@@ -262,7 +262,7 @@ fn rows() -> Vec<Row> {
             name: "stopped early with an unchanged head",
             evidence: unchanged,
             outcome: Outcome::ReviewRequired,
-            cause: Some(TerminalCause::StoppedNoWork),
+            cause: Some(CauseKind::StoppedNoWork),
             reason: SettlementReason::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
             signals: vec![PartialSignal::DeclaredStop],
@@ -332,7 +332,7 @@ fn rows() -> Vec<Row> {
             name: "empty writer result",
             evidence: empty,
             outcome: Outcome::ReviewRequired,
-            cause: Some(TerminalCause::EmptyWriterResult),
+            cause: Some(CauseKind::EmptyWriterResult),
             reason: SettlementReason::EmptyResult,
             stop: Some(StopCause::EmptyResult),
             signals: vec![PartialSignal::HandoffMissing],
@@ -352,7 +352,7 @@ fn rows() -> Vec<Row> {
             name: "cancelled and steered",
             evidence: steered,
             outcome: Outcome::Cancelled,
-            cause: Some(TerminalCause::Steered),
+            cause: Some(CauseKind::Steered),
             reason: SettlementReason::Steered,
             stop: Some(StopCause::Steered),
             signals: vec![],
@@ -372,7 +372,7 @@ fn rows() -> Vec<Row> {
             name: "identity mismatch",
             evidence: identity,
             outcome: Outcome::Failed,
-            cause: Some(TerminalCause::IdentityMismatch),
+            cause: Some(CauseKind::IdentityMismatch),
             reason: SettlementReason::Failed,
             stop: Some(StopCause::IdentityMismatch),
             signals: vec![],
@@ -382,7 +382,7 @@ fn rows() -> Vec<Row> {
             name: "capture defect",
             evidence: capture,
             outcome: Outcome::Failed,
-            cause: Some(TerminalCause::ProviderCaptureDefect { line: 42 }),
+            cause: Some(CauseKind::ProviderCaptureDefect { line: 42 }),
             reason: SettlementReason::Failed,
             stop: Some(StopCause::Unsettled),
             signals: vec![],
@@ -392,7 +392,7 @@ fn rows() -> Vec<Row> {
             name: "budget completion",
             evidence: budget,
             outcome: Outcome::Succeeded,
-            cause: Some(TerminalCause::TokenBudget),
+            cause: Some(CauseKind::TokenBudget),
             reason: SettlementReason::CompletedBeforeBudget,
             stop: Some(StopCause::TokenBudget),
             signals: vec![],
@@ -434,7 +434,7 @@ fn one_decider_settles_every_family_from_one_sealed_record() {
         if row.progress != Some(Progress::Unchanged) {
             assert_ne!(
                 fact.cause,
-                Some(TerminalCause::StoppedNoWork),
+                Some(CauseKind::StoppedNoWork),
                 "{}: no-work without an unchanged head",
                 row.name
             );
@@ -447,14 +447,14 @@ fn progress_is_pin_relative_and_never_reads_remote_state() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     evidence.git = git_at(Some(BASE), Some(BASE));
     evidence.handoff = accepted(handoff(HandoffStatus::StoppedEarly, "Nothing left to do."));
-    assert_eq!(settle(&evidence).cause, Some(TerminalCause::StoppedNoWork));
+    assert_eq!(settle(&evidence).cause, Some(CauseKind::StoppedNoWork));
 
     // A push, a moved remote ref or a settlement base is not a field of the
     // record. Only the sealed head changes when it is re-read after a restart.
     evidence.git.as_mut().unwrap().head = Some(GitOid::parse(HEAD).unwrap());
     let fact = settle(&evidence);
     assert_eq!(fact.progress, Some(Progress::Moved));
-    assert_ne!(fact.cause, Some(TerminalCause::StoppedNoWork));
+    assert_ne!(fact.cause, Some(CauseKind::StoppedNoWork));
 
     // Re-reading HEAD to the same value leaves the sealed fact byte-identical.
     let again = settle(&evidence);

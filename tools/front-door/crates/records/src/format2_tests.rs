@@ -75,7 +75,7 @@ fn settlement_reasons_round_trip_against_the_declared_rules() {
 fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
     use crate::run::{
         CauseSource, Outcome, SETTLEMENT_TABLE, SettlementNodeOutcome, SettlementReason,
-        TerminalCause,
+        CauseKind,
     };
     use crate::settlement::{LaneRole, classify::settle};
     for reason in SettlementReason::ALL {
@@ -116,7 +116,7 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
 
     let empty = settle(&evidence_for(
         Outcome::ReviewRequired,
-        Some(TerminalCause::EmptyWriterResult),
+        Some(CauseKind::EmptyWriterResult),
     ));
     assert_eq!(empty.reason, SettlementReason::EmptyResult);
     let stop = empty.stop.as_ref().unwrap();
@@ -125,7 +125,7 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
     assert_eq!(empty.node, SettlementNodeOutcome::Failed);
 
     let blocked_handoff = handoff(HandoffStatus::Blocked, "Needs an owner decision.");
-    let mut blocked_evidence = evidence_for(Outcome::Succeeded, Some(TerminalCause::Blocked));
+    let mut blocked_evidence = evidence_for(Outcome::Succeeded, Some(CauseKind::Blocked));
     blocked_evidence.handoff = accepted(blocked_handoff);
     let blocked = settle(&blocked_evidence);
     assert_eq!(blocked.reason, SettlementReason::DeclaredStop);
@@ -149,7 +149,7 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
 
 #[test]
 fn host_stops_preserve_complete_handoffs_and_completed_budgets_succeed() {
-    use crate::run::{CauseSource, Outcome, SettlementNodeOutcome, TerminalCause};
+    use crate::run::{CauseSource, Outcome, SettlementNodeOutcome, CauseKind};
     use crate::settlement::{GitEvidence, PrimaryCheckout, classify::settle};
     let handoff: Handoff = serde_json::from_value(json!({
         "schema_version": 2, "status": "done", "note": "Delivered and pushed",
@@ -163,7 +163,7 @@ fn host_stops_preserve_complete_handoffs_and_completed_budgets_succeed() {
         let stop = Stop::new(cause, Some(handoff.clone())).unwrap();
         assert_eq!(stop.handoff(), Some(&handoff));
     }
-    let mut budget = evidence_for(Outcome::Failed, Some(TerminalCause::TokenBudget));
+    let mut budget = evidence_for(Outcome::Failed, Some(CauseKind::TokenBudget));
     budget.handoff = accepted(handoff.clone());
     let classified = settle(&budget);
     assert_eq!(classified.source, CauseSource::Host);
@@ -173,7 +173,7 @@ fn host_stops_preserve_complete_handoffs_and_completed_budgets_succeed() {
 
     // Dirty work is a separate signal: it keeps dependants held even when a
     // clean, done declaration arrived before the budget boundary.
-    let mut dirty = evidence_for(Outcome::Succeeded, Some(TerminalCause::TokenBudget));
+    let mut dirty = evidence_for(Outcome::Succeeded, Some(CauseKind::TokenBudget));
     dirty.handoff = accepted(handoff);
     dirty.git = Some(GitEvidence {
         pinned: None,
@@ -402,7 +402,7 @@ fn handoff(status: HandoffStatus, note: &str) -> Handoff {
 /// A launched, process-exited writer with no declaration and no Git evidence.
 fn evidence_for(
     outcome: crate::run::Outcome,
-    cause: Option<crate::run::TerminalCause>,
+    cause: Option<crate::run::CauseKind>,
 ) -> crate::settlement::SettlementEvidence {
     use crate::settlement::{
         CustodyFacts, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,

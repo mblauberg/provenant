@@ -36,7 +36,7 @@ pub enum AttemptObservation {
         settlement_reason: Option<provenant_records::run::SettlementReason>,
         /// The exact typed cause the run sealed, copied into the graph's
         /// attempt row at settlement.
-        cause: Option<provenant_records::run::TerminalCause>,
+        cause: Option<provenant_records::run::CauseKind>,
     },
 }
 

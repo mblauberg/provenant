@@ -5292,7 +5292,7 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
         assert_eq!(node["advance_error_code"], "preparation_refused", "{node}");
         assert_eq!(
             node["advance_error"],
-            provenant_records::run::TerminalCause::UnregisteredAccount.detail(),
+            provenant_records::run::CauseKind::UnregisteredAccount.detail(),
             "{node}"
         );
     }

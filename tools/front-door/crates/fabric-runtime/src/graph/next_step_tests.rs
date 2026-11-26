@@ -339,7 +339,7 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
         let document = document("worktree_write", serde_json::Value::Null);
         let mut failed = terminal(
             "a/1",
-            AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure),
+            AttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure),
             Some(StopCause::SpawnFailure),
             None,
         );

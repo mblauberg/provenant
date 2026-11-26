@@ -785,7 +785,7 @@ pub(super) fn route() -> RouteRecord {
 }
 pub(super) fn publication_fact(
     outcome: Outcome,
-    cause: Option<TerminalCause>,
+    cause: Option<CauseKind>,
 ) -> provenant_records::settlement::OutcomeFact {
     provenant_records::settlement::classify::settle(
         &provenant_records::settlement::SettlementEvidence::fixture(
@@ -1319,7 +1319,7 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
     )?;
     let mut publication = publication();
     publication.fact.outcome = Outcome::ReviewRequired;
-    publication.fact.cause = Some(TerminalCause::IdentityMismatch);
+    publication.fact.cause = Some(CauseKind::IdentityMismatch);
     publication.observed_route = Some(RouteRecord {
         model: Some("other/model".into()),
         ..route()
@@ -1334,7 +1334,7 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
         record.state,
         AttemptState::Terminal {
             outcome: Outcome::ReviewRequired,
-            terminal_cause: Some(TerminalCause::IdentityMismatch),
+            terminal_cause: Some(CauseKind::IdentityMismatch),
             ..
         }
     ));
@@ -1625,7 +1625,7 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     )?;
     assert_eq!(
         String::from_utf8(result.bytes)?,
-        TerminalCause::Unrecorded.detail()
+        CauseKind::Unrecorded.detail()
     );
     Ok(())
 }

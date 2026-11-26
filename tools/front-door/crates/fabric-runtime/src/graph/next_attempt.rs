@@ -119,7 +119,7 @@ fn expected_preparation_failure(
         AttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
         AttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
         AttemptOutcome::AdapterUnavailable
-        | AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
+        | AttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
             Some(PreparationFailure::AdapterUnavailable)
         }
         _ => None,
@@ -433,7 +433,7 @@ fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcom
         // outcome carries the real cause; this is only fallback eligibility.
         // A local preparation failure needs a local repair, not another route.
         AttemptOutcome::PreparationRefused(
-            provenant_records::run::TerminalCause::PreparationRefused,
+            provenant_records::run::CauseKind::PreparationRefused,
         ) => provenant_routing::FallbackOutcome::Other,
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             provenant_routing::FallbackOutcome::AdapterUnavailable
@@ -462,11 +462,11 @@ fn fallback_cause(outcome: AttemptOutcome) -> Option<provenant_records::StopCaus
     match outcome {
         AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
+        AttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
             Some(StopCause::SpawnFailure)
         }
         AttemptOutcome::PreparationRefused(
-            provenant_records::run::TerminalCause::PreparationRefused,
+            provenant_records::run::CauseKind::PreparationRefused,
         ) => Some(StopCause::PreparationRefused),
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)

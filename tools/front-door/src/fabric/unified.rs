@@ -1285,7 +1285,7 @@ pub(crate) fn enrich_status_rows_within(
 /// Decode the declaration before selecting its tag: arbitrary object keys are
 /// not safe diagnostics.
 fn terminal_cause_code(value: &Value) -> Option<String> {
-    let _: provenant_records::run::TerminalCause = serde_json::from_value(value.clone()).ok()?;
+    let _: provenant_records::run::CauseKind = serde_json::from_value(value.clone()).ok()?;
     match value {
         Value::String(code) => Some(code.clone()),
         Value::Object(tagged) => tagged.keys().next().cloned(),

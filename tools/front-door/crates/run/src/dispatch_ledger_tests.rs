@@ -102,7 +102,7 @@ fn write_grant_warning_threshold_preserves_a_large_terminal_record() -> TestResu
     // The explicit fixture handoff error survives; capacity never masks it.
     assert_eq!(
         record.state.terminal_cause(),
-        Some(TerminalCause::HandoffRefused)
+        Some(CauseKind::HandoffRefused)
     );
     let expected_tools: std::collections::BTreeSet<_> = (0..tool_count)
         .map(|index| format!("/fixture/tools/{index}"))

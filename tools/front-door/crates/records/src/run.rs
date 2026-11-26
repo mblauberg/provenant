@@ -1484,7 +1484,7 @@ impl From<Outcome> for crate::AttemptOutcome {
 /// Safe cause of a terminal decision, independent of provider text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TerminalCause {
+pub enum CauseKind {
     /// The pinned source view of an isolated lane could not be built.
     SourceViewRefused,
     /// A project-binding state directory failed its local owner or mode guard.
@@ -1555,7 +1555,7 @@ pub enum TerminalCause {
     Unrecorded,
 }
 
-impl TerminalCause {
+impl CauseKind {
     /// Bounded label for human status rows. Structured results use `detail`.
     pub fn reason(self) -> &'static str {
         match self {
@@ -1785,7 +1785,7 @@ pub enum AttemptState {
         #[serde(flatten)]
         extra: crate::ExtraFields,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        terminal_cause: Option<TerminalCause>,
+        terminal_cause: Option<CauseKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_note: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1806,7 +1806,7 @@ impl AttemptState {
         }
     }
 
-    pub fn terminal_cause(&self) -> Option<TerminalCause> {
+    pub fn terminal_cause(&self) -> Option<CauseKind> {
         match self {
             Self::Terminal { terminal_cause, .. } => *terminal_cause,
             _ => None,
@@ -3234,12 +3234,12 @@ mod tests {
     fn a_pin_mismatch_has_its_own_honest_cause_text() {
         let pinned = GitOid::parse(&"a".repeat(40)).expect("pinned");
         let head = GitOid::parse(&"b".repeat(40)).expect("head");
-        let cause = TerminalCause::WriterPinMismatch { pinned, head };
+        let cause = CauseKind::WriterPinMismatch { pinned, head };
         let text = cause.diagnostic(true);
         assert!(text.contains(&pinned.to_string()), "{text}");
         assert!(text.contains(&head.to_string()), "{text}");
         assert!(
-            !text.contains(TerminalCause::HandoffRefused.detail()),
+            !text.contains(CauseKind::HandoffRefused.detail()),
             "a pin mismatch must not blame the launch handoff: {text}"
         );
         let detail = cause.detail();

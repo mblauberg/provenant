@@ -76,7 +76,7 @@ fn select_account<'a>(
             } else {
                 PrepareError::Refusal {
                     message: format!("{refusal}; run `provenant accounts list`"),
-                    cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                    cause: provenant_records::run::CauseKind::UnregisteredAccount,
                     note: None,
                     fallback_outcome: None,
                 }
@@ -87,7 +87,7 @@ fn select_account<'a>(
         .find(|entry| entry.adapter == resolved.item.adapter && entry.key == resolved.item.key)
         .ok_or_else(|| PrepareError::Refusal {
             message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
-            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            cause: provenant_records::run::CauseKind::UnregisteredAccount,
             note: None,
             fallback_outcome: None,
         })
@@ -113,7 +113,7 @@ fn select_retained_account<'a>(
     let resolved = provenant_providers::accounts::resolve(&settings, key, ReferenceForms::RETAINED)
         .map_err(|_| PrepareError::Refusal {
             message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
-            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            cause: provenant_records::run::CauseKind::UnregisteredAccount,
             note: None,
             fallback_outcome: None,
         })?;
@@ -123,7 +123,7 @@ fn select_retained_account<'a>(
         .map(Some)
         .ok_or_else(|| PrepareError::Refusal {
             message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
-            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            cause: provenant_records::run::CauseKind::UnregisteredAccount,
             note: None,
             fallback_outcome: None,
         })
@@ -982,7 +982,7 @@ pub(super) enum PrepareError {
     #[error("{message}")]
     Refusal {
         message: String,
-        cause: provenant_records::run::TerminalCause,
+        cause: provenant_records::run::CauseKind,
         /// Fixed-form text naming a configured value, never captured output.
         note: Option<String>,
         fallback_outcome: Option<provenant_records::run::PreparationFailure>,
@@ -1155,12 +1155,12 @@ impl PrepareError {
                 host_message: None,
                 skipped_routes: Vec::new(),
                 fallback_outcome: fallback_outcome.or(match cause {
-                    provenant_records::run::TerminalCause::AccountLoginRequired => {
+                    provenant_records::run::CauseKind::AccountLoginRequired => {
                         Some(provenant_records::run::PreparationFailure::AuthRequired)
                     }
-                    provenant_records::run::TerminalCause::UnregisteredAccount
-                    | provenant_records::run::TerminalCause::CommandUnavailable
-                    | provenant_records::run::TerminalCause::HostNativeUnconfigured => {
+                    provenant_records::run::CauseKind::UnregisteredAccount
+                    | provenant_records::run::CauseKind::CommandUnavailable
+                    | provenant_records::run::CauseKind::HostNativeUnconfigured => {
                         Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
                     }
                     _ => None,
@@ -1173,9 +1173,9 @@ impl PrepareError {
                     super::source_tree::SourceCause::ProjectBindingDirectory(_)
                 );
                 let cause = if binding_refusal {
-                    provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+                    provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe
                 } else {
-                    provenant_records::run::TerminalCause::SourceViewRefused
+                    provenant_records::run::CauseKind::SourceViewRefused
                 };
                 let mut refusal = run::PrepareRefusal::boxed(cause, detail.clone());
                 refusal.terminal_note = Some(detail);
@@ -1243,7 +1243,7 @@ impl PrepareError {
                     boundary_class,
                     policy_code,
                     resource: candidate_resource,
-                    terminal_cause: provenant_records::run::TerminalCause::RouteResolutionRefused,
+                    terminal_cause: provenant_records::run::CauseKind::RouteResolutionRefused,
                     terminal_note: None,
                     message,
                     host_message,
@@ -1252,13 +1252,13 @@ impl PrepareError {
                 });
                 if refusal.auth_required() {
                     refusal.terminal_cause =
-                        provenant_records::run::TerminalCause::AccountLoginRequired;
+                        provenant_records::run::CauseKind::AccountLoginRequired;
                 }
                 refusal
             }
             Self::SourceRoots(error) => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -1268,7 +1268,7 @@ impl PrepareError {
             }
             Self::SourceCwd(error) => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = error.boundary_class();
@@ -1283,13 +1283,13 @@ impl PrepareError {
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
             Self::Unsupported(error) => run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::HandoffRefused,
+                provenant_records::run::CauseKind::HandoffRefused,
                 error.to_string(),
             ),
             Self::ContinuationRequest(error) => {
                 let guard = error.guard();
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     guard.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -1301,7 +1301,7 @@ impl PrepareError {
             }
             Self::SourceHead(error) => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -1317,12 +1317,12 @@ impl PrepareError {
                 let boundary_class = error.boundary_class();
                 let cause = match error {
                     run::RunError::WriterSourceMismatch { expected, actual } => {
-                        provenant_records::run::TerminalCause::WriterPinMismatch {
+                        provenant_records::run::CauseKind::WriterPinMismatch {
                             pinned: expected,
                             head: actual,
                         }
                     }
-                    _ => provenant_records::run::TerminalCause::HandoffRefused,
+                    _ => provenant_records::run::CauseKind::HandoffRefused,
                 };
                 let mut refusal = run::PrepareRefusal::boxed(cause, error.to_string());
                 refusal.boundary_class = boundary_class;
@@ -1333,7 +1333,7 @@ impl PrepareError {
                 let policy_code = provider_policy_code(&error);
                 let boundary_class = error.boundary_class();
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::HandoffRefused,
+                    provenant_records::run::CauseKind::HandoffRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = boundary_class;
@@ -1349,7 +1349,7 @@ impl PrepareError {
             }
             Self::Prompt(error) => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::StoredPromptUnreadable,
+                    provenant_records::run::CauseKind::StoredPromptUnreadable,
                     error.to_string(),
                 );
                 let policy_code = match &error {
@@ -1360,7 +1360,7 @@ impl PrepareError {
                     refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::None;
                     refusal.policy_code = Some(policy_code);
                     refusal.terminal_cause =
-                        provenant_records::run::TerminalCause::AccessPolicyRefused;
+                        provenant_records::run::CauseKind::AccessPolicyRefused;
                 } else {
                     refusal.boundary_class = match &error {
                         LaunchPromptError::TooLarge => {
@@ -1376,7 +1376,7 @@ impl PrepareError {
             }
             error @ Self::HostIndexOverlap => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
@@ -1390,7 +1390,7 @@ impl PrepareError {
                 uncommitted,
             } => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::WriterPinMismatch { pinned, head },
+                    provenant_records::run::CauseKind::WriterPinMismatch { pinned, head },
                     format!(
                         "writer worktree head {head} differs from pinned commit {pinned}{}",
                         dirty_predecessor_suffix(&uncommitted)
@@ -1405,7 +1405,7 @@ impl PrepareError {
             | Self::SourceViewReadOnly(_)
             | Self::WriterContinuation(_)) => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -1430,7 +1430,7 @@ impl PrepareError {
                 refusal
             }
             other => run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::HandoffRefused,
+                provenant_records::run::CauseKind::HandoffRefused,
                 other.to_string(),
             ),
         }
@@ -1449,7 +1449,7 @@ fn dirty_predecessor_suffix(paths: &[String]) -> String {
 #[test]
 // Spec: docs/specs/run.md#writer-pin-and-re-pin
 fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
-    use provenant_records::run::TerminalCause;
+    use provenant_records::run::CauseKind;
     let pinned = provenant_core::GitOid::parse(&"a".repeat(40)).expect("pinned");
     let head = provenant_core::GitOid::parse(&"b".repeat(40)).expect("head");
     for error in [
@@ -1466,12 +1466,12 @@ fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
         let refusal = error.into_refusal();
         assert_eq!(
             refusal.terminal_cause,
-            TerminalCause::WriterPinMismatch { pinned, head }
+            CauseKind::WriterPinMismatch { pinned, head }
         );
         let text = refusal.terminal_cause.diagnostic(true);
         assert!(text.contains(&pinned.to_string()), "{text}");
         assert!(text.contains(&head.to_string()), "{text}");
-        assert!(!text.contains(TerminalCause::HandoffRefused.detail()));
+        assert!(!text.contains(CauseKind::HandoffRefused.detail()));
     }
 }
 
@@ -1608,7 +1608,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert!(home.policy_code.is_none());
     assert_eq!(
         home.terminal_cause,
-        provenant_records::run::TerminalCause::HandoffRefused
+        provenant_records::run::CauseKind::HandoffRefused
     );
     let extensions =
         PlanCheckError::Plan(provenant_confinement::PlanError::UnconfinedExtensions).into_refusal();
@@ -1685,7 +1685,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
 /// Retain a closed resolver classification, never its freely formatted error.
 fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError {
     use crate::route::{DispatchError, EdgeError};
-    use provenant_records::run::TerminalCause;
+    use provenant_records::run::CauseKind;
     let fallback_outcome = match &error {
         DispatchError::Edge(edge) => match edge.as_ref() {
             EdgeError::Routing(provenant_routing::RoutingError::NoEligiblePoolMember {
@@ -1703,7 +1703,7 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
                 kind: crate::route::AccountProfileError::Unknown,
                 ..
             } => (
-                TerminalCause::UnknownPacingAccount,
+                CauseKind::UnknownPacingAccount,
                 "unknown_pacing_account",
             ),
             EdgeError::Routing(error) => {
@@ -1714,36 +1714,36 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
                     } => match reason {
                         provenant_records::RouteExclusionReason::AuthRequired
                         | provenant_records::RouteExclusionReason::LoginExpired => {
-                            TerminalCause::AccountLoginRequired
+                            CauseKind::AccountLoginRequired
                         }
                         provenant_records::RouteExclusionReason::UnknownAccount
                         | provenant_records::RouteExclusionReason::UnresolvedAccount => {
-                            TerminalCause::UnregisteredAccount
+                            CauseKind::UnregisteredAccount
                         }
-                        _ => TerminalCause::RouteResolutionRefused,
+                        _ => CauseKind::RouteResolutionRefused,
                     },
-                    _ => TerminalCause::RouteResolutionRefused,
+                    _ => CauseKind::RouteResolutionRefused,
                 };
                 (cause, error.code())
             }
             EdgeError::Unresolved { .. } => {
-                (TerminalCause::RouteResolutionRefused, "unresolved_selector")
+                (CauseKind::RouteResolutionRefused, "unresolved_selector")
             }
             _ => (
-                TerminalCause::RouteResolutionRefused,
+                CauseKind::RouteResolutionRefused,
                 "route_configuration_or_observation",
             ),
         },
-        DispatchError::Catalogue(error) => (TerminalCause::RouteResolutionRefused, error.code()),
+        DispatchError::Catalogue(error) => (CauseKind::RouteResolutionRefused, error.code()),
         DispatchError::FamilySeparation(..) => {
-            (TerminalCause::RouteResolutionRefused, "family_separation")
+            (CauseKind::RouteResolutionRefused, "family_separation")
         }
     };
     PrepareError::Refusal {
         message,
         cause,
         note: Some(format!("route resolver classification: {code}")),
-        fallback_outcome: if cause == TerminalCause::AccountLoginRequired {
+        fallback_outcome: if cause == CauseKind::AccountLoginRequired {
             Some(provenant_records::run::PreparationFailure::AuthRequired)
         } else {
             fallback_outcome
@@ -1975,9 +1975,9 @@ impl PlanCheckError {
         let skipped = self.skipped("preparation");
         let boundary = self.boundary_class();
         let cause = if boundary == provenant_records::diagnostic::BoundaryClass::None {
-            provenant_records::run::TerminalCause::HandoffRefused
+            provenant_records::run::CauseKind::HandoffRefused
         } else {
-            provenant_records::run::TerminalCause::AccessPolicyRefused
+            provenant_records::run::CauseKind::AccessPolicyRefused
         };
         let mut refusal = run::PrepareRefusal::boxed(cause, skipped.detail.clone());
         refusal.boundary_class = boundary;
@@ -1987,7 +1987,7 @@ impl PlanCheckError {
         refusal.skipped_routes.push(skipped);
         if let Self::ReadOnly(ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)) = self {
             refusal.terminal_cause =
-                provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe;
+                provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe;
             refusal.message = diagnostic
                 .detail
                 .unwrap_or_else(|| "project binding state directory is unsafe".into());
@@ -2166,10 +2166,10 @@ fn prepare_inner(
                 .host_native
                 .get(name)
                 .ok_or_else(|| PrepareError::Refusal {
-                    message: provenant_records::run::TerminalCause::HostNativeUnconfigured
+                    message: provenant_records::run::CauseKind::HostNativeUnconfigured
                         .detail()
                         .into(),
-                    cause: provenant_records::run::TerminalCause::HostNativeUnconfigured,
+                    cause: provenant_records::run::CauseKind::HostNativeUnconfigured,
                     note: None,
                     fallback_outcome: None,
                 })?;
@@ -2836,7 +2836,7 @@ mod stale_readiness_tests {
         )?;
         assert_eq!(
             prior.terminal_cause,
-            Some(run::TerminalCause::LaneTokenLost)
+            Some(run::CauseKind::LaneTokenLost)
         );
         let stale = provenant_providers::AvailabilityRecord {
             schema_version: 1,
@@ -2916,7 +2916,7 @@ mod stale_readiness_tests {
         assert!(refusal.auth_required());
         assert_eq!(
             refusal.terminal_cause,
-            provenant_records::run::TerminalCause::AccountLoginRequired
+            provenant_records::run::CauseKind::AccountLoginRequired
         );
         assert_eq!(
             refusal.skipped_routes[0].cause,
@@ -5926,7 +5926,7 @@ pub(super) fn prepare_candidates_inner(
             (true, None) => {
                 return Err(PrepareError::Refusal {
                     message: "provider prepared a resumed invocation without its retained session binding".into(),
-                    cause: provenant_records::run::TerminalCause::HandoffRefused,
+                    cause: provenant_records::run::CauseKind::HandoffRefused,
                     note: None,
                     fallback_outcome: None,
                 });
@@ -7004,7 +7004,7 @@ mod refusal_cause_tests {
             route_resolution_refusal(crate::route::DispatchError::from(error)).into_refusal();
         assert_eq!(
             refusal.terminal_cause,
-            provenant_records::run::TerminalCause::AccountLoginRequired
+            provenant_records::run::CauseKind::AccountLoginRequired
         );
         assert_eq!(
             refusal.fallback_outcome,
@@ -7036,7 +7036,7 @@ mod refusal_cause_tests {
         let refusal = route_resolution_refusal(error).into_refusal();
         assert_eq!(
             refusal.terminal_cause,
-            provenant_records::run::TerminalCause::RouteResolutionRefused
+            provenant_records::run::CauseKind::RouteResolutionRefused
         );
         assert_eq!(
             refusal.terminal_note.as_deref(),
@@ -7938,7 +7938,7 @@ mod route_launch_boundary_regressions {
         assert!(matches!(
             mismatch,
             Err(PrepareError::Refusal {
-                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                cause: provenant_records::run::CauseKind::UnregisteredAccount,
                 ..
             })
         ));
@@ -7956,7 +7956,7 @@ mod route_launch_boundary_regressions {
         assert!(matches!(
             mismatch,
             Err(PrepareError::Refusal {
-                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                cause: provenant_records::run::CauseKind::UnregisteredAccount,
                 ..
             })
         ));
@@ -8034,6 +8034,6 @@ fn binding_refusal_preserves_local_repair_and_closed_route_guard() {
     );
     assert_eq!(
         refusal.terminal_cause,
-        provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+        provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe
     );
 }

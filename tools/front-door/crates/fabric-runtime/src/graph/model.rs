@@ -2252,7 +2252,7 @@ pub struct GraphAttempt {
     /// terminal record at settlement. Status and `next_step` can name it
     /// without re-reading the run store; the next step still keys on `stop`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cause: Option<provenant_records::run::TerminalCause>,
+    pub cause: Option<provenant_records::run::CauseKind>,
     /// Actor that first submitted this attempt. Run-store operation replay is
     /// actor-scoped, so a resume submits under it.
     pub launch_actor: String,

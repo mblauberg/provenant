@@ -542,7 +542,7 @@ fn project_lane_inner(
         },
     );
     if let run::AttemptState::Terminal {
-        terminal_cause: Some(run::TerminalCause::HandoffRefused),
+        terminal_cause: Some(run::CauseKind::HandoffRefused),
         reason: Some(reason),
         ..
     } = &lane.state

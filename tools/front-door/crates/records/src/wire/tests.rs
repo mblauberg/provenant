@@ -185,9 +185,9 @@ fn lane_rows_validate_with_and_without_optional_members() {
         "session_proof_incomplete"
     );
     for cause in [
-        crate::run::TerminalCause::Steered,
-        crate::run::TerminalCause::EmptyWriterResult,
-        crate::run::TerminalCause::ProviderCaptureDefect { line: 52 },
+        crate::run::CauseKind::Steered,
+        crate::run::CauseKind::EmptyWriterResult,
+        crate::run::CauseKind::ProviderCaptureDefect { line: 52 },
     ] {
         full.terminal_cause = Some(cause);
         accepted(&schema, &full);

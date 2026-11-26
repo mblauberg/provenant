@@ -222,7 +222,7 @@ pub(super) struct Fake {
     /// The outcome a decode reports; success when unset.
     pub(super) outcome: Option<Outcome>,
     /// The terminal cause a decode reports.
-    pub(super) terminal_cause: Option<TerminalCause>,
+    pub(super) terminal_cause: Option<CauseKind>,
     /// Evidence diagnostic for outcomes such as `Unsettled` that require one.
     pub(super) reason: Option<String>,
     /// Provider session the decode reports, for terminal continuation tests.
@@ -262,7 +262,7 @@ impl Providers for Fake {
     fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), Box<PrepareRefusal>> {
         if self.refuse_policy {
             let mut refusal = crate::PrepareRefusal::boxed(
-                TerminalCause::DiskFloor,
+                CauseKind::DiskFloor,
                 "insufficient disk space; run `provenant gc`",
             );
             refusal.resource = self.policy_resource.clone();
@@ -287,7 +287,7 @@ impl Providers for Fake {
         self.resumed.set(resume.map(|r| r.attempt_id));
         if self.refuse {
             return Err(crate::PrepareRefusal::boxed(
-                TerminalCause::RouteResolutionRefused,
+                CauseKind::RouteResolutionRefused,
                 "fixture adapter is disabled",
             ));
         }

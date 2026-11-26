@@ -347,7 +347,7 @@ impl PreparedProvider<'_> {
             code,
             provenant_records::policy::Facts::violation(detail),
             run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::HandoffRefused,
+                provenant_records::run::CauseKind::HandoffRefused,
                 detail,
             ),
         );

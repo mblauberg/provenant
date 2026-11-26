@@ -74,7 +74,7 @@ fn registered_project_inventory_keeps_unsafe_directory_diagnostic_typed()
     let refusal = error.into_refusal();
     assert_eq!(
         refusal.terminal_cause,
-        provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+        provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe
     );
     assert_eq!(
         refusal.boundary_class,

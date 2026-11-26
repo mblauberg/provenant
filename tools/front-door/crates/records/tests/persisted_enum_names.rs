@@ -21,7 +21,7 @@ use provenant_records::{
         AccountSource, AttemptState, CancellationDisposition, CauseSource, ChildWait,
         EffectDisposition, LaneAccess, OriginReceipt, Outcome, PartialSignal, PathScope,
         PreparationFailure, RepositoryAdmissionPhase, RequestedRoute, SandboxFloorStrength,
-        SettlementEffect, SettlementReason, SkipKind, StopWorkPush, StopWorkTrigger, TerminalCause,
+        SettlementEffect, SettlementReason, SkipKind, StopWorkPush, StopWorkTrigger, CauseKind,
         TerminalEvidence, UserSkillsMode, WriteGrantLimitOrigin, WriteSource, WriterDeliveryStage,
         WriterDeliveryState,
     },
@@ -198,8 +198,8 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "unclassified",
         ],
     )?;
-    assert_unit_names::<TerminalCause>(
-        "TerminalCause",
+    assert_unit_names::<CauseKind>(
+        "CauseKind",
         &[
             "source_view_refused",
             "project_binding_directory_unsafe",
@@ -237,8 +237,8 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "unrecorded",
         ],
     )?;
-    assert_external_names::<TerminalCause>(
-        "TerminalCause",
+    assert_external_names::<CauseKind>(
+        "CauseKind",
         &[
             (
                 "writer_pin_mismatch",

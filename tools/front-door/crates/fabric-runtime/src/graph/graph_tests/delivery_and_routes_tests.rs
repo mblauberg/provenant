@@ -920,7 +920,7 @@ fn preparation_refusal_without_evidence_fails_immediately_with_its_cause() {
     task.route = None;
     task.routes = Some(vec![route("first"), route("second")]);
     let document = graph(vec![task]);
-    let cause = provenant_records::run::TerminalCause::AccessPolicyRefused;
+    let cause = provenant_records::run::CauseKind::AccessPolicyRefused;
     let mut owner = FakeOwner {
         observations: VecDeque::from([preparation_refusal("host/attempt", AttemptOutcome::PreparationRefused(cause))]),
         omit_fallback_evidence: true,
@@ -943,7 +943,7 @@ fn preparation_refusal_with_pending_adapter_evidence_waits() {
     task.routes = Some(vec![route("first"), route("second")]);
     let document = graph(vec![task]);
     let mut owner = FakeOwner {
-        observations: VecDeque::from([preparation_refusal("host/attempt", AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::AccessPolicyRefused))]),
+        observations: VecDeque::from([preparation_refusal("host/attempt", AttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::AccessPolicyRefused))]),
         fallback_evidence: [("host/attempt".into(), provenant_records::run::PreparationFailure::AdapterUnavailable)].into(),
         fallback_custody_pending: true,
         now: Some(at(0)),

@@ -858,7 +858,7 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 assert_eq!(record.provider_launched, Some(false), "{record:?}");
                 assert_eq!(
                     record.state.terminal_cause(),
-                    Some(provenant_records::run::TerminalCause::UnsupportedPlatform),
+                    Some(provenant_records::run::CauseKind::UnsupportedPlatform),
                     "{record:?}"
                 );
             }

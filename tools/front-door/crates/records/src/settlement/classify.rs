@@ -11,7 +11,7 @@ use crate::declaration::DeclarationEvidence;
 use crate::handoff::{HandoffResult, HandoffStatus};
 use crate::provenance::Sourced;
 use crate::run::{
-    Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason, TerminalCause,
+    Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason, CauseKind,
     TerminalEvidence,
 };
 use crate::settlement::policy::{AppliedPolicy, NoWork, SettlementPolicy, SignalAction};
@@ -46,7 +46,7 @@ fn derived_reason(
     outcome: Outcome,
     evidence: &TerminalEvidence,
     partial: &[PartialSignal],
-    cause: Option<TerminalCause>,
+    cause: Option<CauseKind>,
     handoff: &HandoffResult,
     launched: bool,
 ) -> SettlementReason {
@@ -65,7 +65,7 @@ fn derived_reason(
     if matches!(evidence, TerminalEvidence::Unsettled { .. }) {
         return SettlementReason::Unsettled;
     }
-    if outcome == Outcome::Cancelled && cause == Some(TerminalCause::Steered) {
+    if outcome == Outcome::Cancelled && cause == Some(CauseKind::Steered) {
         return SettlementReason::Steered;
     }
     if outcome == Outcome::Cancelled {
@@ -78,14 +78,14 @@ fn derived_reason(
         return SettlementReason::HandoffMalformed;
     }
     match cause {
-        Some(TerminalCause::EmptyWriterResult) => return SettlementReason::EmptyResult,
-        Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => {
+        Some(CauseKind::EmptyWriterResult) => return SettlementReason::EmptyResult,
+        Some(CauseKind::Blocked | CauseKind::StoppedNoWork) => {
             return SettlementReason::DeclaredStop;
         }
         Some(
-            TerminalCause::ProviderEarlyStop
-            | TerminalCause::ProviderStalled
-            | TerminalCause::ProviderStalledRetry,
+            CauseKind::ProviderEarlyStop
+            | CauseKind::ProviderStalled
+            | CauseKind::ProviderStalledRetry,
         ) => return SettlementReason::ProviderStop,
         _ => {}
     }
@@ -112,7 +112,7 @@ fn derived_reason(
     if partial.contains(&PartialSignal::UncommittedWork) || outcome == Outcome::Uncommitted {
         return SettlementReason::UncommittedWork;
     }
-    if cause == Some(TerminalCause::TokenBudget)
+    if cause == Some(CauseKind::TokenBudget)
         && matches!(
             outcome,
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Failed | Outcome::TimedOut
@@ -239,7 +239,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         if writer {
             let action = policy.empty_result.value;
             let before = outcome;
-            cause = Some(TerminalCause::EmptyWriterResult);
+            cause = Some(CauseKind::EmptyWriterResult);
             outcome = match action {
                 SignalAction::Fail => Outcome::Failed,
                 SignalAction::Review if outcome == Outcome::Succeeded => Outcome::ReviewRequired,
@@ -249,7 +249,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
                 | SignalAction::Hold => outcome,
             };
             if action != SignalAction::Off {
-                append(&mut reason, TerminalCause::EmptyWriterResult.detail());
+                append(&mut reason, CauseKind::EmptyWriterResult.detail());
             }
             record_action(
                 &mut applied,
@@ -312,7 +312,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
             outcome != before || !classed(action),
         );
     }
-    if cause == Some(TerminalCause::EmptyWriterResult) {
+    if cause == Some(CauseKind::EmptyWriterResult) {
         signals.push(PartialSignal::HandoffMissing);
     }
     if matches!(
@@ -381,7 +381,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
 
     // 6. A blocked writer settles with its own cause and its bounded note.
     if writer
-        && (cause.is_none() || cause == Some(TerminalCause::Blocked))
+        && (cause.is_none() || cause == Some(CauseKind::Blocked))
         && matches!(
             outcome,
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
@@ -392,7 +392,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
             .flatten()
             .filter(|handoff| handoff.status == HandoffStatus::Blocked)
     {
-        cause = Some(TerminalCause::Blocked);
+        cause = Some(CauseKind::Blocked);
         terminal_note = Some(bounded(&blocked.note));
     }
 
@@ -416,11 +416,11 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         && !signals.contains(&PartialSignal::UncommittedWork)
         && !signals.contains(&PartialSignal::HandoffMalformed);
     if no_work_applies && policy.no_work.value == NoWork::Detect {
-        cause = Some(TerminalCause::StoppedNoWork);
+        cause = Some(CauseKind::StoppedNoWork);
         let previous = reason.take().unwrap_or_default();
         reason = Some(format!(
             "{}; {}",
-            TerminalCause::StoppedNoWork.detail(),
+            CauseKind::StoppedNoWork.detail(),
             previous
         ));
     }
@@ -446,9 +446,9 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         reason = Some(UNCANCELLED_REASON.into());
     } else if custody.cancelled {
         outcome = Outcome::Cancelled;
-        if custody.steered && cause != Some(TerminalCause::IdentityMismatch) {
-            cause = Some(TerminalCause::Steered);
-            reason = Some(TerminalCause::Steered.detail().into());
+        if custody.steered && cause != Some(CauseKind::IdentityMismatch) {
+            cause = Some(CauseKind::Steered);
+            reason = Some(CauseKind::Steered.detail().into());
         }
     }
 
@@ -457,8 +457,8 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     if identity.conflict {
         outcome = Outcome::Failed;
         complete = false;
-        cause = Some(TerminalCause::IdentityMismatch);
-        reason = Some(TerminalCause::IdentityMismatch.detail().into());
+        cause = Some(CauseKind::IdentityMismatch);
+        reason = Some(CauseKind::IdentityMismatch.detail().into());
     } else {
         if matches!(
             outcome,
@@ -472,7 +472,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
                 IdentityPolicyEffect::Unsettle => {
                     outcome = Outcome::Unsettled;
                     complete = false;
-                    if !matches!(cause, Some(TerminalCause::ProviderCaptureDefect { .. })) {
+                    if !matches!(cause, Some(CauseKind::ProviderCaptureDefect { .. })) {
                         cause = None;
                         reason = Some(IDENTITY_INCOMPLETE_REASON.into());
                     }
@@ -480,10 +480,10 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
                 IdentityPolicyEffect::Complete | IdentityPolicyEffect::Proceed => {}
             }
         }
-        if identity.eof_fragment_unsettles && cause != Some(TerminalCause::IdentityMismatch) {
+        if identity.eof_fragment_unsettles && cause != Some(CauseKind::IdentityMismatch) {
             outcome = Outcome::Unsettled;
             complete = false;
-            if !matches!(cause, Some(TerminalCause::ProviderCaptureDefect { .. })) {
+            if !matches!(cause, Some(CauseKind::ProviderCaptureDefect { .. })) {
                 cause = None;
                 reason = Some(IDENTITY_EOF_REASON.into());
             }
@@ -504,11 +504,11 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     ) && !matches!(
         cause,
         Some(
-            TerminalCause::Steered
-                | TerminalCause::IdentityMismatch
-                | TerminalCause::ProviderCaptureDefect { .. }
-                | TerminalCause::ProviderStalled
-                | TerminalCause::ProviderStalledRetry
+            CauseKind::Steered
+                | CauseKind::IdentityMismatch
+                | CauseKind::ProviderCaptureDefect { .. }
+                | CauseKind::ProviderStalled
+                | CauseKind::ProviderStalledRetry
         )
     ) {
         cause = None;
@@ -524,7 +524,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
                 .unwrap_or_else(|| Outcome::Unsettled.diagnostic_reason().to_owned()),
         }
     } else if outcome == Outcome::Cancelled
-        && cause != Some(TerminalCause::Steered)
+        && cause != Some(CauseKind::Steered)
         && custody.cancellation_delivered == Some(true)
     {
         TerminalEvidence::EffectiveCancellation
@@ -538,7 +538,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     // Every signal stays on the fact. A non-releasing action (fail, warn, off)
     // withholds its signal and cause from the class ladder, so the class is a
     // plain failure or a completed lane instead of the recorded partial state.
-    let empty_result_missing = cause == Some(TerminalCause::EmptyWriterResult);
+    let empty_result_missing = cause == Some(CauseKind::EmptyWriterResult);
     let class_signals: Vec<PartialSignal> = signals
         .iter()
         .copied()
@@ -554,7 +554,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         })
         .collect();
     let class_cause =
-        if cause == Some(TerminalCause::EmptyWriterResult) && !classed(policy.empty_result.value) {
+        if cause == Some(CauseKind::EmptyWriterResult) && !classed(policy.empty_result.value) {
             None
         } else {
             cause

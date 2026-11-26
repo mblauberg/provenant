@@ -635,9 +635,9 @@ fn disk_policy_refusal(error: DiskCheck) -> Box<run::PrepareRefusal> {
         DiskCheck::Unobserved(_) => None,
     };
     let cause = match &error {
-        DiskCheck::Low { .. } => provenant_records::run::TerminalCause::DiskFloor,
+        DiskCheck::Low { .. } => provenant_records::run::CauseKind::DiskFloor,
         DiskCheck::Unobserved(_) => {
-            provenant_records::run::TerminalCause::DiskObservationUnavailable
+            provenant_records::run::CauseKind::DiskObservationUnavailable
         }
     };
     let policy_code = match &error {
@@ -1024,7 +1024,7 @@ impl Registry<'_> {
                 "provider capture evidence defect at stdout.log line {line}; replay incomplete: {}",
                 provenant_core::bounded_line(error, 512)
             ));
-            decoded.terminal_cause = Some(run::TerminalCause::ProviderCaptureDefect { line });
+            decoded.terminal_cause = Some(run::CauseKind::ProviderCaptureDefect { line });
             decoded
         };
         // Only lost framing is missing evidence. A complete frame that reports a
@@ -1078,7 +1078,7 @@ impl Registry<'_> {
                 Ok(decoded) => events.extend(decoded),
                 Err(provenant_providers::ProviderError::IdentityMismatch) => {
                     let mut decoded = failed("provider identity mismatch");
-                    decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
+                    decoded.terminal_cause = Some(run::CauseKind::IdentityMismatch);
                     return Ok(decoded);
                 }
                 Err(error @ provenant_providers::ProviderError::MalformedFrame { line }) => {
@@ -1127,7 +1127,7 @@ impl Registry<'_> {
             Ok(outcome) => outcome,
             Err(provenant_providers::ProviderError::IdentityMismatch) => {
                 let mut decoded = failed("provider identity mismatch");
-                decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
+                decoded.terminal_cause = Some(run::CauseKind::IdentityMismatch);
                 return Ok(decoded);
             }
             Err(
@@ -1416,7 +1416,7 @@ impl Registry<'_> {
                 let reason = if lane_token && registered_token {
                     crate::quota::registered_lane_token_diagnostic(entries, adapter.id(), key)
                 } else if lane_token {
-                    decoded.terminal_cause = Some(run::TerminalCause::LaneTokenLost);
+                    decoded.terminal_cause = Some(run::CauseKind::LaneTokenLost);
                     crate::quota::lane_token_lost_diagnostic(entries, adapter.id(), key)
                 } else if config.is_some() {
                     crate::quota::account_login_diagnostic(
@@ -1464,7 +1464,7 @@ impl Registry<'_> {
             });
         }
         if decoded.outcome == run::Outcome::Succeeded && early_stop {
-            decoded.terminal_cause = Some(run::TerminalCause::ProviderEarlyStop);
+            decoded.terminal_cause = Some(run::CauseKind::ProviderEarlyStop);
             decoded.reason = Some(
                 provenant_records::diagnostic::ProviderFailureFact::EarlyStop
                     .reason()
@@ -1502,7 +1502,7 @@ impl Registry<'_> {
         {
             decoded.outcome = run::Outcome::QuotaLimited;
             if pool.as_deref() == Some("opencode-free") {
-                decoded.terminal_cause = Some(run::TerminalCause::FreePoolQuota);
+                decoded.terminal_cause = Some(run::CauseKind::FreePoolQuota);
             }
             let fact = provenant_records::diagnostic::ProviderFailureFact::Quota {
                 free_pool: pool.as_deref() == Some("opencode-free"),

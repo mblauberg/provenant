@@ -186,7 +186,7 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
     };
     assert_eq!(
         state.terminal_cause(),
-        Some(TerminalCause::CloudPlacementRemoved)
+        Some(CauseKind::CloudPlacementRemoved)
     );
     assert!(
         store

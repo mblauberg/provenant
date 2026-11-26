@@ -879,11 +879,11 @@ pub(super) fn settlement_fallback_decision(
     let cause = match outcome {
         AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
+        AttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
             Some(StopCause::SpawnFailure)
         }
         AttemptOutcome::PreparationRefused(
-            provenant_records::run::TerminalCause::PreparationRefused,
+            provenant_records::run::CauseKind::PreparationRefused,
         ) => Some(StopCause::PreparationRefused),
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)

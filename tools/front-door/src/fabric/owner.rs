@@ -1829,7 +1829,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 && matches!(
                     &record.state,
                     provenant_records::run::AttemptState::Terminal {
-                        terminal_cause: Some(provenant_records::run::TerminalCause::SpawnFailure),
+                        terminal_cause: Some(provenant_records::run::CauseKind::SpawnFailure),
                         ..
                     }
                 ))
@@ -4250,7 +4250,7 @@ impl BoundGraphOwner<'_> {
                         AttemptOutcome::OtherFailure
                     } else if outcome == Outcome::TimedOut
                         && deadline_seconds.is_some()
-                        && preparation_cause != Some(provenant_records::run::TerminalCause::TokenBudget)
+                        && preparation_cause != Some(provenant_records::run::CauseKind::TokenBudget)
                     {
                         AttemptOutcome::DeadlineExceeded
                     } else {

@@ -29,13 +29,13 @@ fn cancellation_outcome_is_consistent(
     delivered: Option<bool>,
     identity: ProviderIdentityEvidence,
     outcome: Outcome,
-    cause: Option<TerminalCause>,
+    cause: Option<CauseKind>,
 ) -> bool {
     if delivered != Some(true) || outcome == Outcome::Cancelled {
         return true;
     }
     if identity.has_conflict() {
-        outcome == Outcome::Failed && cause == Some(TerminalCause::IdentityMismatch)
+        outcome == Outcome::Failed && cause == Some(CauseKind::IdentityMismatch)
     } else {
         identity.is_incomplete() && outcome == Outcome::Unsettled && cause.is_none()
     }
@@ -150,7 +150,7 @@ pub struct TerminalPublication<'a> {
     pub session: Option<String>,
 }
 pub(crate) struct Withdrawal<'a> {
-    pub terminal_cause: Option<TerminalCause>,
+    pub terminal_cause: Option<CauseKind>,
     pub terminal_note: Option<String>,
     pub expected: AttemptState,
     pub outcome: Outcome,
@@ -1213,7 +1213,7 @@ impl RunStore {
         // A refusal whose producer named no cause is recorded as unrecorded,
         // never as a cause the host did not observe.
         let terminal_cause = terminal_cause
-            .or_else(|| (outcome == Outcome::Rejected).then_some(TerminalCause::Unrecorded));
+            .or_else(|| (outcome == Outcome::Rejected).then_some(CauseKind::Unrecorded));
         if failure.is_some()
             && !matches!(
                 expected,
@@ -1657,7 +1657,7 @@ impl RunStore {
         .permits_success(&publication.fact.signals);
         let identity_permitted = identity_verified
             || (publication.fact.outcome == Outcome::ReviewRequired
-                && publication.fact.cause == Some(TerminalCause::IdentityMismatch));
+                && publication.fact.cause == Some(CauseKind::IdentityMismatch));
         if matches!(
             publication.fact.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired
@@ -1718,7 +1718,7 @@ impl RunStore {
         if import_cancellation {
             next.cancellation_disposition = Some(CancellationDisposition::ImportEffective);
         } else if publication.fact.outcome == Outcome::Cancelled
-            && publication.fact.cause != Some(TerminalCause::Steered)
+            && publication.fact.cause != Some(CauseKind::Steered)
             && ((!launched && decision == TerminalDecision::Ordinary)
                 || cancellation_delivered == Some(true))
         {
@@ -1733,7 +1733,7 @@ impl RunStore {
                             == old.verified_owner.unwrap_or(self.context.actor_id) =>
                 {
                     next.cancellation_disposition =
-                        Some(if publication.fact.cause == Some(TerminalCause::Steered) {
+                        Some(if publication.fact.cause == Some(CauseKind::Steered) {
                             CancellationDisposition::Unknown
                         } else {
                             match cancellation_delivered {

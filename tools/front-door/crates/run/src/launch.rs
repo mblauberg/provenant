@@ -276,7 +276,7 @@ fn applied_write_grants(
 }
 /// Provider-decoded facts from a completed capture.
 pub struct Decoded {
-    pub terminal_cause: Option<TerminalCause>,
+    pub terminal_cause: Option<CauseKind>,
     pub outcome: Outcome,
     pub result: String,
     pub complete: bool,
@@ -299,7 +299,7 @@ pub struct PrepareRefusal {
     /// A configurable resource threshold that refused this launch, if known.
     pub resource: Option<provenant_records::diagnostic::ResourceFact>,
     /// The specific cause. There is no generic refusal.
-    pub terminal_cause: TerminalCause,
+    pub terminal_cause: CauseKind,
     /// Fixed-form text naming a configured value, never captured output.
     pub terminal_note: Option<String>,
     pub message: String,
@@ -311,7 +311,7 @@ pub struct PrepareRefusal {
 /// A refusal for test fixtures that do not care about its cause.
 #[cfg(test)]
 pub(crate) fn fixture_refusal(message: impl Into<String>) -> Box<PrepareRefusal> {
-    PrepareRefusal::boxed(TerminalCause::HandoffRefused, message)
+    PrepareRefusal::boxed(CauseKind::HandoffRefused, message)
 }
 
 impl PrepareRefusal {
@@ -331,7 +331,7 @@ impl PrepareRefusal {
         }
     }
 
-    pub fn boxed(cause: TerminalCause, message: impl Into<String>) -> Box<Self> {
+    pub fn boxed(cause: CauseKind, message: impl Into<String>) -> Box<Self> {
         Box::new(Self {
             boundary_class: provenant_records::diagnostic::BoundaryClass::None,
             policy_code: None,
@@ -396,7 +396,7 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
         ..Default::default()
     };
     skipped.set_guard_facts(None, Some(fact.clone())).unwrap();
-    let mut refusal = PrepareRefusal::boxed(TerminalCause::RouteResolutionRefused, "opaque source");
+    let mut refusal = PrepareRefusal::boxed(CauseKind::RouteResolutionRefused, "opaque source");
     refusal.skipped_routes.push(skipped);
     let kind = refusal.kind();
     assert!(matches!(&kind, RefusalKind::PacingReserveResource(value) if value == &fact));
@@ -527,7 +527,7 @@ fn check_launch_policy(
     };
     // DiskFloor is emitted only by the shared critical-space decision.
     // Advisory pressure has already warned and continued at that core.
-    if refusal.terminal_cause == TerminalCause::DiskFloor {
+    if refusal.terminal_cause == CauseKind::DiskFloor {
         return Err(refusal);
     }
     let owned = refusal.policy_code.clone();
@@ -550,7 +550,7 @@ fn check_launch_policy(
             provenant_records::diagnostic::BoundaryClass::None
                 if matches!(
                     refusal.terminal_cause,
-                    TerminalCause::DiskObservationUnavailable
+                    CauseKind::DiskObservationUnavailable
                 ) =>
             {
                 "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
@@ -926,7 +926,7 @@ pub(crate) enum HandOff {
     Boundary {
         message: String,
         class: provenant_records::diagnostic::BoundaryClass,
-        cause: Option<TerminalCause>,
+        cause: Option<CauseKind>,
     },
     Resource {
         message: String,
@@ -934,7 +934,7 @@ pub(crate) enum HandOff {
     },
     TypedLocal {
         message: String,
-        cause: TerminalCause,
+        cause: CauseKind,
     },
     Busy,
     /// No guardian was contacted, but custody remains protected.
@@ -961,11 +961,11 @@ pub(crate) fn handoff_preparation(
 ) {
     match error {
         HandOff::TypedLocal {
-            cause: TerminalCause::PreparationRefused,
+            cause: CauseKind::PreparationRefused,
             ..
         } => (
             Some(provenant_records::run::PreparationFailure::GitSetup),
-            Some(TerminalCause::preparation_note(reason)),
+            Some(CauseKind::preparation_note(reason)),
         ),
         HandOff::Local(_) | HandOff::TypedLocal { .. } => (
             Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
@@ -1830,7 +1830,7 @@ impl RunStore {
                 reason,
                 finished_at,
                 failure: None,
-                terminal_cause: Some(TerminalCause::HandoffRefused),
+                terminal_cause: Some(CauseKind::HandoffRefused),
                 terminal_note: None,
             },
             call,
@@ -1946,7 +1946,7 @@ impl RunStore {
             // `cloud`. Never hand it to the local supervisor; settle it so
             // status, reconcile and gc can clear the run.
             if task.extra.contains_key("cloud") {
-                let cause = TerminalCause::CloudPlacementRemoved;
+                let cause = CauseKind::CloudPlacementRemoved;
                 match self.withdraw_with_preparation_failure(
                     id,
                     crate::store::Withdrawal {
@@ -2145,7 +2145,7 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: None,
-                            terminal_cause: Some(TerminalCause::StoredPromptUnreadable),
+                            terminal_cause: Some(CauseKind::StoredPromptUnreadable),
                             terminal_note: None,
                         },
                         call,
@@ -2455,7 +2455,7 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: None,
-                            terminal_cause: Some(TerminalCause::WriteGrantsRefused),
+                            terminal_cause: Some(CauseKind::WriteGrantsRefused),
                             terminal_note: kind.terminal_note(),
                         },
                         call,
@@ -2586,13 +2586,13 @@ impl RunStore {
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
                             HandOff::Boundary { cause, .. } => {
-                                cause.or(Some(TerminalCause::HandoffRefused))
+                                cause.or(Some(CauseKind::HandoffRefused))
                             }
-                            HandOff::Busy => Some(TerminalCause::WorktreeBusy),
+                            HandOff::Busy => Some(CauseKind::WorktreeBusy),
                             HandOff::RetainedImport { .. } => {
-                                Some(TerminalCause::RetainedWriterImport)
+                                Some(CauseKind::RetainedWriterImport)
                             }
-                            _ => Some(TerminalCause::HandoffRefused),
+                            _ => Some(CauseKind::HandoffRefused),
                         };
                         let (reason, kind) = match &error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
@@ -3054,7 +3054,7 @@ mod policy_reporting_tests {
                     }
                 );
                 Err(PrepareRefusal::boxed(
-                    TerminalCause::RouteResolutionRefused,
+                    CauseKind::RouteResolutionRefused,
                     "fixture inspected admission",
                 ))
             }
@@ -3406,7 +3406,7 @@ mod resource_status_tests {
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
             let mut refusal = PrepareRefusal::boxed(
-                TerminalCause::RouteResolutionRefused,
+                CauseKind::RouteResolutionRefused,
                 "DEPENDENCY_OUTPUT_SECRET",
             );
             refusal.resource = Some(ResourceFact::DependencyPreparation { configured: true });

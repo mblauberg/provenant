@@ -1,5 +1,5 @@
 //! Shared graph state vocabulary used by runtime records and peer projections.
-use crate::run::TerminalCause;
+use crate::run::CauseKind;
 use serde::{Deserialize, Serialize};
 
 /// Stable identity for one graph route attempt.
@@ -69,7 +69,7 @@ pub enum AttemptOutcome {
     AuthRequired,
     UsageLimited,
     AdapterUnavailable,
-    PreparationRefused(TerminalCause),
+    PreparationRefused(CauseKind),
     DeadlineExceeded,
     Unclassified,
 }

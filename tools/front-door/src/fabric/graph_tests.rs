@@ -1034,9 +1034,9 @@ mod graph_writer_admission_tests {
                 .all(|lane| lane.provider_launched == Some(false))
         );
         for cause in [
-            provenant_records::run::TerminalCause::DiskFloor,
-            provenant_records::run::TerminalCause::DiskObservationUnavailable,
-            provenant_records::run::TerminalCause::RetainedWriterImport,
+            provenant_records::run::CauseKind::DiskFloor,
+            provenant_records::run::CauseKind::DiskObservationUnavailable,
+            provenant_records::run::CauseKind::RetainedWriterImport,
         ] {
             let mut refused = lanes[0].clone();
             if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } =
@@ -1081,7 +1081,7 @@ mod graph_writer_admission_tests {
         if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } =
             &mut child_preparation.state
         {
-            *terminal_cause = Some(provenant_records::run::TerminalCause::AccessPolicyRefused);
+            *terminal_cause = Some(provenant_records::run::CauseKind::AccessPolicyRefused);
         }
         assert!(durable_launch_refusal(&[child_preparation.clone()]).is_none());
         let mut launched_failure = lanes[0].clone();
@@ -1095,7 +1095,7 @@ mod graph_writer_admission_tests {
         assert!(durable_launch_refusal(&[launched_failure.clone()]).is_none());
         assert!(durable_launch_refusal(&[lanes[0].clone(), launched_failure]).is_none());
         let attempt = lanes[0].attempt_id;
-        let sealed = |cause: provenant_records::run::TerminalCause| -> Result<provenant_run::AttemptRecord, Box<dyn std::error::Error>> {
+        let sealed = |cause: provenant_records::run::CauseKind| -> Result<provenant_run::AttemptRecord, Box<dyn std::error::Error>> {
             let mut lane = lanes[0].clone();
             if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } = &mut lane.state {
                 *terminal_cause = Some(cause);
@@ -1125,7 +1125,7 @@ mod graph_writer_admission_tests {
                 reason: "HOST_DISK_ERROR_SENTINEL".into(),
                 kind,
             }];
-            let lane = sealed(provenant_records::run::TerminalCause::DiskFloor)?;
+            let lane = sealed(provenant_records::run::CauseKind::DiskFloor)?;
             let first = launch_refusal(&started, std::slice::from_ref(&lane));
             let replay = launch_refusal(&[], &[lane]);
             let Some(FacadeError::DispatchRefused { reason, .. }) = first else {
@@ -1133,7 +1133,7 @@ mod graph_writer_admission_tests {
             };
             assert!(!reason.contains("HOST_DISK_ERROR_SENTINEL"), "{reason}");
             assert!(matches!(replay, Some(FacadeError::DispatchRefused { .. })));
-            let ordinary = sealed(provenant_records::run::TerminalCause::RouteResolutionRefused)?;
+            let ordinary = sealed(provenant_records::run::CauseKind::RouteResolutionRefused)?;
             assert!(launch_refusal(&started, std::slice::from_ref(&ordinary)).is_none());
             assert!(launch_refusal(&[], &[ordinary]).is_none());
         }

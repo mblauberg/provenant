@@ -2562,7 +2562,7 @@ mod tests {
                 commit: None,
                 stop: Some(provenant_records::StopCause::StoppedNoWork),
                 settlement_reason: Some(provenant_records::run::SettlementReason::DeclaredStop),
-                cause: Some(provenant_records::run::TerminalCause::StoppedNoWork),
+                cause: Some(provenant_records::run::CauseKind::StoppedNoWork),
             },
             ObservationFacts {
                 route_index: 0,
@@ -2579,7 +2579,7 @@ mod tests {
         let attempt = &checkpoint.nodes[0].attempts[0];
         assert_eq!(
             attempt.cause,
-            Some(provenant_records::run::TerminalCause::StoppedNoWork)
+            Some(provenant_records::run::CauseKind::StoppedNoWork)
         );
         assert_eq!(attempt.outcome, Some(AttemptOutcome::StoppedNoWork));
         assert_eq!(

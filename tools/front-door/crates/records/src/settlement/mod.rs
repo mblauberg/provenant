@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::declaration::{DeclarationCounts, DeclarationEvidence};
 use crate::handoff::Handoff;
 use crate::run::{
-    CauseSource, Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason, TerminalCause,
+    CauseSource, Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason, CauseKind,
     TerminalEvidence,
 };
 use crate::settlement::policy::{AppliedPolicy, SettlementPolicy};
@@ -55,7 +55,7 @@ pub enum LaneRole {
 #[serde(rename_all = "snake_case")]
 pub struct HostVerdict {
     pub outcome: Outcome,
-    pub cause: Option<TerminalCause>,
+    pub cause: Option<CauseKind>,
     pub complete: bool,
     pub result_empty: bool,
     pub reason: Option<String>,
@@ -74,7 +74,7 @@ pub struct CustodyFacts {
     pub cancellation_delivered: Option<bool>,
     pub import_cancelled: bool,
     pub process_exit: bool,
-    pub stall: Option<TerminalCause>,
+    pub stall: Option<CauseKind>,
     pub identity: IdentityEvidence,
 }
 
@@ -143,7 +143,7 @@ pub enum Progress {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OutcomeFact {
     pub outcome: Outcome,
-    pub cause: Option<TerminalCause>,
+    pub cause: Option<CauseKind>,
     pub settlement_reason: SettlementReason,
     pub stop: Option<Stop>,
     pub source: CauseSource,
@@ -166,7 +166,7 @@ pub struct OutcomeFact {
 #[cfg(any(test, feature = "fixture"))]
 impl SettlementEvidence {
     /// A launched, complete fixture with no declaration or Git evidence.
-    pub fn fixture(lane: LaneRole, outcome: Outcome, cause: Option<TerminalCause>) -> Self {
+    pub fn fixture(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> Self {
         Self {
             schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
             lane,

@@ -949,7 +949,7 @@ mod tests {
         );
         assert_ne!(
             decoded.terminal_cause,
-            Some(run::TerminalCause::IdentityMismatch)
+            Some(run::CauseKind::IdentityMismatch)
         );
 
         let complete = make_frames()?;
@@ -980,7 +980,7 @@ mod tests {
         // fragment: it settles as a line-specific capture defect.
         assert_eq!(
             decoded.terminal_cause,
-            Some(run::TerminalCause::ProviderCaptureDefect { line: 2 })
+            Some(run::CauseKind::ProviderCaptureDefect { line: 2 })
         );
         assert!(decoded.reason.as_deref().is_some_and(|reason| {
             reason.contains("stdout.log line 2")
