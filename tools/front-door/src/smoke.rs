@@ -166,28 +166,46 @@ pub(crate) fn fixture_root(home: &Path, root: &Path) -> PathBuf {
 /// committer and dates come from the caller's `env` so the same nonce yields
 /// the same OIDs everywhere; global and system config are ignored.
 fn git(directory: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::ffi::OsString;
     let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let mut command = std::process::Command::new(executable);
-    command
-        .current_dir(directory)
-        .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null");
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    let output = command
-        .output()
+    let argv: Vec<OsString> = std::iter::once(executable.into_os_string())
+        .chain(args.iter().map(OsString::from))
+        .collect();
+    // The inherited environment without any Git setting, then the hermetic
+    // config switches, then the caller's fixed identity and dates.
+    let environment: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+        .chain(
+            [
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+                ("GIT_TERMINAL_PROMPT", "0"),
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ]
+            .iter()
+            .chain(env)
+            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+        )
+        .collect();
+    let executor =
+        SystemExecutor::new(1).map_err(|error| format!("smoke Git launch failed: {error}"))?;
+    let mut options = ExecOptions::new(&argv, directory, std::time::Duration::from_secs(60));
+    options.env = Some(&environment);
+    options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+    options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
+    let outcome = executor
+        .execute(options)
         .map_err(|error| format!("smoke Git launch failed: {error}"))?;
-    if !output.status.success() {
+    if outcome.timed_out || outcome.termination != Termination::Exit(0) {
         return Err(format!(
             "smoke Git {} failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&outcome.stderr.bytes).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    Ok(String::from_utf8_lossy(&outcome.stdout.bytes)
+        .trim()
+        .to_owned())
 }
 
 /// The identity the writer uses for both fixture commits.
@@ -268,6 +286,9 @@ pub(crate) fn create_fixture(
 
     let roots =
         crate::roots::child(home, home, state.to_path_buf()).map_err(|error| error.to_string())?;
+    // A dry run on a fresh host binds the fixture before any command has
+    // created the state root, so the binding creates it the same way.
+    provenant_cli::accounts::ensure_state_directory(roots.state.as_path())?;
     let project = std::fs::canonicalize(&fixture).map_err(|error| error.to_string())?;
     let common = std::fs::canonicalize(fixture.join(".git")).map_err(|error| error.to_string())?;
     let location =
