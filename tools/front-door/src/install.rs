@@ -2311,13 +2311,23 @@ fn run_verify_only(
         Err(report) => {
             // Publish the innermost typed reason, not the nested `Command
             // failed` wrappers the child executor stacks around a smoke error.
-            let (code, message) = innermost_error_text(&report);
+            // The innermost envelope can be the blocked dependant's
+            // `upstream_blocked`; when the graph checkpoint is in the report,
+            // name the node that actually failed instead and carry the whole
+            // summary to the parent that renders this child's refusal.
+            let (code, message) = match smoke_root_cause(&report) {
+                Some(cause) => (
+                    cause.code,
+                    smoke_failure_summary(&report).unwrap_or_else(|| "smoke failure".to_owned()),
+                ),
+                None => innermost_error_text(&report),
+            };
             super::fail(
                 "upgrade",
                 Outcome::Error,
                 &code,
                 &message,
-                "inspect the reported smoke failure, resolve it, then rerun `upgrade --verify`",
+                "resolve the reported smoke cause, then rerun `provenant upgrade --verify`",
                 globals,
             )
         }
@@ -2648,7 +2658,10 @@ struct HostUpgrade {
 
 #[path = "install_report.rs"]
 mod report;
-use report::{first_error_line, graph_verdict, innermost_error_text, is_envelope, smoke_verdict};
+use report::{
+    first_error_line, graph_verdict, innermost_error_text, is_envelope, smoke_failure_summary,
+    smoke_root_cause, smoke_verdict,
+};
 
 /// Refusal detail: name every failing host once with its bounded one-line
 /// reason. The full per-host view lives in `--verify --json`; it must never
