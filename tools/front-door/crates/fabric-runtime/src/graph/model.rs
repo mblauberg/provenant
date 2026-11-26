@@ -1929,6 +1929,10 @@ pub struct GraphCheckpoint {
     /// Durable admission fence. Resume observes the same attempt keys.
     #[serde(default)]
     pub cancelled: bool,
+    /// Host/project `on_stop` defaults resolved once at admission. A node's
+    /// own `on_stop` entry wins over these; old checkpoints decode to empty.
+    #[serde(default, skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    pub on_stop_defaults: provenant_records::OnStop,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<String>,
     /// Why the graph waits for the chair, with the cause typed.
@@ -2244,6 +2248,11 @@ pub struct GraphAttempt {
     pub state: AttemptState,
     pub attempt_ref: Option<String>,
     pub outcome: Option<AttemptOutcome>,
+    /// The exact typed cause the run sealed for this attempt, copied from the
+    /// terminal record at settlement. Status and `next_step` can name it
+    /// without re-reading the run store; the next step still keys on `stop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<provenant_records::run::TerminalCause>,
     /// Actor that first submitted this attempt. Run-store operation replay is
     /// actor-scoped, so a resume submits under it.
     pub launch_actor: String,

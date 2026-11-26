@@ -507,6 +507,7 @@ host_refused_before_acceptance: false,
                             cost_partial: true,
                             cost_unknown_reason: Some(worst(NOTE_BYTES)),
                         }),
+                    cause: None,
                     })
                     .collect(),
             }

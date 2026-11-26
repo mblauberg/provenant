@@ -408,6 +408,7 @@ fn handoff_missing_classification_does_not_release_a_dependant() {
             commit: None,
             stop: Some(provenant_records::StopCause::HandoffMissing),
             settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+        cause: None,
         }]
         .into(),
         ..Default::default()
@@ -657,6 +658,7 @@ fn budget_pause() -> (GraphDocument, FakeOwner, crate::config::GraphBudget) {
         commit: None,
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+    cause: None,
     };
     let owner = FakeOwner {
         now: Some(at(0)),

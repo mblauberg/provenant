@@ -1123,6 +1123,7 @@ fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
                 commit: None,
                 settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMalformed),
                 stop: Some(provenant_records::StopCause::HandoffMalformed),
+            cause: None,
             },
             AttemptObservation::Terminal {
                 attempt_ref: None,
@@ -1135,6 +1136,7 @@ fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
                 commit: None,
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+            cause: None,
             },
         ]
         .into(),

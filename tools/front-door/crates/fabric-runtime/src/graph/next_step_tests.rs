@@ -14,12 +14,17 @@ struct Owner {
     worktrees: Vec<Option<String>>,
     facts: Option<DepletionFacts>,
     spawn_custody_released: Option<bool>,
+    on_stop_defaults: provenant_records::OnStop,
 }
 
 impl AttemptOwner for Owner {
     type Error = std::convert::Infallible;
     fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
         provenant_config::PortTable::builtin().worktree_layout
+    }
+
+    fn graph_on_stop_defaults(&self) -> provenant_records::OnStop {
+        self.on_stop_defaults.clone()
     }
 
     fn actor(&self) -> String {
@@ -164,6 +169,7 @@ fn terminal(
         branch: None,
         commit: None,
         stop,
+        cause: None,
     }
 }
 
@@ -883,6 +889,7 @@ fn pause_reason(checkpoint: &GraphCheckpoint) -> &str {
 fn a_recoverable_stop_on_a_single_route_continues_on_the_same_route() {
     for cause in [
         StopCause::StoppedEarly,
+        StopCause::StoppedNoWork,
         StopCause::LaneTokenLost,
         StopCause::ContextHandoff,
     ] {
@@ -1202,4 +1209,49 @@ fn an_unrecognised_blocked_on_is_named_not_reported_missing() {
     assert!(reason.contains("weather"), "{reason}");
     assert!(!reason.contains("not given"), "{reason}");
     assert!(!reason.contains("owner decision"), "{reason}");
+}
+
+/// Host/project defaults are resolved once at admission; the node's own entry
+/// wins where both name the same cause.
+#[test]
+fn stopped_no_work_default_pauses_and_the_node_overrides_it() {
+    let defaults =
+        provenant_records::OnStop::new([(StopCause::StoppedNoWork, NextStep::Chair)].into());
+    let handoff = stopped_early_handoff(&["Finish the renderer"]);
+    let stopped = || {
+        terminal(
+            "a/1",
+            AttemptOutcome::StoppedNoWork,
+            Some(StopCause::StoppedNoWork),
+            Some(&handoff),
+        )
+    };
+
+    let document = single_route_document(serde_json::Value::Null);
+    let mut owner = Owner {
+        observations: [stopped()].into(),
+        on_stop_defaults: defaults.clone(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert!(pause_reason(&run.checkpoint).contains("return to the chair"));
+    assert!(restarts(&run.checkpoint).is_empty());
+
+    let document = single_route_document(json!({"stopped_no_work": "same_route"}));
+    let mut owner = Owner {
+        observations: [stopped(), done("a/2")].into(),
+        on_stop_defaults: defaults,
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(
+        restarts(&run.checkpoint),
+        [(
+            StopCause::StoppedNoWork,
+            NextStep::SameRoute {
+                continuation: provenant_records::Continuation::Fresh
+            }
+        )]
+    );
 }

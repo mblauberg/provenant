@@ -259,6 +259,7 @@ mod graph_writer_admission_tests {
                         branch: None,
                         commit: None,
                         stop: None,
+                    cause: None,
                     },
                 )
             }
@@ -2953,6 +2954,7 @@ mod result_tests {
                     branch: None,
                     commit: None,
                     stop: None,
+                cause: None,
                 })
             }
         }
@@ -3564,6 +3566,7 @@ mod retry_allowance_tests {
                 branch: None,
                 commit: None,
                 stop: None,
+            cause: None,
             })
         }
     }

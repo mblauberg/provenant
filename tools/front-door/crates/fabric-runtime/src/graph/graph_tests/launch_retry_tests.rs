@@ -720,6 +720,7 @@ fn nonterminal_observation_transitions_need_no_owner_or_journal() {
         input_cap_source: None,
         input_manifest: None,
         usage: None,
+    cause: None,
     };
     let mut state = NodeState::Pending;
     apply_unknown_observation(&mut attempt, &mut state, None);

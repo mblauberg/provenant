@@ -3447,6 +3447,7 @@ fn seed_composite_output_graph_with_gate(
                 commit: None,
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }

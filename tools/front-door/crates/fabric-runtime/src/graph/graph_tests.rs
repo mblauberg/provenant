@@ -633,6 +633,7 @@ fn done_as(reference: &str) -> AttemptObservation {
         commit: None,
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+        cause: None,
     }
 }
 
@@ -873,6 +874,7 @@ fn terminal(outcome: AttemptOutcome) -> AttemptObservation {
         commit: None,
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+        cause: None,
     }
 }
 
@@ -888,6 +890,7 @@ fn preparation_refusal(reference: &str, outcome: AttemptOutcome) -> AttemptObser
         commit: None,
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+        cause: None,
     }
 }
 
@@ -903,6 +906,7 @@ fn terminal_with_result(outcome: AttemptOutcome, result: &str) -> AttemptObserva
         commit: None,
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+        cause: None,
     }
 }
 
@@ -975,6 +979,7 @@ fn check_fallback(
                 commit: None,
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+                cause: None,
             },
             terminal(AttemptOutcome::Succeeded),
         ]),

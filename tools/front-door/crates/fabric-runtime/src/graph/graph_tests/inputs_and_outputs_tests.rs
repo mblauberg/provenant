@@ -1137,6 +1137,7 @@ fn required_verdict_checks_exact_lines_and_missing_results() {
                 commit: None,
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+            cause: None,
             }]),
             ..Default::default()
         };

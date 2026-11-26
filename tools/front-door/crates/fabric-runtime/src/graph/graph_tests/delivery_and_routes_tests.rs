@@ -770,6 +770,7 @@ fn launched_reader_reports_pinned_route() {
             commit: None,
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
+        cause: None,
         }]),
         ..FakeOwner::default()
     };
@@ -808,6 +809,7 @@ fn reader_auth_restart_uses_the_declared_successor_account() {
                 commit: None,
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+            cause: None,
             },
             terminal(AttemptOutcome::Succeeded),
         ]),
@@ -847,6 +849,7 @@ fn fallback_reports_unreadable_evidence() {
             commit: None,
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
+        cause: None,
         }]),
         ..FakeOwner::default()
     };

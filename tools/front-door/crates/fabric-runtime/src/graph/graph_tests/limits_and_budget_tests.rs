@@ -17,6 +17,7 @@ fn usage_fetch_failure_is_unknown_and_does_not_wedge_graph() {
         commit: None,
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+    cause: None,
     };
     for policy in [
         crate::config::UnknownUsage::Warn,
@@ -78,6 +79,7 @@ fn cost_unknown_reason_is_recorded() {
             commit: None,
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
+        cause: None,
         }]),
         usage: AttemptUsage {
             cost_unknown_reason: Some("config/telemetry-prices.toml: missing".into()),
@@ -280,6 +282,7 @@ fn resumed_writer_settles_and_reports_head_under_structural_pause() {
         commit: Some(final_head.clone()),
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+    cause: None,
     };
     let mut owner = FakeOwner {
         observations: VecDeque::from([
@@ -387,6 +390,7 @@ fn final_budget_exhaustion_still_delivers() {
             commit: None,
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
+        cause: None,
         }]),
         usage: AttemptUsage {
             tokens: Some(10),
@@ -438,6 +442,7 @@ fn budget_pause_stops_admission_and_extension_resumes() {
         commit: None,
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+    cause: None,
     };
     let mut owner = FakeOwner {
         observations: VecDeque::from([observation(), observation()]),
@@ -488,6 +493,7 @@ fn unknown_usage_warns_or_pauses_and_events_are_idempotent() {
         commit: None,
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+    cause: None,
     };
     for policy in [
         crate::config::UnknownUsage::Warn,
@@ -566,6 +572,7 @@ fn graph_wall_budget_sums_provider_time_and_preserves_partial_lower_bound() {
             commit: None,
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
+        cause: None,
         }]),
         usage: AttemptUsage {
             tokens: Some(12),

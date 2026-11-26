@@ -394,6 +394,12 @@ pub trait AttemptOwner {
         provenant_records::policy::Policy::default()
     }
 
+    /// Host/project `on_stop` defaults, resolved once at graph admission and
+    /// sealed in the checkpoint. A node's own `on_stop` entry wins over them.
+    fn graph_on_stop_defaults(&self) -> provenant_records::OnStop {
+        provenant_records::OnStop::default()
+    }
+
     /// Restore a writer's sealed deadline, or start its launch allowance before binding.
     fn begin_launch(
         &mut self,
@@ -3790,6 +3796,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     let catalogue = owner.catalogue();
     // Resolve once for this graph operation, before replay and expansion.
     let admission_policy = owner.graph_admission_policy();
+    let on_stop_defaults = owner.graph_on_stop_defaults();
     let unbounded = crate::config::GraphLimits {
         nodes: usize::MAX,
         edges: usize::MAX,
@@ -3894,6 +3901,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 instance_id,
                 ask_actor,
             );
+            checkpoint.on_stop_defaults = on_stop_defaults;
             if let Some(submission) = document.submission_patch.as_ref() {
                 let library = template::TemplateLibrary::bundled();
                 let resolvers = Default::default();
