@@ -1,5 +1,5 @@
-## Telemetry
+## Additions
 
-### Value report
+### Telemetry and providers
 
 - `provenant telemetry value` now reports, for every account with quota readings and a configured plan, the API-equivalent cost per full window and its trend, the value multiple against a USD plan price or explicit USD notional, the share unused at reset with its observed-before-reset timestamp and sample count, and priced coverage. A foreign-currency price without USD notional and a missing pool reading before reset are named unavailable. `--since` limits the summary; bounded-window cost uses the complete quota cycle, and a window without bounds has unavailable full-window cost. Credit accounts add a draw-down rate and days to exhaustion, or a named unavailable reason when the readings are missing. An unpriced bucket and an attribution gap are named rather than zero-filled; a failed quota-history read degrades those fields and names its cause. `price_source` and `window_source` state where the defaults came from. The accepted `telemetry cost --by` groupings are declared once in `CostBy` and checked against the runbook by a test. (#2225)
