@@ -84,7 +84,7 @@ pub use git_context::{
 };
 pub use holder::{
     HolderContext, HostLaunchContext, RetainedGit, RootSeed, RunHolder, SealedTask, retained_git,
-    writer_base,
+    settlement_git, writer_base,
 };
 pub use identity::ProviderIdentityEvidence;
 #[cfg(test)]

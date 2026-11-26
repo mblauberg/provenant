@@ -373,12 +373,13 @@ read: the command guidance is the protocol text and lane rules sit in `lanes.bri
 `declared_stop` is the lane's own statement and its follow-up is `on_stop`.
 
 Four auditable values accompany the decider. `GitEvidence.pushed_head` is the remote-tracking tip of
-the bound branch at the cut: `lane show` prints `pushed: <oid>`, and `settle` never reads it.
+the bound branch at the cut, sealed in `writer-terminal.json`: the full `output` result view prints
+`pushed: <oid>`, and `settle` never reads it.
 `GitEvidence.uncommitted_paths` is the bounded, sorted census behind the `uncommitted` note and
-appears in `lane show --json`. `DeclarationCounts` on `DeclarationEvidence` counts accepted and
+appears in `output --json` as `uncommitted_paths`. `DeclarationCounts` on `DeclarationEvidence` counts accepted and
 rejected declarations, reaching telemetry as `handoff_declarations_accepted` and
 `handoff_declarations_rejected`. `OutcomeFact.handoff_source` is `Declared` for an accepted
-declaration and `Host` for a host-synthesised stop handoff, reaching telemetry and `lane show` as
+declaration and `Host` for a host-synthesised stop handoff, reaching telemetry and `output` as
 `handoff_source`.
 - Why: per-route reliability and provenance need a measure without restoring a prose parser.
 

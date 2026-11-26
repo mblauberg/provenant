@@ -720,6 +720,18 @@ impl WriterLaunch {
         status_paths(&output)
     }
 
+    /// The remote-tracking tip of the bound branch, when the remote has one.
+    /// Read where `ahead_of_remote` reads it, so both describe the same ref.
+    pub(super) fn remote_tip(
+        &self,
+        git: &Path,
+        remote: Option<&provenant_config::RemoteName>,
+    ) -> Option<GitOid> {
+        let branch = self.branch.as_str().strip_prefix("refs/heads/")?;
+        let upstream = format!("refs/remotes/{}/{branch}", remote?);
+        crate::objects::resolve_ref(git, self.worktree.repo(), &upstream).ok()
+    }
+
     pub(super) fn ahead_of_remote(
         &self,
         git: &Path,
@@ -3706,6 +3718,9 @@ impl WriterLaunch {
                 push,
             }
         });
+        // The remote-tracking tip at the cut, after any stop push. Sealed
+        // with the head so a re-drive reads the same value; diagnostic only.
+        let pushed_head = self.remote_tip(&git_executable, stop_remote.as_ref());
         crate::artifacts::seal(
             attempt,
             "writer-terminal.json",
@@ -3714,6 +3729,7 @@ impl WriterLaunch {
                 // Replay may observe a later writer's descendant on the branch.
                 // Attribute only the head pinned for this attempt's settlement.
                 head: verified_tip,
+                pushed_head,
                 stop_work,
                 warnings,
             })?,
@@ -4075,6 +4091,9 @@ mod uncommitted_tests;
 pub(crate) struct WriterTerminal {
     pub schema_version: u64,
     pub head: GitOid,
+    /// The remote-tracking tip of the bound branch when custody closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_head: Option<GitOid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_work: Option<provenant_records::run::StopWorkSummary>,
     /// Settlement warnings recorded once, so a resume does not re-emit them.
@@ -4096,25 +4115,20 @@ pub(crate) fn terminal_head(attempt: &Directory) -> Result<Option<GitOid>> {
     Ok(Some(terminal.head))
 }
 
-/// The recorded remote-tracking tip of the bound branch, when one was sealed at
-/// launch. This is diagnostic evidence only: the classifier never reads it, so
-/// a push can never change a settlement fact.
-pub(crate) fn pushed_head(attempt: &Directory, _worktree: &Path) -> Result<Option<GitOid>> {
-    let Some(raw) = crate::artifacts::read_sealed(attempt, PRIMARY_PIN, crate::RECORD_LIMIT)?
+/// The remote-tracking tip of the bound branch at the cut, read from the
+/// sealed writer terminal record. Diagnostic evidence only: the classifier
+/// never reads it, so a push can never change a settlement fact.
+pub(crate) fn pushed_head(attempt: &Directory) -> Result<Option<GitOid>> {
+    let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "writer-terminal.json", crate::RECORD_LIMIT)?
     else {
         return Ok(None);
     };
-    let pin: PrimaryPin = crate::db::decode(&raw)?;
-    let Some(head_ref) = pin.head_ref.as_deref() else {
-        return Ok(None);
-    };
-    let branch = head_ref.strip_prefix("refs/heads/").unwrap_or(head_ref);
-    let suffix = format!("/{branch}");
-    Ok(pin
-        .refs
-        .iter()
-        .find(|(name, _)| name.starts_with("refs/remotes/") && name.ends_with(&suffix))
-        .map(|(_, oid)| *oid))
+    let terminal: WriterTerminal = crate::db::decode(&raw)?;
+    if terminal.schema_version != 1 {
+        return Err(RunError::Validation("writer terminal version mismatch"));
+    }
+    Ok(terminal.pushed_head)
 }
 #[derive(serde::Serialize)]
 struct WriterManifest {

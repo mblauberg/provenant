@@ -1,8 +1,6 @@
 //! Host-owned settlement evidence: the launch pin, terminal head and the one
 //! sealed record that is the single input to settlement.
 
-use std::path::Path;
-
 use provenant_core::GitOid;
 use provenant_os::fs::Directory;
 use provenant_records::{
@@ -26,10 +24,10 @@ pub(crate) fn terminal_head(attempt: &Directory) -> Result<Option<GitOid>> {
     crate::writer::terminal_head(attempt)
 }
 
-/// The recorded remote-tracking tip of the bound branch. Diagnostic only; the
-/// classifier never reads it.
-pub(crate) fn pushed_head(attempt: &Directory, worktree: &Path) -> Result<Option<GitOid>> {
-    crate::writer::pushed_head(attempt, worktree)
+/// The remote-tracking tip of the bound branch at the cut. Diagnostic only;
+/// the classifier never reads it.
+pub(crate) fn pushed_head(attempt: &Directory) -> Result<Option<GitOid>> {
+    crate::writer::pushed_head(attempt)
 }
 
 /// Seal `evidence` as the attempt's one settlement input, returning the

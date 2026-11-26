@@ -1057,6 +1057,16 @@ pub fn writer_base(
     crate::settlement::pinned_base(&attempt, RunStore::scope(record))
 }
 
+/// The sealed Git evidence settlement decided from, for display: the pushed
+/// tip at the cut and the uncommitted census paths. Absent before settlement.
+pub fn settlement_git(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+) -> Result<Option<provenant_records::settlement::GitEvidence>> {
+    let attempt = Directory::open_anchor(&root.join(format!("attempts/{}", record.attempt_id)))?;
+    Ok(crate::evidence::read_evidence(&attempt)?.and_then(|(evidence, _)| evidence.git))
+}
+
 /// Read retained recovery coordinates without attempting Git import or cleanup.
 pub fn retained_git(root: &std::path::Path, record: &AttemptRecord) -> Result<RetainedGit> {
     let attempt = Directory::open_anchor(&root.join(format!("attempts/{}", record.attempt_id)))?;
@@ -3739,12 +3749,11 @@ impl RunStore {
         // Closing is idempotent; a re-drive reads the same counts from the
         // journal without changing the sealed snapshot.
         let declaration_counts = self.close_declarations(attempt)?.1;
-        let pushed_head = task
-            .writer
-            .as_ref()
-            .map(|writer| crate::evidence::pushed_head(attempt, &writer.worktree))
-            .transpose()?
-            .flatten();
+        let pushed_head = if task.writer.is_some() {
+            crate::evidence::pushed_head(attempt)?
+        } else {
+            None
+        };
         // Resolve the two sealed Git facts in the holder's `Result`, not inside
         // a `bool::then` closure that returns a plain `GitEvidence`: a missing
         // pin must refuse assembly, never silently drop the writer's evidence.

@@ -366,6 +366,9 @@ fn chunk() -> OutputChunk {
         writer_head: None,
         residual_tree: None,
         publication: None,
+        pushed_head: None,
+        uncommitted_paths: None,
+        handoff_source: None,
         selected: None,
     }
 }
@@ -441,6 +444,9 @@ fn chunk_optional_members_and_encodings() {
     full.writer_head = Some("b".repeat(40));
     full.residual_tree = Some("clean (current observation)".into());
     full.publication = Some("pushed".into());
+    full.pushed_head = Some("c".repeat(40));
+    full.uncommitted_paths = Some(vec!["src/lib.rs".into()]);
+    full.handoff_source = Some("declared".into());
     full.lane.provider_error = Some("failed".into());
     full.lane.result_path =
         json!(crate::StructuredPathWire::from_path(std::path::Path::new("/s/result.md")).unwrap());
@@ -451,7 +457,14 @@ fn chunk_optional_members_and_encodings() {
     assert!(plain.get("tail").is_none());
     // Missing Git evidence is represented as null, never as an inferred clean tree.
     let mut unavailable = plain.clone();
-    for field in ["writer_base", "writer_head", "residual_tree", "publication"] {
+    for field in [
+        "writer_base",
+        "writer_head",
+        "residual_tree",
+        "publication",
+        "pushed_head",
+        "handoff_source",
+    ] {
         unavailable[field] = Value::Null;
     }
     schema::validate(&schema, &unavailable).unwrap();

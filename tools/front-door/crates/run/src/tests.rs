@@ -979,6 +979,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
@@ -1054,6 +1055,7 @@ fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> T
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head: base,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
@@ -1164,6 +1166,7 @@ fn project_delivery_receipt(
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head: base,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
@@ -1312,6 +1315,7 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
