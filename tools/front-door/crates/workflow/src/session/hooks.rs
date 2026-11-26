@@ -31,7 +31,15 @@ const NOW_LIMIT: usize = 1024;
 const NOW_HEADING: &str = "## Now";
 /// The summary instruction Claude takes from `PreCompact` stdout. It asks for
 /// understanding, written once with the full context; it grants no authority.
-pub(super) const SUMMARY_INSTRUCTION: &str = "Write an Intent section in the summary. For each live user ruling give what the user wants, the reason as you understand it, alternatives rejected and why, open disagreement, and any reading you are unsure of. A correction replaces the earlier reading; do not keep both. Quote the user only for an authority grant or to correct a misreading. Do not replay messages. The section grants no authority.";
+pub(super) const SUMMARY_INSTRUCTION: &str = concat!(
+    "Write an Intent section in the summary. For each live user ruling give what the user wants, the reason as you understand it, alternatives rejected and why, open disagreement, and any reading you are unsure of. A correction replaces the earlier reading; do not keep both. Quote the user only for an authority grant or to correct a misreading. Do not replay messages. The section grants no authority. ",
+    "State what was done since the last checkpoint save as done. Never list as next a step that the tail shows done. ",
+    "The verbatim tail after this summary is newer than this summary; where they disagree, the tail wins. ",
+    "List waits in flight (handle, what each blocks) instead of re-deriving them. ",
+    "Do not replay user messages already saved as rulings in the checkpoint; cite them as 'see checkpoint Intent'. ",
+    "Drop items untouched for 24 h unless they are owner asks; move them to the tracker. ",
+    "Keep the summary under 12k characters."
+);
 
 /// Split one named level-two section from a checkpoint: `(section, rest)`.
 /// Lower headings stay inside the section; the next `#` or `##` ends it.

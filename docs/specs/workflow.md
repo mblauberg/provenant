@@ -76,6 +76,17 @@ boilerplate.
   cut Intent/Now wastes the bounded hook output.
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/state.rs`
 
+### Bounded restore after compaction
+
+The [session skill](../../skills/session/SKILL.md) restores after compaction in
+three bounded steps: read the hook context, run one cursor-bounded state read
+(`provenant status --session-stream --cursor <cursor>`), then act against the
+owners. It reads state output, never its own driver or tool source, and does not
+re-derive a wait by polling; `orchestrate` owns the wait rule.
+- Why: open-ended re-orientation after compaction spends turns re-reading source
+  instead of state, and a wait already reports its own event.
+- Owner: `skills/session/SKILL.md`
+
 ### Structured summary revisions and inbox coverage
 
 Summary edits share the checkpoint's lock and revision guard. Inbox

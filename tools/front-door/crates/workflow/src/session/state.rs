@@ -269,12 +269,47 @@ pub struct Unavailable {
     pub reason: String,
 }
 
+/// Where the session digest looks for custody rows. `project` (the default)
+/// keeps another project's work out of the chair's context; `all` opts back in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DigestScope {
+    #[default]
+    Project,
+    All,
+}
+impl DigestScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::All => "all",
+        }
+    }
+}
+
+/// One custody row as the collector saw it. Presence and project travel with
+/// the subject so the digest can collapse unattended and foreign work without
+/// losing the counts or showing a row it should hide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustodyLine {
+    pub subject: String,
+    pub presence: String,
+    pub project: String,
+    pub mine: bool,
+}
+
 /// One collected view. A section the collector could not read is named in
 /// `unavailable` rather than shown as empty, so absence never reads as "none".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionState {
-    pub custody: Vec<String>,
+    /// Active custody rows the collector could see, before scoping.
+    pub custody: Vec<CustodyLine>,
     pub custody_more: Option<String>,
+    /// Project the hook ran in; another project's rows stay hidden by default.
+    pub current_project: Option<String>,
+    /// Where the digest looks for custody; from `session.digest.scope`.
+    pub scope: DigestScope,
+    /// Config layer that set `scope`, shown in the unattended line.
+    pub scope_source: Option<String>,
     pub active: Vec<LaneLine>,
     pub settled: Vec<LaneLine>,
     /// When the listing held lanes beyond the page the collector read, the
@@ -303,10 +338,47 @@ struct Section {
 impl SessionState {
     fn sections(&self, worktrees: bool) -> Vec<Section> {
         let mut sections = Vec::new();
-        if !self.custody.is_empty() || self.custody_more.is_some() {
+        let here = |project: &str| {
+            self.current_project
+                .as_deref()
+                .is_some_and(|current| current == project)
+        };
+        let mut custody_lines = Vec::new();
+        let mut unattended = 0usize;
+        let mut unattended_here = 0usize;
+        for row in &self.custody {
+            if row.presence == "unattended" {
+                unattended += 1;
+                if here(&row.project) {
+                    unattended_here += 1;
+                }
+            } else if row.mine && (self.scope == DigestScope::All || here(&row.project)) {
+                // Only custody this chair holds is named; unattended and
+                // foreign-project rows collapse into one counted line below.
+                custody_lines.push(format!(
+                    "{} ({})",
+                    clean(&row.subject, FIELD_LIMIT),
+                    clean(&row.presence, 32)
+                ));
+            }
+        }
+        if unattended > 0 {
+            let command = self
+                .commands
+                .runnable("status --adoptable")
+                .unwrap_or_else(|| {
+                    "provenant status --adoptable with this hook's --state-dir".into()
+                });
+            custody_lines.push(format!(
+                "Unattended: {unattended} ({unattended_here} this project) — {command} (scope: {}, source: {})",
+                self.scope.as_str(),
+                self.scope_source.as_deref().unwrap_or("default")
+            ));
+        }
+        if !custody_lines.is_empty() || self.custody_more.is_some() {
             sections.push(Section {
                 title: CUSTODY_TITLE.into(),
-                lines: self.custody.clone(),
+                lines: custody_lines,
                 more: 0,
                 partial: self.custody_more.clone(),
             });
@@ -616,6 +688,75 @@ mod tests {
             branch: None,
             reason: None,
         }
+    }
+
+    fn custody(subject: &str, presence: &str, project: &str, mine: bool) -> CustodyLine {
+        CustodyLine {
+            subject: subject.into(),
+            presence: presence.into(),
+            project: project.into(),
+            mine,
+        }
+    }
+
+    #[test]
+    fn unattended_custody_collapses_within_the_digest_limit() {
+        // A store full of unattended rows must not fill the chair's context:
+        // they collapse to one counted line, whatever their number.
+        let rows: Vec<_> = (0..90)
+            .map(|n| {
+                custody(
+                    &format!("foreign/unattended-{n}"),
+                    "unattended",
+                    "other",
+                    false,
+                )
+            })
+            .collect();
+        let state = SessionState {
+            custody: rows,
+            current_project: Some("here".into()),
+            ..Default::default()
+        };
+        let digest = state.digest(DIGEST_LIMIT);
+        assert!(digest.len() <= DIGEST_LIMIT, "{}", digest.len());
+        assert!(digest.len() < 1024, "{}", digest.len());
+        assert!(
+            digest.contains("Unattended: 90 (0 this project)"),
+            "{digest}"
+        );
+        assert!(digest.contains("status --adoptable"), "{digest}");
+        assert!(digest.contains("source: default"), "{digest}");
+        assert!(!digest.contains("unattended-0"), "{digest}");
+    }
+
+    #[test]
+    fn foreign_project_rows_are_hidden_unless_the_scope_is_all() {
+        let rows = vec![
+            custody("mine/here", "live", "here", true),
+            custody("mine/there", "live", "there", true),
+            custody("adoptable/here", "unattended", "here", false),
+            custody("adoptable/there", "unattended", "there", false),
+        ];
+        let scoped = |scope| SessionState {
+            custody: rows.clone(),
+            current_project: Some("here".into()),
+            scope,
+            ..Default::default()
+        };
+        let project = scoped(DigestScope::Project).digest(DIGEST_LIMIT);
+        assert!(project.contains("mine/here"), "{project}");
+        assert!(!project.contains("mine/there"), "{project}");
+        assert!(
+            project.contains("Unattended: 2 (1 this project)"),
+            "{project}"
+        );
+        let all = scoped(DigestScope::All).digest(DIGEST_LIMIT);
+        assert!(
+            all.contains("mine/here") && all.contains("mine/there"),
+            "{all}"
+        );
+        assert!(all.contains("scope: all"), "{all}");
     }
 
     #[test]

@@ -13,6 +13,15 @@ schema_version = 1
 always = ["scope"]
 ungated = ["main-health"]
 
+# Cheap jobs that must finish before an expensive suite's jobs start. A failed
+# gate leaves those jobs skipped, so no scarce runner is claimed for a change
+# that does not compile; a skipped gate (its own suite covered by evidence)
+# still lets an independently selected gated suite run. The workflow edge is
+# asserted by scripts/check-ci-suites.
+[[gate]]
+job = "rust-lint"
+suites = ["macos_lint", "macos_native", "macos_release"]
+
 [evidence]
 # Green ci-status push runs of this workflow on this branch are evidence.
 workflow = "ci.yml"
