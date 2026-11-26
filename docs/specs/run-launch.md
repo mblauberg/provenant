@@ -228,15 +228,21 @@ an empty range. A remote reader binds the peer's **own** checkout HEAD, not the 
 commit: the sender's head names a commit in its scratch project that the peer clone may never
 have seen, and the source view materialiser refuses an absent commit rather than substituting a
 nearby ref. The peer's HEAD first parent supplies its review base; when Git evidence is missing,
-the launch warns and falls back to the sender's pins. For a manual bundled smoke launch without a
-`diff_base`, the checkout's first parent supplies the range; if unavailable, review is skipped with a reason and the other eligible
-nodes continue. A node may name a small project-relative fixture;
+the launch warns and falls back to the sender's pins. A bundled smoke review runs after the write
+node and reads the commit the writer produced in its scratch worktree, so its diff is the writer's
+own smoke change and needs no delivered pr or push; its base is the commit the writer branched
+from, or the existing linked checkout's HEAD immediately before the write, unless
+`--set diff_base=BASE` pins another one. The chosen source is shown in the warnings.
+A manual smoke launch with no writer has no scratch commit to review, so review is skipped with a
+reason and the other eligible nodes continue. A node may name a small project-relative fixture;
 the host stages its bytes with the task, so a peer places the same file in its own candidate
 scratch and the brief names its path instead of leaking a caller path. The upgrade smoke fixture
 carries a fresh random fact that exists only in those staged bytes, never in a committed tree or
-the bundled template, so a reader that reconstructs the answer from source cannot report it.
-- Why: a verification graph must run on a real install and exercise a writer, and a skipped node
-  must not refuse the run it does not take part in. A fixture must reach every host that runs a
+the bundled template, so a reader that reconstructs the answer from source cannot report it; the
+review asserts that exact token against the read lane's report.
+- Why: a verification graph must run on a real install and exercise a writer, a skipped node must
+  not refuse the run it does not take part in, and a smoke review must stay bounded by its own
+  scratch change rather than the caller checkout. A fixture must reach every host that runs a
   reader, not just the host that owns the checkout; a stale peer clone must still read a valid
   tree, and a smoke pass must be evidence that the staged fixture was actually read.
 
