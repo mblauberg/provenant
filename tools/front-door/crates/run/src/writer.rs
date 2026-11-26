@@ -4005,7 +4005,7 @@ impl WriterLaunch {
         state: &Path,
         custody: &provenant_supervisor::custody::Recovery,
         cancel: &CancelToken,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<UncommittedWork>> {
         let base = custody
             .writer_base(
                 self.worktree.repo().root_dir(),
@@ -4030,18 +4030,18 @@ impl WriterLaunch {
             "read writer uncommitted changes",
             Some(self.worktree.path()),
         ))?;
-        Ok(uncommitted_reason(&paths).map(|work| work.render()))
+        Ok(uncommitted_reason(&paths))
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct UncommittedWork {
-    paths: Vec<String>,
-    omitted: usize,
+pub(crate) struct UncommittedWork {
+    pub(crate) paths: Vec<String>,
+    pub(crate) omitted: usize,
 }
 
 impl UncommittedWork {
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let mut reason = format!(
             "writer left uncommitted edits and no new commit: {}",
             self.paths.join(", ")
@@ -4094,6 +4094,27 @@ pub(crate) fn terminal_head(attempt: &Directory) -> Result<Option<GitOid>> {
         return Err(RunError::Validation("writer terminal version mismatch"));
     }
     Ok(Some(terminal.head))
+}
+
+/// The recorded remote-tracking tip of the bound branch, when one was sealed at
+/// launch. This is diagnostic evidence only: the classifier never reads it, so
+/// a push can never change a settlement fact.
+pub(crate) fn pushed_head(attempt: &Directory, _worktree: &Path) -> Result<Option<GitOid>> {
+    let Some(raw) = crate::artifacts::read_sealed(attempt, PRIMARY_PIN, crate::RECORD_LIMIT)?
+    else {
+        return Ok(None);
+    };
+    let pin: PrimaryPin = crate::db::decode(&raw)?;
+    let Some(head_ref) = pin.head_ref.as_deref() else {
+        return Ok(None);
+    };
+    let branch = head_ref.strip_prefix("refs/heads/").unwrap_or(head_ref);
+    let suffix = format!("/{branch}");
+    Ok(pin
+        .refs
+        .iter()
+        .find(|(name, _)| name.starts_with("refs/remotes/") && name.ends_with(&suffix))
+        .map(|(_, oid)| *oid))
 }
 #[derive(serde::Serialize)]
 struct WriterManifest {

@@ -1,20 +1,20 @@
 //! Host-owned settlement evidence: the launch pin, terminal head and the one
 //! sealed record that is the single input to settlement.
 
+use std::path::Path;
+
 use provenant_core::GitOid;
 use provenant_os::fs::Directory;
-use provenant_records::{CanonicalV1, FileDigest, settlement::SettlementEvidence};
+use provenant_records::{
+    CanonicalV1, FileDigest,
+    settlement::SettlementEvidence,
+    warning::{SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS, Warning, warn},
+};
 
 use crate::Result;
 
 /// The sealed evidence record, beside the attempt's other host-owned facts.
 const SETTLEMENT_EVIDENCE: &str = "settlement-evidence.json";
-
-/// A locally declared warning code keeps this edit inside the evidence module.
-/// This crate has no `tracing` dependency; the repository routes warnings
-/// through `provenant_records::warning`, which is capturable in tests.
-const SETTLEMENT_EVIDENCE_REDRIVE: provenant_records::warning::WarningCode =
-    provenant_records::warning::WarningCode("SETTLEMENT_EVIDENCE_REDRIVE");
 
 /// The launch-time Git base, sealed once by the writer at launch.
 pub(crate) fn launch_pin(attempt: &Directory) -> Result<Option<GitOid>> {
@@ -24,6 +24,12 @@ pub(crate) fn launch_pin(attempt: &Directory) -> Result<Option<GitOid>> {
 /// The terminal Git head, sealed by the writer when custody closed.
 pub(crate) fn terminal_head(attempt: &Directory) -> Result<Option<GitOid>> {
     crate::writer::terminal_head(attempt)
+}
+
+/// The recorded remote-tracking tip of the bound branch. Diagnostic only; the
+/// classifier never reads it.
+pub(crate) fn pushed_head(attempt: &Directory, worktree: &Path) -> Result<Option<GitOid>> {
+    crate::writer::pushed_head(attempt, worktree)
 }
 
 /// Seal `evidence` as the attempt's one settlement input, returning the
@@ -36,8 +42,8 @@ pub(crate) fn seal_evidence(
 ) -> Result<(SettlementEvidence, FileDigest)> {
     if let Some((sealed, digest)) = read_evidence(attempt)? {
         if &sealed != evidence {
-            provenant_records::warning::warn(provenant_records::warning::Warning::new(
-                SETTLEMENT_EVIDENCE_REDRIVE,
+            warn(Warning::new(
+                SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS,
                 "settlement evidence differs on re-drive; sealed copy kept",
             ));
         }

@@ -179,6 +179,8 @@ fn host_stops_preserve_complete_handoffs_and_completed_budgets_succeed() {
         pinned: None,
         head: None,
         uncommitted: Some("M src/main.rs".into()),
+        uncommitted_paths: vec!["src/main.rs".into()],
+        pushed_head: None,
         primary: PrimaryCheckout::NotChecked,
     });
     assert_eq!(settle(&dirty).node, SettlementNodeOutcome::Failed);
@@ -421,6 +423,7 @@ fn evidence_for(
             stopped_handoff: None,
         },
         handoff: crate::declaration::DeclarationEvidence::Missing,
+        declarations: Default::default(),
         git: None,
         custody: CustodyFacts {
             launched: true,
@@ -436,6 +439,7 @@ fn evidence_for(
                 eof_fragment_unsettles: false,
             },
         },
+        policy: crate::settlement::policy::SettlementPolicy::shipped(),
     }
 }
 
@@ -623,6 +627,8 @@ fn stray_work_holds_dependants_instead_of_completing() {
         pinned: None,
         head: None,
         uncommitted: None,
+        uncommitted_paths: Vec::new(),
+        pushed_head: None,
         primary: PrimaryCheckout::Review {
             note: "primary checkout moved without a bound-branch commit".into(),
         },

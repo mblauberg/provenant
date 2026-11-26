@@ -2727,6 +2727,15 @@ pub struct AttemptRecord {
     pub progress: Option<crate::settlement::Progress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_evidence: Option<crate::FileDigest>,
+    /// Declaration counts for lanes that owe a handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declarations: Option<crate::declaration::DeclarationCounts>,
+    /// Whether the settled handoff was declared by the lane or made by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_source: Option<crate::settlement::HandoffSource>,
+    /// Non-default settlement policy actions that changed the decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_policy_applied: Vec<crate::settlement::policy::AppliedPolicy>,
     /// The cancellation disposition known when the decision was sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation_disposition: Option<CancellationDisposition>,

@@ -57,7 +57,7 @@ impl RunStore {
         // inside the attempt directory can write there before it exits; bytes
         // that are not a settled envelope are evidence, never a result (#3844).
         set_aside_foreign_snapshot(attempt, record)?;
-        let declared = self.close_declarations(attempt)?;
+        let (declared, _counts) = self.close_declarations(attempt)?;
         let handoff: HandoffResult = match &declared {
             DeclarationEvidence::Accepted(sealed) => Ok(Some(sealed.handoff.clone())),
             DeclarationEvidence::Rejected { error } => Err(error.clone()),
