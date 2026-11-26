@@ -6,7 +6,7 @@ use super::{
     fakes::{FakeAlarms, FakeForge, FakeGate, FakeRepo},
     model::*,
     policy::LandPolicy,
-    ports::{Approval, PullRequestInfo, PullRequestState, Repo},
+    ports::{Approval, Mergeability, PullRequestInfo, PullRequestState, Repo},
 };
 use provenant_cli::domains::{GateKind, LandOverride, LandSettings};
 use std::collections::BTreeMap;
@@ -114,6 +114,7 @@ impl LandingFixture {
             checks: vec![CheckEvidence {
                 name: "ci-status".into(),
                 issuer: issuer.map(str::to_owned),
+                app_id: None,
                 result: result.clone(),
             }],
             issuer: None,
@@ -186,6 +187,7 @@ impl LandingFixture {
                     base_branch: "main".into(),
                     author: "author".into(),
                     state: PullRequestState::Open,
+                    mergeability: Mergeability::Unknown,
                     merged_commit: None,
                     stack: None,
                     draft: false,
@@ -253,6 +255,7 @@ impl LandingFixture {
             &mut FakeAlarms::default(),
             Request {
                 pins: &Default::default(),
+                delivery_queue: false,
                 numbers,
                 target: "main",
                 settings,

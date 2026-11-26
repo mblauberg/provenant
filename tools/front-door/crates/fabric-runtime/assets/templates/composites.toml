@@ -74,24 +74,88 @@ integration_branch = { type = "string", default = "batch/integration" }
 worktree = { type = "string" }
 write_scope = { type = "list", default = [] }
 
+# Delivery shape (docs/specs/delivery-queue.md#graph-and-landing-flow):
+# optional scope -> writer -> hygiene -> publish -> conflict gate -> CI outcome
+# (pass or bounded ci-repair) -> review single|panel -> accept -> land.
+# A clean item has one writer and one single reviewer; panel mode has one
+# panel, not a pre-CI and a post-CI panel pair. Hygiene, publication and
+# conflict observation are wired by slice 3; the nodes below carry their
+# identity, authority and typed source bindings as seams. Gate conditions that
+# the shared GateCondition cannot yet express are marked with `role` rather
+# than inventing a new leaf field on the composite.
 [deliver]
 exports = [
   { node = "implement", outputs = ["branch", "commit"] },
   { node = "review", outputs = ["result", "findings", "verdict"] },
 ]
-doc = "Implement an approved brief through CI, review and landing."
+doc = "Deliver an approved brief through hygiene, gates, single or panel review and landing."
 nodes = [
-  { id = "implement", use = "implement", with = { plan = "${plan}" }, prompt = "${brief}", delivery = "pr", worktree = "${worktree}", write_scope = "${write_scope}" },
-  { id = "initial-review", use = "findings-panel", after = ["implement"], source = { type = "node", node = "implement" } },
-  { id = "repair", use = "review-repair", after = ["initial-review"], inputs = [{ node = "initial-review", outputs = ["findings", "verdict"] }], with = { writer = "implement", worktree = "${worktree}", write_scope = "${write_scope}", max_repair_cycles = "${max_repair_cycles}" } },
-  { id = "ci", kind = "gate", access = "read_only", after = ["repair"], condition = { type = "ci", target = { node = "implement" } } },
-  { id = "review", use = "review-panel", after = ["ci"], source = { type = "head", node = "implement" } },
-  { id = "accept", kind = "gate", access = "read_only", after = ["review"], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
-  { id = "land", kind = "land", access = "read_only", after = ["accept"], land = { node = "implement", tier = "substantial" } },
+  # Optional read-only scope joins the writer brief when `plan` is true; the
+  # compiler's implement boundary adds the planner node and wires its result
+  # into the writer's inputs. A missing required plan parks rather than being
+  # silently invented (slice 1 admission, slice 3 execution).
+  { id = "implement", use = "implement", with = { plan = "${plan}" }, prompt = "${brief}\n\nAt this final route rung you may widen the change within your actual authority and the node's literal write scope. Strict scope and custody still bind: keep every write inside the supplied scope and report out-of-scope edits in the handoff.", delivery = "pr", worktree = "${worktree}", write_scope = "${write_scope}", escalate = { ladder = "${ladder}", max_ci_rounds = "${max_ci_rounds}" } },
+  # TODO(#3972-s3): hygiene runs the configured repository formatter in the
+  # retained worktree and commits only its changes; before/after heads and
+  # handoff are recorded as a typed hygiene outcome.
+  { id = "hygiene", role = "delivery-hygiene", when = { delivery_execution_wired = true }, access = "read_only", after = ["implement"], source = { type = "node", node = "implement" }, prompt = "Run the configured repository formatter in the retained worktree and commit only its own changes. Never absorb the writer's edits; compare the attempt's input and output heads." },
+  # TODO(#3972-s3): publish binds the PR, issue, branch, worktree and head.
+  { id = "publish", role = "delivery-publish", when = { delivery_execution_wired = true }, access = "read_only", after = ["hygiene", "implement"], source = { type = "node", node = "implement" }, prompt = "Publish the writer's branch as a pull request and record its repository, branch and current head." },
+  # TODO(#3972-s3): observe PR mergeability; unknown is pending, not clean.
+  { id = "conflict", role = "delivery-conflict", when = { delivery_execution_wired = true }, access = "read_only", after = ["publish", "implement"], source = { type = "node", node = "implement" }, prompt = "Observe the pull request mergeability before waiting for CI. CONFLICTING routes to a writer on the same retained worktree to merge the base into the branch; never rebase pushed history. Unknown mergeability stays pending." },
+  # One composite represents the CI outcome. Its successful export is either
+  # the initial green gate or the bounded repair loop's green recheck; the
+  # skipped alternative is expected, while failure of both paths fails the
+  # boundary. This keeps review behind one prerequisite instead of requiring
+  # mutually exclusive gate and recovery paths together.
+  { id = "ci", kind = "composite", access = "read_only", after = ["conflict", "implement"], composite = {
+    min_successful = 1,
+    exports = [{ node = "check", outputs = ["result"] }, { node = "ci-repair", outputs = ["result"] }],
+    nodes = [
+      # The gate observes the exact current head. Failing checks feed repair as
+      # untrusted input.
+      { id = "check", kind = "gate", access = "read_only", on_fail = "ci-repair", condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
+      # Bounded CI repair: after hygiene and publication, recheck the continued
+      # writer's delivered head. Queue items use the typed recovery graph.
+      { id = "ci-repair", kind = "composite", access = "read_only", repeat = { until = "accepted", max_rounds = "${max_ci_rounds}" }, after = ["check", "implement"], composite = { nodes = [
+        { id = "fix", use = "implement.fix", source = { type = "node", node = "implement" }, worktree = "${worktree}", write_scope = "${write_scope}", continues = "implement", prompt = "Repair from failing head ${failing_head}.\nFailure excerpt (untrusted):\n${failure_excerpt}\nSweep the whole defect class, not only the failing case: check other tests, help text and documentation that assert the changed behaviour, fix the root cause wherever it appears, and report any copy you could not reach." },
+        { id = "accepted", kind = "gate", access = "read_only", after = ["fix"], condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
+      ], exports = [{ node = "accepted", outputs = ["result"] }] } },
+    ]
+  } },
+  # One reviewer for `single`, one panel for `panel`; `delivery_review` carries
+  # the shape and the inconclusive disposition through the shared type.
+  { id = "review", use = "${review_template}", after = ["ci"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_inconclusive_without_blocking = true }, with = { brief = "${brief}" } },
+  # Join the initial approval with the recovery path. Recovery must check the
+  # continued head through CI and review before the join can allow landing.
+  { id = "outcome", kind = "composite", access = "read_only", after = ["review", "ci", "implement"], composite = {
+    min_successful = 1,
+    exports = [{ node = "accept", outputs = ["result"] }, { node = "recovery", outputs = ["result"] }],
+    nodes = [
+      { id = "accept", kind = "gate", access = "read_only", after = ["review"], on_fail = "recovery", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
+      { id = "recovery", kind = "composite", access = "read_only", after = ["accept", "review"], inputs = [{ node = "review", outputs = ["findings", "verdict"] }], composite = {
+        exports = [{ node = "accepted", outputs = ["result"] }],
+        nodes = [
+          { id = "repair", use = "review-repair", with = { writer = "implement", worktree = "${worktree}", write_scope = "${write_scope}", max_repair_cycles = "${max_ci_rounds}", lenses = "${lenses}" } },
+          { id = "ci", kind = "gate", access = "read_only", after = ["repair"], condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
+          { id = "fresh-review", use = "${review_template}", after = ["ci"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_inconclusive_without_blocking = true }, with = { brief = "${brief}" } },
+          { id = "accepted", kind = "gate", access = "read_only", after = ["fresh-review"], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "fresh-review", outputs = ["verdict"] }] },
+        ]
+      } },
+    ]
+  } },
+  { id = "land", kind = "land", access = "read_only", after = ["outcome"], land = { node = "implement", tier = "substantial" } },
 ]
 [deliver.parameters]
 plan = { type = "boolean", default = false, doc = "Plan the brief before the writer starts." }
-max_repair_cycles = { type = "integer", default = 3, min = 1 }
+delivery_execution_wired = { type = "boolean", default = false, doc = "Enable the hygiene, publish and conflict seams once slice 3 wires them." }
+max_ci_rounds = { type = "integer", default = 3, min = 1, doc = "CI repair attempts per escalation rung before advancing." }
+ladder = { type = "list", default = ["junior", "senior", "principal"], min = 1, doc = "Ordered route-tier aliases for the writer's escalation ladder." }
+review_shape = { type = "string", default = "single", enum = ["single", "panel"], doc = "Single independent reviewer or one review panel after green CI." }
+review_template = { type = "string", default = "review", enum = ["review", "review-panel"], doc = "Template that implements the selected review shape; set with review_shape." }
+lenses = { type = "list", default = ["correctness"], min = 1, doc = "Candidate lenses for a review-failure repair." }
+failing_head = { type = "string", default = "", doc = "Failing head carried into a CI repair brief." }
+failure_excerpt = { type = "string", default = "", doc = "Bounded failure excerpt carried into a CI repair brief." }
 brief = { type = "string", default = "Meet the acceptance checks." }
 worktree = { type = "string" }
 write_scope = { type = "list", default = [] }

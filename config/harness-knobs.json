@@ -393,6 +393,14 @@
       "writer_provision_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "120", "effect": "Independent allowance for provisioning each writer in a graph; also bounds how long a launch waits for a contended writer lock."}
     }
   },
+  "host_delivery_queue_settings": {
+    "path": "domains.fabric.queue",
+    "settings": {
+      "max_parallel": {"type": "int", "allowed": "1 to 64", "min": 1, "max": 64, "default": "4", "effect": "Maximum number of active delivery item graphs."},
+      "ci_slots": {"type": "int", "allowed": "0 to 64", "min": 0, "max": 64, "default": "1", "effect": "Admission cap for delivery queue CI observations; zero disables the cap."},
+      "prep_retries": {"type": "int", "allowed": "0 to 64", "min": 0, "max": 64, "default": "2", "effect": "Number of queue item launch preparation retries before parking."}
+    }
+  },
   "host_model_policy_settings": {
     "path": "domains.routing.model_policy",
     "settings": {

@@ -107,7 +107,7 @@ fn admitted_launch_projects_typed_prompt_field_and_limit() {
 #[test]
 fn memory_pressure_launch_refusal_names_source_and_action() {
     use crate::coordination::facade::FacadeError;
-    use provenant_records::diagnostic::{PressureLevel, PressureThreshold, ResourceFact, Layer, };
+    use provenant_records::diagnostic::{Layer, PressureLevel, PressureThreshold, ResourceFact};
     let error = FacadeError::ConfinementRefused {
         resource: Some(ResourceFact::MemoryPressure {
             level: PressureLevel::Critical,
@@ -337,7 +337,7 @@ fn launch_invalid_field_matrix_preserves_local_facts() {
 #[test]
 fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
     use crate::coordination::facade::{DispatchRefusalFact, FacadeError};
-    use provenant_records::diagnostic::{ResourceFact, Layer};
+    use provenant_records::diagnostic::{Layer, ResourceFact};
     let cases = [
         (
             FacadeError::DispatchRefused {
@@ -480,9 +480,11 @@ fn writer_binding_failure_persists_only_the_safe_projection() {
     writer.worktree = Some("/fixture/worktree".into());
     let mut owner = ErrorLauncher {
         binding_error: Some(FacadeError::DispatchRefused {
-            fact: Some(crate::coordination::facade::DispatchRefusalFact::DirtyWriter {
-                paths: String::new(),
-            }),
+            fact: Some(
+                crate::coordination::facade::DispatchRefusalFact::DirtyWriter {
+                    paths: String::new(),
+                },
+            ),
             reason: "TOKEN_SENTINEL".into(),
             disk: None,
         }),
@@ -757,7 +759,11 @@ fn failed_creation_base_settles_the_node_as_failed_for_wait() {
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
         let progress = &run.checkpoint.nodes[0];
-        assert_eq!(progress.state, NodeState::Failed, "a failed preparation must settle failed: {progress:?}");
+        assert_eq!(
+            progress.state,
+            NodeState::Failed,
+            "a failed preparation must settle failed: {progress:?}"
+        );
         assert!(progress.attempts.is_empty(), "no attempt was ever launched");
         assert!(
             progress
@@ -773,4 +779,16 @@ fn failed_creation_base_settles_the_node_as_failed_for_wait() {
             Some(NodeState::Failed)
         );
     }
+}
+
+#[test]
+fn preparation_exhaustion_always_has_diagnostic_evidence() {
+    assert_eq!(
+        preparation_exhausted_message(None),
+        "Preparation retries exhausted"
+    );
+    assert_eq!(
+        preparation_exhausted_message(Some("owner detail".into())),
+        "owner detail"
+    );
 }
