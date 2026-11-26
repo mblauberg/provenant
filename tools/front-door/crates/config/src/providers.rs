@@ -1,5 +1,5 @@
 //! Host provider updates, separate from self-update inside confined lanes.
-use provenant_records::warning::{PROVIDER_SETTING_OUT_OF_RANGE, Warning, warn};
+use provenant_records::warning::{PROVIDER_SETTING_OUT_OF_RANGE, Warning, detected_source, warn};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, time::Duration};
 
@@ -140,7 +140,7 @@ impl ProviderSettings {
             Warning::new(
                 PROVIDER_SETTING_OUT_OF_RANGE,
                 format!("{key} = {seconds} is outside 1-60; using {DEFAULT_SECONDS}"),
-                provenant_records::warning::detected_source(PROVIDER_SETTING_OUT_OF_RANGE),
+                detected_source(PROVIDER_SETTING_OUT_OF_RANGE),
             )
             .subject(key),
         );
@@ -229,6 +229,10 @@ mod tests {
             assert_eq!(
                 warnings[0].source.origin.as_deref(),
                 Some("warning:PROVIDER_SETTING_OUT_OF_RANGE")
+            );
+            assert_eq!(
+                warnings[0].source,
+                detected_source(PROVIDER_SETTING_OUT_OF_RANGE)
             );
         }
     }
