@@ -226,9 +226,7 @@ impl Settings {
     /// The effective fixture root. An unsafe configured value has already
     /// warned through [`Self::validate`]; fall back to the compiled relative root.
     pub fn root(&self) -> PathBuf {
-        validate_root(&self.fixture_root).unwrap_or_else(|_| {
-            validate_root(DEFAULT_FIXTURE_ROOT).expect("the default root is valid")
-        })
+        validate_root(&self.fixture_root).unwrap_or_else(|_| PathBuf::from(DEFAULT_FIXTURE_ROOT))
     }
 
     /// `KEY = value (KEY from SOURCE)` for every effective value. Used by
