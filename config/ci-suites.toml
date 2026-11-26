@@ -11,7 +11,9 @@ schema_version = 1
 # jobs run after ci-status and never gate it.
 [jobs]
 always = ["scope"]
-ungated = ["main-health"]
+# `rerun-failed` produces re-run evidence for main-health before ci-status but
+# never gates it: a skipped re-run on a green main must not stall the gate.
+ungated = ["main-health", "rerun-failed"]
 
 # Cheap jobs that must finish before an expensive suite's jobs start. A failed
 # gate leaves those jobs skipped, so no scarce runner is claimed for a change
