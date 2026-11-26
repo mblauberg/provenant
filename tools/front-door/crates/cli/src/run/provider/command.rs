@@ -57,6 +57,20 @@ pub(super) fn prepare_command(
 ) -> Result<run::PreparedLaunch, PrepareError> {
     #[cfg(feature = "fixture")]
     hold_command_preparation_for_fixture();
+    // Load the owner capability entries once for this launch, from the same
+    // host state and project layers the compatibility table reads. An invalid
+    // row warns and is skipped; it never blocks a configured command.
+    let roots = registry.roots.ok_or("routing context is unavailable")?;
+    let (capability_overlay, overlay_warnings) = provenant_config::adapter_capabilities::effective(
+        roots.state.as_path(),
+        Some(roots.checkout()),
+    );
+    for warning in overlay_warnings {
+        provenant_records::warning::warn(provenant_records::warning::Warning::new(
+            provenant_records::warning::CONFIG_KEY_IGNORED,
+            warning.to_string(),
+        ));
+    }
     if !AdapterSpec::get(provider)
         .is_some_and(|spec| spec.identity.named_entry == provenant_records::NamedEntry::Command)
     {
@@ -75,11 +89,13 @@ pub(super) fn prepare_command(
                 ))
             )
         })?
+        .with_overlay(&capability_overlay)
         .check_launch(&provenant_records::LaunchRequest {
             resume: resume.is_some(),
             write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
             network: task.access.network,
             skill_location: task.profile.require_skill_location,
+            gap_policy: provenant_records::GapPolicy::default(),
             ..Default::default()
         });
     if let Some(decision) = check.refusal() {
@@ -90,7 +106,6 @@ pub(super) fn prepare_command(
         .find(|entry| entry.adapter.id() == provider)
         .map(|entry| entry.adapter)
         .ok_or_else(|| unavailable(format!("{provider} is not registered")))?;
-    let roots = registry.roots.ok_or("routing context is unavailable")?;
     let project = registry
         .project_id
         .ok_or("selected project identity is unavailable")?;
@@ -336,15 +351,20 @@ pub(super) fn prepare_command(
     }
     let mut launch_warnings = Vec::new();
     let image_input = !task.access.attachments.is_empty();
-    if let Some(spec) = AdapterSpec::get(provider)
-        && let Some(decision) = spec
+    if let Some(spec) = AdapterSpec::get(provider) {
+        let spec = spec.with_overlay(&capability_overlay);
+        let gap_policy = capability_overlay.gap_policy(provider, &launch_policy);
+        if let Some(decision) = spec
             .check_launch(&provenant_records::LaunchRequest {
                 image_input,
+                gap_policy,
                 ..Default::default()
             })
             .degraded(provenant_records::LaunchField::ImageInput)
-    {
-        launch_warnings.push(format!("warning: {decision}; attachments remain readable"));
+            && decision.warn
+        {
+            launch_warnings.push(format!("warning: {decision}; attachments remain readable"));
+        }
     }
     launch_warnings.extend(protection_warnings);
     launch_warnings.extend(super::preparation::ignore_file_warnings(

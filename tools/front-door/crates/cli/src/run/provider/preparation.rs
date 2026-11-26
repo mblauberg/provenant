@@ -255,6 +255,27 @@ fn opencode_access_message(access: &provenant_records::LaneAccessReceipt) -> Str
     )
 }
 
+/// Effective `[[adapter_capabilities]]` entries for one launch, read from the
+/// same host state and project layers as the compatibility table. An invalid
+/// row warns and is skipped rather than refusing the launch.
+fn launch_capability_overlay(registry: &Registry<'_>) -> provenant_records::CapabilityOverlay {
+    registry
+        .roots
+        .map_or_else(provenant_records::CapabilityOverlay::default, |roots| {
+            let (overlay, warnings) = provenant_config::adapter_capabilities::effective(
+                roots.state.as_path(),
+                Some(roots.checkout()),
+            );
+            for warning in warnings {
+                warn(Warning::new(
+                    provenant_records::warning::CONFIG_KEY_IGNORED,
+                    warning.to_string(),
+                ));
+            }
+            overlay
+        })
+}
+
 fn push_launch_warning(route: &mut ResolvedRoute, warning: impl Into<String>) {
     let warning = warning.into();
     let warning = if warning.starts_with("warning:") {
@@ -2146,6 +2167,7 @@ fn prepare_inner(
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    let capability_overlay = launch_capability_overlay(registry);
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
         && AdapterSpec::get(provider).is_some_and(|spec| {
             spec.identity.named_entry == provenant_records::NamedEntry::DelegatedAgent
@@ -2153,11 +2175,13 @@ fn prepare_inner(
     {
         let check = AdapterSpec::get(provider)
             .ok_or("unknown adapter")?
+            .with_overlay(&capability_overlay)
             .check_launch(&provenant_records::LaunchRequest {
                 resume: resume.is_some(),
                 write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
                 network: task.access.network,
                 skill_location: task.profile.require_skill_location,
+                gap_policy: provenant_records::GapPolicy::default(),
                 ..Default::default()
             });
         if let Some(decision) = check.refusal() {
@@ -3198,6 +3222,7 @@ pub(super) fn prepare_candidates_inner(
     host_native: Option<&str>,
     #[cfg(test)] alter_availability: Option<&AlterAvailability<'_>>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    let capability_overlay = launch_capability_overlay(registry);
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(
             registry,
@@ -4059,18 +4084,21 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(skipped);
             continue;
         }
-        if let Some(spec) = AdapterSpec::get(&route.adapter)
-            && let Some(error) = request
+        if let Some(spec) = AdapterSpec::get(&route.adapter) {
+            let spec = spec.with_overlay(&capability_overlay);
+            let gap_policy = capability_overlay.gap_policy(spec.identity.name, &launch_policy);
+            if let Some(error) = request
                 .intent
-                .check_launch(spec, &route.model, route.effort.as_deref())
+                .check_launch(&spec, &route.model, route.effort.as_deref(), gap_policy)
                 .refusal()
-        {
-            reason_boundaries.insert(
-                reasons.len(),
-                provenant_records::diagnostic::BoundaryClass::Authority,
-            );
-            reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
-            continue;
+            {
+                reason_boundaries.insert(
+                    reasons.len(),
+                    provenant_records::diagnostic::BoundaryClass::Authority,
+                );
+                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                continue;
+            }
         }
         let effective = config.domains.routing.model_policy.effective(
             &catalogue,
@@ -5724,18 +5752,23 @@ pub(super) fn prepare_candidates_inner(
             push_launch_warning(&mut route, warning);
         }
         let image_input = !task.access.attachments.is_empty();
-        if let Some(spec) = AdapterSpec::get(&route.adapter)
-            && let Some(decision) = spec
+        if let Some(spec) = AdapterSpec::get(&route.adapter) {
+            let spec = spec.with_overlay(&capability_overlay);
+            let gap_policy = capability_overlay.gap_policy(spec.identity.name, &launch_policy);
+            if let Some(decision) = spec
                 .check_launch(&provenant_records::LaunchRequest {
                     image_input,
+                    gap_policy,
                     ..Default::default()
                 })
                 .degraded(provenant_records::LaunchField::ImageInput)
-        {
-            push_launch_warning(
-                &mut route,
-                format!("warning: {decision}; attachments remain readable"),
-            );
+                && decision.warn
+            {
+                push_launch_warning(
+                    &mut route,
+                    format!("warning: {decision}; attachments remain readable"),
+                );
+            }
         }
         // A read-only lane builds in its scratch by design. No writer launch
         // exports a target; warn if an adapter still points one into the lane's
@@ -7095,6 +7128,69 @@ mod attachment_tests {
                 .degraded(provenant_records::LaunchField::ImageInput)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_disabled_image_input_names_the_overlay_and_off_silences_it() {
+        use provenant_records::{
+            AdapterOverride, CapabilityOverlay, Layer, OVERLAY_SOURCE, OverridableCapability,
+            Source,
+        };
+        let overlay = CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "cursor".into(),
+                disable: vec![OverridableCapability::ImageInput],
+                reason: Some("no attachments in this lane".into()),
+                on_gap: vec![],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: None,
+                },
+            }],
+        };
+        let gap = AdapterSpec::get("cursor")
+            .unwrap()
+            .with_overlay(&overlay)
+            .check_launch(&provenant_records::LaunchRequest {
+                image_input: true,
+                gap_policy: provenant_records::GapPolicy::default(),
+                ..Default::default()
+            })
+            .degraded(provenant_records::LaunchField::ImageInput)
+            .expect("a disabled image input degrades");
+        assert_eq!(gap.source, OVERLAY_SOURCE);
+        assert!(gap.warn);
+        let warning = format!("warning: {gap}; attachments remain readable");
+        assert!(warning.contains("cursor") && warning.contains("image input"));
+        assert!(warning.contains(OVERLAY_SOURCE));
+
+        let off = CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "cursor".into(),
+                disable: vec![OverridableCapability::ImageInput],
+                reason: None,
+                on_gap: vec![(
+                    provenant_records::LaunchField::ImageInput,
+                    provenant_records::GapAction::Off,
+                )],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: None,
+                },
+            }],
+        };
+        let policy = off.gap_policy("cursor", &provenant_records::policy::Policy::default());
+        let silent = AdapterSpec::get("cursor")
+            .unwrap()
+            .with_overlay(&off)
+            .check_launch(&provenant_records::LaunchRequest {
+                image_input: true,
+                gap_policy: policy,
+                ..Default::default()
+            })
+            .degraded(provenant_records::LaunchField::ImageInput)
+            .expect("off still degrades rather than refusing");
+        assert!(!silent.warn);
     }
 }
 

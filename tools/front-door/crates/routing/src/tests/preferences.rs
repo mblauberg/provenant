@@ -135,7 +135,12 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         assert_eq!(
             query
                 .intent
-                .check_launch(&narrow, "gpt-5.3-codex-low", None)
+                .check_launch(
+                    &narrow,
+                    "gpt-5.3-codex-low",
+                    None,
+                    provenant_records::GapPolicy::default(),
+                )
                 .refusal()
                 .is_none(),
             expected == "cursor"
@@ -283,6 +288,138 @@ fn an_exact_pin_drops_an_undeclared_effort_with_a_sourced_warning()
     assert!(warning.applied.is_none());
     assert_eq!(warning.source, ADAPTER_ROW_SOURCE);
     assert_eq!(warning.reason, "no effort control");
+    Ok(())
+}
+
+#[test]
+fn an_adapter_entry_can_refuse_an_exact_pin_effort_gap() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::{
+        ADAPTER_ROW_SOURCE, AdapterFact, AdapterOverride, AdapterSpec, CapabilityOverlay,
+        GapAction, LaunchField, Layer, Source,
+    };
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config.capability_overlay = CapabilityOverlay {
+        entries: vec![AdapterOverride {
+            adapter: "codex".into(),
+            disable: vec![],
+            reason: Some("owner requires an effort control".into()),
+            on_gap: vec![(LaunchField::Effort, GapAction::Refuse)],
+            source: Source {
+                layer: Layer::Project,
+                origin: Some(".provenant/config.toml#adapter_capabilities".into()),
+            },
+        }],
+    };
+    let mut no_effort = *AdapterSpec::get("codex").unwrap();
+    no_effort.capabilities.launch.effort =
+        AdapterFact::unsupported("no effort control", ADAPTER_ROW_SOURCE);
+    let lookup = |adapter: &str| {
+        if adapter == "codex" {
+            Some(no_effort)
+        } else {
+            AdapterSpec::get(adapter).copied()
+        }
+    };
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.launch_specs = Some(&lookup);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.effort = Some("high".into());
+    let error = match resolve(&query, &ctx) {
+        Err(RoutingError::UnsupportedLaunch(error)) => error,
+        _ => panic!("an owner refuse gap must reject the exact pin"),
+    };
+    assert!(error.contains("no effort control"));
+    assert!(error.contains("action set by an adapter_capabilities entry"));
+    Ok(())
+}
+
+#[test]
+fn an_off_effort_gap_drops_the_selector_without_a_warning() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_records::{ADAPTER_ROW_SOURCE, AdapterFact, AdapterSpec, policy::Strength};
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    let rule = config
+        .launch_policy
+        .rules
+        .iter_mut()
+        .find(|entry| entry.rule.code == "LAUNCH_EFFORT_UNSUPPORTED")
+        .ok_or("LAUNCH_EFFORT_UNSUPPORTED is declared")?;
+    rule.rule.strength = Strength::Off;
+    let mut no_effort = *AdapterSpec::get("codex").unwrap();
+    no_effort.capabilities.launch.effort =
+        AdapterFact::unsupported("no effort control", ADAPTER_ROW_SOURCE);
+    let lookup = |adapter: &str| {
+        if adapter == "codex" {
+            Some(no_effort)
+        } else {
+            AdapterSpec::get(adapter).copied()
+        }
+    };
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.launch_specs = Some(&lookup);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.effort = Some("high".into());
+    let route = resolve(&query, &ctx)?;
+    assert!(route.effort.is_none());
+    assert!(route.diagnostics.effort_warning.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_disabled_write_fact_refuses_with_the_overlay_source() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_records::{
+        AdapterOverride, CapabilityOverlay, Layer, OVERLAY_SOURCE, OverridableCapability, Source,
+    };
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config.capability_overlay = CapabilityOverlay {
+        entries: vec![AdapterOverride {
+            adapter: "codex".into(),
+            disable: vec![OverridableCapability::Write],
+            reason: None,
+            on_gap: vec![],
+            source: Source {
+                layer: Layer::Project,
+                origin: None,
+            },
+        }],
+    };
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.intent.writes = true;
+    let error = match resolve(&query, &ctx) {
+        Err(RoutingError::UnsupportedLaunch(error)) => error,
+        _ => panic!("a disabled write fact must refuse the route"),
+    };
+    assert!(error.contains("write"));
+    assert!(error.contains(OVERLAY_SOURCE));
     Ok(())
 }
 

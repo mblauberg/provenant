@@ -2548,9 +2548,18 @@ fn candidate(
     #[cfg(not(test))]
     let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
     if let Some(spec) = spec {
-        let check = intent.check_launch(&spec, model.model(), effort);
+        // Owner entries can narrow a row's facts; routing reads the effective
+        // spec, never the raw row. The gap policy joins the already layered
+        // launch policy with that adapter's `on_gap` overrides.
+        let spec = spec.with_overlay(&context.config.capability_overlay);
+        let gap_policy = context
+            .config
+            .capability_overlay
+            .gap_policy(spec.identity.name, &context.config.launch_policy);
+        let check = intent.check_launch(&spec, model.model(), effort, gap_policy);
         // A refusal or a missing model control makes the candidate ineligible:
         // pools and fallbacks move on, and an exact pin reports the decision.
+        // An owner-set `refuse` gap is a refusal here, even on an exact pin.
         if let Some(decision) = check
             .refusal()
             .or_else(|| check.degraded(provenant_records::LaunchField::Model))
@@ -2559,13 +2568,16 @@ fn candidate(
         }
         // A missing effort control degrades. Pools prefer a fallback; an exact
         // route drops the selector and records the declaration in the envelope.
+        // An `off` gap drops it silently instead.
         if let Some(decision) = check.degraded(provenant_records::LaunchField::Effort) {
             let requested = effort.map(str::to_owned);
             if for_pool {
                 return Err(RoutingError::UnsupportedLaunch(decision.to_string()));
             }
-            effort_gap = Some((requested, decision.source, decision.reason));
             effort = None;
+            if decision.warn {
+                effort_gap = Some((requested, decision.source, decision.reason));
+            }
         }
     }
     let access = context.access.iter().find(|a| a.adapter == model.adapter());

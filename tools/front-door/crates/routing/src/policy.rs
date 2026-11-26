@@ -28,6 +28,7 @@ impl RouteIntent {
         spec: &provenant_records::AdapterSpec,
         model: &str,
         effort: Option<&str>,
+        gap_policy: provenant_records::GapPolicy,
     ) -> provenant_records::LaunchCheck {
         spec.check_launch(&provenant_records::LaunchRequest {
             model: Some(model),
@@ -37,7 +38,7 @@ impl RouteIntent {
             network: self.network,
             write: self.writes,
             skill_location: self.skill_location,
-            gap_policy: provenant_records::GapPolicy::default(),
+            gap_policy,
         })
     }
 }
@@ -997,7 +998,12 @@ mod tests {
         ] {
             assert_eq!(
                 intent
-                    .check_launch(&narrow, "model", None)
+                    .check_launch(
+                        &narrow,
+                        "model",
+                        None,
+                        provenant_records::GapPolicy::default(),
+                    )
                     .refusal()
                     .map(|e| e.field),
                 expected
