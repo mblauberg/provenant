@@ -298,11 +298,11 @@ fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<()
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         for entry in REGISTRY.iter().filter(|entry| {
             provenant_records::AdapterSpec::get(entry.adapter.id())
-                .is_some_and(|spec| spec.launch.model)
+                .is_some_and(|spec| spec.capabilities.launch.model.value)
         }) {
             let id = entry.adapter.id();
             let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
-            let authentication = declaration.authentication;
+            let authentication = declaration.login.authentication;
             let plan = fixture_access_plan(access, authentication, false);
             let mut route = route(id, "fixture-model");
             route.account_key = None;
@@ -453,13 +453,13 @@ fn model_adapters_follow_declared_prompt_transport_without_exposing_tokens()
     let repo = Path::new("/fixture/repo");
     for entry in REGISTRY.iter().filter(|entry| {
         provenant_records::AdapterSpec::get(entry.adapter.id())
-            .is_some_and(|spec| spec.launch.model)
+            .is_some_and(|spec| spec.capabilities.launch.model.value)
     }) {
         let id = entry.adapter.id();
         let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
         let mut route = route(id, "fixture-model");
         route.account_key = None;
-        let plan = read_only_plan("/fixture", declaration.authentication);
+        let plan = read_only_plan("/fixture", declaration.login.authentication);
         let prepared = entry.adapter.prepare(fixture_input(
             &route,
             &plan,
@@ -472,7 +472,7 @@ fn model_adapters_follow_declared_prompt_transport_without_exposing_tokens()
             cargo_home_path(&prepared),
             Path::new("/fixture/home/.cargo")
         );
-        if declaration.argv_prompt {
+        if declaration.launch.argv_prompt {
             assert!(prepared.argv.iter().any(|arg| arg == prompt.text()));
         } else {
             assert_eq!(
@@ -529,11 +529,11 @@ fn read_only_launch_requires_cwd_inside_a_declared_read_root() -> Result<(), Pro
     let token = fixture_token();
     for entry in REGISTRY.iter().filter(|entry| {
         provenant_records::AdapterSpec::get(entry.adapter.id())
-            .is_some_and(|declaration| declaration.launch.model)
+            .is_some_and(|declaration| declaration.capabilities.launch.model.value)
     }) {
         let id = entry.adapter.id();
         let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
-        let plan = read_only_plan("/fixture", declaration.authentication);
+        let plan = read_only_plan("/fixture", declaration.login.authentication);
         let mut route = route(id, "fixture-model");
         route.account_key = None;
         assert!(matches!(

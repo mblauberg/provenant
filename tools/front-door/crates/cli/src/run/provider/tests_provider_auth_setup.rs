@@ -1075,7 +1075,7 @@ fn launch_prompt_preserves_admitted_text_when_host_additions_exceed_one_mib()
             provenant_records::diagnostic::Layer::Host,
             &provenant_records::policy::Policy::default(),
         )?;
-        if AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt) {
+        if AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.argv_prompt) {
             assert_eq!(
                 std::fs::read_to_string(prompt.file().ok_or("expected spill file")?)?,
                 text

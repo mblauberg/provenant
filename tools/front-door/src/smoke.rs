@@ -418,7 +418,14 @@ pub(crate) fn sweep_fixtures(
             .filter(|marker| marker.schema_version == 1 && marker.nonce == name);
         let Some(marker) = marker else {
             let message = format!("smoke fixture {name} has no ownership marker; left in place");
-            warn(Warning::new(SMOKE_FIXTURE_FOREIGN, message.clone()).once_per_change());
+            warn(
+                Warning::new(
+                    SMOKE_FIXTURE_FOREIGN,
+                    message.clone(),
+                    provenant_records::warning::detected_source(SMOKE_FIXTURE_FOREIGN),
+                )
+                .once_per_change(),
+            );
             warnings.push(message);
             continue;
         };
@@ -667,7 +674,14 @@ pub(crate) fn report_smoke_cleanup<T>(
         return outcome;
     };
     let warning = format!("smoke fixture binding was not removed: {error}");
-    warn(Warning::new(SMOKE_BINDING_RETAINED, warning.clone()).once_per_change());
+    warn(
+        Warning::new(
+            SMOKE_BINDING_RETAINED,
+            warning.clone(),
+            provenant_records::warning::detected_source(SMOKE_BINDING_RETAINED),
+        )
+        .once_per_change(),
+    );
     match outcome {
         Ok(output) => Ok(output),
         Err(error) => Err(format!("{error}\n{warning}")),
@@ -957,7 +971,14 @@ pub(crate) fn run_lifecycle(
     let cleanup_result = peer_cleanup.and(local_cleanup);
     cleanup_phase.1 = clock.mono_now();
     if let SmokeVerdict::Unverified { cause, reason } = &verdict {
-        warn(Warning::new(cause.code(), reason.clone()).once_per_change());
+        warn(
+            Warning::new(
+                cause.code(),
+                reason.clone(),
+                provenant_records::warning::detected_source(cause.code()),
+            )
+            .once_per_change(),
+        );
     }
     if !warnings.is_empty() {
         if !output.is_empty() {

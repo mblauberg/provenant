@@ -562,6 +562,9 @@ pub(crate) fn run(
                 "--over creates {} nodes; check comma-separated items",
                 request.over.len()
             ),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::ARGUMENT_VALUE_SUSPECT,
+            ),
         ));
     }
     // `run smoke` is the hermetic lifecycle, not a graph against the caller's
@@ -588,6 +591,9 @@ pub(crate) fn run(
                 warn(Warning::new(
                     provenant_records::warning::SMOKE_PROJECT_IGNORED,
                     "run smoke ignores --project and uses a hermetic fixture",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::SMOKE_PROJECT_IGNORED,
+                    ),
                 ));
             }
             return smoke_lifecycle(&request, globals, &resolved, &smoke_settings, &smoke_origin);
@@ -609,6 +615,9 @@ pub(crate) fn run(
             format!(
                 "run smoke --explain effective settings:\n{}",
                 smoke_settings.explain(&smoke_origin)
+            ),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::LAUNCH_ADVISORY,
             ),
         ));
     }
@@ -661,6 +670,9 @@ pub(crate) fn run(
             warn(Warning::new(
                 provenant_records::warning::MODEL_SEGMENT_ADVISORY,
                 warning,
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::MODEL_SEGMENT_ADVISORY,
+                ),
             ));
         }
     }

@@ -5,7 +5,7 @@ pub(crate) fn decode_source(
     capture: &provenant_quota::ProbeCapture,
 ) -> Result<QuotaSnapshot, QuotaError> {
     super::decode_source(
-        provenant_records::Harness::Agy.spec().name,
+        provenant_records::Harness::Agy.spec().identity.name,
         plan,
         capture,
         decode_agy,

@@ -439,6 +439,53 @@ impl Inspection {
         }
     }
 }
+/// Advisory: attempt scratch above the configured share of free space. A
+/// bounded, read-only census; an incomplete observation never claims safety or
+/// danger it did not measure.
+fn warn_on_attempt_scratch(roots: &provenant_core::Roots) {
+    let Ok(config) = provenant_cli::config_reads::show_for(roots, "check config") else {
+        return;
+    };
+    let share = config.gc.scratch_warning_share_value();
+    if share <= 0.0 {
+        return;
+    }
+    let scratch = roots.state.as_path().join(provenant_run::ATTEMPT_SCRATCH);
+    let mut census = provenant_os::disk::DiskReport::with_walk_budget(
+        scratch.clone(),
+        0,
+        10_000,
+        Duration::from_millis(500),
+    )
+    .with_cancellation(CancelToken::new());
+    // The whole census is summed below, so the measured entry's index is not
+    // needed; discard the `#[must_use]` observation explicitly.
+    let _ = census.measure("attempt_scratch", &scratch);
+    let bytes = census.entries.iter().fold(0_u64, |sum, entry| {
+        sum.saturating_add(entry.allocated_bytes)
+    });
+    let Ok(free) = provenant_confinement::disk::available_bytes_at_existing(roots.state.as_path())
+    else {
+        return;
+    };
+    if scratch_exceeds_share(bytes, free, share) {
+        warn(
+            Warning::new(
+                provenant_records::warning::ATTEMPT_SCRATCH_HIGH,
+                format!(
+                    "attempt scratch holds {bytes} bytes with {free} bytes free, above gc.scratch_warning_share={share}; run `provenant gc --apply` to reclaim settled scratch"
+                ),
+                provenant_records::warning::detected_source(provenant_records::warning::ATTEMPT_SCRATCH_HIGH),
+            )
+            .subject(scratch.display().to_string()),
+        );
+    }
+}
+
+fn scratch_exceeds_share(bytes: u64, free: u64, share: f64) -> bool {
+    (bytes as f64) > (free as f64) * share
+}
+
 fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
     let workspace = if matches!(check, Inspectable::Release { .. }) {
         roots::Workspace::Checkout
@@ -452,6 +499,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
         roots,
         ..
     } = roots::resolve(globals, workspace, roots::Product::Required)?;
+    warn_on_attempt_scratch(&roots);
     let selector = (
         env!("PROVENANT_SOURCE_DIGEST"),
         assets.as_os_str().as_encoded_bytes(),
@@ -520,6 +568,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::POOL_EFFORT_UNSUPPORTED,
                     message,
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::POOL_EFFORT_UNSUPPORTED,
+                    ),
                 ));
             }
             for message in
@@ -528,6 +579,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::PORT_DECLARATION_IGNORED,
                     message,
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::PORT_DECLARATION_IGNORED,
+                    ),
                 ));
             }
             Ok(provenant_cli::check::config_page(
@@ -617,7 +671,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::AGENT_TOOLCHAIN_PATH,
                     message,
-                ));
+                 provenant_records::warning::detected_source(provenant_records::warning::AGENT_TOOLCHAIN_PATH)));
             }
             let apps = crate::apps::dir(&targets.home);
             let login_item = crate::apps::stale_login_item(&apps);
@@ -640,6 +694,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::STALE_LOGIN_ITEM_ADVISORY,
                     message,
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::STALE_LOGIN_ITEM_ADVISORY,
+                    ),
                 ));
             }
             Ok(result)
@@ -804,6 +861,9 @@ fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<
                 provenant_records::warning::Warning::new(
                     provenant_records::warning::PRIVATE_CHECK_DIR_UNCLEAN,
                     format!("cannot clean private check directory: {error}"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::PRIVATE_CHECK_DIR_UNCLEAN,
+                    ),
                 )
                 .once_per_change(),
             );
@@ -838,4 +898,21 @@ fn git_page(
             cancel: &cancel,
         })
     })
+}
+
+#[cfg(test)]
+mod scratch_warning_tests {
+    #[test]
+    fn small_positive_shares_keep_their_threshold() {
+        assert!(!super::scratch_exceeds_share(
+            99,
+            1_000_000_000,
+            0.000_000_1
+        ));
+        assert!(super::scratch_exceeds_share(
+            101,
+            1_000_000_000,
+            0.000_000_1
+        ));
+    }
 }

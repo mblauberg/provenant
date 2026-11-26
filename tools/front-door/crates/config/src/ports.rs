@@ -1658,6 +1658,7 @@ fn warn_malformed_port_file(path: &Path, error: &io::Error) {
         Warning::new(
             CONFIG_MALFORMED,
             format!("{file}: malformed port declaration ignored: {error}"),
+            provenant_records::warning::detected_source(CONFIG_MALFORMED),
         )
         .subject(file)
         .repair(format!(
@@ -1902,7 +1903,7 @@ fn apply_layer(
                         "{file}: schema_version: expected {}, found {version}; using the current schema",
                         PORTS_SCHEMA_VERSION
                     ),
-                )
+                 provenant_records::warning::detected_source(CONFIG_MALFORMED))
                 .subject(file.clone())
                 .repair(format!(
                     "set \"schema_version\": {PORTS_SCHEMA_VERSION} in {file}"

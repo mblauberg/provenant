@@ -258,6 +258,9 @@ pub enum Command {
     /// Run fast repository checks
     #[command(subcommand)]
     Check(Check),
+    /// Inspect declared adapter capabilities
+    #[command(subcommand)]
+    Adapter(Adapter),
     /// Run harness and git hook handlers
     #[command(subcommand)]
     Hook(Hook),
@@ -1227,6 +1230,19 @@ pub enum Rules {
 }
 pub use crate::check::Check;
 pub use crate::ci::Ci;
+/// Read the declared adapter capability matrix.
+#[derive(Clone, Debug, Subcommand)]
+pub enum Adapter {
+    /// Project the registry, compatibility and measured latency as JSON or text
+    Capabilities {
+        /// Show only these adapter ids; an unknown id warns and is skipped (repeatable)
+        #[arg(long = "adapter", value_name = "ID")]
+        adapters: Vec<String>,
+        /// Skip the harness version probe; compatibility reports `version_unread`
+        #[arg(long)]
+        no_probe: bool,
+    },
+}
 #[derive(Clone, Debug, Subcommand)]
 pub enum Hook {
     /// Handle git hook events
@@ -1428,6 +1444,9 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
             Warning::new(
                 provenant_records::warning::WAIT_BUDGET_CLAMPED,
                 format!("wait budget clamped to maximum {maximum}s"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::WAIT_BUDGET_CLAMPED,
+                ),
             )
             .repair("Request a smaller wait budget."),
         );

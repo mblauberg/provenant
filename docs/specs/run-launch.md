@@ -315,6 +315,120 @@ provenance but cannot resume a provider session or select model-specific control
 - Why: provider selection must not silently narrow a lane's working surface, and only the user
   may widen a read-only lane's write authority.
 
+### Launch capability decisions
+
+Before any side effect a launch checks each requested field against the adapter's declared
+`AdapterFact`s and reports a gap for every absent field in `LaunchField` order. Model, effort
+and image input degrade: a model gap makes the candidate ineligible so routing prefers a
+fallback; an effort gap on an exact pin drops the control with an `effort_warning` naming the
+declaration's reason and source, while a pool prefers a fallback; image attachments on an
+adapter without image input stay readable paths and produce a launch warning that lists them.
+Write, network, resume and skill-location gaps refuse the launch: they are confinement or
+continuity boundaries with no safe downgrade. A refusal names the adapter, the field, the
+reason and the source.
+- Why: a degraded input must stay visible in the result, and a boundary refusal must never
+  be silently narrowed.
+
+### Capability overrides and gap policy
+
+`[[adapter_capabilities]]` entries in the host and project overlays narrow an adapter's facts
+with `disable = [...]` and a `reason`; a later layer replaces the whole entry by adapter, and
+an unknown adapter or capability name warns and is skipped. Widening is not expressible.
+`on_gap.model`, `on_gap.effort` and `on_gap.image_input` set a degradable gap to `warn`, `off`
+or `refuse`; the `policy.LAUNCH_MODEL_UNSUPPORTED`, `policy.LAUNCH_EFFORT_UNSUPPORTED` and
+`policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED` rows set the same action for every adapter. One
+resolver decides each gap. Precedence, lowest first: the compiled default (`warn`); the policy
+row, layered host, project and dispatch by the policy table; the adapter's `on_gap` key, host
+then project. The adapter entry is the narrower setting, so it wins for that adapter at any
+layer, and the policy candidate it replaced is reported as shadowed. A gap names the layer and
+setting that chose its action; a default names both settings that can change it, for example
+`warn by default; set policy.LAUNCH_EFFORT_UNSUPPORTED or [[adapter_capabilities]]
+on_gap.effort`. `provenant adapter capabilities` reports each adapter's effective rules, and
+`run --explain` reports, per node and pinned adapter, the gaps that launch would meet with
+those sources. Write, network, resume and
+skill-location gaps always refuse because they are authority and continuity boundaries, so an
+`on_gap` key for them warns and is skipped. Admission and graph validation read the row facts;
+routing and preparation apply the overlay and gap policy before the provider starts.
+`provenant adapter capabilities` reports the effective facts and the layer that narrowed them.
+- Why: an owner may narrow a harness without editing the registry, and an override cannot
+  silently become an authority grant.
+
+### Adapter capability matrix
+
+`provenant adapter capabilities [--json]` projects the registry, the compatibility assessment
+and measured latency in the result envelope v2. The checked table below is the static part: it
+reads no host state, so the document never depends on a machine. A `no` value carries a
+footnote with its reason and source.
+
+<!-- adapter-capabilities:begin -->
+Declared adapter capabilities. A `no` value carries a footnote with its reason and source.
+
+| Adapter | Model | Effort | Image input | Resume | Write | Network | Default network | Lane | Chair | Terminal event | Answering model | Usage attribution | Live input | Session reference | Hooks | Answer delivery | Precompact context | Instructions |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| claude | yes | yes | yes | yes | yes | provider, local, open | open | continuation_only | mail_only | weak | stream | attempt | no[^1] | reported | yes | yes | yes | yes |
+| codex | yes | yes | yes | yes | yes | provider, local, open | open | continuation_only | mail_only | weak | rollout | session | no[^3] | reported | yes | yes | no[^2] | yes |
+| cursor | yes | yes | no[^7] | yes | yes | provider, local, open | open | continuation_only | mail_only | weak | stream | attempt | no[^8] | reported | yes | no[^4] | no[^5] | no[^6] |
+| agy | yes | yes | no[^11] | yes | yes | provider, local, open | open | continuation_only | mail_only | weak | stream | attempt | no[^12] | reported | yes | no[^9] | no[^10] | yes |
+| opencode | yes | yes | no[^14] | yes | yes | provider, local, open | open | continuation_only | mail_only | weak | session_database | attempt | no[^15] | reported | yes | no[^13] | yes | yes |
+| command | no[^18] | no[^19] | no[^20] | no[^21] | no[^22] | provider, local, open | open | unsupported | unsupported | no[^16] | unreported | attempt | no[^23] | no[^17] | - | - | - | - |
+| host-native | no[^25] | no[^26] | no[^27] | no[^28] | yes | provider, local, open | open | unsupported | unsupported | weak | stream | attempt | no[^29] | no[^24] | - | - | - | - |
+| fixture-provider | yes | no[^31] | no[^32] | no[^33] | no[^34] | provider, local, open | open | unsupported | unsupported | weak | stream | attempt | no[^35] | no[^30] | - | - | - | - |
+
+[^1]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^2]: precompact context: Codex PreCompact accepts only a systemMessage UI notice, not model context; source=https://developers.openai.com/codex/hooks
+[^3]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^4]: answer delivery: Cursor preToolUse does not accept the additionalContext response used by Provenant answer delivery; source=https://cursor.com/docs/hooks#pretooluse
+[^5]: precompact context: Cursor preCompact accepts only user_message output shown to the user, not model context; source=https://cursor.com/docs/hooks#precompact
+[^6]: instructions: Cursor global instructions are settings-managed; AGENTS.md is project-root scoped; source=https://docs.cursor.com/context/rules-for-ai
+[^7]: image input: cursor does not provide image input control; source=crates/records/src/adapters.rs
+[^8]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^9]: answer delivery: Antigravity PreToolUse returns a tool decision and argument overwrite, not injected context; source=https://antigravity.google/docs/hooks#input-and-output-contract
+[^10]: precompact context: Antigravity exposes no PreCompact event; source=https://antigravity.google/docs/hooks#supported-events
+[^11]: image input: agy does not provide image input control; source=crates/records/src/adapters.rs
+[^12]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^13]: answer delivery: OpenCode tool.execute.before hooks cannot inject additional context into the active session; source=https://opencode.ai/docs/build/plugins/server#tool-execution
+[^14]: image input: opencode does not provide image input control; source=crates/records/src/adapters.rs
+[^15]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^16]: absent: process exit is the contract for raw output; source=crates/records/src/adapters.rs
+[^17]: absent: raw output carries no session id; source=crates/records/src/adapters.rs
+[^18]: model: command does not provide model control; source=crates/records/src/adapters.rs
+[^19]: effort: command does not provide effort control; source=crates/records/src/adapters.rs
+[^20]: image input: command does not provide image input control; source=crates/records/src/adapters.rs
+[^21]: resume: command does not provide resume control; source=crates/records/src/adapters.rs
+[^22]: write: command does not provide write control; source=crates/records/src/adapters.rs
+[^23]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^24]: absent: the delegated adapter reports no provider session id; source=crates/records/src/adapters.rs
+[^25]: model: host-native does not provide model control; source=crates/records/src/adapters.rs
+[^26]: effort: host-native does not provide effort control; source=crates/records/src/adapters.rs
+[^27]: image input: host-native does not provide image input control; source=crates/records/src/adapters.rs
+[^28]: resume: host-native does not provide resume control; source=crates/records/src/adapters.rs
+[^29]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^30]: absent: the delegated adapter reports no provider session id; source=crates/records/src/adapters.rs
+[^31]: effort: fixture-provider does not provide effort control; source=crates/records/src/adapters.rs
+[^32]: image input: fixture-provider does not provide image input control; source=crates/records/src/adapters.rs
+[^33]: resume: fixture-provider does not provide resume control; source=crates/records/src/adapters.rs
+[^34]: write: fixture-provider does not provide write control; source=crates/records/src/adapters.rs
+[^35]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+<!-- adapter-capabilities:end -->
+
+### Harness version compatibility
+
+A bundled, empty table at `crates/routing/assets/harness-compatibility.toml` is overlaid by
+`[[harness_compatibility]]` entries in the host and project `config.toml` through
+`provenant_config::overlays::read_layers`; a later layer replaces the whole entry by adapter.
+An entry declares a `provenant_range`, an optional `recommended_range` and `ranges` of
+comma-separated comparators (`>=`, `>`, `<`, `<=`, `=`) over `MAJOR[.MINOR[.PATCH]]`; the first
+matching range wins and names `supported`, `unsupported` or `broken`. No entry or no matching
+range is `unlisted` and a version that cannot be read is `version_unread`. An entry whose
+`provenant_range` excludes this build's version is ignored, and an invalid entry is skipped
+with an overlay warning naming its layer. `HARNESS_VERSION_UNSUPPORTED` and
+`HARNESS_VERSION_BROKEN` warn by default and may be set to `off` or `refuse` through their
+`policy.*` knobs. The version probe is one bounded `--version` call per binary per process,
+cached by path, mtime and length, and controlled by `providers.<id>.version_probe` and
+`providers.<id>.version_probe_timeout_seconds`; there is no remote fetch.
+- Why: harness CLIs change weekly, and a stale version must be actionable without becoming
+  an accidental launch boundary.
+
 ### Lane access
 
 `LaneAccess` resolves `lanes.access` to `host` (default) or `isolated` ([ADR 0042](../adr/0042-lane-access-host-by-default.md)).

@@ -230,15 +230,51 @@ fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dy
     for (raw, terminal) in [(fixture!("codex/success.jsonl"), true), ("", false)] {
         let outcome = replay(&codex::Codex, raw, exit)?.1;
         assert_eq!(outcome.status(), OutcomeStatus::Failed);
-        assert_eq!(outcome.terminal(), terminal);
+        assert_eq!(outcome.terminal_event_seen(), terminal);
         assert_eq!(outcome.exit(), exit);
         let record = serde_json::to_value(&outcome)?;
         assert_eq!(
-            record.get("terminal"),
+            record.get("terminal_event_seen"),
             Some(&serde_json::Value::Bool(terminal))
         );
         assert_eq!(record.get("exit"), Some(&serde_json::to_value(exit)?));
     }
+    Ok(())
+}
+#[test]
+fn settlement_follows_the_declared_terminal_event() -> Result<(), ProviderError> {
+    // The command row declares terminal_event = Absent: a clean process exit is
+    // the contract, but no provider terminal event is claimed. The fabricated
+    // terminal for raw output is gone, so `terminal_event_seen()` is false here.
+    for (exit, expected) in [
+        (EXIT, OutcomeStatus::Success),
+        (
+            ExitObservation {
+                code: Some(7),
+                ..EXIT
+            },
+            OutcomeStatus::Failed,
+        ),
+        (
+            ExitObservation {
+                timed_out: true,
+                ..EXIT
+            },
+            OutcomeStatus::Partial,
+        ),
+    ] {
+        let outcome = replay(&command::Command, "some output\n", exit)?.1;
+        assert_eq!(outcome.status(), expected, "exit={exit:?}");
+        assert!(
+            !outcome.terminal_event_seen(),
+            "raw output claims no provider terminal event"
+        );
+    }
+    // A JSONL row declares terminal_event = Weak: a clean exit without a
+    // provider terminal event stays Partial.
+    let outcome = replay(&codex::Codex, "{\"type\":\"turn.started\"}\n", EXIT)?.1;
+    assert_eq!(outcome.status(), OutcomeStatus::Partial);
+    assert!(!outcome.terminal_event_seen());
     Ok(())
 }
 #[test]
@@ -873,7 +909,7 @@ fn usage_events(events: &[ProviderEvent]) -> Vec<&ProviderEvent> {
 /// semantics, so a recorded fixture's total is checked at the public boundary.
 fn usage_total(events: &[ProviderEvent], adapter: &str) -> provenant_records::Tokens {
     let spec = provenant_records::AdapterSpec::get(adapter).expect("declared adapter");
-    let mut accumulator = UsageAccumulator::new(spec.usage);
+    let mut accumulator = UsageAccumulator::new(spec.launch.usage);
     for event in usage_events(events) {
         let ProviderEvent::Usage(report) = event else {
             panic!("a usage event");
@@ -1085,8 +1121,8 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
             .iter()
             // Host-native delegates; the feature-gated fixture is injected by its test.
             .filter(|spec| spec.id != provenant_records::Harness::HostNative)
-            .filter(|spec| spec.name != "fixture-provider")
-            .map(|spec| spec.name)
+            .filter(|spec| spec.identity.name != "fixture-provider")
+            .map(|spec| spec.identity.name)
             .collect()
     );
     for entry in REGISTRY {
@@ -1102,8 +1138,10 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
             assert!(
                 !provenant_records::AdapterSpec::get(entry.adapter.id())
                     .unwrap()
+                    .capabilities
                     .launch
                     .model
+                    .value
             );
         }
     }

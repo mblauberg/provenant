@@ -131,7 +131,9 @@ crossing and there is no compatibility path afterwards. Owners keep the SQL
 narrow: rewrite only the rows and fields the new types cannot read, and make
 every walk total for any valid JSON. A row whose stored bytes are not valid JSON
 is skipped by the rewrite and fails only its own decode, because one damaged row
-must not block every writable open.
+must not block every writable open. An additive optional attempt field such as
+`first_output_at` needs no base bump or migration: an older row decodes to `None`,
+which is the true value for a time nothing recorded.
 - Why: additive changes preserve stored state, while a single declared rewrite
   lets a vocabulary change reach existing rows without a permanent decoder
   shim.
@@ -235,6 +237,9 @@ beside the type it owns, is:
   separately in the sealed profile and is not a configuration layer.
 - Config overlays use `OVERLAY_PRECEDENCE`: default, host, project. Host-project
   state reports as the host layer to owners.
+- `harness_compatibility` and `adapter_capabilities` are overlay tables keyed by
+  adapter: each effective entry reports the layer and origin that supplied it, and a
+  later layer replaces the whole entry.
 - Editable schema fields use `SCHEMA_PRECEDENCE`: default, profile, host.
 - Land policies use `LAND_PRECEDENCE`: default, host, project.
 - Graph templates use `TEMPLATE_PRECEDENCE`: default, host, project, launch.

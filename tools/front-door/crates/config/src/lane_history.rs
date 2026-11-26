@@ -139,6 +139,7 @@ fn resolve_setting<T: HistoryValue>(
                     Warning::new(
                         CONFIG_MALFORMED,
                         unknown_value(name, text, source, T::default().as_str()),
+                        provenant_records::warning::detected_source(CONFIG_MALFORMED),
                     )
                     .subject(name.to_owned())
                     .repair(format!("set {name} to a declared value"))

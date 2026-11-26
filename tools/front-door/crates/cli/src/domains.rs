@@ -16,6 +16,7 @@ pub struct Domains {
     pub wait: crate::wait::Settings,
     #[serde(default)]
     pub smoke: crate::smoke::Settings,
+    pub adapter: crate::adapter_capabilities::Settings,
     pub accounts: provenant_providers::accounts::Settings,
     pub quota: provenant_quota::Settings,
     pub routing: provenant_routing::RoutingConfig,
@@ -805,10 +806,11 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
 // A slice keeps the section count derived from the entries themselves. A
 // hand-maintained array length went stale when two branches each added a
 // section, breaking the build; there is no length here to forget to update.
-const ENTRIES: &[DomainSection] = &[
+static ENTRIES: &[DomainSection] = &[
     provenant_config::policy::SECTION,
     crate::wait::SECTION,
     crate::smoke::SECTION,
+    crate::adapter_capabilities::SECTION,
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
     provenant_routing::SECTION,
@@ -872,6 +874,10 @@ mod tests {
             ),
             ("wait", typed_paths::<crate::wait::Settings>()),
             ("smoke", typed_paths::<crate::smoke::Settings>()),
+            (
+                "adapter",
+                typed_paths::<crate::adapter_capabilities::Settings>(),
+            ),
             (
                 "accounts",
                 typed_paths::<provenant_providers::accounts::Settings>(),
@@ -943,6 +949,17 @@ mod tests {
             "deserializable domain settings without field metadata:\n{}",
             missing.join("\n")
         );
+    }
+
+    #[test]
+    fn adapter_capability_settings_are_registered() {
+        assert!(SECTIONS.entries.iter().any(|section| {
+            section.name == "adapter"
+                && section
+                    .fields
+                    .iter()
+                    .any(|field| field.path == "capabilities.measurements")
+        }));
     }
 
     // Spec: docs/specs/cli.md#configuration-schema-completeness
@@ -1365,6 +1382,12 @@ mod tests {
         ] {
             assert_eq!(field(path).kind, "enum");
         }
+        let adapter_samples = field("domains.adapter.capabilities.measurement_samples");
+        assert_eq!(adapter_samples.kind, "int");
+        assert_eq!(
+            (adapter_samples.min, adapter_samples.max),
+            (Some(1), Some(2000))
+        );
         let idle = field("gc.idle");
         assert_eq!(
             (idle.kind, idle.min, idle.max, &idle.default),

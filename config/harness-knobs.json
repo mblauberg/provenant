@@ -59,6 +59,11 @@
       "providers.{provider}.runtime_deadline_seconds",
       "providers.{provider}.stall_after_seconds",
       "providers.{provider}.stall_policy",
+      "providers.{provider}.version_probe",
+      "providers.{provider}.version_probe_timeout_seconds",
+      "domains.adapter.capabilities.measurements",
+      "domains.adapter.capabilities.measurement_samples",
+      "domains.adapter.capabilities.measurement_records",
       "providers.codex.clean_config",
       "gc.graph_checkpoint_days",
       "session.digest.scope"
@@ -178,6 +183,18 @@
       "values": ["report", "steer", "retry", "fail"],
       "default": "report",
       "effect": "Opt-in action after the stall is reported: report warns only; steer queues a steering turn; retry stops the provider and advances to the next route within the retry budget; fail stops it with a typed provider_stalled cause. All actions warn first."
+    },
+    "version_probe": {
+      "type": "bool",
+      "default": true,
+      "effect": "Probe the installed provider version from local executable metadata, cached by path, mtime and length with a bounded timeout; false skips the probe and leaves the version unknown."
+    },
+    "version_probe_timeout_seconds": {
+      "type": "int",
+      "min": 1,
+      "max": 60,
+      "default": 4,
+      "effect": "Time allowed for a local version probe before it is abandoned. Out-of-range values warn and use the compiled four-second default; the effective value and source appear in the warning."
     }
   },
   "host_run_settings": {
@@ -412,6 +429,56 @@
       "set.{parameter}": {"type": "string", "allowed": "any smoke.toml parameter with a value that parses for its type", "default": "unset", "status": "wired", "reader": "tools/front-door/src/smoke.rs", "effect": "Template parameters supplied under --set by configuration, merged below a command-line --set of the same key. The effective value and its source appear in the smoke result parameters block and in run smoke --explain.", "trade_off": "A configured parameter applies to every smoke run on the host; --set overrides it for one run."}
     }
   },
+  "domain_adapter_settings": {
+    "path": "domains.adapter.capabilities",
+    "settings": {
+      "measurements": {"type": "bool", "allowed": "true or false", "default": true, "effect": "Read terminal attempts from the run store for the adapter capability matrix. false reports measurements as null without opening the store."},
+      "measurement_samples": {"type": "int", "allowed": "1 to 2000 samples per adapter", "min": 1, "max": 2000, "default": "200", "effect": "At most this many latency samples are kept per adapter in the capability matrix; out-of-range values warn and use the compiled default."},
+      "measurement_records": {"type": "int", "allowed": "1 to 20000 attempts", "min": 1, "max": 20000, "default": "2000", "effect": "At most this many terminal attempts are inspected for the capability matrix; out-of-range values warn and use the compiled default."}
+    }
+  },
+  "adapter_capabilities_settings": {
+    "path": "adapter_capabilities",
+    "where": "`[[adapter_capabilities]]` entries in the host or project configuration (a project entry replaces the host entry for the same adapter)",
+    "settings": {
+      "adapter": {
+        "type": "string",
+        "allowed": "an adapter id from `provenant adapter capabilities`",
+        "default": "required",
+        "effect": "The adapter this entry narrows. An unknown adapter warns and the entry is skipped"
+      },
+      "disable": {
+        "type": "string_list",
+        "allowed": "model, effort, image_input, resume, write, live_input",
+        "default": "[]",
+        "effect": "Report these capabilities as unsupported for the adapter, with this entry's reason and source. A row's fact cannot be widened; an unknown name warns and is skipped"
+      },
+      "reason": {
+        "type": "string",
+        "allowed": "free text",
+        "default": "none",
+        "effect": "Why the entry narrows the adapter; shown by `provenant adapter capabilities`"
+      },
+      "on_gap.model": {
+        "type": "enum",
+        "allowed": "warn, off, refuse",
+        "default": "policy.LAUNCH_MODEL_UNSUPPORTED (warn)",
+        "effect": "Action when a launch asks this adapter for a model it does not support. Wins over policy.LAUNCH_MODEL_UNSUPPORTED for this adapter; the replaced policy value is shown as shadowed"
+      },
+      "on_gap.effort": {
+        "type": "enum",
+        "allowed": "warn, off, refuse",
+        "default": "policy.LAUNCH_EFFORT_UNSUPPORTED (warn)",
+        "effect": "Action when a launch asks this adapter for an effort it does not support. Wins over policy.LAUNCH_EFFORT_UNSUPPORTED for this adapter; the replaced policy value is shown as shadowed"
+      },
+      "on_gap.image_input": {
+        "type": "enum",
+        "allowed": "warn, off, refuse",
+        "default": "policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED (warn)",
+        "effect": "Action when a launch attaches images for an adapter without image input. Wins over policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED for this adapter; the replaced policy value is shown as shadowed"
+      }
+    }
+  },
   "host_graph_settings": {
     "path": "domains.fabric.graph",
     "settings": {
@@ -615,6 +682,11 @@
       "policy.CONFINEMENT_SOURCE_AGENT_CONFIG_NONE": {"type": "enum", "allowed": "warn, off", "default": "off", "effect": "Project-local agent configuration is not a credential boundary; operators may opt into overlap warnings. The setting source is named in each warning."},
       "policy.CREDENTIAL_ROOTS_OVERLAP_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Under host access, credential roots that overlap lane roots or cannot be resolved precisely warn with their paths, effective access and source, then preparation proceeds; isolated access keeps the existing refusals. The setting source is named in each warning."},
       "policy.LAUNCH_NATIVE_AUTH_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Host access warns and uses native provider authentication when managed authentication is unavailable or bypassed. The effective access and its source are named."},
+      "policy.HARNESS_VERSION_UNSUPPORTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A harness version an overlay marks unsupported warns and proceeds by default, naming the version, reason, issue and overlay layer; refuse selects a configured stop at launch and in check providers. The setting source is named in each warning."},
+      "policy.HARNESS_VERSION_BROKEN": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A harness version an overlay marks broken warns and proceeds by default, naming the version, reason, issue and overlay layer; refuse selects a configured stop at launch and in check providers. The setting source is named in each warning."},
+      "policy.LAUNCH_MODEL_UNSUPPORTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A declared model gap degrades the candidate to a fallback with a warning naming the field, reason and source; off degrades without a warning line, and refuse selects a configured stop. An adapter_capabilities on_gap entry overrides this policy for that adapter."},
+      "policy.LAUNCH_EFFORT_UNSUPPORTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A declared effort gap drops the control on an exact route and prefers a fallback in a pool, reporting an effort_warning naming the declaration; off drops it without a warning, and refuse selects a configured stop. An adapter_capabilities on_gap entry overrides this policy for that adapter."},
+      "policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Attachments on an adapter without image input stay readable paths and produce a sourced launch warning; off suppresses the warning, and refuse selects a configured stop. An adapter_capabilities on_gap entry overrides this policy for that adapter."},
       "policy.DECLARATION_JOURNAL_NEAR_FULL": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A declaration below 10% of its journal bound still succeeds and warns; the declaration is the sealed record, so a refusal would drop the lane's result. Off silences the warning without changing the bound. The setting source is named in each warning."},
       "policy.LAUNCH_FILTER_OPTIONAL_GRANTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Optional discovered grants that cannot be represented in SBPL are omitted and reported; required grants remain subject to confinement validation. Credential-overlapping discoveries warn with the path, effective access and source, and are retained under host access while isolated access keeps its omission. The setting source is named in each warning."},
       "policy.LAUNCH_LAUNCHSPEC_COMPLETE_TOOL_REQUIREMENTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unrepresentable optional write grants are omitted; unrepresentable library dependencies make the reported closure incomplete. The setting source is named in each warning."},
@@ -671,7 +743,6 @@
       "policy.GRAPH_LAND_REQUIRES_GATES": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A land node without a verdict and CI gate after its writer warns; the landing grant is a separate authority check. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.GRAPH_PR_EXCLUSIVE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Graph-level and node PR delivery both set: the node setting is ignored with a warning. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.GRAPH_HOST_NATIVE_FALLBACK": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A host-native route without a fallback warns. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
-      "policy.LAUNCH_FIELD_UNSUPPORTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A non-write launch field (model, effort, network, resume, skills) unsupported by the route is dropped with a warning; write support stays an authority refusal. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.SECRET_SHAPED_INPUT": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Secret-shaped input warns with its field path and proceeds; exact credential values are handled at their owning boundary. The setting source is named in each warning."},
       "policy.DIRTY_WRITER": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A writer worktree with uncommitted edits launches and records the dirty state; checked-out and detached writers stay refused. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.SOURCE_TREE_ENTRY_OMITTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A gitlink, unsupported object or oversized entry is omitted from the read-only view with a warning naming it. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},

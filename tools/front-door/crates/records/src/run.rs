@@ -2834,6 +2834,10 @@ pub struct AttemptRecord {
     /// Most recent supervisor-observed stdout/stderr activity while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<WallTime>,
+    /// First supervisor-observed stdout/stderr activity while running. Absent
+    /// when no output was observed; older records never recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_output_at: Option<WallTime>,
     /// Whether the observation checkpoint was absent or could be read and
     /// identity-checked. Used only for live coverage reporting.
     #[serde(skip)]
@@ -2985,13 +2989,17 @@ pub fn serialise_public_attempt<S: serde::Serializer>(
 }
 
 impl AttemptRecord {
-    /// Usage attributable to this attempt; unmarked Codex totals are session-wide.
+    /// Usage attributable to this attempt; session-attributed totals are
+    /// zeroed here unless the adapter marked them per attempt.
     pub fn effective_usage(&self) -> UsageRecord {
         if self
             .applied_route
             .as_ref()
             .and_then(|route| route.provider.as_deref())
-            == Some("codex")
+            .and_then(crate::AdapterSpec::get)
+            .is_some_and(|s| {
+                s.capabilities.usage_attribution.value == crate::UsageAttribution::Session
+            })
             && self.usage.per_attempt != Some(true)
         {
             UsageRecord::default()

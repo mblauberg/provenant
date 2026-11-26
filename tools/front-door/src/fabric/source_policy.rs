@@ -43,7 +43,9 @@ pub(super) fn read_source_choice(
                 )
             };
             provenant_records::warning::warn(provenant_records::warning::Warning::new(
-                code, message,
+                code,
+                message,
+                provenant_records::warning::detected_source(code),
             ));
             ReadSource::Auto
         }

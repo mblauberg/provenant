@@ -314,6 +314,9 @@ impl Settings {
                     format!(
                         "wait settings use compiled defaults; configuration unavailable: {reason}"
                     ),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                    ),
                 ));
                 let profile = provenant_config::Profile::default();
                 Ok((
@@ -404,6 +407,9 @@ impl Settings {
                 Warning::new(
                     provenant_records::warning::WAIT_BUDGET_CLAMPED,
                     format!("wait budget clamped to {maximum}s"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::WAIT_BUDGET_CLAMPED,
+                    ),
                 )
                 .subject(origin.describe(MAX_TIMEOUT_KEY)),
             );

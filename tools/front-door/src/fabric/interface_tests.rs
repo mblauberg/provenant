@@ -4919,6 +4919,7 @@ fn review_explain_applies_family_floor_to_launched_legs_and_reports_exclusions()
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let family = provenant_records::AdapterSpec::get("codex")
         .ok_or("adapter")?
+        .identity
         .family;
     let input = json!({
         "op": "run", "explain": true,
@@ -5023,6 +5024,7 @@ fn review_child_refuses_unknown_tier_under_advisory_default() -> Result {
     let factory = factory(&rig)?;
     let family = provenant_records::AdapterSpec::get("codex")
         .ok_or("adapter")?
+        .identity
         .family;
     // No `diversity` key: the advisory default must refuse the tier too.
     let child = json!({

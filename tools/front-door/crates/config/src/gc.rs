@@ -197,8 +197,8 @@ retention_classes! {
         owner: Run,
         adapter: attempt_scratch,
         eligibility: Declared,
-        detail: "released, unreserved attempt; finished work, unowned idle lifetime or over-cap scratch",
-        settings: ["gc.idle", "gc.attempt_scratch_max"],
+        detail: "released, unreserved attempt; finished work, unowned idle lifetime, over-cap scratch or unreadable record past the grace",
+        settings: ["gc.idle", "gc.attempt_scratch_max", "gc.scratch_grace"],
         triggers: GC
     },
     ProviderState => {
@@ -575,7 +575,7 @@ impl StoreSettings {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GcSettings {
     pub schedule: bool,
@@ -591,6 +591,18 @@ pub struct GcSettings {
     /// Per-attempt scratch size above which a settled attempt's scratch is
     /// collectible without waiting out `idle`. Zero disables the cap.
     pub attempt_scratch_max: String,
+    /// Bounded grace after an unreadable, invalid or custody-unproven run
+    /// record before its scratch becomes collectible. The grace starts at the
+    /// scratch tree's newest write, so a live writer keeps its own lifetime.
+    /// Zero collects as soon as the record cannot prove custody.
+    pub scratch_grace: String,
+    /// Wall time allowed for a read-only GC preview before it reports that the
+    /// remaining attempts need an applied pass. Distinct from `sweep_budget`,
+    /// which bounds an applied collection.
+    pub preview_budget: String,
+    /// Fraction of measured free space above which attempt scratch raises a
+    /// `check` warning. `0` disables the warning.
+    pub scratch_warning_share: f64,
     pub free_floor: Option<String>,
     /// Only this small critical threshold may stop new builds; free_floor warns.
     pub critical_free: Option<String>,
@@ -609,6 +621,9 @@ impl Default for GcSettings {
             discard_archive_retention: "14d".into(),
             cargo_target_idle: "30d".into(),
             attempt_scratch_max: "2G".into(),
+            scratch_grace: "1d".into(),
+            preview_budget: "1s".into(),
+            scratch_warning_share: 0.25,
             free_floor: None,
             critical_free: None,
             alert_below: None,
@@ -692,7 +707,11 @@ impl DiskGate {
         );
         match level {
             DiskLevel::Ready => Effect::Proceed,
-            DiskLevel::Warning => Effect::Warn(Warning::new(DISK_FLOOR_LOW, detail)),
+            DiskLevel::Warning => Effect::Warn(Warning::new(
+                DISK_FLOOR_LOW,
+                detail,
+                provenant_records::warning::detected_source(DISK_FLOOR_LOW),
+            )),
             DiskLevel::Critical => {
                 let mut policy = Policy::default();
                 policy.overlay(
@@ -730,6 +749,25 @@ impl GcSettings {
     /// `gc.idle`; zero disables the cap.
     pub fn attempt_scratch_max_bytes(&self) -> Result<u64, &'static str> {
         parse_cache_size(&self.attempt_scratch_max)
+    }
+
+    /// Bounded grace for unreadable or custody-unproven scratch, in seconds.
+    pub fn scratch_grace_seconds(&self) -> Result<u64, &'static str> {
+        parse_gc_idle_duration(&self.scratch_grace)
+    }
+
+    /// Wall time allowed for one read-only preview, in seconds.
+    pub fn preview_budget_seconds(&self) -> Result<u64, &'static str> {
+        parse_gc_idle_duration(&self.preview_budget)
+    }
+
+    /// Effective fraction of free space that triggers a scratch warning.
+    pub fn scratch_warning_share_value(&self) -> f64 {
+        if self.scratch_warning_share.is_finite() {
+            self.scratch_warning_share.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 
     /// Age after which gc offers to stop a stale graph, in seconds.
@@ -802,6 +840,13 @@ impl GcSettings {
         self.discard_archive_retention_seconds()?;
         self.cargo_target_idle_seconds()?;
         self.attempt_scratch_max_bytes()?;
+        self.scratch_grace_seconds()?;
+        self.preview_budget_seconds()?;
+        if !self.scratch_warning_share.is_finite()
+            || !(0.0..=1.0).contains(&self.scratch_warning_share)
+        {
+            return Err("scratch_warning_share_range");
+        }
         self.stale_graph_age_seconds()?;
         if !(1..=3650).contains(&self.graph_checkpoint_days) {
             return Err("graph_checkpoint_days_range");
@@ -1009,6 +1054,45 @@ mod tests {
             Err("invalid_cache_size")
         );
         assert_eq!(settings.validate(), Err("invalid_cache_size"));
+    }
+
+    #[test]
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    fn scratch_grace_preview_budget_and_warning_share_are_configurable() {
+        let mut settings = super::GcSettings::default();
+        assert_eq!(settings.scratch_grace_seconds(), Ok(86_400));
+        assert_eq!(settings.preview_budget_seconds(), Ok(1));
+        assert_eq!(settings.scratch_warning_share_value(), 0.25);
+        assert_eq!(settings.validate(), Ok(()));
+        settings.scratch_grace = "0".into();
+        settings.preview_budget = "5s".into();
+        settings.scratch_warning_share = 0.5;
+        assert_eq!(settings.scratch_grace_seconds(), Ok(0));
+        assert_eq!(settings.preview_budget_seconds(), Ok(5));
+        assert_eq!(settings.scratch_warning_share_value(), 0.5);
+        assert_eq!(settings.validate(), Ok(()));
+        for bad in ["", "1x", "18446744073709551615w"] {
+            settings.scratch_grace = bad.into();
+            assert_eq!(
+                settings.validate(),
+                Err("invalid_gc_idle_duration"),
+                "{bad}"
+            );
+            settings.scratch_grace = "1d".into();
+            settings.preview_budget = bad.into();
+            assert_eq!(
+                settings.validate(),
+                Err("invalid_gc_idle_duration"),
+                "{bad}"
+            );
+            settings.preview_budget = "1s".into();
+        }
+        for share in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
+            settings.scratch_warning_share = share;
+            assert_eq!(settings.validate(), Err("scratch_warning_share_range"));
+        }
+        settings.scratch_warning_share = 0.0;
+        assert_eq!(settings.validate(), Ok(()));
     }
 
     #[test]

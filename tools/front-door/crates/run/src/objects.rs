@@ -174,6 +174,7 @@ pub(crate) fn execute_bounded(
                 "lane Git import: {}",
                 String::from_utf8_lossy(&non_advice_stderr).trim_end()
             ),
+            provenant_records::warning::detected_source(LANE_GIT_IMPORT_STDERR),
         ));
     }
     Ok(output.stdout.bytes)
@@ -934,6 +935,9 @@ pub(crate) fn publish_branch(
                             "{warning}; {}; set {UNROOTED_TIP} to refuse to stop instead",
                             history.unrooted_tip.setting(UNROOTED_TIP),
                         ),
+                        provenant_records::warning::detected_source(
+                            LANE_HISTORY_PUBLICATION_ADJUSTED,
+                        ),
                     )
                     .subject(branch.to_owned()),
                 );
@@ -1005,7 +1009,14 @@ pub(crate) fn publish_branch(
                 history.rebase.setting(REBASE),
             )
         };
-        warn(Warning::new(LANE_HISTORY_PUBLICATION_ADJUSTED, message).subject(branch.to_owned()));
+        warn(
+            Warning::new(
+                LANE_HISTORY_PUBLICATION_ADJUSTED,
+                message,
+                provenant_records::warning::detected_source(LANE_HISTORY_PUBLICATION_ADJUSTED),
+            )
+            .subject(branch.to_owned()),
+        );
     }
     // The ancestor the publication established is the one judged on the lane
     // head before any host merge. A merge adds the host branch as a parent, so

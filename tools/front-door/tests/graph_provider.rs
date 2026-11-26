@@ -1649,17 +1649,25 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         "recovery must retain the selected remote tip before provisioning"
     );
     // Spec: docs/specs/cli.md#warnings-are-typed-values -- under
-    // --json warnings travel in the envelope, never on raw stderr.
+    // --json warnings travel in the envelope, never on raw stderr, each with
+    // its stable code and the source of the state that caused it.
+    let warnings = settled.launch_value["warnings"]
+        .as_array()
+        .ok_or("launch envelope warnings")?;
     assert!(
-        settled.launch_value["warnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| {
-                warning["code"] == "BRANCH_BEHIND_BASE"
-                    && warning["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains("ignoring --base"))
-            })),
-        "no BRANCH_BEHIND_BASE warning in the launch envelope: {combined}"
+        warnings.iter().all(|warning| warning["code"].is_string()),
+        "every launch warning carries a code: {combined}"
+    );
+    assert!(
+        warnings.iter().any(|warning| {
+            warning["code"] == "BRANCH_BEHIND_BASE"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("ignoring --base"))
+                && warning["source"]["layer"] == "detected"
+                && warning["source"]["origin"].is_string()
+        }),
+        "no sourced BRANCH_BEHIND_BASE warning in the launch envelope: {combined}"
     );
 
     let args = vec![
@@ -6504,6 +6512,62 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn run_json_carries_launch_warning_source_without_warning_stderr() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+    let account =
+        provenant_providers::identity::codex_account(auth).ok_or("Codex fixture account")?;
+    support::register_account(&rig, "codex", "fixture", &account, &rig.root.join("codex"))?;
+    let config = rig.state.join("config.toml");
+    let mut settings: toml_edit::DocumentMut = fs::read_to_string(&config)?.parse()?;
+    settings["unknown"] = toml_edit::value("fixture");
+    fs::write(&config, settings.to_string())?;
+    let document = rig.root.join("config-warning.json");
+    fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "config-warning",
+            "nodes": [{
+                "id": "reader",
+                "prompt": "fixture config warning",
+                "access": "read_only",
+                "route": {"adapter": "codex", "model": "gpt-6-luna"}
+            }]
+        }))?,
+    )?;
+
+    let (out, envelope) = rig.launch(&["--file", document.to_str().ok_or("document path")?])?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let warnings = envelope["warnings"].as_array().ok_or("warnings array")?;
+    let warning = warnings
+        .iter()
+        .find(|warning| warning["code"] == "CONFIG_KEY_IGNORED")
+        .ok_or("ignored config key warning")?;
+    assert_eq!(warning["source"]["layer"], "detected", "{warning}");
+    assert_eq!(
+        warning["source"]["origin"], "warning:CONFIG_KEY_IGNORED",
+        "{warning}"
+    );
+    assert!(
+        warnings.iter().all(|warning| {
+            warning["code"].as_str().is_some() && warning["source"]["layer"].as_str().is_some()
+        }),
+        "every envelope warning needs a code and source: {envelope}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr.bytes).contains("warning:"),
+        "JSON warning was also written to stderr: {out:?}"
+    );
+    cleanup.disarm();
+    Ok(())
+}
+
 /// Issue #3531: an exact model present in the cached discovered layer must
 /// resolve through the same effective catalogue `route list` uses, so launch
 /// emits no "not in the catalogue" warning. A genuinely unknown model still
@@ -6638,6 +6702,10 @@ fn main() -> ExitCode {
             (
                 "provider_checks_preserve_routes_and_settlement_causes",
                 provider_checks_preserve_routes_and_settlement_causes,
+            ),
+            (
+                "run_json_carries_launch_warning_source_without_warning_stderr",
+                run_json_carries_launch_warning_source_without_warning_stderr,
             ),
             (
                 "pending_graph_reports_pre_attempt_writer_failure",

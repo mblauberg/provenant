@@ -123,6 +123,9 @@ fn writer_dirty_setting(
             provenant_records::warning::warn(provenant_records::warning::Warning::new(
                 provenant_records::warning::CONFIG_UNAVAILABLE,
                 format!("writer dirty setting unavailable ({safe}); using default wip_commit"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                ),
             ));
             (None, "default".to_owned())
         }
@@ -253,6 +256,9 @@ fn preflight_writer_worktrees(
                     provenant_records::warning::Warning::new(
                         provenant_records::warning::PREFLIGHT_CONTINUE_IN_PLACE,
                         warning.clone(),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::PREFLIGHT_CONTINUE_IN_PLACE,
+                        ),
                     )
                     .subject(path.to_owned()),
                 );
@@ -290,6 +296,9 @@ fn preflight_writer_worktrees(
             provenant_records::warning::Warning::new(
                 provenant_records::warning::WORKTREE_ADOPTED_DIRTY,
                 warning,
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::WORKTREE_ADOPTED_DIRTY,
+                ),
             )
             .subject(path.clone()),
         );

@@ -11,6 +11,7 @@ pub use admission::{
     ResolvedAdmissionClass,
 };
 mod account_sync;
+pub mod adapter_capabilities;
 mod cache_budget;
 mod domains;
 mod edit;
@@ -297,7 +298,7 @@ fn close_matches(close: &[String]) -> String {
 }
 
 /// `D` is composition's closed, typed aggregate of registered domain sections.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResolvedConfig<D = NoDomains> {
     pub schema_version: u64,
     pub profile: Profile,

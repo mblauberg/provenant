@@ -106,6 +106,36 @@ class DocTruthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertEqual(result.stdout.count("unresolved spec citation"), 2, result.stdout)
 
+    def test_skill_declarations_cite_a_living_spec_section(self):
+        self.spec()
+        skill_dir = self.root / "skills/example"
+        skill_dir.mkdir(parents=True)
+        skill = skill_dir / "SKILL.md"
+        skill.write_text("# Example\n\nSpec: docs/specs/example.md#admission\n")
+        self.assertEqual(self.check("--inventory-only", source=False).returncode, 0)
+        skill.write_text(skill.read_text().replace("#admission", "#missing"))
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("skills/example/SKILL.md:3: error:", result.stdout)
+        self.assertIn("unresolved spec citation", result.stdout)
+
+    def test_bundled_review_skills_declare_the_fix_round_contract(self):
+        repo = SCRIPTS.parent
+        spec_heading = "### Fix-round invariants and split-verdict adjudication"
+        self.assertIn(spec_heading, (repo / "docs/specs/fabric.md").read_text())
+        citation = "Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication"
+        contract_terms = {
+            "code-review": ("invariant", "delta", "adjudication", "shared flaw"),
+            "deliver": (
+                "invariant", "sweep", "sites", "pin", "delta", "adjudication", "shared flaw",
+            ),
+        }
+        for name, terms in contract_terms.items():
+            text = (repo / "skills" / name / "SKILL.md").read_text()
+            for term in terms:
+                self.assertIn(term, text, f"{name}: {term}")
+            self.assertIn(citation, text, name)
+
     def test_github_heading_slugs_render_text_and_disambiguate_collisions(self):
         self.spec("## Signals: `StopCause` & **custody**!\n"
                   "## Signals: `StopCause` & **custody**!\n"

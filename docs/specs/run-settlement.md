@@ -207,7 +207,10 @@ A launch with an unknown acknowledgement is not replayed while custody remains u
 - Why: an unobserved provider may still be writing.
 
 Success requires an observed successful exit, matching provider identity and a validated
-non-empty result; capture bytes alone are not completion evidence. A complete read-only answer can
+non-empty result; capture bytes alone are not completion evidence. An adapter's declared terminal
+event decides whether a clean exit settles as success: `strong` requires the provider's terminal
+event stating success and outranks a clean exit, `weak` requires the provider's terminal event, and
+`absent` (raw command output) accepts a clean exit. A complete read-only answer can
 succeed without a handoff. A valid complete handoff before a host token-budget stop also succeeds
 when no unfinished-work signal remains, retaining the typed host stop and releasing dependants. A
 writer with non-exempt uncommitted work does not deliver it.

@@ -1,5 +1,5 @@
 //! The one way library code reports a warning: a typed value with a stable
-//! code, routed to a capture, the command's sink or stderr.
+//! code and structured source, routed to a capture or the command's sink.
 use crate::provenance::Source;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -17,9 +17,8 @@ pub struct Warning {
     /// What it is about: a path, key, branch, attempt or route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
-    /// The setting that caused it, when one did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<Source>,
+    /// The structured cause or origin of this event.
+    pub source: Source,
     /// One command or edit that clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair: Option<String>,
@@ -99,6 +98,8 @@ pub const CONFIG_UNAVAILABLE: WarningCode = WarningCode("CONFIG_UNAVAILABLE");
 pub const PROJECT_DIRECTORY_IGNORED: WarningCode = WarningCode("PROJECT_DIRECTORY_IGNORED");
 /// Free disk space fell below the configured floor; collection may proceed.
 pub const DISK_FLOOR_LOW: WarningCode = WarningCode("DISK_FLOOR_LOW");
+/// Attempt scratch holds more than the configured share of free space.
+pub const ATTEMPT_SCRATCH_HIGH: WarningCode = WarningCode("ATTEMPT_SCRATCH_HIGH");
 /// Native package cache settings could not be resolved safely and were kept.
 pub const PACKAGE_CACHE_SETTINGS_UNRESOLVED: WarningCode =
     WarningCode("PACKAGE_CACHE_SETTINGS_UNRESOLVED");
@@ -117,6 +118,8 @@ pub const ACCOUNT_SWITCH_RECONCILE_FAILED: WarningCode =
 pub const CHANGE_SIGNAL_UNPUBLISHED: WarningCode = WarningCode("CHANGE_SIGNAL_UNPUBLISHED");
 /// A detached worker's process-budget probe failed; the limit is unknown.
 pub const PROCESS_BUDGET_PROBE_FAILED: WarningCode = WarningCode("PROCESS_BUDGET_PROBE_FAILED");
+/// A provider setting was outside its declared range, so the compiled default applied.
+pub const PROVIDER_SETTING_OUT_OF_RANGE: WarningCode = WarningCode("PROVIDER_SETTING_OUT_OF_RANGE");
 
 // Warnings from the remaining library crates (w2-warn-lib-b): full meaning and
 // the sites that use each code are recorded beside the conversion in that
@@ -284,6 +287,10 @@ pub const LOCAL_GATE_ADVISORY: WarningCode = WarningCode("LOCAL_GATE_ADVISORY");
 pub const INSTALL_FINDING_ADVISORY: WarningCode = WarningCode("INSTALL_FINDING_ADVISORY");
 /// A wait budget exceeded its maximum and was clamped.
 pub const WAIT_BUDGET_CLAMPED: WarningCode = WarningCode("WAIT_BUDGET_CLAMPED");
+/// A wait inside a lane named no targets follows the lane's children instead.
+pub const WAIT_TARGET_FALLBACK: WarningCode = WarningCode("WAIT_TARGET_FALLBACK");
+/// A writer worktree carried an advisory that did not block the handoff.
+pub const WRITER_ADVISORY: WarningCode = WarningCode("WRITER_ADVISORY");
 /// The model catalogue could not be read; a bundled or empty catalogue applied.
 pub const MODEL_CATALOGUE_UNAVAILABLE: WarningCode = WarningCode("MODEL_CATALOGUE_UNAVAILABLE");
 /// Quota readiness could not be synchronised with its stored record.
@@ -421,14 +428,27 @@ pub const ROUTE_MODEL_NOT_CATALOGUED: WarningCode = WarningCode("ROUTE_MODEL_NOT
 /// succeeds; the named setting is the one to raise.
 pub const DECLARATION_JOURNAL_NEAR_FULL: WarningCode = WarningCode("DECLARATION_JOURNAL_NEAR_FULL");
 
+/// Source label for an observed event whose producer has no narrower provenance.
+pub fn detected_source(code: WarningCode) -> Source {
+    Source {
+        layer: crate::provenance::Layer::Detected,
+        origin: Some(format!("warning:{}", code.as_str())),
+    }
+}
+
+/// Drain warnings emitted without a command sink or an active capture.
+pub fn take_unhandled() -> Vec<Warning> {
+    UNHANDLED.with(|warnings| std::mem::take(&mut *warnings.borrow_mut()))
+}
+
 impl Warning {
-    /// A warning with no subject, source or repair.
-    pub fn new(code: WarningCode, message: impl Into<String>) -> Self {
+    /// A warning with its structured cause.
+    pub fn new(code: WarningCode, message: impl Into<String>, source: Source) -> Self {
         Self {
             code: Cow::Borrowed(code.0),
             message: message.into(),
             subject: None,
-            source: None,
+            source,
             repair: None,
             dedup: Dedup::default(),
         }
@@ -440,9 +460,9 @@ impl Warning {
         self
     }
 
-    /// Name the setting that caused it.
+    /// Replace the initial detected-event source with a more specific cause.
     pub fn source(mut self, source: Source) -> Self {
-        self.source = Some(source);
+        self.source = source;
         self
     }
 
@@ -504,8 +524,8 @@ impl Drop for SinkGuard {
 /// The only way library code reports a warning. Routes to, in order: the
 /// innermost capture on this thread; the process sink the binary installed
 /// for this command (one command per process, so worker threads reach it);
-/// else stderr as `warning: <message>`.
-#[allow(clippy::print_stderr, clippy::disallowed_methods)]
+/// else retains it for the caller to collect with [`take_unhandled`].
+#[allow(clippy::disallowed_methods)]
 pub fn warn(w: Warning) {
     let captured = CAPTURES.with(|captures| {
         let mut stack = captures.borrow_mut();
@@ -525,7 +545,7 @@ pub fn warn(w: Warning) {
         sink.accept(w);
         return;
     }
-    eprintln!("warning: {}", w.message);
+    UNHANDLED.with(|warnings| warnings.borrow_mut().push(w));
 }
 
 /// Thread-local: collects warnings raised on this thread inside `f` (tests, or
@@ -557,14 +577,20 @@ pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<Warning>) {
 
 thread_local! {
     static CAPTURES: RefCell<Vec<Vec<Warning>>> = const { RefCell::new(Vec::new()) };
+    static UNHANDLED: RefCell<Vec<Warning>> = const { RefCell::new(Vec::new()) };
 }
 
 static SINK: RwLock<Option<Arc<dyn Sink>>> = RwLock::new(None);
 
 #[cfg(test)]
 mod tests {
-    use super::{Dedup, NAME_CASE_FOLDED, Sink, Warning, capture, install, warn};
+    use super::{
+        Dedup, NAME_CASE_FOLDED, Sink, Warning, capture, detected_source, install, take_unhandled,
+        warn,
+    };
     use std::sync::{Arc, Mutex};
+
+    static SINK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Default)]
     struct Recorder {
@@ -593,8 +619,16 @@ mod tests {
             warn(Warning::new(
                 NAME_CASE_FOLDED,
                 "folded `Writer` to `writer`",
+                detected_source(NAME_CASE_FOLDED),
             ));
-            warn(Warning::new(NAME_CASE_FOLDED, "folded `Reader` to `reader`").subject("reader"));
+            warn(
+                Warning::new(
+                    NAME_CASE_FOLDED,
+                    "folded `Reader` to `reader`",
+                    detected_source(NAME_CASE_FOLDED),
+                )
+                .subject("reader"),
+            );
         });
         assert_eq!(warnings.len(), 2);
         assert_eq!(warnings[0].code.as_ref(), NAME_CASE_FOLDED.0);
@@ -603,15 +637,43 @@ mod tests {
 
     /// Spec: docs/specs/cli.md#warnings-are-typed-values
     #[test]
+    fn warning_without_a_sink_is_retained_for_the_caller() {
+        let _lock = SINK_TEST_LOCK.lock().expect("sink test lock");
+        let _ = take_unhandled();
+        warn(Warning::new(
+            NAME_CASE_FOLDED,
+            "folded `Reader` to `reader`",
+            detected_source(NAME_CASE_FOLDED),
+        ));
+        let warnings = take_unhandled();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].source.layer, crate::provenance::Layer::Detected);
+        assert_eq!(
+            warnings[0].source.origin.as_deref(),
+            Some("warning:NAME_CASE_FOLDED")
+        );
+    }
+
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
+    #[test]
     fn nested_sinks_restore_the_previous_one() {
+        let _lock = SINK_TEST_LOCK.lock().expect("sink test lock");
         let outer = Arc::new(Recorder::default());
         let inner = Arc::new(Recorder::default());
         let outer_guard = install(outer.clone());
         {
             let _inner_guard = install(inner.clone());
-            warn(Warning::new(NAME_CASE_FOLDED, "inner"));
+            warn(Warning::new(
+                NAME_CASE_FOLDED,
+                "inner",
+                detected_source(NAME_CASE_FOLDED),
+            ));
         }
-        warn(Warning::new(NAME_CASE_FOLDED, "outer"));
+        warn(Warning::new(
+            NAME_CASE_FOLDED,
+            "outer",
+            detected_source(NAME_CASE_FOLDED),
+        ));
         assert_eq!(inner.messages(), ["inner"]);
         assert_eq!(outer.messages(), ["outer"]);
         drop(outer_guard);
@@ -620,15 +682,27 @@ mod tests {
     /// Spec: docs/specs/cli.md#warnings-are-typed-values
     #[test]
     fn a_per_change_key_is_stable_for_equal_content_and_follows_the_subject() {
-        let first = Warning::new(NAME_CASE_FOLDED, "folded")
-            .subject("writer")
-            .once_per_change();
-        let same = Warning::new(NAME_CASE_FOLDED, "folded")
-            .subject("writer")
-            .once_per_change();
-        let other = Warning::new(NAME_CASE_FOLDED, "folded")
-            .subject("reader")
-            .once_per_change();
+        let first = Warning::new(
+            NAME_CASE_FOLDED,
+            "folded",
+            detected_source(NAME_CASE_FOLDED),
+        )
+        .subject("writer")
+        .once_per_change();
+        let same = Warning::new(
+            NAME_CASE_FOLDED,
+            "folded",
+            detected_source(NAME_CASE_FOLDED),
+        )
+        .subject("writer")
+        .once_per_change();
+        let other = Warning::new(
+            NAME_CASE_FOLDED,
+            "folded",
+            detected_source(NAME_CASE_FOLDED),
+        )
+        .subject("reader")
+        .once_per_change();
         assert_eq!(first.dedup, Dedup::PerChange);
         assert_eq!(first.key(), same.key());
         assert_ne!(first.key(), other.key());

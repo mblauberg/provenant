@@ -2,7 +2,10 @@
 //! process state; uncertain custody stays fenced and is reported as such.
 use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_core::{AttemptId, MessageId, OperationId, WallTime};
-use provenant_records::{custody::Scope, warning::Warning};
+use provenant_records::{
+    custody::Scope,
+    warning::{self, Warning},
+};
 use provenant_supervisor::{
     census::{ProcessObserver, SystemProcessObserver},
     custody::{self, CustodyError, Observation, RecoveryState, StopReceipt},
@@ -797,13 +800,16 @@ pub struct UnreadableAttempt {
 /// The one typed warning for an undecodable attempt record. Its subject carries
 /// the source path, schema and error; admission refusals stay fixed text.
 pub fn unreadable_record_warning(source: &UnreadableSource, released: bool) -> Warning {
-    use provenant_records::warning::{UNREADABLE_RECORD_HELD, UNREADABLE_RECORD_RELEASED};
+    use provenant_records::warning::{
+        UNREADABLE_RECORD_HELD, UNREADABLE_RECORD_RELEASED, detected_source,
+    };
+    let code = if released {
+        UNREADABLE_RECORD_RELEASED
+    } else {
+        UNREADABLE_RECORD_HELD
+    };
     Warning::new(
-        if released {
-            UNREADABLE_RECORD_RELEASED
-        } else {
-            UNREADABLE_RECORD_HELD
-        },
+        code,
         format!(
             "stored record for attempt {} could not be decoded; {}",
             source.attempt,
@@ -813,9 +819,17 @@ pub fn unreadable_record_warning(source: &UnreadableSource, released: bool) -> W
                 "its writer lease is retained because liveness could not be disproved"
             }
         ),
+        detected_source(code),
     )
     .subject(source.to_string())
     .repair("inspect the preserved copy under quarantine/, then rerun reconcile")
+}
+
+fn attributed_orphan_warning(message: String, attempt: impl ToString) -> Warning {
+    let code = warning::ORPHAN_PROCESS_ATTRIBUTED;
+    Warning::new(code, message, warning::detected_source(code))
+        .subject(attempt.to_string())
+        .once_per_change()
 }
 
 fn reservation_issue_blocks_report(reservation: &std::path::Path, issue: &std::path::Path) -> bool {
@@ -1291,6 +1305,7 @@ impl RunStore {
                     Warning::new(
                         warning::PROVIDER_STALLED,
                         "retrying the recorded stall stop request",
+                        provenant_records::warning::detected_source(warning::PROVIDER_STALLED),
                     )
                     .subject(record.attempt_id.to_string())
                     .once_per_change(),
@@ -1343,10 +1358,14 @@ impl RunStore {
             )?;
         }
         warning::warn(
-            Warning::new(warning::PROVIDER_STALLED, message)
-                .subject(record.attempt_id.to_string())
-                .source(source)
-                .once_per_change(),
+            Warning::new(
+                warning::PROVIDER_STALLED,
+                message,
+                provenant_records::warning::detected_source(warning::PROVIDER_STALLED),
+            )
+            .subject(record.attempt_id.to_string())
+            .source(source)
+            .once_per_change(),
         );
         match policy {
             StallPolicy::Report => Ok(None),
@@ -2822,7 +2841,6 @@ impl RunStore {
                 pids.sort_unstable();
                 pids.dedup();
                 if !report.reported.is_empty() {
-                    use provenant_records::warning::{self, Warning};
                     // A report-only process must remain visible in status
                     // while the attempt stays fenced, just like a stall.
                     let names = report
@@ -2842,11 +2860,7 @@ impl RunStore {
                             RECORD_LIMIT,
                         )?;
                     }
-                    warning::warn(
-                        Warning::new(warning::ORPHAN_PROCESS_ATTRIBUTED, message)
-                            .subject(record.attempt_id.to_string())
-                            .once_per_change(),
-                    );
+                    warning::warn(attributed_orphan_warning(message, record.attempt_id));
                 }
                 return Ok(Some(Reconciled::Escaped { pids }));
             }
@@ -4971,13 +4985,50 @@ impl RunStore {
             // Release does not finish the work. A follow-up may still need scratch.
             return Ok(None);
         }
+        let in_use = self.scratch_in_use(id)?;
+        let released = self.custody_released(record, call)?;
+        if !released && !in_use {
+            // Settlement releases scratch for a settled attempt whose custody
+            // proof never arrived once it has been idle past `gc.scratch_grace`.
+            // GC applies the same rule, so neither path alone strands it.
+            let grace = provenant_config::GcSettings::read(self.context.state_root.as_path())
+                .ok()
+                .and_then(|settings| settings.scratch_grace_seconds().ok())
+                .unwrap_or(86_400);
+            let policy = ScratchPolicy {
+                grace_seconds: grace,
+                ..ScratchPolicy::new(0)
+            };
+            let mut sizes = provenant_os::disk::DiskReport::with_walk_budget(
+                self.context.state_root.as_path().into(),
+                0,
+                10_000,
+                std::time::Duration::from_millis(500),
+            );
+            let mut grace_report = ProviderStateGc::default();
+            self.collect_grace_scratch(
+                &id.to_string(),
+                call.clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?,
+                false,
+                &policy,
+                call,
+                &RetentionScan::default(),
+                &mut sizes,
+                &mut grace_report,
+            )?;
+            if !grace_report.attempt_tmp.is_empty() {
+                return Ok(Some(Reconciled::TemporaryRemoved));
+            }
+        }
+        if !released || in_use {
+            return Ok(None);
+        }
         let _publication = attempt.try_lock_existing(
             std::ffi::OsStr::new("publication.lock"),
             provenant_os::fs::LockMode::Exclusive,
         )?;
-        if !self.custody_released(record, call)? || self.scratch_in_use(id)? {
-            return Ok(None);
-        }
         let remove = || -> Result<()> {
             match scratch.metadata_at(std::ffi::OsStr::new("tmp"), false) {
                 Err(error) if error.is_not_found() => return Ok(()),

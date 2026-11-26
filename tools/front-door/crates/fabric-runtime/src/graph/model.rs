@@ -1363,6 +1363,9 @@ pub enum NodeKind {
     Composite,
     Task,
     Synthesise,
+    /// Resolves conflicting per-head review verdicts into one verdict without
+    /// starting another review round.
+    Adjudicate,
     Gate,
     Loop,
     Decide,
@@ -1598,6 +1601,15 @@ pub struct RepairItem {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alternative: Option<String>,
+    /// The sweep query the writer ran to find every site of this invariant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<String>,
+    /// Every site the writer changed while pinning this invariant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sites: Option<Vec<String>>,
+    /// The test that pins this invariant so a recurrence is caught.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

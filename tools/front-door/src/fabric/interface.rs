@@ -1040,6 +1040,9 @@ impl Factory {
                         format!(
                             "full config unavailable ({error}); using the owner's resolved policy"
                         ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::CONFIG_UNAVAILABLE,
+                        ),
                     )
                     .subject(self.context.identity.project.to_string()),
                 );
@@ -1664,7 +1667,7 @@ impl Factory {
                     provenant_records::warning::Warning::new(
                         provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE,
                         format!("repository worktree inventory unavailable ({reason}); read roots are limited to the current directory"),
-                    )
+                     provenant_records::warning::detected_source(provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE))
                     .subject(self.cwd.display().to_string()),
                 );
                 vec![self.cwd.clone()]
@@ -2716,6 +2719,12 @@ impl Factory {
                     }));
                 }
             }
+            let capability_gaps = provenant_cli::adapter_capabilities::explain_capability_gaps(
+                &self.context.roots,
+                &self.context.identity.project.to_string(),
+                &config,
+                &expanded.nodes,
+            );
             let node_routes = self.explain_node_routes(&expanded.nodes);
             let source_admission = self.explain_source_admission(&expanded.nodes)?;
             let refused = source_admission
@@ -2733,6 +2742,7 @@ impl Factory {
                 .collect::<Vec<_>>();
             return Ok(json!({
                 "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
+                "capability_gaps": capability_gaps,
                 "reused_writer_bases": reused_writer_bases,
                 "node_routes": node_routes,
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
@@ -4371,6 +4381,9 @@ pub(super) fn warn_operator(warning: impl std::fmt::Display) {
         provenant_records::warning::Warning::new(
             provenant_records::warning::LAUNCH_ADVISORY,
             warning.to_string(),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::LAUNCH_ADVISORY,
+            ),
         )
         .once_per_change(),
     );

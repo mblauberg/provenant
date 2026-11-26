@@ -102,6 +102,9 @@ pub fn read_latest_approval_carry(
                             "failed to open approval carry receipt {}: {error}",
                             entry.path().display()
                         ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::APPROVAL_RECEIPT_UNREADABLE,
+                        ),
                     )
                     .subject(entry.path().display().to_string()),
                 );
@@ -118,6 +121,9 @@ pub fn read_latest_approval_carry(
                             format!(
                                 "corrupt approval carry receipt in {}: {error}",
                                 entry.path().display()
+                            ),
+                            provenant_records::warning::detected_source(
+                                provenant_records::warning::APPROVAL_RECEIPT_UNREADABLE,
                             ),
                         )
                         .subject(entry.path().display().to_string()),

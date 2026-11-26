@@ -3,12 +3,16 @@
 
 mod adapters;
 pub use adapters::{
-    ADAPTER_SPECS, AccountIdentityProbe, AccountModelPlan, AccountQuota, AdapterSpec,
-    COMMAND_OUTPUT_TAIL_BYTES, CapabilitySupport, ClientEnvMarkers, GithubAuth, HarnessInstall,
-    HookAction, HookEvent, HookProtocol, HookTimeoutUnit, INSTRUCTION_ASSET, LaunchCapabilities,
-    LaunchField, LaunchRequest, LoginObservation, LoginReprobe, ModelListingFormat,
-    ModelObservation, NamedEntry, NativeAuthWarning, QuotaProbeKind, SetupRoot, SkillLocation,
-    StreamContract, UnsupportedLaunch, UpdateCommand, normalise_model_id,
+    ADAPTER_ROW_REASON, ADAPTER_ROW_SOURCE, ADAPTER_SPECS, AccountIdentityProbe, AccountModelPlan,
+    AccountQuota, AdapterAccounts, AdapterFact, AdapterIdentity, AdapterLaunch, AdapterLogin,
+    AdapterOverride, AdapterQuota, AdapterSpec, AnsweringModelSource, COMMAND_OUTPUT_TAIL_BYTES,
+    Capabilities, CapabilityOverlay, Caveat, ClientEnvMarkers, GapAction, GapPolicy, GapRule,
+    GithubAuth, HarnessInstall, HookAction, HookEvent, HookProtocol, HookTimeoutUnit,
+    INSTRUCTION_ASSET, LaunchAction, LaunchCapabilities, LaunchCheck, LaunchField, LaunchGap,
+    LaunchRequest, LoginObservation, LoginReprobe, ModelListingFormat, NamedEntry,
+    NativeAuthWarning, NativeCapabilities, OVERLAY_REASON, OVERLAY_SOURCE, OverridableCapability,
+    QuotaProbeKind, RetainedArtifact, Retention, SessionReference, SetupRoot, SkillLocation,
+    StreamFraming, TerminalEventStrength, UpdateCommand, UsageAttribution, normalise_model_id,
 };
 
 /// The instruction content bound into this product build and projected into

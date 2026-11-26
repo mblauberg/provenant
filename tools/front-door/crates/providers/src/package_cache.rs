@@ -1147,7 +1147,7 @@ fn warn_unsupported() {
         Warning::new(
             PACKAGE_CACHE_SETTINGS_UNRESOLVED,
             "native package cache settings could not be resolved safely; configured paths were left unchanged",
-        )
+         provenant_records::warning::detected_source(PACKAGE_CACHE_SETTINGS_UNRESOLVED))
         .repair("set an absolute cache/store path or use supported host path variables")
         .once_per_change(),
     );
@@ -1158,7 +1158,7 @@ fn warn_legacy_project_pnpm() {
         Warning::new(
             LEGACY_PNPM_CACHE_SETTINGS,
             "project .npmrc contains legacy pnpm cache settings; shared cache binding was skipped because support varies by pnpm version; a version that ignores these keys may use private HOME/XDG caches",
-        )
+         provenant_records::warning::detected_source(LEGACY_PNPM_CACHE_SETTINGS))
         .repair("use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml for portable shared paths")
         .once_per_change(),
     );
@@ -1169,7 +1169,7 @@ fn warn_pnpm_family_unresolved() {
         Warning::new(
             PNPM_FAMILY_UNRESOLVED,
             "the effective pnpm selector family could not be identified safely because the selected version or project management policy is ambiguous; configured selectors were preserved and shared cache binding was skipped",
-        )
+         provenant_records::warning::detected_source(PNPM_FAMILY_UNRESOLVED))
         .repair("set the cache/store selector family supported by the effective pnpm version, or use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml")
         .once_per_change(),
     );
@@ -1180,7 +1180,7 @@ fn warn_pnpm_selector_conflict() {
         Warning::new(
             PNPM_SELECTOR_CONFLICT,
             "pnpm cache selectors disagree with the selected pnpm version; preserving configured values and skipping shared cache binding",
-        )
+         provenant_records::warning::detected_source(PNPM_SELECTOR_CONFLICT))
         .repair("set the cache/store selector family supported by the selected pnpm version")
         .once_per_change(),
     );
@@ -1191,7 +1191,7 @@ fn warn_legacy_pnpm_environment_selector() {
         Warning::new(
             LEGACY_PNPM_ENV_SELECTOR,
             "shared cache binding for pnpm before version 11 uses npm_config_cache_dir/npm_config_store_dir; npm invoked in the same provider session may report these as unknown settings",
-        )
+         provenant_records::warning::detected_source(LEGACY_PNPM_ENV_SELECTOR))
         .repair("use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml to avoid environment selectors")
         .once_per_change(),
     );

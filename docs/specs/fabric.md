@@ -581,6 +581,35 @@ requirements into its failure path.
 - Why: repeated review and repair needs bounded admission and a human decision at
   the bound.
 
+### Fix-round invariants and split-verdict adjudication
+
+A blocking finding names the invariant it breaks in its top-level `class`. A
+finding without one is warned first at settlement; a blocking finding without
+one is refused. A fix round returns invariants, not patched sites: for each
+invariant its `repair_item` carries the sweep query it ran, every site it changed
+and the test that pins the invariant. Round two reviews only the repair delta
+against those named invariants, never a fresh full panel; a lens may raise a new
+invariant, which then follows the same contract. Two distinct findings with the
+same invariant are one shared flaw and route to the principal design continuation.
+Distinct member verdicts on one head, including approval and inconclusive, are a
+split and go to one adjudication node that returns a single
+verdict; the read-only adjudicator runs as an agent on the configured `senior`
+route on the panel members' pinned head when one is recorded. Each gate consumes only the adjudicator
+associated with its own panel and head; later panels receive their own adjudicator.
+Once admitted, an adjudicator must succeed with a verdict before its panel can
+pass; the original panel verdict cannot substitute for a failed or missing result.
+A split in a nested lens group remains visible when a panel synthesises its output;
+the adjudicator receives the outer panel's synthesised findings.
+A panel whose members have different pinned heads cannot be adjudicated as one
+split. It returns `VERDICT: PASS` only when
+no blocking finding survives; otherwise it returns `VERDICT: FAIL` or
+`VERDICT: INCONCLUSIVE`. An upheld finding therefore reaches the gate as a
+successful `FAIL` verdict and can route to repair. The split itself never starts
+another round, though an upheld changes-request legitimately needs repair.
+- Why: writers patch named sites and repeat a flaw elsewhere unless the invariant
+  is named and swept; lens verdicts drift when a panel re-runs without a shared
+  rubric, and no node resolved a split verdict.
+
 ### Node asks and decide nodes
 
 The inbox owns the question and answer; graph checkpoints link to it, and replay

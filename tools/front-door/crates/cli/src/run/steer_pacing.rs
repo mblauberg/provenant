@@ -72,6 +72,9 @@ pub fn pace_steer_restart(
                 warn(Warning::new(
                     provenant_records::warning::STEER_PACING_RECORD_INVALID,
                     "ignoring invalid steer restart pacing record",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::STEER_PACING_RECORD_INVALID,
+                    ),
                 ));
                 None
             }

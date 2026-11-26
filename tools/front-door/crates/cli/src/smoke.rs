@@ -190,6 +190,9 @@ impl Settings {
                     format!(
                         "smoke settings use compiled defaults; configuration unavailable: {reason}"
                     ),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                    ),
                 ));
                 let profile = provenant_config::Profile::default();
                 Ok((

@@ -661,6 +661,9 @@ impl Factory {
             provenant_records::warning::warn(provenant_records::warning::Warning::new(
                 provenant_records::warning::READ_SOURCE_PINNED_FOR_PEER,
                 message.clone(),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::READ_SOURCE_PINNED_FOR_PEER,
+                ),
             ));
             warnings.push(message);
         }
