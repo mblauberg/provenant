@@ -4941,7 +4941,7 @@ mod host_clock_tests {
     #[test]
     fn account_directory_overrides_follow_registry_entries() {
         let mut fixture = provenant_records::ADAPTER_SPECS[0];
-        fixture.name = "fixture";
+        fixture.identity.name = "fixture";
         fixture.accounts.default_directory = Some(("FIXTURE_HOME", ".fixture"));
         let actual = account_directories(&[fixture], |key| {
             (key == "FIXTURE_HOME").then(|| "/fixture/home".into())

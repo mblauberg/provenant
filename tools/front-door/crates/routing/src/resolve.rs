@@ -2570,7 +2570,9 @@ fn candidate(
         // route drops the selector and records the declaration in the envelope.
         // An `off` gap drops it silently instead.
         if let Some(decision) = check.degraded(provenant_records::LaunchField::Effort) {
-            let requested = effort.map(str::to_owned);
+            // `degraded(Effort)` only fires when a control was requested, so the
+            // warning records that selector as a String, matching EffortWarning.
+            let requested = effort.unwrap_or_default().to_owned();
             if for_pool {
                 return Err(RoutingError::UnsupportedLaunch(decision.to_string()));
             }

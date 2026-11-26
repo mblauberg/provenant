@@ -287,6 +287,8 @@ fn an_exact_pin_drops_an_undeclared_effort_with_a_sourced_warning()
     let route = resolve(&query, &ctx)?;
     assert!(route.effort.is_none());
     let warning = route.diagnostics.effort_warning.ok_or("effort warning")?;
+    // Invariant: an exact pin with an effort gap drops the control but keeps
+    // the requested selector, declaration source and reason in the warning.
     assert_eq!(warning.requested, "high");
     assert!(warning.applied.is_none());
     assert_eq!(warning.source, ADAPTER_ROW_SOURCE);

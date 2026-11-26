@@ -1567,7 +1567,7 @@ mod admission_tests {
             .find(|spec| spec.quota.free_pool.is_none())
             .expect("adapter without a free pool");
         let mut no_pool = record.clone();
-        no_pool.account.adapter = plain.name.into();
+        no_pool.account.adapter = plain.identity.name.into();
         assert_eq!(
             free_pool_recheck_due(&no_pool, &crate::DEFAULT_FRESHNESS).unwrap(),
             None
