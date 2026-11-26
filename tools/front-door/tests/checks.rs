@@ -104,13 +104,13 @@ fn check_config_warns_when_warm_cache_toolchain_differs_from_pin() -> Result {
         rig.project.join("rust-toolchain.toml"),
         "[toolchain]\nchannel = \"1.100.0\"\n",
     )?;
+    // Slots are keyed by the checkout's canonical Git common dir, so derive
+    // the key exactly as the build store does; hashing the project path puts
+    // the fixture in a directory production never reads.
+    let key = provenant_config::project_key_for(rig.project.as_path())
+        .unwrap_or_else(|| provenant_config::project_key(rig.project.as_path()));
+    let slot = provenant_run::build::paths::slot_root(&rig.home, &key, 0);
     // Slot caches are private run stores; the fixture must use the same mode.
-    let key = provenant_config::project_key(rig.project.as_path());
-    let slot = rig
-        .home
-        .join("Library/Caches/provenant-slots")
-        .join(&key)
-        .join("0");
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true).mode(0o700).create(&slot)?;
     provenant_run::build::slots::SlotRecord {
