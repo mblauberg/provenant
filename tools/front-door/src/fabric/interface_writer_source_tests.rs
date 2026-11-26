@@ -309,6 +309,114 @@ fn reused_worktree_with_upstream(rig: &TestRig) -> Result<(PathBuf, String, Stri
     Ok((writer, base, head))
 }
 
+fn reused_worktrees_with_distinct_upstreams(
+    rig: &TestRig,
+) -> Result<[(PathBuf, String, String); 2]> {
+    git(rig, &["config", "user.name", "Test"])?;
+    git(rig, &["config", "user.email", "test@example.invalid"])?;
+    let remote = rig.root.join("remote.git");
+    let remote = remote.to_str().ok_or("remote path")?;
+    git(rig, &["init", "-q", "--bare", remote])?;
+    git(
+        rig,
+        &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"],
+    )?;
+    git(rig, &["remote", "add", "origin", remote])?;
+    git(rig, &["push", "-q", "origin", "main"])?;
+    git(rig, &["remote", "set-head", "origin", "main"])?;
+    let first_base = git(rig, &["rev-parse", "HEAD"])?;
+    git(rig, &["push", "-q", "origin", "HEAD:refs/heads/first-base"])?;
+
+    let first_writer = rig.root.join("first-writer");
+    let first_writer_text = first_writer.to_str().ok_or("first writer path")?;
+    git(
+        rig,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "first-fix",
+            first_writer_text,
+            &first_base,
+        ],
+    )?;
+    git(
+        rig,
+        &[
+            "-C",
+            first_writer_text,
+            "branch",
+            "--set-upstream-to=origin/first-base",
+            "first-fix",
+        ],
+    )?;
+    std::fs::write(first_writer.join("first-change"), "first\n")?;
+    git(rig, &["-C", first_writer_text, "add", "first-change"])?;
+    git(
+        rig,
+        &[
+            "-C",
+            first_writer_text,
+            "commit",
+            "-q",
+            "-m",
+            "first writer change",
+        ],
+    )?;
+    let first_head = git(rig, &["-C", first_writer_text, "rev-parse", "HEAD"])?;
+
+    std::fs::write(rig.project.join("second-base"), "second base\n")?;
+    git(rig, &["add", "second-base"])?;
+    git(rig, &["commit", "-q", "-m", "second base"])?;
+    git(rig, &["push", "-q", "origin", "main"])?;
+    let second_base = git(rig, &["rev-parse", "HEAD"])?;
+
+    let second_writer = rig.root.join("second-writer");
+    let second_writer_text = second_writer.to_str().ok_or("second writer path")?;
+    git(
+        rig,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "second-fix",
+            second_writer_text,
+            &second_base,
+        ],
+    )?;
+    git(
+        rig,
+        &[
+            "-C",
+            second_writer_text,
+            "branch",
+            "--set-upstream-to=origin/main",
+            "second-fix",
+        ],
+    )?;
+    std::fs::write(second_writer.join("second-change"), "second\n")?;
+    git(rig, &["-C", second_writer_text, "add", "second-change"])?;
+    git(
+        rig,
+        &[
+            "-C",
+            second_writer_text,
+            "commit",
+            "-q",
+            "-m",
+            "second writer change",
+        ],
+    )?;
+    let second_head = git(rig, &["-C", second_writer_text, "rev-parse", "HEAD"])?;
+
+    Ok([
+        (first_writer, first_base, first_head),
+        (second_writer, second_base, second_head),
+    ])
+}
+
 /// The graph shape from the issue: an implement node reusing a worktree and a
 /// findings-panel sourcing that node, with no authored review base.
 fn reused_writer_panel(writer: &std::path::Path) -> Value {
@@ -344,6 +452,11 @@ fn reused_worktree_writer_pins_a_non_empty_panel_range() -> Result {
     );
     assert_eq!(
         response["document"]["review_base"],
+        Value::Null,
+        "{response}"
+    );
+    assert_eq!(
+        response["document"]["nodes"][1]["review_base"],
         json!(base),
         "{response}"
     );
@@ -352,6 +465,90 @@ fn reused_worktree_writer_pins_a_non_empty_panel_range() -> Result {
     let range_base = factory.review_comparison_base(&writer, Some(&base), &head)?;
     assert_eq!(range_base, base);
     assert_ne!(range_base, head);
+    Ok(())
+}
+
+/// Each reused writer's panel keeps its own base, and no inferred writer base
+/// becomes the graph fallback for another writer's review range.
+#[test]
+fn each_reused_writer_panel_uses_its_own_non_empty_review_range() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let [
+        (first_writer, first_base, first_head),
+        (second_writer, second_base, second_head),
+    ] = reused_worktrees_with_distinct_upstreams(&rig)?;
+    declare_forge(&rig)?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let response = factory.graph_document(
+        json!({
+            "op":"run", "explain":true,
+            "document":{
+                "schema_version":2, "graph_id":"multiple-reused-writers",
+                "nodes":[
+                    {"id":"implement-first","use":"implement","with":{"plan":false},"worktree":first_writer,"write_scope":["."],"delivery":"push"},
+                    {"id":"implement-second","use":"implement","with":{"plan":false},"worktree":second_writer,"write_scope":["."],"delivery":"push"},
+                    {"id":"review-first","use":"findings-panel","after":["implement-first"],"source":{"type":"node","node":"implement-first"}},
+                    {"id":"review-second","use":"findings-panel","after":["implement-second"],"source":{"type":"node","node":"implement-second"}}
+                ]
+            }
+        }),
+        budget,
+        &cancel,
+    )?;
+
+    assert_eq!(
+        response["document"]["review_base"],
+        Value::Null,
+        "{response}"
+    );
+    assert_eq!(
+        response["document"]["nodes"][2]["review_base"],
+        json!(first_base)
+    );
+    assert_eq!(
+        response["document"]["nodes"][3]["review_base"],
+        json!(second_base)
+    );
+    assert_eq!(
+        response["document"]["nodes"][2]["source"]["node"],
+        json!("implement-first")
+    );
+    assert_eq!(
+        response["document"]["nodes"][3]["source"]["node"],
+        json!("implement-second")
+    );
+    assert_ne!(first_base, second_base);
+    assert_ne!(
+        first_base, first_head,
+        "the first review range must be non-empty"
+    );
+    assert_ne!(
+        second_base, second_head,
+        "the second review range must be non-empty"
+    );
+    assert_eq!(
+        response["reused_writer_bases"][0]["commit"],
+        json!(first_base),
+        "{response}"
+    );
+    assert_eq!(
+        response["reused_writer_bases"][1]["commit"],
+        json!(second_base),
+        "{response}"
+    );
+    assert_eq!(
+        response["reused_writer_bases"][0]["source"],
+        json!("the reused worktree branch's upstream"),
+        "{response}"
+    );
+    assert_eq!(
+        response["reused_writer_bases"][1]["source"],
+        json!("the reused worktree branch's upstream"),
+        "{response}"
+    );
+
     Ok(())
 }
 

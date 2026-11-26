@@ -465,6 +465,40 @@ fn is_node_sourced_review_of(node: &GraphNode, writer: &str) -> bool {
         && carries_review_protocol(node)
 }
 
+fn has_node_sourced_review(node: &GraphNode, writer: &str) -> bool {
+    is_node_sourced_review_of(node, writer)
+        || node.composite.as_ref().is_some_and(|composite| {
+            composite
+                .nodes
+                .iter()
+                .any(|child| has_node_sourced_review(child, writer))
+        })
+        || node.loop_body.as_ref().is_some_and(|loop_spec| {
+            loop_spec
+                .body
+                .iter()
+                .any(|child| has_node_sourced_review(child, writer))
+        })
+}
+
+/// Whether this writer has a node-sourced review without a panel-specific or
+/// graph-authored comparison base.
+fn has_unbased_node_sourced_review(node: &GraphNode, writer: &str) -> bool {
+    (is_node_sourced_review_of(node, writer) && node.review_base.is_none())
+        || node.composite.as_ref().is_some_and(|composite| {
+            composite
+                .nodes
+                .iter()
+                .any(|child| has_unbased_node_sourced_review(child, writer))
+        })
+        || node.loop_body.as_ref().is_some_and(|loop_spec| {
+            loop_spec
+                .body
+                .iter()
+                .any(|child| has_unbased_node_sourced_review(child, writer))
+        })
+}
+
 /// Any review node that sources `writer` gets the resolved base. The composite
 /// boundary and its members are both pinned so every lens receives base..head.
 fn bind_writer_review_base(node: &mut GraphNode, writer: &str, base: &str) {
@@ -2448,10 +2482,10 @@ impl Factory {
         // sources that writer compares base..pushed head instead of an empty
         // range. A plain writer stays advisory: only a node-sourced review
         // needs the base to be present before launch.
-        let mut reused_writer_base = None;
+        let mut reused_writer_bases = Vec::new();
         for node in &document.nodes {
             if node.access == AccessMode::WorktreeWrite && node.worktree.is_some() {
-                reused_writer_base = Some((
+                reused_writer_bases.push((
                     node.id.clone(),
                     resolve_reused_worktree_base(
                         node,
@@ -2462,34 +2496,34 @@ impl Factory {
                         git.as_deref(),
                     ),
                 ));
-                break;
             }
         }
-        if let Some((writer_id, base)) = &reused_writer_base {
+        for (writer_id, base) in &reused_writer_bases {
             if writer_base
                 .as_ref()
                 .is_none_or(|base| base.commit.is_none())
+                && reused_writer_bases.len() == 1
             {
                 writer_base = base.clone();
             }
             match base.as_ref().and_then(|base| base.commit.as_deref()) {
                 Some(commit) => {
-                    if document.review_base.is_none() {
-                        document.review_base = Some(commit.to_owned());
-                        document.schema_version = document.schema_version.max(2);
-                    }
+                    let has_review = document
+                        .nodes
+                        .iter()
+                        .any(|node| has_node_sourced_review(node, writer_id));
                     for node in &mut document.nodes {
                         bind_writer_review_base(node, writer_id, commit);
                     }
+                    if has_review {
+                        document.schema_version = document.schema_version.max(2);
+                    }
                 }
                 None if document.review_base.is_none()
-                    && !document.nodes.iter().any(|node| {
-                        node.review_base.is_some() && is_node_sourced_review_of(node, writer_id)
-                    })
                     && document
                         .nodes
                         .iter()
-                        .any(|node| is_node_sourced_review_of(node, writer_id)) =>
+                        .any(|node| has_unbased_node_sourced_review(node, writer_id)) =>
                 {
                     return Err(FacadeError::invalid(InvalidInputDetail::Field(format!(
                         "review_base_unresolved: writer {writer_id} reuses a worktree with no declared base, upstream or default-branch merge base; declare base on the node or supply review_base"
@@ -2743,12 +2777,23 @@ impl Factory {
             let refused = source_admission
                 .iter()
                 .any(|row| row["status"] == "refused");
+            let reused_writer_bases = reused_writer_bases
+                .iter()
+                .map(|(node, base)| {
+                    json!({
+                        "node": node,
+                        "commit": base.as_ref().and_then(|base| base.commit.as_deref()),
+                        "source": base.as_ref().map(|base| base.source.label()),
+                    })
+                })
+                .collect::<Vec<_>>();
             return Ok(json!({
                 "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
                 "writer_base": writer_base.as_ref().map(|base| json!({
                     "commit": base.commit,
                     "source": base.source.label(),
                 })),
+                "reused_writer_bases": reused_writer_bases,
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,

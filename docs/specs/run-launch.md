@@ -177,11 +177,12 @@ provisioning, and provisioning verifies the exact branch and head.
 
 A writer node that reuses an existing worktree declares its comparison `base`. When none is
 declared, the host resolves one from the worktree branch's upstream, else from its merge base
-with the default branch; `run --explain` reports the chosen commit and the source that supplied
-it. The base is pinned into the graph as its review base, so a findings-panel sourcing that
-writer compares the base against its pushed head. A node-sourced review panel with no resolved
-base and no authored review base refuses the graph before launch, naming the writer and the
-remedy; a plain writer without a base remains advisory and falls back to the caller checkout.
+with the default branch; `run --explain` reports each chosen commit and its source. The base is
+pinned only to review panels sourcing that writer, so each panel compares its writer's base
+against its pushed head without turning one writer's inferred base into a graph-wide fallback.
+A node-sourced review panel with no resolved base and no authored review base refuses the graph
+before launch, naming the writer and the remedy; a plain writer without a base remains advisory
+and falls back to the caller checkout.
 - Why: without a pinned base every lens reviews an empty range and reports equal commits, which
   hides the missing Git evidence instead of naming it once before any lane starts.
 
