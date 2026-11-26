@@ -442,6 +442,7 @@ fn evidence_for(
                 conflict: false,
                 incomplete: IdentityPolicyEffect::Complete,
                 eof_fragment_unsettles: false,
+                route: crate::settlement::RouteIdentityFact::Observed,
             },
         },
         policy: crate::settlement::policy::SettlementPolicy::shipped(),

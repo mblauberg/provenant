@@ -55,6 +55,7 @@ fn evidence(pinned: Option<GitOid>, head: Option<GitOid>) -> SettlementEvidence 
                 conflict: false,
                 incomplete: IdentityPolicyEffect::Complete,
                 eof_fragment_unsettles: false,
+                route: provenant_records::settlement::RouteIdentityFact::Observed,
             },
         },
         policy: provenant_records::settlement::policy::SettlementPolicy::shipped(),

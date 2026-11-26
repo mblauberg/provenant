@@ -2090,11 +2090,29 @@ fn settlement_outcome_has_one_writer() -> Result<(), Box<dyn Error>> {
         };
         if let Some(settle_line) = settle_line {
             for (index, line) in lines.iter().enumerate().skip(settle_line + 1) {
-                if line.contains("decoded.outcome =") || line.contains("decoded.terminal_cause =") {
+                if line.contains("decoded.outcome =") || line.contains("decoded.cause =") {
                     violations.push(format!(
                         "{relative}:{}: host outcome mutated after settle",
                         index + 1
                     ));
+                }
+                // The settled decision is one record: a later field write
+                // would leave the class, release and delivery disagreeing.
+                for field in [
+                    "fact.outcome = ",
+                    "fact.cause = ",
+                    "fact.complete = ",
+                    "fact.settlement_class = ",
+                    "fact.release = ",
+                    "fact.delivery_eligible = ",
+                    "fact.signals.push(",
+                ] {
+                    if line.contains(field) {
+                        violations.push(format!(
+                            "{relative}:{}: settled fact mutated after settle (`{field}`)",
+                            index + 1
+                        ));
+                    }
                 }
             }
         }

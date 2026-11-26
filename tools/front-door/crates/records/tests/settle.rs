@@ -81,6 +81,7 @@ fn base(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> Settlemen
                 conflict: false,
                 incomplete: IdentityPolicyEffect::Complete,
                 eof_fragment_unsettles: false,
+                route: provenant_records::settlement::RouteIdentityFact::Observed,
             },
         },
         policy: SettlementPolicy::shipped(),

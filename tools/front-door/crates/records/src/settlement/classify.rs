@@ -16,7 +16,7 @@ use crate::run::{
 use crate::settlement::policy::{AppliedPolicy, NoWork, SettlementPolicy, SignalAction};
 use crate::settlement::{
     HandoffSource, HeadProgress, IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout,
-    SettlementEvidence,
+    RouteIdentityFact, SettlementEvidence,
 };
 use crate::stop::{Stop, StopCause};
 
@@ -266,7 +266,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     }
 
     // 4. Delivery keys off the outcome before a declared stop.
-    let delivery_eligible = outcome == Outcome::Succeeded;
+    let mut delivery_eligible = outcome == Outcome::Succeeded;
 
     // 5. A host-synthesised stop outranks a declaration; otherwise the last
     // accepted journal line is the declaration, the rejected lines its error.
@@ -485,6 +485,46 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
             if !matches!(cause, Some(CauseKind::ProviderCaptureDefect { .. })) {
                 cause = None;
                 reason = Some(IDENTITY_EOF_REASON.into());
+            }
+        }
+        // A contradicted route keeps a writer's moved head for review, naming
+        // both identities; it never discards the work. Every other lane keeps
+        // the fatal mismatch decision. Missing route evidence is a signal.
+        // The holder scopes the fact to an attempt that would otherwise stand,
+        // and it runs last so a contradicted route outranks an unsettling effect.
+        match &identity.route {
+            RouteIdentityFact::Observed => {}
+            RouteIdentityFact::Unobserved => {
+                signals.push(SettlementSignal::IdentityUnobserved);
+            }
+            RouteIdentityFact::Mismatch {
+                requested,
+                observed,
+            } => {
+                let moved_head = evidence
+                    .git
+                    .as_ref()
+                    .filter(|git| writer && git.head_progress() == HeadProgress::Moved)
+                    .and_then(|git| git.writer_head);
+                cause = Some(CauseKind::IdentityMismatch);
+                // Work from a contradicted route is reviewed, never
+                // delivered on its own say-so.
+                delivery_eligible = false;
+                if let Some(head) = moved_head {
+                    outcome = Outcome::ReviewRequired;
+                    // A preserved commit is a review record, not a
+                    // success: its sealed result is complete.
+                    complete = true;
+                    append(
+                        &mut reason,
+                        format!(
+                            "warning: observed provider identity ({observed}) differs from the requested route ({requested}); kept commit {head} for review"
+                        ),
+                    );
+                } else {
+                    outcome = Outcome::Failed;
+                    reason = Some(CauseKind::IdentityMismatch.detail().into());
+                }
             }
         }
     }

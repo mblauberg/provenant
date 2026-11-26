@@ -152,6 +152,7 @@ fn provider_identity(
     exit: &ExitObservation,
     decoded: &Decoded,
     policy: &provenant_records::policy::Policy,
+    route: provenant_records::settlement::RouteIdentityFact,
 ) -> provenant_records::settlement::IdentityEvidence {
     use provenant_records::settlement::{IdentityEvidence, IdentityPolicyEffect};
 
@@ -197,6 +198,25 @@ fn provider_identity(
         conflict: exit.provider_identity_conflict,
         incomplete,
         eof_fragment_unsettles,
+        route,
+    }
+}
+
+/// The route identity fact the classifier applies: the observed provider route
+/// against the resolved and applied routes, with the identities it names.
+fn route_identity_fact(
+    resolved: Option<&RouteRecord>,
+    applied: Option<&RouteRecord>,
+    observed: Option<&RouteRecord>,
+) -> provenant_records::settlement::RouteIdentityFact {
+    use provenant_records::settlement::RouteIdentityFact;
+    match crate::reader::route_identity(resolved, applied, observed) {
+        crate::reader::RouteIdentity::Observed => RouteIdentityFact::Observed,
+        crate::reader::RouteIdentity::Unobserved => RouteIdentityFact::Unobserved,
+        crate::reader::RouteIdentity::Mismatch => RouteIdentityFact::Mismatch {
+            requested: route_identity_label(applied),
+            observed: route_identity_label(observed),
+        },
     }
 }
 
@@ -222,53 +242,6 @@ fn route_identity_label(route: Option<&RouteRecord>) -> String {
         "no identity recorded".into()
     } else {
         labels.join(", ")
-    }
-}
-
-/// Apply a contradicted provider identity to the settled fact. A writer whose
-/// head moved keeps its commit for review, with a warning naming both
-/// identities; it never fails and never discards the work. Every other lane
-/// keeps the fatal mismatch decision. This runs after `settle` because the
-/// moved head comes from the sealed progress fact, not from a live Git read.
-fn apply_route_identity(
-    fact: &mut provenant_records::settlement::OutcomeFact,
-    result: &mut String,
-    resolved: Option<&RouteRecord>,
-    applied: Option<&RouteRecord>,
-    observed: Option<&RouteRecord>,
-    committed_head: Option<provenant_core::GitOid>,
-) {
-    match crate::reader::route_identity(resolved, applied, observed) {
-        crate::reader::RouteIdentity::Observed => {}
-        crate::reader::RouteIdentity::Unobserved => {
-            fact.signals.push(SettlementSignal::IdentityUnobserved);
-        }
-        crate::reader::RouteIdentity::Mismatch => match committed_head {
-            Some(head) => {
-                let warning = format!(
-                    "warning: observed provider identity ({}) differs from the requested route ({}); kept commit {head} for review",
-                    route_identity_label(observed),
-                    route_identity_label(applied),
-                );
-                fact.outcome = Outcome::ReviewRequired;
-                fact.cause = Some(CauseKind::IdentityMismatch);
-                fact.reason = Some(match fact.reason.take() {
-                    Some(reason) => format!("{reason}; {warning}"),
-                    None => warning,
-                });
-                if result.is_empty() {
-                    *result = EMPTY_WRITER_RESULT.into();
-                }
-                // A preserved commit is a review record, not a success: its
-                // sealed result must be complete even when the capture was not.
-                fact.complete = true;
-            }
-            None => {
-                fact.outcome = Outcome::Failed;
-                fact.cause = Some(CauseKind::IdentityMismatch);
-                fact.reason = Some(CauseKind::IdentityMismatch.detail().into());
-            }
-        },
     }
 }
 
@@ -308,7 +281,12 @@ mod identity_policy_tests {
                 reason: None,
                 signals: vec![],
             };
-            let evidence = provider_identity(&exit, &decoded, &policy);
+            let evidence = provider_identity(
+                &exit,
+                &decoded,
+                &policy,
+                provenant_records::settlement::RouteIdentityFact::Observed,
+            );
             assert_eq!(evidence.conflict, conflict);
             assert!(!evidence.eof_fragment_unsettles);
             match (strength, conflict) {
@@ -336,44 +314,50 @@ mod identity_policy_tests {
     #[test]
     fn identity_mismatch_keeps_a_writers_commit_for_review()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        use provenant_records::settlement::{LaneRole, SettlementEvidence, classify::settle};
+        use provenant_records::settlement::{
+            GitEvidence, LaneRole, SettlementEvidence, classify::settle,
+        };
         let requested = crate::tests::route();
         let observed = RouteRecord {
             model: Some("fixture/other".into()),
             ..requested.clone()
         };
+        let route = route_identity_fact(Some(&requested), Some(&requested), Some(&observed));
+        let base = provenant_core::GitOid::parse(&"a".repeat(40))?;
         let head = provenant_core::GitOid::parse(&"b".repeat(40))?;
-        for (committed, expected) in [
-            (Some(head), Outcome::ReviewRequired),
-            (None, Outcome::Failed),
+        // A writer whose head moved keeps it for review; a writer with no new
+        // commit and a reader keep the fatal decision.
+        for (lane, writer_head, expected) in [
+            (LaneRole::ModelWriter, Some(head), Outcome::ReviewRequired),
+            (LaneRole::ModelWriter, Some(base), Outcome::Failed),
+            (LaneRole::Reader, None, Outcome::Failed),
         ] {
-            let mut fact = settle(&SettlementEvidence::fixture(
-                LaneRole::Reader,
-                Outcome::Succeeded,
-                None,
-            ));
-            let mut result = "committed work".to_owned();
-            apply_route_identity(
-                &mut fact,
-                &mut result,
-                Some(&requested),
-                Some(&requested),
-                Some(&observed),
-                committed,
-            );
-            assert_eq!(fact.outcome, expected);
+            let mut evidence = SettlementEvidence::fixture(lane, Outcome::Succeeded, None);
+            evidence.custody.identity.route = route.clone();
+            if writer_head.is_some() {
+                evidence.git = Some(GitEvidence {
+                    input_head: Some(base),
+                    writer_head,
+                    uncommitted: None,
+                    uncommitted_paths: Vec::new(),
+                    pushed_head: None,
+                    primary: provenant_records::settlement::PrimaryCheckout::Clean,
+                });
+            }
+            let fact = settle(&evidence);
+            assert_eq!(fact.outcome, expected, "{lane:?} {writer_head:?}");
             assert_eq!(fact.cause, Some(CauseKind::IdentityMismatch));
             let reason = fact.reason.as_deref().ok_or("mismatch reason")?;
-            if committed.is_some() {
+            if expected == Outcome::ReviewRequired {
                 assert!(reason.contains("fixture/model"), "{reason}");
                 assert!(reason.contains("fixture/other"), "{reason}");
                 assert!(reason.contains(&head.to_string()), "{reason}");
                 assert!(fact.complete);
             } else {
-                // No verified moved head: the fatal decision and its fixed
-                // detail are unchanged.
                 assert_eq!(reason, CauseKind::IdentityMismatch.detail());
             }
+            // The class follows the same decision: no release, no delivery.
+            assert!(!fact.delivery_eligible, "{lane:?} {writer_head:?}");
         }
         Ok(())
     }
@@ -3810,7 +3794,26 @@ impl RunStore {
                         )
                     })
                     .and_then(|marker| stall_stop_cause(exit.stop_reason, cancelled, marker)),
-                identity: provider_identity(exit, &decoded, &policy),
+                identity: provider_identity(
+                    exit,
+                    &decoded,
+                    &policy,
+                    // Identity decides only an attempt that would otherwise
+                    // stand; a failure keeps its own cause.
+                    if matches!(
+                        decoded.outcome,
+                        Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+                    ) || completed_budget_handoff
+                    {
+                        route_identity_fact(
+                            record.resolved_route.as_ref(),
+                            record.applied_route.as_ref(),
+                            decoded.observed_route.as_ref(),
+                        )
+                    } else {
+                        provenant_records::settlement::RouteIdentityFact::Observed
+                    },
+                ),
             },
             policy: settlement_policy,
         };
@@ -3819,33 +3822,13 @@ impl RunStore {
             None => crate::evidence::seal_evidence(attempt, &evidence)?,
         };
         let mut fact = provenant_records::settlement::classify::settle(&evidence);
-        // Route identity is a graph-owned override. It reads the sealed progress
-        // so a moved head keeps the writer's commit for review; a re-read of HEAD
-        // cannot move the sealed pin.
-        if matches!(
-            evidence.host.outcome,
-            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-        ) || completed_budget_handoff
+        // A writer's commit kept for review after a route mismatch needs a
+        // complete sealed result even when the capture was empty.
+        if fact.cause == Some(CauseKind::IdentityMismatch)
+            && fact.outcome == Outcome::ReviewRequired
+            && result.is_empty()
         {
-            let observed_route = decoded.observed_route.clone();
-            let committed_head = if matches!(
-                fact.head_progress,
-                Some(provenant_records::settlement::HeadProgress::Moved)
-            ) {
-                crate::evidence::terminal_head(attempt)?
-            } else {
-                None
-            };
-            apply_route_identity(
-                &mut fact,
-                &mut result,
-                record.resolved_route.as_ref(),
-                record.applied_route.as_ref(),
-                observed_route.as_ref(),
-                committed_head,
-            );
-            fact.signals.sort();
-            fact.signals.dedup();
+            result = EMPTY_WRITER_RESULT.into();
         }
         // External delivery runs only from the committed decision below.
         let result_orphan = read_settled(

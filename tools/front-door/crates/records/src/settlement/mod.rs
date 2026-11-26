@@ -85,6 +85,27 @@ pub struct IdentityEvidence {
     pub conflict: bool,
     pub incomplete: IdentityPolicyEffect,
     pub eof_fragment_unsettles: bool,
+    /// Whether the observed provider route matched the requested one. The
+    /// host records `Observed` for an attempt that already failed, so a
+    /// failure keeps its own cause. The classifier applies it in the identity
+    /// step, so the class, the release and delivery eligibility follow the
+    /// same decision.
+    #[serde(default)]
+    pub route: RouteIdentityFact,
+}
+
+/// The observed route against the resolved and applied routes, with the
+/// identities a mismatch names.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RouteIdentityFact {
+    #[default]
+    Observed,
+    Unobserved,
+    Mismatch {
+        requested: String,
+        observed: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +219,7 @@ impl SettlementEvidence {
                     conflict: false,
                     incomplete: IdentityPolicyEffect::Complete,
                     eof_fragment_unsettles: false,
+                    route: RouteIdentityFact::Observed,
                 },
             },
             policy: SettlementPolicy::shipped(),
