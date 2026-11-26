@@ -4378,7 +4378,8 @@ mod outcome_release_tests {
                 input.request.task.deliver = Some(WriterDeliveryRequest {
                     extra: Default::default(),
                     mode: DeliveryMode::Push,
-                    remote: "origin".into(),
+                    remote: provenant_records::run::Destination::from_name("origin")
+                        .expect("fixture remote"),
                     branch: "lane".into(),
                     open_pr: false,
                     fast_forward_only: true,

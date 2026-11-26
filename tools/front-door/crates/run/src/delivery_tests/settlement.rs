@@ -158,7 +158,12 @@ fn review_delivery_requires_acceptance_and_exact_head()
     assert_eq!(integration.previous, None);
     assert_eq!(integration.integrated, head);
     let endpoint = provenant_records::custody::RefEndpoint::Remote {
-        remote: integration.remote.clone(),
+        remote: integration
+            .remote
+            .remote_name()
+            .ok_or("local integration has no remote")?
+            .as_str()
+            .to_owned(),
         push_url: integration.push_url.clone().ok_or("push URL")?,
     };
     let reference = provenant_confinement::repo::GitRefName::new(&integration.target)?;

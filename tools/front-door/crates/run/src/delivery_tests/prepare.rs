@@ -280,7 +280,12 @@ fn userinfo_remote_delivers_with_credential_free_records()
         .integration
         .ok_or("missing integration")?;
     let endpoint = provenant_records::custody::RefEndpoint::Remote {
-        remote: integration.remote.clone(),
+        remote: integration
+            .remote
+            .remote_name()
+            .ok_or("local integration has no remote")?
+            .as_str()
+            .to_owned(),
         push_url: integration.push_url.clone().ok_or("missing endpoint")?,
     };
     for record in [
@@ -402,7 +407,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     let request = WriterDeliveryRequest {
         extra: Default::default(),
         mode: Default::default(),
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "published/lane".into(),
         open_pr: false,
         fast_forward_only: false,
@@ -1103,7 +1108,7 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
     let request = WriterDeliveryRequest {
         extra: Default::default(),
         mode: DeliveryMode::Push,
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "published/lane".into(),
         open_pr: false,
         fast_forward_only: false,

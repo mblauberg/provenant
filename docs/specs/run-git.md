@@ -72,6 +72,15 @@ sandboxed lane can write, and credential-bearing URLs stay out of process argume
 bindings, receipts and the ref ledger keep only the URL without userinfo, and cleanup re-resolves
 the push URL and checks its credential-free identity against the recorded endpoint.
 
+A delivery destination is either `Local` or `Remote(RemoteName)`; an empty string spells neither.
+The request, its sealed launch binding and the delivery receipt carry this typed value, parsed once
+on decode with the single `RemoteName` grammar. There is no second remote alphabet in delivery
+validation and no empty-name sentinel to re-derive: a local integration is `Local`, a named
+publication is `Remote(name)`, and a persisted record carrying `""` is malformed and refused.
+- Why: the resolver accepts names the write path used to refuse, and an empty string cannot name a
+  usable remote or a local destination without a second source of truth.
+- Owner: `crates/records/src/run.rs`, `crates/run/src/delivery.rs`
+
 Dispatch checks delivery targets before admission and delivery checks protection again. Direct
 push and integration refuse protected targets. Integration conflicts publish no ref, and a
 concurrent loser records a failure for host pickup.

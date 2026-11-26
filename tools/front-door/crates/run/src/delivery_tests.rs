@@ -237,7 +237,8 @@ impl PrepareFixture {
             request: WriterDeliveryRequest {
                 extra: Default::default(),
                 mode: Default::default(),
-                remote: "origin".into(),
+                remote: provenant_records::run::Destination::from_name("origin")
+                    .expect("fixture remote"),
                 branch: "published/lane".into(),
                 open_pr: false,
                 fast_forward_only: false,

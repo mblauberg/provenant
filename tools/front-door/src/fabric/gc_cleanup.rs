@@ -225,23 +225,21 @@ fn delivered_removal_evidence(
         let Ok(Some(destination)) = provenant_run::HostDeliveryContext::destination_for_remote(
             request.mode.clone(),
             &request.branch,
-            &request.remote,
+            request.remote.remote_name().cloned(),
         ) else {
             return false;
         };
-        let remote = destination.remote;
         let branch = destination.branch;
         let target_ref = format!("refs/heads/{branch}");
-        let expected_reference = if remote.is_empty() {
-            target_ref.clone()
-        } else {
-            format!("refs/remotes/{remote}/{branch}")
+        let expected_reference = match destination.remote.as_str() {
+            None => target_ref.clone(),
+            Some(remote) => format!("refs/remotes/{remote}/{branch}"),
         };
-        request.remote == remote
+        request.remote == destination.remote
             && request.branch == branch
             && reference == expected_reference
             && receipt.integration.as_ref().is_some_and(|integration| {
-                integration.remote == remote && integration.target == target_ref
+                integration.remote == destination.remote && integration.target == target_ref
             })
     });
     if integration_matches {
@@ -962,12 +960,9 @@ fn collect_owned_worktree_with(
                             provenant_run::WriterDeliveryState::Delivered { .. }
                         )
                     })
-                    .map(|receipt| {
-                        if receipt.remote.is_empty() {
-                            format!("refs/heads/{}", receipt.branch)
-                        } else {
-                            format!("refs/remotes/{}/{}", receipt.remote, receipt.branch)
-                        }
+                    .map(|receipt| match receipt.remote.as_str() {
+                        None => format!("refs/heads/{}", receipt.branch),
+                        Some(remote) => format!("refs/remotes/{remote}/{}", receipt.branch),
                     });
                 let Some(head) = record.head.or_else(|| {
                     (record.provider_launched == Some(false))
@@ -1348,7 +1343,7 @@ mod removal_tests {
         let make_request = |mode, remote: &str, branch: &str, open_pr| WriterDeliveryRequest {
             extra: Default::default(),
             mode,
-            remote: remote.into(),
+            remote: provenant_records::run::Destination::from_name(remote).expect("fixture remote"),
             branch: branch.into(),
             open_pr,
             fast_forward_only: false,
@@ -1357,7 +1352,8 @@ mod removal_tests {
             |remote: &str, branch: &str, integration| provenant_run::WriterDeliveryReceipt {
                 extra: Default::default(),
                 schema_version: 1,
-                remote: remote.into(),
+                remote: provenant_records::run::Destination::from_name(remote)
+                    .expect("fixture remote"),
                 branch: branch.into(),
                 head: Some(head),
                 review_acceptance: None,
@@ -1369,7 +1365,8 @@ mod removal_tests {
             };
         let lane_integration = Some(WriterIntegration {
             extra: Default::default(),
-            remote: "origin".into(),
+            remote: provenant_records::run::Destination::from_name("origin")
+                .expect("fixture remote"),
             push_url: Some("https://example.invalid/repo".into()),
             target: "refs/heads/topic".into(),
             previous: None,
@@ -1407,7 +1404,8 @@ mod removal_tests {
             "main",
             Some(WriterIntegration {
                 extra: Default::default(),
-                remote: "origin".into(),
+                remote: provenant_records::run::Destination::from_name("origin")
+                    .expect("fixture remote"),
                 push_url: Some("https://example.invalid/repo".into()),
                 target: "refs/heads/main".into(),
                 previous: Some(target),

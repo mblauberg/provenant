@@ -955,7 +955,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: Default::default(),
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "published/lane".into(),
         open_pr: false,
         fast_forward_only: false,
@@ -1029,7 +1029,7 @@ fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> T
     input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: provenant_records::run::DeliveryMode::Integrate("batch/next".into()),
-        remote: String::new(),
+        remote: provenant_records::run::Destination::Local,
         branch: "batch/next".into(),
         open_pr: false,
         fast_forward_only: false,
@@ -1069,7 +1069,7 @@ fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> T
         &db::bytes(&WriterDeliveryReceipt {
             extra: Default::default(),
             schema_version: 1,
-            remote: String::new(),
+            remote: provenant_records::run::Destination::Local,
             branch: "batch/next".into(),
             head: Some(integrated),
             review_acceptance: None,
@@ -1079,7 +1079,7 @@ fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> T
             },
             integration: Some(provenant_records::run::WriterIntegration {
                 extra: Default::default(),
-                remote: String::new(),
+                remote: provenant_records::run::Destination::Local,
                 push_url: None,
                 target: "refs/heads/batch/next".into(),
                 previous: Some(base),
@@ -1183,7 +1183,7 @@ fn delivered_receipt(
     WriterDeliveryReceipt {
         extra: Default::default(),
         schema_version: 1,
-        remote: remote.into(),
+        remote: provenant_records::run::Destination::from_name(remote).expect("fixture remote"),
         branch: branch.into(),
         head: Some(head),
         review_acceptance: None,
@@ -1394,7 +1394,7 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: Default::default(),
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "published/lane".into(),
         open_pr: false,
         fast_forward_only: false,
@@ -1410,7 +1410,10 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
             extra: Default::default()
         }
     );
-    assert_eq!((receipt.remote.as_str(), receipt.head), ("origin", None));
+    assert_eq!(
+        (receipt.remote.as_str(), receipt.head),
+        (Some("origin"), None)
+    );
     Ok(())
 }
 #[test]
