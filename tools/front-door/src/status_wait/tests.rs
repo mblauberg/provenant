@@ -1023,7 +1023,7 @@ fn a_pinned_wait_ignores_the_verdict_of_another_head() {
 }
 
 #[test]
-fn a_pinned_wait_settles_head_moved_when_the_pr_moves() {
+fn a_pinned_wait_settles_pr_head_moved_when_the_pr_moves() {
     let first = oid(&"a".repeat(40));
     let second = oid(&"b".repeat(40));
     let mut subject = Some(pinned_subject(first, SubjectPolicy::Pinned));
@@ -1051,7 +1051,7 @@ fn a_pinned_wait_settles_head_moved_when_the_pr_moves() {
     assert!(moved, "a pinned_head_seen head that moves settles the wait");
     assert_eq!(
         moved_line.cause.as_deref(),
-        Some(crate::pr::status::HEAD_MOVED)
+        Some(crate::pr::status::PR_HEAD_MOVED)
     );
     assert!(
         moved_line
@@ -1068,7 +1068,7 @@ fn a_pinned_wait_settles_head_moved_when_the_pr_moves() {
     let reading = pr_reading("#7", &subject, &None, moved_line, false, moved);
     assert_eq!(reading.settle, Settle::Unsuccessful);
     assert!(
-        reading.line.contains("cause=head_moved"),
+        reading.line.contains("cause=pr_head_moved"),
         "{}",
         reading.line
     );
@@ -1091,7 +1091,7 @@ fn a_follow_latest_wait_repins_and_warns() {
             &test_sample(SubjectPolicy::FollowLatest),
         )
     });
-    assert!(!moved, "follow_latest never settles head_moved");
+    assert!(!moved, "follow_latest never settles pr_head_moved");
     let subject = subject.expect("subject stays pinned");
     assert_eq!(subject.head, second, "the new head is pinned");
     assert_eq!(
@@ -1181,7 +1181,10 @@ fn a_wait_pins_the_forge_head_at_admission() {
     assert_eq!(forced.policy, SubjectPolicy::Pinned, "--head always pins");
     assert_eq!(
         forced.policy_source,
-        Some(provenant_records::Source::at(provenant_records::Layer::Launch, "--head"))
+        Some(provenant_records::Source::at(
+            provenant_records::Layer::Launch,
+            "--head"
+        ))
     );
 
     let local = "e".repeat(40);

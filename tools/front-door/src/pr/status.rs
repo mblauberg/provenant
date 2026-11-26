@@ -13,7 +13,7 @@ mod membership;
 /// Why a PR whose CI never reported checks stayed pending. Shared by the
 /// graph gate's CI summary and by `wait --pr` at a timeout.
 /// A pinned pull request moved after its admitted head was observed.
-pub const HEAD_MOVED: &str = "head_moved";
+pub const PR_HEAD_MOVED: &str = "pr_head_moved";
 /// A pull request wait refused to proceed without a head at admission.
 pub const HEAD_UNPINNED: &str = "head_unpinned";
 

@@ -558,7 +558,7 @@ at admission and reports it (with `origin`, `policy` and `policy_source`) in JSO
 `domains.wait.pr_head_policy` (default `pinned`, overridable per project and by
 `wait --pr-head-policy`, which requires `--pr` and conflicts with `--head`)
 decides what happens when that head moves: `pinned` settles `Unsuccessful` with
-cause `head_moved` naming both heads and the rerun command; `follow_latest`
+cause `pr_head_moved` naming both heads and the rerun command; `follow_latest`
 re-pins and warns `PR_HEAD_FOLLOWED`, recording the old head in `followed_from`.
 `--head` always pins. `domains.wait.pr_head_source` chooses the forge head
 (`forge`), the local branch tip (`local`, warning and using the forge when no

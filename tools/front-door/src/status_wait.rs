@@ -287,7 +287,7 @@ impl ActionsGrace {
         };
         // A head that moved past the pinned subject is a terminal decision,
         // not a passing verdict that might still gain Actions runs.
-        if line.cause.as_deref() == Some(crate::pr::status::HEAD_MOVED) {
+        if line.cause.as_deref() == Some(crate::pr::status::PR_HEAD_MOVED) {
             return reading;
         }
         let first_read = match &self.head {
@@ -368,17 +368,17 @@ fn pr_subject(
                 origin: SubjectOrigin,
                 policy: SubjectPolicy,
                 source: &provenant_records::Source| PinnedSubject {
-            extra: Default::default(),
-            base: None,
-            head,
-            origin,
-            pinned_at: now,
-            policy,
-            repository: repository.as_ref().ok().cloned(),
-            base_ref: None,
-            policy_source: Some(source.clone()),
-            followed_from: Vec::new(),
-        };
+        extra: Default::default(),
+        base: None,
+        head,
+        origin,
+        pinned_at: now,
+        policy,
+        repository: repository.as_ref().ok().cloned(),
+        base_ref: None,
+        policy_source: Some(source.clone()),
+        followed_from: Vec::new(),
+    };
     if let Some(head) = command_head {
         return GitOid::parse(head).ok().map(|head| {
             make(
@@ -496,7 +496,7 @@ fn apply_subject_sample(
             if *pinned_head_seen {
                 match policy {
                     SubjectPolicy::Pinned => {
-                        line.cause = Some(crate::pr::status::HEAD_MOVED.to_owned());
+                        line.cause = Some(crate::pr::status::PR_HEAD_MOVED.to_owned());
                         line.next = Some(format!(
                             "rerun provenant wait --pr {number} for the new head, or set domains.wait.pr_head_policy=follow_latest"
                         ));
