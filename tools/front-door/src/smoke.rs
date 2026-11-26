@@ -7,6 +7,7 @@
 //! lifecycle start removes fixtures left behind by crashed runs.
 
 use provenant_cli::{
+    Upgrade,
     fabric::Context,
     smoke::{
         BRANCH_PREFIX_KEY, FIXTURE_ROOT_KEY, Origin as SmokeOrigin, SWEEP_AFTER_HOURS_KEY,
@@ -605,7 +606,7 @@ pub(crate) fn run_lifecycle(
     program: &Path,
     state: &Path,
     home: &Path,
-    args: &cli::Upgrade,
+    args: &Upgrade,
 ) -> Result<SmokeOutcome, String> {
     let roots =
         crate::roots::child(home, home, state.to_path_buf()).map_err(|error| error.to_string())?;

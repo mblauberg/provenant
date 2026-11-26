@@ -1188,7 +1188,7 @@ mod tests {
             "domains.wait.pr_head_source",
             "domains.wait.pr_head_unpinned",
         ] {
-            assert_eq!(field(path).source, provenant_config::Layer::User, "{path}");
+            assert_eq!(field(path).source, provenant_config::Layer::Host, "{path}");
         }
         let effective = edited.config.domains.wait.pr_head(Some("demo"));
         assert_eq!(
