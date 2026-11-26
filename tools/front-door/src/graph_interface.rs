@@ -668,7 +668,7 @@ fn smoke_lifecycle(
         }
     };
     let runner = match provenant_os::exec::SystemExecutor::new(1) {
-        Ok(executor) => crate::install::UpgradeRunner {
+        Ok(executor) => crate::install::ChildRunner {
             executor,
             environment: std::env::vars_os().collect(),
             cwd: resolved.project.clone(),

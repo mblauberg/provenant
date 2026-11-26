@@ -1263,9 +1263,9 @@ mod tests {
             (grace.min, grace.max, &grace.default),
             (Some(0), Some(600), &json!(60))
         );
-        let pr_head = field("domains.wait.pr_head");
+        let pr_head_policy = field("domains.wait.pr_head_policy");
         assert_eq!(
-            (pr_head.kind, &pr_head.default),
+            (pr_head_policy.kind, &pr_head_policy.default),
             ("string", &json!("pinned"))
         );
         let idle = field("gc.idle");

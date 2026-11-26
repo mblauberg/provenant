@@ -223,7 +223,7 @@ fn subject_with_base(
         origin: provenant_records::subject::SubjectOrigin::LocalRef {
             name: "main".into(),
         },
-        observed_at: provenant_core::WallTime::from_micros(1).unwrap(),
+        pinned_at: provenant_core::WallTime::from_micros(1).unwrap(),
         policy: provenant_records::subject::SubjectPolicy::Pinned,
     }
 }

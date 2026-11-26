@@ -333,7 +333,7 @@ fn read_only_checkout_warning_reports_a_local_read_for_an_unpinned_checkout()
 }
 
 #[test]
-fn read_only_source_ref_names_the_fetched_upstream_head_of_a_behind_checkout()
+fn resolve_read_source_names_the_fetched_upstream_head_of_a_behind_checkout()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 
@@ -405,10 +405,10 @@ fn read_only_source_ref_names_the_fetched_upstream_head_of_a_behind_checkout()
 
     // The selected tree is the fetched upstream head, named by its ref, and
     // the stale local head is kept in the advisory warning.
-    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
+    let selected = confinement::resolve_read_source(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("behind checkout did not resolve an upstream source")?;
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&default)?);
-    assert_eq!(selected.head, provenant_core::GitOid::parse(&stale)?);
+    assert_eq!(selected.checkout_head, provenant_core::GitOid::parse(&stale)?);
     assert_eq!(selected.behind, 1);
     assert!(
         selected.reference.contains("origin"),
@@ -423,19 +423,19 @@ fn read_only_source_ref_names_the_fetched_upstream_head_of_a_behind_checkout()
     // Level with or ahead of the default pins the observed checkout HEAD: the
     // lane reads that commit, not a tree that can move after admission.
     run(&checkout, &["reset", "-q", "--hard", &default])?;
-    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
+    let selected = confinement::resolve_read_source(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("level checkout did not pin its HEAD")?;
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&default)?);
-    assert_eq!(selected.head, provenant_core::GitOid::parse(&default)?);
+    assert_eq!(selected.checkout_head, provenant_core::GitOid::parse(&default)?);
     assert_eq!(selected.behind, 0);
     assert_eq!(selected.reference, "master");
 
     run(&checkout, &["commit", "-q", "--allow-empty", "-m", "three"])?;
     let ahead = run(&checkout, &["rev-parse", "HEAD"])?;
-    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
+    let selected = confinement::resolve_read_source(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("ahead checkout did not pin its HEAD")?;
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&ahead)?);
-    assert_eq!(selected.head, provenant_core::GitOid::parse(&ahead)?);
+    assert_eq!(selected.checkout_head, provenant_core::GitOid::parse(&ahead)?);
     assert_eq!(selected.behind, 0);
     assert_eq!(selected.reference, "master");
     Ok(())
@@ -468,10 +468,10 @@ fn auto_read_lane_stays_on_the_commit_observed_at_admission()
     .to_owned();
 
     // Admission pins the checkout HEAD, which is level with its upstream.
-    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
+    let selected = confinement::resolve_read_source(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("auto source did not pin the checkout HEAD")?;
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&admission)?);
-    assert_eq!(selected.head, provenant_core::GitOid::parse(&admission)?);
+    assert_eq!(selected.checkout_head, provenant_core::GitOid::parse(&admission)?);
     assert_eq!(selected.behind, 0);
     assert_eq!(selected.reference, "main");
 
@@ -487,12 +487,31 @@ fn auto_read_lane_stays_on_the_commit_observed_at_admission()
     .to_owned();
     assert_ne!(current, admission);
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&admission)?);
-    assert_eq!(selected.head, provenant_core::GitOid::parse(&admission)?);
+    assert_eq!(selected.checkout_head, provenant_core::GitOid::parse(&admission)?);
+    Ok(())
+}
+
+/// Auto pins HEAD even when no remote exists, so a local read cannot drift.
+#[test]
+fn auto_read_source_pins_a_checkout_without_a_remote() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let checkout = temp.path().join("checkout");
+    std::fs::create_dir_all(&state)?;
+    std::fs::create_dir_all(&checkout)?;
+    provenant_os::fixture::run_git(&checkout, &["init", "-q", "-b", "main"])?;
+    std::fs::write(checkout.join("file"), "one\n")?;
+    provenant_os::fixture::run_git(&checkout, &["add", "file"])?;
+    provenant_os::fixture::run_git(&checkout, &["commit", "-qm", "one"])?;
+    let head = String::from_utf8(provenant_os::fixture::run_git(&checkout, &["rev-parse", "HEAD"])?)?;
+    let pin = confinement::resolve_read_source(&state, &checkout, &crate::run::ReadSourceChoice::automatic()).ok_or("missing pin")?;
+    assert_eq!(pin.commit.to_string(), head.trim());
+    assert_eq!(pin.reference, "main");
     Ok(())
 }
 
 #[test]
-fn read_only_source_ref_uses_the_checked_out_branch_upstream_not_the_default_branch()
+fn resolve_read_source_uses_the_checked_out_branch_upstream_not_the_default_branch()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 
@@ -573,10 +592,10 @@ fn read_only_source_ref_uses_the_checked_out_branch_upstream_not_the_default_bra
         &["checkout", "-q", "-b", "feature", "--track", "origin/feature"],
     )?;
     run(&checkout, &["reset", "-q", "--hard", &base])?;
-    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
+    let selected = confinement::resolve_read_source(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("stale feature checkout did not resolve its upstream")?;
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&feature)?);
-    assert_eq!(selected.head, provenant_core::GitOid::parse(&base)?);
+    assert_eq!(selected.checkout_head, provenant_core::GitOid::parse(&base)?);
     assert_eq!(selected.behind, 1);
     assert_eq!(selected.reference, "refs/remotes/origin/feature");
 
@@ -588,7 +607,7 @@ fn read_only_source_ref_uses_the_checked_out_branch_upstream_not_the_default_bra
         &["branch", "--set-upstream-to=origin/feature", "master"],
     )?;
     assert_eq!(run(&checkout, &["rev-parse", "HEAD"])?, master);
-    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
+    let selected = confinement::resolve_read_source(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("contained default hid the branch's own upstream")?;
     assert_eq!(selected.reference, "refs/remotes/origin/feature");
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&feature)?);
@@ -596,7 +615,7 @@ fn read_only_source_ref_uses_the_checked_out_branch_upstream_not_the_default_bra
     // A detached HEAD has no configured upstream: the origin default is the
     // advisory stand-in and names the ref actually used.
     run(&checkout, &["checkout", "-q", "--detach", &base])?;
-    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
+    let selected = confinement::resolve_read_source(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("detached checkout did not fall back to the origin default")?;
     assert_eq!(selected.reference, "refs/remotes/origin/HEAD");
     assert_eq!(selected.commit, provenant_core::GitOid::parse(&master)?);
@@ -607,11 +626,11 @@ fn read_only_source_ref_uses_the_checked_out_branch_upstream_not_the_default_bra
 fn read_only_warning_text_distinguishes_a_pin_from_a_local_read() {
     let commit = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
     let head = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
-    let selected = crate::run::ReadOnlySourceRef {
+    let selected = crate::run::ReadSourcePin {
         commit,
         reference: "refs/remotes/origin/feature".to_owned(),
         behind: 1,
-        head,
+        checkout_head: head,
     };
     let source = Path::new("/repo/checkout");
     let pinned = crate::run::read_only_source_warning(source, &selected, &crate::run::ReadSourceChoice::automatic());
@@ -1690,7 +1709,7 @@ fn retained_state_copy_refuses_trees_past_its_entry_and_depth_budget()
 
 #[test]
 // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-fn read_only_source_ref_resolves_the_remote_instead_of_assuming_origin()
+fn resolve_read_source_resolves_the_remote_instead_of_assuming_origin()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let state = temp.path().join("state");
@@ -1736,7 +1755,7 @@ fn read_only_source_ref_resolves_the_remote_instead_of_assuming_origin()
     )?;
     provenant_os::fixture::run_git(&checkout, &["reset", "-q", "--hard", "HEAD~1"])?;
 
-    let selected = confinement::read_only_source_ref(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
+    let selected = confinement::resolve_read_source(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("behind checkout did not resolve a source")?;
     assert!(
         selected.reference.contains("refs/remotes/forge/"),

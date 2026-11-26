@@ -333,8 +333,11 @@ pub const TEMP_CHECKOUT_RETAINED: WarningCode = WarningCode("TEMP_CHECKOUT_RETAI
 pub const SMOKE_BINDING_RETAINED: WarningCode = WarningCode("SMOKE_BINDING_RETAINED");
 /// The caller project was ignored for hermetic smoke.
 pub const SMOKE_PROJECT_IGNORED: WarningCode = WarningCode("SMOKE_PROJECT_IGNORED");
-/// The peer could not verify the smoke fixture.
-pub const SMOKE_FIXTURE_UNVERIFIED: WarningCode = WarningCode("SMOKE_FIXTURE_UNVERIFIED");
+/// The retired read-source spelling now falls back to auto.
+pub const READ_SOURCE_VALUE_RENAMED: WarningCode = WarningCode("READ_SOURCE_VALUE_RENAMED");
+/// The peer does not support the smoke fixture protocol.
+pub const SMOKE_PEER_FIXTURE_UNSUPPORTED: WarningCode =
+    WarningCode("SMOKE_PEER_FIXTURE_UNSUPPORTED");
 /// A pull request wait followed a new head.
 pub const PR_HEAD_FOLLOWED: WarningCode = WarningCode("PR_HEAD_FOLLOWED");
 /// A pull request wait has not yet pinned a head.

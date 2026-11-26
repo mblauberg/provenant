@@ -1544,17 +1544,27 @@ mod tests {
 
     #[test]
     fn run_accepts_an_explicit_local_read_only_source() {
-        let invocation = valid(&["run", "task", "Review the tree", "--source", "local"]);
+        let invocation = valid(&["run", "task", "Review the tree", "--source", "live"]);
         let Command::Run(request) = invocation.command else {
             panic!("expected run");
         };
-        assert_eq!(request.source.as_deref(), Some("local"));
-        let invocation = valid(&["run", "task", "Review the tree", "--source", "upstream"]);
+        assert_eq!(request.source.as_deref(), Some("live"));
+        let invocation = valid(&[
+            "run",
+            "task",
+            "Review the tree",
+            "--source",
+            "default_branch",
+        ]);
         let Command::Run(request) = invocation.command else {
             panic!("expected run");
         };
-        assert_eq!(request.source.as_deref(), Some("upstream"));
-        invalid(&["run", "task", "Review the tree", "--source", "elsewhere"]);
+        assert_eq!(request.source.as_deref(), Some("default_branch"));
+        for source in ["auto", "refs/heads/x"] {
+            valid(&["run", "task", "Review the tree", "--source", source]);
+        }
+        let retired = "local";
+        invalid(&["run", "task", "Review the tree", "--source", retired]);
     }
 
     #[test]

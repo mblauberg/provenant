@@ -939,6 +939,25 @@ fn version_refusal_precedes_unknown_key_decoding() {
     ));
 }
 
+/// Inspection reports a repository spelling without changing the file.
+#[test]
+fn config_check_reports_retired_repository_read_source() {
+    let fixture = Files::new();
+    let repo = fixture.roots.checkout().join(".provenant");
+    std::fs::create_dir_all(&repo).unwrap();
+    let file = repo.join("config.toml");
+    std::fs::write(&file, "[knobs]\nlanes.read_source='checkout'\n").unwrap();
+    let check = inspect_config(&fixture.roots, &DOMAINS).unwrap().check;
+    assert!(
+        check
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "read_source_value_renamed"
+                && finding.message.contains("using auto"))
+    );
+    assert!(std::fs::read_to_string(file).unwrap().contains("checkout"));
+}
+
 #[test]
 fn inspect_collects_ordered_unknown_type_range_and_domain_failures() {
     let fixture = Files::new();

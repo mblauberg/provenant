@@ -302,23 +302,58 @@ fn command_error(fail: &Fail) -> CommandError {
 
 /// The pinned commit a read-only lane reads. Under the compiled default this is
 /// the fetched upstream head when the checkout is behind it, and the observed
-/// checkout HEAD otherwise. `head` is kept so a launch can name both the tree
+/// checkout HEAD otherwise. `checkout_head` is kept so a launch can name both the tree
 /// the checkout held at admission and the one the lane reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReadOnlySourceRef {
+pub struct ReadSourcePin {
     pub commit: provenant_core::GitOid,
     pub reference: String,
     pub behind: u64,
-    pub head: provenant_core::GitOid,
+    pub checkout_head: provenant_core::GitOid,
 }
 
-/// The sourced choice of what a read-only lane reads. `value` is `checkout`,
-/// `default_branch`, an explicit ref, or empty for the compiled default (the
-/// `auto` registry value); the layer and origin are the ones the owner actually
-/// set the knob at, so every warning and receipt names the same place.
+/// A read source is either a policy or a caller-supplied Git ref.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadSource {
+    Auto,
+    Live,
+    DefaultBranch,
+    Ref(String),
+}
+
+impl ReadSource {
+    /// Reject retired spellings and empty values; other nonempty values name refs.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "live" => Ok(Self::Live),
+            "default_branch" => Ok(Self::DefaultBranch),
+            "" | "checkout" | "local" | "upstream" => {
+                Err("expected auto, live, default_branch, or a Git ref".into())
+            }
+            value if provenant_confinement::repo::GitRevision::new(value).is_ok() => {
+                Ok(Self::Ref(value.to_owned()))
+            }
+            _ => Err("expected auto, live, default_branch, or a Git ref".into()),
+        }
+    }
+}
+
+impl std::fmt::Display for ReadSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Live => f.write_str("live"),
+            Self::DefaultBranch => f.write_str("default_branch"),
+            Self::Ref(value) => f.write_str(value),
+        }
+    }
+}
+
+/// The sourced read policy and its configuration origin.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadSourceChoice {
-    pub value: String,
+    pub source: ReadSource,
     pub fetch_first: bool,
     pub layer: provenant_records::Layer,
     pub origin: Option<String>,
@@ -327,7 +362,7 @@ pub struct ReadSourceChoice {
 impl Default for ReadSourceChoice {
     fn default() -> Self {
         Self {
-            value: String::new(),
+            source: ReadSource::Auto,
             fetch_first: false,
             layer: provenant_records::Layer::Default,
             origin: None,
@@ -358,22 +393,22 @@ impl ReadSourceChoice {
 /// compiled default pins the upstream when the checkout is behind it, and the
 /// checkout HEAD otherwise; an explicit choice pins its own commit. Missing Git
 /// evidence is advisory, never a refusal.
-pub fn read_only_source_ref(
+pub fn resolve_read_source(
     state: &Path,
     source: &Path,
     choice: &ReadSourceChoice,
-) -> Option<ReadOnlySourceRef> {
-    provider::confinement::read_only_source_ref(state, source, choice)
+) -> Option<ReadSourcePin> {
+    provider::confinement::resolve_read_source(state, source, choice)
 }
 
 /// The warning a read-only launch carries when a source is pinned, naming the
 /// ref and commit the lane will read and where that choice came from.
 pub fn read_only_source_warning(
     source: &Path,
-    selected: &ReadOnlySourceRef,
+    selected: &ReadSourcePin,
     choice: &ReadSourceChoice,
 ) -> String {
-    if choice.value.is_empty() {
+    if choice.source == ReadSource::Auto {
         format!(
             "{} is {} commit{} behind {}; read-only lane will read {} ({}) instead of local {} because the checkout is stale",
             source.display(),
@@ -382,7 +417,7 @@ pub fn read_only_source_warning(
             selected.reference,
             selected.reference,
             selected.commit,
-            selected.head
+            selected.checkout_head
         )
     } else {
         format!(
@@ -391,7 +426,7 @@ pub fn read_only_source_warning(
             selected.commit,
             source.display(),
             ReadSourceChoice::KNOB,
-            choice.value,
+            choice.source,
             choice.description()
         )
     }
@@ -400,7 +435,7 @@ pub fn read_only_source_warning(
 /// The warning for a read-only launch that keeps the local checkout. Under the
 /// compiled default the observed HEAD itself is the pin, so a later commit
 /// cannot move it; the fetched upstream is only the reason it was stale.
-pub fn read_only_local_checkout_warning(source: &Path, selected: &ReadOnlySourceRef) -> String {
+pub fn read_only_local_checkout_warning(source: &Path, selected: &ReadSourcePin) -> String {
     format!(
         "{} is {} commit{} behind {} ({}); read-only lane will read the local checkout ({}) because no upstream source was pinned",
         source.display(),
@@ -408,7 +443,7 @@ pub fn read_only_local_checkout_warning(source: &Path, selected: &ReadOnlySource
         if selected.behind == 1 { "" } else { "s" },
         selected.reference,
         selected.commit,
-        selected.head
+        selected.checkout_head
     )
 }
 
@@ -2523,3 +2558,19 @@ mod lane_depth_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod read_source_spelling_tests {
+    use super::ReadSource;
+
+    /// Every supported spelling round-trips, while retired names are refused.
+    #[test]
+    fn parses_the_read_source_vocabulary() {
+        for value in ["auto", "live", "default_branch", "refs/heads/x"] {
+            assert_eq!(ReadSource::parse(value).unwrap().to_string(), value);
+        }
+        for value in ["", "checkout", "local", "upstream"] {
+            assert!(ReadSource::parse(value).is_err());
+        }
+    }
+}

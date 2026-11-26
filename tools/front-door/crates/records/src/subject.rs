@@ -10,7 +10,7 @@ pub struct PinnedSubject {
     pub base: Option<GitOid>,
     pub head: GitOid,
     pub origin: SubjectOrigin,
-    pub observed_at: WallTime,
+    pub pinned_at: WallTime,
     #[serde(default)]
     pub policy: SubjectPolicy,
 }
@@ -35,7 +35,7 @@ pub enum SubjectOrigin {
         nonce: String,
     },
     /// A full OID supplied by the caller.
-    Commit,
+    Explicit,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn subject_round_trips_unknown_fields() {
-        let value = serde_json::json!({"head": "1".repeat(40), "origin": {"kind": "commit"}, "observed_at": WallTime::from_micros(1).unwrap(), "policy": "pinned", "future": {"value": 42}});
+        let value = serde_json::json!({"head": "1".repeat(40), "origin": {"kind": "explicit"}, "pinned_at": WallTime::from_micros(1).unwrap(), "policy": "pinned", "future": {"value": 42}});
         let subject: PinnedSubject = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(subject).unwrap(), value);
     }

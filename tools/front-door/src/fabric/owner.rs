@@ -4633,7 +4633,7 @@ mod journal_error_tests {
             document["subject"] = serde_json::json!({
                 "head": subject,
                 "origin": {"kind":"local_ref","name":"HEAD"},
-                "observed_at": "2000-01-01T00:00:00.000000Z"
+                "pinned_at": "2000-01-01T00:00:00.000000Z"
             });
         }
         let graph_base = scenario == "graph-base" || scenario == "behaviour";
