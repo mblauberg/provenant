@@ -70,6 +70,12 @@ fn guardian_capture_preserves_raw_provider_frames_for_settlement() {
 
 fn fixture() -> Result<TestRig> {
     let mut rig = repository()?;
+    // Product assets must not grant a reader access to the live source tree.
+    let assets = rig.root.join("product-assets");
+    fs::create_dir(&assets)?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
+    rig.env
+        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
     ok(
         &rig,
         &["worktree", "create", "compose", "--base", "HEAD", "--json"],
