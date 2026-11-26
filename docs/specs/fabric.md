@@ -207,7 +207,9 @@ drawing a pick, because the weighted selection, account and credential decision
 remain launch-only. The row's `selection` names that boundary, so pool routing
 can be checked before launch. Each pool candidate includes its model, adapter,
 effective effort and the source of each value; a node-level effort applies to
-every candidate. Model-less adapter routes report their provider in `adapter`
+every candidate. Structural and host-managed nodes (gates, loops, composites, decisions, land,
+hygiene and publish) have no route row. A model route reports its declared
+adapter even when its model cannot be canonicalised. Model-less adapter routes report their provider in `adapter`
 and preserve the configured entry separately as `route_name`.
 - Why: a model id may itself contain `/`, so re-parsing a stored id silently
   changes which model runs.
@@ -496,7 +498,10 @@ invalid.
 ### Writer continuation
 
 A writer that `continues` an upstream `pr` or `push` writer reuses its worktree
-and branch, so repairs update the same pull request. The host pushes without
+and branch, so repairs update the same pull request. An authored writer id binds
+to its unique expanded root writer, including inside repair loops whose local
+continuation has the same name; continuing writers do not become new roots.
+The host pushes without
 force and refuses a mismatched branch.
 - Why: a repair must land on the reviewed PR and never rewrite a moved branch.
 

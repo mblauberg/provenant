@@ -1202,6 +1202,18 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
             ],
         ),
         (
+            "review-repair",
+            vec![
+                json!({"id":"exercise", "use":"review-repair", "with":{"worktree":rig.project, "write_scope":["."], "max_repair_cycles":1}}),
+            ],
+        ),
+        (
+            "deliver",
+            vec![
+                json!({"id":"exercise", "use":"deliver", "with":{"worktree":rig.project, "write_scope":["."], "max_ci_rounds":1}}),
+            ],
+        ),
+        (
             "synthesise",
             vec![
                 json!({"id":"source", "use":"task"}),
@@ -1225,6 +1237,51 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
             .output()?;
         let explained: Value = serde_json::from_slice(&output.stdout)?;
         assert!(output.status.success(), "{name}: {explained}");
+        if matches!(name, "review-repair" | "deliver") {
+            use provenant_fabric_runtime::graph::{GraphDocument, NodeKind};
+            let document: GraphDocument =
+                serde_json::from_value(explained["data"]["document"].clone())?;
+            let expanded =
+                document.expanded(&provenant_fabric_runtime::config::GraphLimits::default())?;
+            let rows = explained["data"]["node_routes"]
+                .as_array()
+                .ok_or("node routes")?;
+            let structural: Vec<_> = expanded
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.composite.is_some()
+                        || node.condition.is_some()
+                        || node.decide.is_some()
+                        || node.loop_body.is_some()
+                        || node.land.is_some()
+                        || matches!(
+                            node.kind,
+                            Some(
+                                NodeKind::Composite
+                                    | NodeKind::Gate
+                                    | NodeKind::Loop
+                                    | NodeKind::Decide
+                                    | NodeKind::Land
+                                    | NodeKind::Hygiene
+                                    | NodeKind::Publish
+                            )
+                        )
+                })
+                .collect();
+            assert!(
+                !structural.is_empty(),
+                "{name} must exercise structural nodes"
+            );
+            for node in structural {
+                assert!(
+                    rows.iter().all(|row| row["node"] != node.id),
+                    "{name}: structural node {} has a route: {rows:?}",
+                    node.id
+                );
+            }
+            assert!(!rows.is_empty(), "{name} must report launchable routes");
+        }
     }
     let worktree = format!("worktree={}", rig.project.display());
     let (output, explained) = rig.run(&[

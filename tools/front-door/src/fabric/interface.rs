@@ -3048,7 +3048,7 @@ impl Factory {
         &self,
         nodes: &[provenant_fabric_runtime::graph::GraphNode],
     ) -> Vec<Value> {
-        use provenant_fabric_runtime::graph::{GraphRoute, GraphRouteSelector};
+        use provenant_fabric_runtime::graph::{GraphRoute, GraphRouteSelector, NodeKind};
         // The provider check returns the route list together with the account
         // settings; this preview only needs the list's named routes and pools.
         let listed = provenant_cli::route::provider_check_routes(&self.context.roots)
@@ -3062,6 +3062,20 @@ impl Factory {
                 || node.composite.is_some()
                 || node.condition.is_some()
                 || node.decide.is_some()
+                || node.loop_body.is_some()
+                || node.land.is_some()
+                || matches!(
+                    node.kind,
+                    Some(
+                        NodeKind::Composite
+                            | NodeKind::Gate
+                            | NodeKind::Loop
+                            | NodeKind::Decide
+                            | NodeKind::Land
+                            | NodeKind::Hygiene
+                            | NodeKind::Publish
+                    )
+                )
             {
                 continue;
             }
@@ -3092,7 +3106,7 @@ impl Factory {
                     Value,
                 ) = match route.selector() {
                     GraphRouteSelector::Model(model) => (
-                        adapter_of(model).map_or(Value::Null, Value::String),
+                        optional(route.adapter.clone().or_else(|| adapter_of(model))),
                         Value::String(model.to_owned()),
                         optional(effort),
                         json!({
