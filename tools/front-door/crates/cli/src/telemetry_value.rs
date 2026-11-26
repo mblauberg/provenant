@@ -120,6 +120,51 @@ fn named(reason: Option<value::Unavailable>) -> String {
     reason.map_or_else(|| "unknown".to_owned(), |kind| kind.name().to_owned())
 }
 
+fn price_per_window_usd(
+    plan: Option<&provenant_quota::PlanPrice>,
+    window_seconds: Option<u64>,
+) -> (Option<u64>, Option<value::Unavailable>) {
+    let Some(plan) = plan else {
+        return (None, None);
+    };
+    let monthly_usd = if plan.currency == "USD" {
+        if plan.price > 0.0 {
+            Some(plan.price)
+        } else {
+            plan.notional_usd
+        }
+    } else if plan.notional_usd.is_some() {
+        plan.notional_usd
+    } else {
+        return (None, Some(value::Unavailable::UnsupportedCurrency));
+    };
+    let Some(length) = window_seconds else {
+        return (None, None);
+    };
+    let Some(monthly_usd) = monthly_usd.filter(|amount| amount.is_finite() && *amount > 0.0) else {
+        return (None, None);
+    };
+    (
+        Some((monthly_usd * 1_000_000.0 * length as f64 / 2_592_000.0).round() as u64),
+        None,
+    )
+}
+
+fn window_cost_rows<'a>(
+    rows: &'a [Row],
+    provider: &str,
+    identity_key: &str,
+    bounds: Option<(i64, i64)>,
+) -> Vec<&'a Row> {
+    let Some((start, end)) = bounds else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter(|row| attributed(row, provider, identity_key))
+        .filter(|row| (start..=end).contains(&seconds(row)))
+        .collect()
+}
+
 /// Credit balances arrive as decimal strings (`9.50`) or `unlimited`.
 fn credit_balance_microdollars(text: &str) -> Option<u64> {
     let trimmed = text.trim();
@@ -317,7 +362,7 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
                             .windows
                             .iter()
                             .find(|candidate| candidate.pool == w.pool)
-                            .map_or(0, |candidate| candidate.used_basis_points);
+                            .map(|candidate| candidate.used_basis_points);
                         ValueReading {
                             observed_unix_seconds: record.observed_unix_seconds,
                             used_basis_points: used,
@@ -332,51 +377,36 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
                 let at_reset: Vec<u64> = window_readings
                     .windows(2)
                     .filter(|pair| pair[1].reset)
-                    .map(|pair| pair[0].used_basis_points)
+                    .filter_map(|pair| pair[0].used_basis_points)
                     .collect();
                 let trend = value::trend(&at_reset);
-                // Cost is taken from the quota window when the reading carries
-                // its bounds; otherwise from --since, and the basis says so.
-                let cost_basis = match (w.resets_unix_seconds, w.window_seconds) {
-                    (Some(reset), Some(len)) => {
-                        let start = reset.saturating_sub(i64::try_from(len).unwrap_or(i64::MAX));
-                        format!("api_equivalent_{start}_to_{reset}")
-                    }
-                    _ => format!("api_equivalent_since_{since}"),
-                };
-                let cost_rows: Vec<&Row> = in_window
-                    .iter()
-                    .copied()
-                    .filter(|row| attributed(row, provider, &identity_key))
-                    .filter(|row| match (w.resets_unix_seconds, w.window_seconds) {
-                        (Some(reset), Some(len)) => {
-                            let at = seconds(row);
-                            at >= reset.saturating_sub(i64::try_from(len).unwrap_or(i64::MAX))
-                                && at <= reset
-                        }
-                        _ => true,
-                    })
-                    .collect();
-                let totals = report::totals(cost_rows.iter().copied()).map_err(io)?;
-                let price_per_window = price.and_then(|plan| {
-                    w.window_seconds.map(|length| {
-                        let effective = if plan.price > 0.0 {
-                            plan.price
-                        } else {
-                            plan.notional_usd.unwrap_or(0.0)
-                        };
-                        if !effective.is_finite() || effective <= 0.0 {
-                            return 0;
-                        }
-                        (effective * 1_000_000.0 * length as f64 / 2_592_000.0).round() as u64
-                    })
+                // A report cutoff cannot truncate the denominator's quota cycle.
+                let bounds = w.window_seconds.zip(w.resets_unix_seconds).map(|(len, reset)| {
+                    (
+                        reset.saturating_sub(i64::try_from(len).unwrap_or(i64::MAX)),
+                        reset,
+                    )
                 });
-                let window_value = value::window_value(
+                let cost_basis = bounds.map_or_else(
+                    || "unavailable_no_window_bounds".to_owned(),
+                    |(start, end)| format!("api_equivalent_{start}_to_{end}"),
+                );
+                let cost_rows = window_cost_rows(&ledger.rows, provider, &identity_key, bounds);
+                let totals = report::totals(cost_rows.iter().copied()).map_err(io)?;
+                let (price_per_window, price_unavailable) =
+                    price_per_window_usd(price, w.window_seconds);
+                let mut window_value = value::window_value(
                     totals.microdollars,
                     w.used_basis_points,
                     price_per_window,
                     totals.complete,
+                    bounds.is_some(),
                 );
+                if window_value.cost_per_full_window_microdollars.is_some()
+                    && price_unavailable.is_some()
+                {
+                    window_value.unavailable = price_unavailable;
+                }
                 let cost_text = match window_value.cost_per_full_window_microdollars {
                     Some(micros) => usd(micros),
                     None => format!("unavailable ({})", named(window_value.unavailable)),
@@ -610,6 +640,81 @@ fn accepted_outcomes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_core::{ProjectId, WallTime};
+    use provenant_records::{AccountIdentity, UsageSource};
+    use provenant_telemetry::ledger::{Cost, FORMAT, Tokens};
+
+    fn row(at: i64, attempt: &str) -> Row {
+        Row {
+            format: FORMAT.into(),
+            source: UsageSource::Ingest,
+            project: ProjectId::from_bytes([1; 16]),
+            graph: "graph".into(),
+            node: "node".into(),
+            attempt: attempt.into(),
+            provider: Some("claude".into()),
+            model: Some("model".into()),
+            effort: None,
+            identity: AccountIdentity::known("claude", "account", "epoch"),
+            outcome: "succeeded".into(),
+            started: None,
+            finished: WallTime::from_micros(at * 1_000_000).expect("valid timestamp"),
+            tokens: Tokens::default(),
+            cost: Some(Cost {
+                picodollars: 0,
+                complete: true,
+                subscription: false,
+                prices: "fixture".into(),
+                extra: Default::default(),
+            }),
+            context_band: None,
+            extra: Default::default(),
+        }
+    }
+
+    fn plan(price: f64, currency: &str, notional_usd: Option<f64>) -> provenant_quota::PlanPrice {
+        provenant_quota::PlanPrice {
+            name: "fixture".into(),
+            price,
+            currency: currency.into(),
+            notional_usd,
+            effective_from: "2026-01-01".into(),
+        }
+    }
+
+    #[test]
+    fn plan_value_uses_only_a_usd_price_or_explicit_usd_notional() {
+        assert_eq!(
+            price_per_window_usd(Some(&plan(30.0, "USD", None)), Some(2_592_000)),
+            (Some(30_000_000), None)
+        );
+        assert_eq!(
+            price_per_window_usd(Some(&plan(40.0, "AUD", None)), Some(2_592_000)),
+            (None, Some(value::Unavailable::UnsupportedCurrency))
+        );
+        assert_eq!(
+            price_per_window_usd(Some(&plan(40.0, "AUD", Some(25.0))), Some(2_592_000)),
+            (Some(25_000_000), None)
+        );
+    }
+
+    #[test]
+    fn full_window_cost_includes_cycle_rows_earlier_than_the_report_cutoff() {
+        let rows = [
+            row(90, "outside"),
+            row(110, "before_cutoff"),
+            row(150, "after_cutoff"),
+        ];
+        let selected = window_cost_rows(&rows, "claude", "account", Some((100, 200)));
+        assert_eq!(
+            selected
+                .iter()
+                .map(|row| row.attempt.as_str())
+                .collect::<Vec<_>>(),
+            ["before_cutoff", "after_cutoff"]
+        );
+        assert!(window_cost_rows(&rows, "claude", "account", None).is_empty());
+    }
 
     #[test]
     fn a_non_numeric_credit_balance_degrades_to_an_absent_reading() {

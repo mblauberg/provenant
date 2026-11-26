@@ -28,8 +28,11 @@ chair session to an account, see [account switching](configuration.md#chair-acco
   figure states its coverage; an unpriced bucket is a named lower bound, never
   zero. Credit accounts add `credit_runway` (draw-down per day and days to
   exhaustion), or a named unavailable reason when the readings are missing.
-  `price_source` and `window_source` name where the defaults came from. Compare
-  a full billing period before acting on any of it.
+  `price_source` and `window_source` name where the defaults came from. The
+  value multiple uses a USD plan price or explicit `notional_usd`; unsupported
+  currencies are named unavailable. `--since` limits the summary, not a bounded
+  quota cycle's cost; a window without cycle bounds has unavailable full-window
+  cost. Compare a full billing period before acting on any of it.
 - `telemetry mileage` is what one quota point costs: it joins quota history with
   ingested usage, so run ingest first. Do not pass `--model`: quota deltas cover
   every model, so a model filter understates mileage.
@@ -84,6 +87,7 @@ added, so resolution is the refresh cadence. `provenant quota history [--account
 LABEL] [--since T] [--limit N]` lists readings.
 
 Record plan prices per account in `domains.accounts.entries.{id}.plans`, with an
-entry for each price change. Nothing converts currencies. A free plan carries
-`notional_usd` so `telemetry value` can still state a value multiple; the
-multiple uses the notional, not a claim that the plan was paid for.
+entry for each price change. Nothing converts currencies. A foreign-currency
+plan needs `notional_usd` for `telemetry value` to state a value multiple. A
+free plan carries `notional_usd` so the multiple uses its notional, not a claim
+that the plan was paid for.

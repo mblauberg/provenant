@@ -68,9 +68,16 @@ window set are stated with the source that supplied them.
 
 An unused share is the last reading before the reset, labelled
 `observed_before_reset` with its timestamp and sample count; a reset with no
-reading before it is named unavailable. A reset, an unpriced bucket and an
-attribution gap are reported as such and never zero-filled: unpriced cost is a
-bound, and a failed optional read names its cause and degrades that field.
+reading before it is named unavailable. If the immediately preceding snapshot
+omits the pool, `missing_reading_before_reset` is reported instead of treating
+the missing quota as zero. A reset, an unpriced bucket and an attribution gap
+are reported as such and never zero-filled: unpriced cost is a bound, and a
+failed optional read names its cause and degrades that field. A plan price is
+compared with USD API-equivalent cost only when its currency is USD or it has
+an explicit `notional_usd`; a foreign-currency amount is not treated as USD.
+`--since` limits the report summary, while bounded-window cost uses the complete
+ledger cycle. If the window has no bounds, full-window cost is named
+`incomplete_window` rather than scaled from a partial report range.
 Plan suggestions are expiring recommendations with evidence counts; nothing
 applies them.
 - Why: a full window priced from a partial window, or a guessed zero for an

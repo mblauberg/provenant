@@ -12,7 +12,8 @@ use std::cmp::Ordering;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reading {
     pub observed_unix_seconds: i64,
-    pub used_basis_points: u64,
+    /// Absent when a quota snapshot did not include this pool.
+    pub used_basis_points: Option<u64>,
     /// A reset was detected at this reading: usage fell or the reset advanced.
     pub reset: bool,
 }
@@ -32,6 +33,7 @@ pub struct CreditPoint {
 pub enum Unavailable {
     NoResetObserved,
     NoReadingBeforeReset,
+    MissingReadingBeforeReset,
     NotEnoughReadings,
     NoCreditBalance,
     NoElapsedTime,
@@ -39,6 +41,8 @@ pub enum Unavailable {
     Unpriced,
     NoUsage,
     NoPriceInForce,
+    UnsupportedCurrency,
+    IncompleteWindow,
 }
 
 impl Unavailable {
@@ -47,6 +51,7 @@ impl Unavailable {
         match self {
             Self::NoResetObserved => "no_reset_observed",
             Self::NoReadingBeforeReset => "no_reading_before_reset",
+            Self::MissingReadingBeforeReset => "missing_reading_before_reset",
             Self::NotEnoughReadings => "not_enough_readings",
             Self::NoCreditBalance => "no_credit_balance",
             Self::NoElapsedTime => "no_elapsed_time",
@@ -54,6 +59,8 @@ impl Unavailable {
             Self::Unpriced => "unpriced",
             Self::NoUsage => "no_usage",
             Self::NoPriceInForce => "no_price_in_force",
+            Self::UnsupportedCurrency => "unsupported_currency",
+            Self::IncompleteWindow => "incomplete_window",
         }
     }
 }
@@ -105,7 +112,10 @@ pub fn unused_at_reset(readings: &[Reading]) -> Option<UnusedShare> {
         .iter()
         .rposition(|reading| reading.reset)
         .map_or(0, |index| index + 1);
-    let samples = (at - start) as u64;
+    let samples = readings[start..at]
+        .iter()
+        .filter(|reading| reading.used_basis_points.is_some())
+        .count() as u64;
     if samples == 0 {
         return Some(share_unavailable(
             Unavailable::NoReadingBeforeReset,
@@ -114,7 +124,14 @@ pub fn unused_at_reset(readings: &[Reading]) -> Option<UnusedShare> {
         ));
     }
     let before = readings[at - 1];
-    let used = before.used_basis_points.min(10_000);
+    let Some(used) = before.used_basis_points else {
+        return Some(share_unavailable(
+            Unavailable::MissingReadingBeforeReset,
+            samples,
+            Some(before.observed_unix_seconds),
+        ));
+    };
+    let used = used.min(10_000);
     Some(UnusedShare {
         basis: OBSERVED_BEFORE_RESET,
         unused_basis_points: Some(10_000 - used),
@@ -190,6 +207,7 @@ pub fn window_value(
     used_basis_points: u64,
     price_per_window_microdollars: Option<u64>,
     complete: bool,
+    full_window: bool,
 ) -> WindowValue {
     let used = used_basis_points.min(10_000);
     let mut result = WindowValue {
@@ -199,6 +217,10 @@ pub fn window_value(
         used_basis_points: used,
         unavailable: None,
     };
+    if !full_window {
+        result.unavailable = Some(Unavailable::IncompleteWindow);
+        return result;
+    }
     let cost = match cost_microdollars {
         Some(cost) => cost,
         None => {
@@ -292,7 +314,7 @@ pub fn credit_runway(points: &[CreditPoint]) -> CreditRunway {
 mod tests {
     use super::*;
 
-    fn reading(at: i64, used: u64, reset: bool) -> Reading {
+    fn reading(at: i64, used: Option<u64>, reset: bool) -> Reading {
         Reading {
             observed_unix_seconds: at,
             used_basis_points: used,
@@ -303,11 +325,11 @@ mod tests {
     #[test]
     fn unused_share_is_the_last_reading_of_the_completed_cycle() {
         let readings = [
-            reading(1_000, 9_000, false),
-            reading(2_000, 500, true), // first cycle reset after one reading
-            reading(2_500, 2_000, false), // last cycle's first reading
-            reading(3_000, 4_000, false), // last reading before the reset sets the share
-            reading(4_000, 2_000, true),
+            reading(1_000, Some(9_000), false),
+            reading(2_000, Some(500), true), // first cycle reset after one reading
+            reading(2_500, Some(2_000), false), // last cycle's first reading
+            reading(3_000, Some(4_000), false), // last reading before the reset sets the share
+            reading(4_000, Some(2_000), true),
         ];
         let share = unused_at_reset(&readings).expect("a series with readings");
         assert_eq!(share.basis, OBSERVED_BEFORE_RESET);
@@ -321,7 +343,7 @@ mod tests {
 
     #[test]
     fn a_reset_without_a_reading_before_it_is_named_not_zero() {
-        let share = unused_at_reset(&[reading(1_000, 500, true)]).expect("a reading");
+        let share = unused_at_reset(&[reading(1_000, Some(500), true)]).expect("a reading");
         assert_eq!(share.unavailable, Some(Unavailable::NoReadingBeforeReset));
         assert_eq!(share.unused_basis_points, None);
         assert_eq!(share.observed_unix_seconds, Some(1_000));
@@ -329,11 +351,31 @@ mod tests {
 
     #[test]
     fn a_series_with_no_reset_is_named_not_zero() {
-        let share = unused_at_reset(&[reading(1_000, 100, false), reading(2_000, 200, false)])
-            .expect("readings");
+        let share = unused_at_reset(&[
+            reading(1_000, Some(100), false),
+            reading(2_000, Some(200), false),
+        ])
+        .expect("readings");
         assert_eq!(share.unavailable, Some(Unavailable::NoResetObserved));
         assert_eq!(share.unused_basis_points, None);
         assert_eq!(share.used_basis_points, None);
+    }
+
+    #[test]
+    fn missing_pool_reading_before_reset_is_not_zero_filled() {
+        let share = unused_at_reset(&[
+            reading(1_000, Some(4_000), false),
+            reading(2_000, None, false),
+            reading(3_000, Some(500), true),
+        ])
+        .expect("the reset marker is present");
+        assert_eq!(
+            share.unavailable,
+            Some(Unavailable::MissingReadingBeforeReset)
+        );
+        assert_eq!(share.unused_basis_points, None);
+        assert_eq!(share.observed_unix_seconds, Some(2_000));
+        assert_eq!(share.samples, 1);
     }
 
     #[test]
@@ -353,28 +395,36 @@ mod tests {
 
     #[test]
     fn a_full_window_is_scaled_once_and_an_unpriced_bucket_is_a_bound() {
-        let priced = window_value(Some(1_000_000), 2_500, Some(2_000_000), true);
+        let priced = window_value(Some(1_000_000), 2_500, Some(2_000_000), true, true);
         assert_eq!(priced.cost_per_full_window_microdollars, Some(4_000_000));
         assert_eq!(priced.value_multiple_basis_points, Some(20_000));
         assert_eq!(priced.unavailable, None);
 
-        let partial = window_value(Some(1_000_000), 2_500, Some(2_000_000), false);
+        let partial = window_value(Some(1_000_000), 2_500, Some(2_000_000), false, true);
         assert_eq!(partial.cost_per_full_window_microdollars, None);
         assert_eq!(partial.lower_bound_microdollars, Some(4_000_000));
         assert_eq!(partial.unavailable, Some(Unavailable::Unpriced));
 
         assert_eq!(
-            window_value(None, 0, None, true).unavailable,
+            window_value(None, 0, None, true, true).unavailable,
             Some(Unavailable::Unpriced)
         );
         assert_eq!(
-            window_value(Some(1), 0, Some(1), true).unavailable,
+            window_value(Some(1), 0, Some(1), true, true).unavailable,
             Some(Unavailable::NoUsage)
         );
         assert_eq!(
-            window_value(Some(1), 100, None, true).unavailable,
+            window_value(Some(1), 100, None, true, true).unavailable,
             Some(Unavailable::NoPriceInForce)
         );
+    }
+
+    #[test]
+    fn since_limited_cost_cannot_be_scaled_as_a_full_window() {
+        let partial = window_value(Some(1_000_000), 2_500, Some(2_000_000), true, false);
+        assert_eq!(partial.cost_per_full_window_microdollars, None);
+        assert_eq!(partial.value_multiple_basis_points, None);
+        assert_eq!(partial.unavailable, Some(Unavailable::IncompleteWindow));
     }
 
     #[test]
