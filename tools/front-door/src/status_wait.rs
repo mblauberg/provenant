@@ -4,9 +4,13 @@
 // This edge owns the real deadline for channel receives and source I/O.
 #![allow(clippy::disallowed_methods)]
 use provenant_cli::{Globals, wait::LocalCadence};
-use provenant_core::CancelToken;
+use provenant_core::{CancelToken, Clock as _, GitOid, WallTime};
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-use provenant_records::Outcome;
+use provenant_records::{
+    Outcome,
+    subject::{HeadCheck, PinnedSubject, SubjectOrigin, SubjectPolicy, head_check},
+    warning::{self, WarningCode},
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -26,9 +30,12 @@ enum Source {
     Pr {
         number: u64,
         repository: Result<String, String>,
-        /// The head this wait is pinned to. Until GitHub reports it, no
-        /// verdict is taken from the pull request's current head.
-        watch_head: Option<String>,
+        /// The head and policy fixed once at admission. `None` until the forge
+        /// reports a head; the first successful sample pins it then.
+        subject: Option<PinnedSubject>,
+        /// Whether the pull request has reported the pinned head at least once.
+        /// Only after that does a different head count as a move.
+        seen: bool,
         complete: bool,
     },
 }
@@ -269,6 +276,11 @@ impl ActionsGrace {
         else {
             return reading;
         };
+        // A head that moved past the pinned subject is a terminal decision,
+        // not a passing verdict that might still gain Actions runs.
+        if line.cause.as_deref() == Some("head_moved") {
+            return reading;
+        }
         let first_read = match &self.head {
             Some((head, at)) if *head == line.head => *at,
             _ => {
@@ -288,7 +300,7 @@ impl ActionsGrace {
                 "{label} {}{} head={}",
                 line.class(),
                 line.cause_suffix(),
-                watched_head(&line)
+                line.awaiting.as_deref().unwrap_or(&line.head)
             ),
             data: json!(line),
         }
@@ -297,22 +309,156 @@ impl ActionsGrace {
 
 /// A PR reading is only a verdict about the head being watched. While GitHub
 /// reports a different head, keep the reading pending whatever its checks say.
-fn gate_line(
-    mut line: crate::pr::status::Line,
-    watch_head: Option<&str>,
-) -> crate::pr::status::Line {
+fn gate_line(line: &mut crate::pr::status::Line, watch_head: Option<&str>) {
     if let Some(head) = watch_head
         && line.awaiting.is_none()
         && line.head != head
     {
         line.await_head(head);
     }
-    line
 }
 
-/// The head a PR reading is watching, always shown in its status line.
-fn watched_head(line: &crate::pr::status::Line) -> &str {
-    line.awaiting.as_deref().unwrap_or(&line.head)
+/// The head a PR reading is watching, always shown in its status line. The
+/// pinned subject is authoritative: a head the pull request moved to is never
+/// reported as the thing the wait is judging.
+fn watched_head(subject: &Option<PinnedSubject>, line: &crate::pr::status::Line) -> String {
+    subject.as_ref().map_or_else(
+        || line.awaiting.as_deref().unwrap_or(&line.head).to_owned(),
+        |subject| subject.head.to_string(),
+    )
+}
+
+/// The observation time for a subject pinned at admission or first sample.
+fn wall_now() -> WallTime {
+    provenant_os::clock::SystemClock::new()
+        .wall_now()
+        .unwrap_or_else(|_| WallTime::from_micros(0).expect("the epoch is a valid wall time"))
+}
+
+/// Build the subject a `wait --pr` pins at admission. The invariant: exactly
+/// one head is fixed per wait and `--head` always pins, whatever the forge
+/// later reports. A local tip that differs from the forge becomes the subject
+/// with a `LocalRef` origin; otherwise the forge head carries a `ForgePr` origin.
+fn pr_subject(
+    number: u64,
+    repository: &Result<String, String>,
+    policy: SubjectPolicy,
+    now: WallTime,
+    command_head: Option<&str>,
+    forge: Option<(String, String)>,
+    local_tip: Option<String>,
+) -> Option<PinnedSubject> {
+    let make = |head: GitOid, origin: SubjectOrigin, policy: SubjectPolicy| PinnedSubject {
+        extra: Default::default(),
+        base: None,
+        head,
+        origin,
+        observed_at: now,
+        policy,
+    };
+    if let Some(head) = command_head {
+        return GitOid::parse(head)
+            .ok()
+            .map(|head| make(head, SubjectOrigin::Commit, SubjectPolicy::Pinned));
+    }
+    let (sha, branch) = forge?;
+    if let Some(local) = local_tip
+        && local != sha
+        && let Ok(head) = GitOid::parse(&local)
+    {
+        return Some(make(head, SubjectOrigin::LocalRef { name: branch }, policy));
+    }
+    GitOid::parse(&sha).ok().map(|head| {
+        make(
+            head,
+            SubjectOrigin::ForgePr {
+                repository: repository.as_ref().cloned().unwrap_or_default(),
+                number,
+            },
+            policy,
+        )
+    })
+}
+
+/// Apply one PR observation to the wait's pinned subject. Updates `subject`
+/// and `seen` in place; returns `true` only when a previously seen head moved
+/// past a pinned subject. The invariant: a verdict is drawn only from the head
+/// pinned at admission (or the first sample when the forge was unreadable),
+/// never from a later head whose checks belong to different work.
+fn apply_subject_sample(
+    subject: &mut Option<PinnedSubject>,
+    seen: &mut bool,
+    line: &mut crate::pr::status::Line,
+    number: u64,
+    repository: &Result<String, String>,
+    policy: SubjectPolicy,
+    now: WallTime,
+) -> bool {
+    if subject.is_none() {
+        // The forge was unreadable at admission: the first successful sample
+        // pins its head, with the `ForgePr` origin and the configured policy.
+        if let Ok(head) = GitOid::parse(&line.head) {
+            *subject = Some(PinnedSubject {
+                extra: Default::default(),
+                base: None,
+                head,
+                origin: SubjectOrigin::ForgePr {
+                    repository: repository.as_ref().cloned().unwrap_or_default(),
+                    number,
+                },
+                observed_at: now,
+                policy,
+            });
+        }
+        *seen = true;
+        return false;
+    }
+    let (pinned, policy) = {
+        let subject = subject.as_ref().expect("subject pinned before sampling");
+        (subject.head, subject.policy)
+    };
+    let pinned_text = pinned.to_string();
+    match head_check(
+        &pinned,
+        GitOid::parse(&line.head).map_err(|error| error.to_string()),
+    ) {
+        HeadCheck::Unmoved => *seen = true,
+        HeadCheck::Moved { current, .. } => {
+            if *seen {
+                match policy {
+                    SubjectPolicy::Pinned => {
+                        line.cause = Some("head_moved".to_owned());
+                        line.next = Some(format!(
+                            "rerun provenant wait --pr {number} for the new head, or set domains.wait.pr_head=follow_latest"
+                        ));
+                        return true;
+                    }
+                    SubjectPolicy::FollowLatest => {
+                        warn(
+                            warning::PR_HEAD_FOLLOWED,
+                            format!(
+                                "#{number} head moved from {pinned} to {current}; following the new head"
+                            ),
+                        );
+                        subject
+                            .as_mut()
+                            .expect("subject pinned before sampling")
+                            .head = current;
+                        *seen = false;
+                    }
+                }
+            }
+        }
+        HeadCheck::Unavailable { .. } => {}
+    }
+    if !*seen {
+        gate_line(line, Some(&pinned_text));
+    }
+    false
+}
+
+fn warn(code: WarningCode, message: String) {
+    warning::warn(warning::Warning::new(code, message));
 }
 
 /// The tip of a branch known locally, checked in the local repository only.
@@ -445,6 +591,102 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
     }
 }
 
+/// Render one PR observation as a reading. `head_moved` forces an
+/// unsuccessful settlement for a pinned subject whose head moved after it was
+/// seen. The subject is carried in the data so status and the wait envelope
+/// show exactly what the wait pinned.
+fn pr_reading(
+    label: &str,
+    subject: &Option<PinnedSubject>,
+    line: crate::pr::status::Line,
+    complete: bool,
+    head_moved: bool,
+) -> Reading {
+    let head = watched_head(subject, &line);
+    let settle = if head_moved {
+        Settle::Unsuccessful
+    } else {
+        match line.wait_verdict(complete) {
+            Some(true) => Settle::Succeeded,
+            Some(false) => Settle::Unsuccessful,
+            None => Settle::Pending,
+        }
+    };
+    let mut data = json!(line);
+    data["subject"] = json!(subject);
+    Reading {
+        settle,
+        line: format!(
+            "{label} {}{} head={head}",
+            line.class(),
+            line.cause_suffix()
+        ),
+        data,
+    }
+}
+
+/// Read one PR source, applying the wait's subject policy to the observation.
+/// `source` is owned by the polling worker so `subject` and `seen` persist
+/// across samples: a verdict is only ever about the pinned head.
+fn read_pr(
+    source: &mut Source,
+    policy: SubjectPolicy,
+    edge: &provenant_cli::run::Edge<'_>,
+    _session: &mut Option<provenant_cli::fabric::Context>,
+    deadline: Instant,
+    pr_read_timeout: Duration,
+    cancel: &CancelToken,
+) -> Reading {
+    let label = source.label();
+    let (number, repository, complete) = match &*source {
+        Source::Pr {
+            number,
+            repository,
+            complete,
+            ..
+        } => (*number, repository.clone(), *complete),
+        _ => return Reading::unavailable(&label, "not a pull request source"),
+    };
+    let Ok(repository) = repository else {
+        return Reading::unavailable(&label, "forge context unavailable");
+    };
+    let mut line = match crate::pr::status::wait_line_observed(
+        edge.cwd,
+        edge.roots.state.as_path(),
+        &repository,
+        number,
+        &forge_request(deadline, cancel, pr_read_timeout),
+        // Spec: docs/specs/cli.md#ci-observations — the PR path reads
+        // through the one observer and its one sourced retry family.
+        crate::pr::observer::retry(edge.roots).poll.value,
+    ) {
+        Ok(line) => line,
+        Err(error) => return Reading::unavailable(&label, &error.to_string()),
+    };
+    let head_moved = match &mut *source {
+        Source::Pr { subject, seen, .. } => apply_subject_sample(
+            subject,
+            seen,
+            &mut line,
+            number,
+            &Ok(repository),
+            policy,
+            wall_now(),
+        ),
+        _ => unreachable!("checked above"),
+    };
+    line.attach_failure_digest(
+        edge.roots.state.as_path(),
+        edge.cwd,
+        &forge_request(deadline, cancel, pr_read_timeout),
+    );
+    let subject = match &*source {
+        Source::Pr { subject, .. } => subject.clone(),
+        _ => unreachable!("checked above"),
+    };
+    pr_reading(&label, &subject, line, complete, head_moved)
+}
+
 /// Read one source after a native event or a configured fallback tick.
 fn read(
     source: &Source,
@@ -461,6 +703,20 @@ fn read(
     }
 
     match source {
+        Source::Pr { .. } => {
+            // A one-off read has no state to carry forward; the polling worker
+            // owns the persistent subject for the wait loop.
+            let mut owned = source.clone();
+            read_pr(
+                &mut owned,
+                SubjectPolicy::Pinned,
+                edge,
+                session,
+                deadline,
+                pr_read_timeout,
+                cancel,
+            )
+        }
         Source::UnreadableGraph(_, error) => classify_rows(
             &label,
             &[json!({
@@ -475,54 +731,18 @@ fn read(
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
             }
         }
-        Source::Pr {
-            number,
-            repository,
-            watch_head,
-            complete,
-        } => match repository {
-            Ok(repository) => match crate::pr::status::wait_line_observed(
-                edge.cwd,
-                edge.roots.state.as_path(),
-                repository,
-                *number,
-                &forge_request(deadline, cancel, pr_read_timeout),
-                // Spec: docs/specs/cli.md#ci-observations — the PR path reads
-                // through the one observer and its one sourced retry family.
-                crate::pr::observer::retry(edge.roots).poll.value,
-            ) {
-                Ok(line) => {
-                    let mut line = gate_line(line, watch_head.as_deref());
-                    line.attach_failure_digest(
-                        edge.roots.state.as_path(),
-                        edge.cwd,
-                        &forge_request(deadline, cancel, pr_read_timeout),
-                    );
-                    Reading {
-                        settle: match line.wait_verdict(*complete) {
-                            Some(true) => Settle::Succeeded,
-                            Some(false) => Settle::Unsuccessful,
-                            None => Settle::Pending,
-                        },
-                        line: format!(
-                            "{label} {}{} head={}",
-                            line.class(),
-                            line.cause_suffix(),
-                            watched_head(&line)
-                        ),
-                        data: json!(line),
-                    }
-                }
-                Err(error) => Reading::unavailable(&label, &error.to_string()),
-            },
-            Err(error) => Reading::unavailable(&label, error),
-        },
     }
 }
 
+/// Render a PR journal event as a reading, applying the same subject policy
+/// as a forge read. The label is derived from the PR number so event readings
+/// agree with direct readings in the wait's per-target rows.
 pub(crate) fn reading_pr_event(
+    subject: &mut Option<PinnedSubject>,
+    seen: &mut bool,
     number: u64,
-    watch_head: Option<&str>,
+    repository: &Result<String, String>,
+    policy: SubjectPolicy,
     complete: bool,
     detail: Value,
 ) -> Reading {
@@ -560,30 +780,25 @@ pub(crate) fn reading_pr_event(
     })
     .collect();
     match serde_json::from_value::<crate::pr::status::Line>(status.clone()) {
-        Ok(line) => {
-            let line = gate_line(line, watch_head);
-            let summary = format!(
-                "{label} {}{} head={}",
-                line.class(),
-                line.cause_suffix(),
-                watched_head(&line)
+        Ok(mut line) => {
+            let head_moved = apply_subject_sample(
+                subject,
+                seen,
+                &mut line,
+                number,
+                repository,
+                policy,
+                wall_now(),
             );
-            Reading {
-                settle: match line.wait_verdict(complete) {
-                    Some(true) => Settle::Succeeded,
-                    Some(false) => Settle::Unsuccessful,
-                    None => Settle::Pending,
-                },
-                line: if malformed.is_empty() {
-                    summary
-                } else {
-                    format!(
-                        "{summary} warning: invalid display fields {}",
-                        malformed.join(",")
-                    )
-                },
-                data: json!(line),
+            let mut reading = pr_reading(&label, subject, line, complete, head_moved);
+            if !malformed.is_empty() {
+                reading.line = format!(
+                    "{} warning: invalid display fields {}",
+                    reading.line,
+                    malformed.join(",")
+                );
             }
+            reading
         }
         Err(error) => Reading::unavailable(&label, &format!("invalid PR journal status: {error}")),
     }
@@ -1689,6 +1904,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     prs.dedup();
     let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
     let actions_grace = Duration::from_secs(settings.actions_grace_seconds);
+    let pr_head_policy = settings.pr_head;
     if sources.len() + prs.len() > settings.max_targets as usize {
         return crate::fail(
             "wait",
@@ -1705,35 +1921,58 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             crate::pr::status::wait_repository(edge.roots.state.as_path(), edge.cwd, &request)
                 .map_err(|error| error.to_string());
         sources.extend(prs.into_iter().map(|number| {
-            let watch_head = command.head.clone().or_else(|| {
-                let repository = repository.as_ref().ok()?;
-                let reported = crate::pr::status::wait_head(
-                    edge.roots.state.as_path(),
-                    edge.cwd,
-                    repository,
-                    number,
-                    &request,
-                )
-                .ok()?;
-                let local = local_branch_tip(edge.cwd, &reported.branch)?;
-                (local != reported.sha).then(|| {
-                    provenant_records::warning::warn(
-                        provenant_records::warning::Warning::new(
-                            provenant_records::warning::BRANCH_BEHIND_BASE,
-                            format!(
-                                "#{number}: local tip {local} differs from GitHub head {}; waiting for the local tip",
-                                reported.sha
-                            ),
-                        )
-                        .subject(reported.branch.clone()),
-                    );
-                    local
+            let forge = if command.head.is_some() {
+                None
+            } else {
+                repository.as_ref().ok().and_then(|repository| {
+                    crate::pr::status::wait_head(
+                        edge.roots.state.as_path(),
+                        edge.cwd,
+                        repository,
+                        number,
+                        &request,
+                    )
+                    .ok()
+                    .map(|reported| (reported.sha, reported.branch))
                 })
-            });
+            };
+            let local_tip = forge
+                .as_ref()
+                .and_then(|(_, branch)| local_branch_tip(edge.cwd, branch));
+            if let (Some((sha, branch)), Some(local)) = (&forge, &local_tip)
+                && local != sha
+            {
+                warning::warn(
+                    warning::Warning::new(
+                        warning::BRANCH_BEHIND_BASE,
+                        format!(
+                            "#{number}: local tip {local} differs from GitHub head {sha}; waiting for the local tip"
+                        ),
+                    )
+                    .subject(branch.clone()),
+                );
+            }
+            let unpinned = command.head.is_none() && forge.is_none();
+            let subject = pr_subject(
+                number,
+                &repository,
+                pr_head_policy,
+                wall_now(),
+                command.head.as_deref(),
+                forge,
+                local_tip,
+            );
+            if unpinned {
+                warn(
+                    warning::PR_HEAD_UNPINNED,
+                    format!("#{number}: forge head unavailable; the first observation pins the subject"),
+                );
+            }
             Source::Pr {
                 number,
                 repository: repository.clone(),
-                watch_head,
+                subject,
+                seen: false,
                 complete,
             }
         }));
@@ -2072,33 +2311,33 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             let stop = &stop;
             let interval = Duration::from_secs(60);
             scope.spawn(move || {
-                let mut session = None;
-                let (watch_head, complete) = match source {
+                // Own the source so the subject and `seen` survive across
+                // samples: they are the wait's one pinned decision.
+                let mut source = (*source).clone();
+                let (number, repository, complete) = match &source {
                     Source::Pr {
-                        watch_head,
+                        number,
+                        repository,
                         complete,
                         ..
-                    } => (watch_head.as_deref(), *complete),
-                    _ => (None, false),
+                    } => (*number, repository.clone(), *complete),
+                    _ => return,
                 };
+                let label = source.label();
+                let mut session = None;
                 // Each subscription owns its replay cursor. No target can
                 // consume another target's events from a shared cursor.
                 let setup =
                     (|| -> Result<crate::pr::observer::journal::PrJournal, Box<dyn std::error::Error>> {
                         // The observer module owns both transports: this journal
                         // supplies a current PR observation when one exists, and
-                        // `read` falls back to the forge through the observer.
+                        // `read_pr` falls back to the forge through the observer.
                         let journal = crate::pr::observer::journal::PrJournal::open(
                             edge.roots.state.as_path(),
                             edge.cwd,
                         )?;
-                        if let Source::Pr {
-                            number,
-                            repository: Ok(repository),
-                            ..
-                        } = source
-                        {
-                            journal.register(repository, *number, None)?;
+                        if let Ok(repository) = &repository {
+                            journal.register(repository, number, None)?;
                         }
                         Ok(journal)
                     })();
@@ -2114,15 +2353,16 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 };
                 let mut grace = ActionsGrace::new(actions_grace);
                 let initial = grace.apply(
-                    read(
-                        source,
+                    read_pr(
+                        &mut source,
+                        pr_head_policy,
                         edge,
                         &mut session,
                         deadline,
                         pr_read_timeout,
                         &stop.cancel,
                     ),
-                    &source.label(),
+                    &label,
                     complete,
                 );
                 let done = initial.done();
@@ -2143,33 +2383,39 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                     {
                         break;
                     }
-                    let reading = match (event_reader.as_mut(), source) {
-                        (
-                            Some(journal),
-                            Source::Pr {
+                    let reading = match event_reader.as_mut() {
+                        Some(journal) if repository.is_ok() => {
+                            let repository_ref = repository.as_ref().expect("checked above");
+                            match journal.next(
+                                repository_ref,
                                 number,
-                                repository: Ok(repository),
-                                ..
-                            },
-                        ) => match journal.next(
-                            repository,
-                            *number,
-                            Duration::from_secs(60)
-                                .saturating_sub(last_reconcile.elapsed())
-                                .min(deadline.saturating_duration_since(Instant::now()))
-                                .min(grace.due_in().unwrap_or(Duration::MAX)),
-                            &stop.cancel,
-                        ) {
+                                Duration::from_secs(60)
+                                    .saturating_sub(last_reconcile.elapsed())
+                                    .min(deadline.saturating_duration_since(Instant::now()))
+                                    .min(grace.due_in().unwrap_or(Duration::MAX)),
+                                &stop.cancel,
+                            ) {
                             Ok(Some(detail)) => {
                                 last_reconcile = Instant::now();
                                 if detail["status"].is_object() {
-                                    let event =
-                                        reading_pr_event(*number, watch_head, complete, detail);
+                                    let event = match &mut source {
+                                        Source::Pr { subject, seen, .. } => reading_pr_event(
+                                            subject,
+                                            seen,
+                                            number,
+                                            &repository,
+                                            pr_head_policy,
+                                            complete,
+                                            detail,
+                                        ),
+                                        _ => unreachable!("checked above"),
+                                    };
                                     if complete || event.settle == Settle::Succeeded {
                                         // Journal records are bounded and omit Actions runs.
                                         // Reconcile through the observer before settling.
-                                        read(
-                                            source,
+                                        read_pr(
+                                            &mut source,
+                                            pr_head_policy,
                                             edge,
                                             &mut session,
                                             deadline,
@@ -2182,8 +2428,9 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 } else {
                                     // Webhook records carry identifiers only;
                                     // fetch the authoritative PR status now.
-                                    read(
-                                        source,
+                                    read_pr(
+                                        &mut source,
+                                        pr_head_policy,
                                         edge,
                                         &mut session,
                                         deadline,
@@ -2202,13 +2449,14 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 // nothing else would settle it.
                                 if !grace.is_due()
                                     && journal
-                                        .source_current(repository, *number, None)
+                                        .source_current(repository_ref, number, None)
                                         .unwrap_or(false)
                                 {
                                     continue;
                                 }
-                                read(
-                                    source,
+                                read_pr(
+                                    &mut source,
+                                    pr_head_policy,
                                     edge,
                                     &mut session,
                                     deadline,
@@ -2220,11 +2468,12 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             Err(error) => {
                                 event_reader = None;
                                 Reading::unavailable(
-                                    &source.label(),
+                                    &label,
                                     &format!("PR event journal failed: {error}"),
                                 )
                             }
-                        },
+                            }
+                        }
                         _ => {
                             if !stop.pause(
                                 interval
@@ -2235,8 +2484,9 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 break;
                             }
                             last_reconcile = Instant::now();
-                            read(
-                                source,
+                            read_pr(
+                                &mut source,
+                                pr_head_policy,
                                 edge,
                                 &mut session,
                                 deadline,
@@ -2245,7 +2495,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             )
                         }
                     };
-                    let reading = grace.apply(reading, &source.label(), complete);
+                    let reading = grace.apply(reading, &label, complete);
                     let finished = reading.done();
                     if sender
                         .send(Update {
@@ -2428,8 +2678,7 @@ mod tests {
             if let Some(value) = value {
                 status["failing_checks"] = value;
             }
-            let reading =
-                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}));
+            let reading = event_reading(7, false, serde_json::json!({"status":status}));
             assert_eq!(reading.settle, super::Settle::Succeeded);
             assert!(!reading.line.contains("unavailable"));
         }
@@ -2443,8 +2692,7 @@ mod tests {
         ] {
             let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
             status[field] = serde_json::json!({"invalid":true});
-            let reading =
-                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}));
+            let reading = event_reading(7, false, serde_json::json!({"status":status}));
             assert!(!reading.line.contains("unavailable"), "{field}");
             assert!(reading.line.contains("warning"), "{field}");
             assert_eq!(reading.settle, super::Settle::Pending, "{field}");
@@ -2455,8 +2703,7 @@ mod tests {
         for field in ["checks_failed", "checks_pending", "review", "error"] {
             let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
             status[field] = serde_json::json!({"invalid":true});
-            let reading =
-                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}));
+            let reading = event_reading(7, false, serde_json::json!({"status":status}));
             assert_eq!(reading.settle, super::Settle::Pending, "{field}");
             assert!(reading.line.contains("unavailable"), "{field}");
         }
@@ -2464,7 +2711,7 @@ mod tests {
             let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
             status.as_object_mut().unwrap().remove(field);
             assert!(
-                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}))
+                event_reading(7, false, serde_json::json!({"status":status}))
                     .line
                     .contains("unavailable")
             );
@@ -2474,6 +2721,41 @@ mod tests {
     use super::*;
     #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use provenant_core::Clock as _;
+
+    /// Render an event detail with a pinned-no-head subject, the same shape a
+    /// direct reading has before the forge reports a head.
+    fn event_reading(number: u64, complete: bool, detail: Value) -> Reading {
+        let mut subject = None;
+        let mut seen = false;
+        reading_pr_event(
+            &mut subject,
+            &mut seen,
+            number,
+            &Ok("owner/repo".into()),
+            SubjectPolicy::Pinned,
+            complete,
+            detail,
+        )
+    }
+
+    fn oid(text: &str) -> GitOid {
+        GitOid::parse(text).expect("fixture OID")
+    }
+
+    fn pr_line(head: GitOid, passed: bool) -> crate::pr::status::Line {
+        let (review, passed_count, failed) = if passed {
+            ("approved", 1, 0)
+        } else {
+            ("changes_requested", 0, 1)
+        };
+        serde_json::from_value(json!({
+            "number": 7, "state": "OPEN", "head": head.to_string(), "draft": false,
+            "merge": "clean", "review": review, "error": null,
+            "checks_passed": passed_count, "checks_total": 1,
+            "checks_failed": failed, "checks_pending": 0
+        }))
+        .expect("fixture PR line")
+    }
 
     #[test]
     fn a_selection_with_peer_or_relayed_attempts_is_not_locally_represented() {
@@ -2711,7 +2993,8 @@ mod tests {
         let pull = Source::Pr {
             number: 7,
             repository: Ok("owner/repo".into()),
-            watch_head: None,
+            subject: None,
+            seen: false,
             complete: false,
         };
         for (with_pull, expected) in [(false, Outcome::Ok), (true, Outcome::Timeout)] {
@@ -3248,13 +3531,10 @@ mod tests {
         });
         let event = json!({"status": status});
         assert_eq!(
-            reading_pr_event(7, None, false, event.clone()).settle,
+            event_reading(7, false, event.clone()).settle,
             Settle::Unsuccessful
         );
-        assert_eq!(
-            reading_pr_event(7, None, true, event).settle,
-            Settle::Pending
-        );
+        assert_eq!(event_reading(7, true, event).settle, Settle::Pending);
     }
 
     fn settled_pr_reading(head: &str, passed: bool, workflows: Option<bool>) -> Reading {
@@ -3347,20 +3627,218 @@ mod tests {
         );
     }
 
+    fn pinned_subject(head: GitOid, policy: SubjectPolicy) -> PinnedSubject {
+        PinnedSubject {
+            extra: Default::default(),
+            base: None,
+            head,
+            origin: SubjectOrigin::ForgePr {
+                repository: "owner/repo".into(),
+                number: 7,
+            },
+            observed_at: WallTime::from_micros(0).expect("fixture time"),
+            policy,
+        }
+    }
+
     #[test]
     fn a_pinned_wait_ignores_the_verdict_of_another_head() {
-        let line: crate::pr::status::Line = serde_json::from_value(json!({
-            "number": 7, "state": "OPEN", "head": "stale", "draft": false,
-            "merge": "clean", "review": "approved", "error": null,
-            "checks_passed": 1, "checks_total": 1,
-            "checks_failed": 0, "checks_pending": 0
-        }))
-        .expect("fixture line");
-        assert_eq!(line.verdict(), Some(true));
-        let pinned = gate_line(line, Some("new"));
-        assert_eq!(pinned.verdict(), None);
-        assert_eq!(watched_head(&pinned), "new");
-        assert_eq!(pinned.head, "stale");
+        let pinned = oid(&"a".repeat(40));
+        let other = oid(&"b".repeat(40));
+        let mut subject = Some(pinned_subject(pinned, SubjectPolicy::Pinned));
+        let mut seen = false;
+        let mut line = pr_line(other, true);
+        assert_eq!(line.verdict(), Some(true), "the other head passes");
+        let moved = apply_subject_sample(
+            &mut subject,
+            &mut seen,
+            &mut line,
+            7,
+            &Ok("owner/repo".into()),
+            SubjectPolicy::Pinned,
+            WallTime::from_micros(0).expect("fixture time"),
+        );
+        assert!(!moved, "an unseen head is not a move");
+        assert_eq!(line.verdict(), None, "its verdict is ignored");
+        assert_eq!(watched_head(&subject, &line), pinned.to_string());
+        assert_eq!(line.head, other.to_string());
+    }
+
+    #[test]
+    fn a_pinned_wait_settles_head_moved_when_the_pr_moves() {
+        let first = oid(&"a".repeat(40));
+        let second = oid(&"b".repeat(40));
+        let mut subject = Some(pinned_subject(first, SubjectPolicy::Pinned));
+        let mut seen = false;
+        let mut first_sample = pr_line(first, true);
+        assert!(!apply_subject_sample(
+            &mut subject,
+            &mut seen,
+            &mut first_sample,
+            7,
+            &Ok("owner/repo".into()),
+            SubjectPolicy::Pinned,
+            WallTime::from_micros(0).expect("fixture time"),
+        ));
+        assert!(seen, "the pinned head was observed");
+
+        let mut moved_line = pr_line(second, true);
+        let (moved, warnings) = warning::capture(|| {
+            apply_subject_sample(
+                &mut subject,
+                &mut seen,
+                &mut moved_line,
+                7,
+                &Ok("owner/repo".into()),
+                SubjectPolicy::Pinned,
+                WallTime::from_micros(0).expect("fixture time"),
+            )
+        });
+        assert!(moved, "a seen head that moves settles the wait");
+        assert_eq!(moved_line.cause.as_deref(), Some("head_moved"));
+        assert!(
+            moved_line
+                .next
+                .as_deref()
+                .is_some_and(|next| next.contains("domains.wait.pr_head=follow_latest")),
+            "{:?}",
+            moved_line.next
+        );
+        assert!(
+            warnings.is_empty(),
+            "a pinned wait does not follow: {warnings:?}"
+        );
+        let reading = pr_reading("#7", &subject, moved_line, false, moved);
+        assert_eq!(reading.settle, Settle::Unsuccessful);
+        assert!(
+            reading.line.contains("cause=head_moved"),
+            "{}",
+            reading.line
+        );
+    }
+
+    #[test]
+    fn a_follow_latest_wait_repins_and_warns() {
+        let first = oid(&"a".repeat(40));
+        let second = oid(&"b".repeat(40));
+        let mut subject = Some(pinned_subject(first, SubjectPolicy::FollowLatest));
+        let mut seen = true;
+        let mut line = pr_line(second, true);
+        let (moved, warnings) = warning::capture(|| {
+            apply_subject_sample(
+                &mut subject,
+                &mut seen,
+                &mut line,
+                7,
+                &Ok("owner/repo".into()),
+                SubjectPolicy::FollowLatest,
+                WallTime::from_micros(0).expect("fixture time"),
+            )
+        });
+        assert!(!moved, "follow_latest never settles head_moved");
+        let subject = subject.expect("subject stays pinned");
+        assert_eq!(subject.head, second, "the new head is pinned");
+        assert!(!seen, "the new head must be observed before it can move");
+        assert_eq!(line.cause, None);
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.code.as_ref() == warning::PR_HEAD_FOLLOWED.as_str()
+                    && warning.message.contains(&first.to_string())
+                    && warning.message.contains(&second.to_string())
+            }),
+            "both heads are named in the warning: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_wait_pins_the_forge_head_at_admission() {
+        let now = WallTime::from_micros(0).expect("fixture time");
+        let forge = "c".repeat(40);
+        let subject = pr_subject(
+            7,
+            &Ok("owner/repo".into()),
+            SubjectPolicy::Pinned,
+            now,
+            None,
+            Some((forge.clone(), "feature".into())),
+            None,
+        )
+        .expect("forge head pins a subject");
+        assert_eq!(subject.head, oid(&forge));
+        assert_eq!(
+            subject.origin,
+            SubjectOrigin::ForgePr {
+                repository: "owner/repo".into(),
+                number: 7
+            }
+        );
+        assert_eq!(subject.policy, SubjectPolicy::Pinned);
+
+        let explicit = "d".repeat(40);
+        let forced = pr_subject(
+            7,
+            &Ok("owner/repo".into()),
+            SubjectPolicy::FollowLatest,
+            now,
+            Some(&explicit),
+            Some((forge.clone(), "feature".into())),
+            None,
+        )
+        .expect("--head pins a subject");
+        assert_eq!(forced.head, oid(&explicit));
+        assert_eq!(forced.origin, SubjectOrigin::Commit);
+        assert_eq!(forced.policy, SubjectPolicy::Pinned, "--head always pins");
+
+        let local = "e".repeat(40);
+        let local_subject = pr_subject(
+            7,
+            &Ok("owner/repo".into()),
+            SubjectPolicy::Pinned,
+            now,
+            None,
+            Some((forge, "feature".into())),
+            Some(local.clone()),
+        )
+        .expect("local tip pins a subject");
+        assert_eq!(local_subject.head, oid(&local));
+        assert_eq!(
+            local_subject.origin,
+            SubjectOrigin::LocalRef {
+                name: "feature".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_wait_without_a_forge_head_pins_its_first_sample() {
+        let head = oid(&"f".repeat(40));
+        let mut subject = None;
+        let mut seen = false;
+        let mut line = pr_line(head, true);
+        let moved = apply_subject_sample(
+            &mut subject,
+            &mut seen,
+            &mut line,
+            7,
+            &Ok("owner/repo".into()),
+            SubjectPolicy::FollowLatest,
+            WallTime::from_micros(0).expect("fixture time"),
+        );
+        assert!(!moved);
+        let subject = subject.expect("the first sample pins the subject");
+        assert_eq!(subject.head, head);
+        assert_eq!(subject.policy, SubjectPolicy::FollowLatest);
+        assert_eq!(
+            subject.origin,
+            SubjectOrigin::ForgePr {
+                repository: "owner/repo".into(),
+                number: 7
+            }
+        );
+        assert!(seen);
+        let reading = pr_reading("#7", &Some(subject.clone()), line, false, moved);
+        assert_eq!(reading.data["subject"], json!(subject));
+        assert_eq!(reading.settle, Settle::Succeeded);
     }
 
     #[test]
@@ -3368,7 +3846,8 @@ mod tests {
         let sources = vec![Source::Pr {
             number: 7,
             repository: Ok("owner/repo".into()),
-            watch_head: None,
+            subject: None,
+            seen: false,
             complete: false,
         }];
         let pending = Reading {
@@ -3424,7 +3903,8 @@ mod tests {
             vec![Source::Pr {
                 number: 7,
                 repository: Ok("owner/repo".into()),
-                watch_head: None,
+                subject: None,
+                seen: false,
                 complete,
             }]
         };
