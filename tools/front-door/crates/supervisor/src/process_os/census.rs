@@ -913,17 +913,23 @@ fn darwin_sysctl_record(pid: i32) -> Option<DarwinSysctlRecord> {
 fn darwin_sysctl_process(pid: i32, boot: &str) -> Option<ProcessFact> {
     let own_pid = i32::try_from(std::process::id()).ok()?;
     let own = darwin_sysctl_record(own_pid)?;
-    // SAFETY: these scalar process queries retain no pointers.
-    let (own_parent, own_group) = unsafe { (libc::getppid(), libc::getpgrp()) };
+    // SAFETY: getppid takes no arguments and retains no pointers.
+    let own_parent = unsafe { libc::getppid() };
+    // SAFETY: getpgrp takes no arguments and retains no pointers.
+    let own_group = unsafe { libc::getpgrp() };
     if own.pid != own_pid || own.parent != own_parent || own.group != own_group {
         return None;
     }
     let first = darwin_sysctl_record(pid)?;
-    // SAFETY: scalar PID queries retain no pointers.
-    let (group, session) = unsafe { (libc::getpgid(pid), libc::getsid(pid)) };
+    // SAFETY: getpgid accepts a scalar PID and retains no pointers.
+    let group = unsafe { libc::getpgid(pid) };
+    // SAFETY: getsid accepts a scalar PID and retains no pointers.
+    let session = unsafe { libc::getsid(pid) };
     let second = darwin_sysctl_record(pid)?;
-    // SAFETY: repeat the scalar queries to fence process reuse and changes.
-    let (group_again, session_again) = unsafe { (libc::getpgid(pid), libc::getsid(pid)) };
+    // SAFETY: getpgid again accepts a scalar PID and retains no pointers.
+    let group_again = unsafe { libc::getpgid(pid) };
+    // SAFETY: getsid again accepts a scalar PID and retains no pointers.
+    let session_again = unsafe { libc::getsid(pid) };
     if first != second
         || first.pid != pid
         || first.parent < 0
