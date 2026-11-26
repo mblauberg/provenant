@@ -952,7 +952,7 @@ fn branch_control_uses_the_project_worktree_layout() -> Result {
 }
 
 #[test]
-fn branch_without_base_uses_the_remote_default_branch() -> Result {
+fn branch_without_base_defers_to_the_writer_base_knob() -> Result {
     let mut node = json!({"use":"task"});
     bind_launch_controls(
         &json!({"branch":"topic"}),
@@ -961,10 +961,7 @@ fn branch_without_base_uses_the_remote_default_branch() -> Result {
         &provenant_config::PortTable::builtin(),
     )?;
     assert_eq!(node["worktree"], "/repo/.worktrees/topic");
-    assert_eq!(
-        node["attempt"]["new_worktree"]["base"],
-        "refs/remotes/origin/HEAD"
-    );
+    assert_eq!(node["attempt"]["new_worktree"]["base"], "HEAD");
     assert_eq!(node["attempt"]["new_worktree"]["default_base"], true);
     let mut explicit = json!({"use":"task"});
     bind_launch_controls(
@@ -3102,6 +3099,89 @@ fn read_source_choices_pin_the_commit_and_name_their_layer() -> Result {
     let flag = submit(None, Some("live"))?;
     assert!(flag["document"]["nodes"][0]["source"].is_null());
     Ok(())
+}
+
+/// `lanes.writer_base` replaces the compiled origin default: a sole remote
+/// named `upstream` supplies the base of a `--branch` writer, `checkout` keeps
+/// the caller checkout, and an explicit `--base` always wins over the knob.
+/// Spec: docs/specs/run-launch.md#inputs-and-resources
+#[test]
+fn writer_base_knob_resolves_the_sole_remote_and_launch_base_wins() -> Result {
+    let rig = TestRig::new()?;
+    let remote = rig.root.join("upstream.git");
+    let remote = remote.to_str().ok_or("remote path")?;
+    git(&rig, &["init", "-q", "--bare", remote])?;
+    git(
+        &rig,
+        &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"],
+    )?;
+    git(&rig, &["config", "user.name", "Test"])?;
+    git(&rig, &["config", "user.email", "test@example.invalid"])?;
+    std::fs::write(rig.project.join("file"), "one\n")?;
+    git(&rig, &["add", "file"])?;
+    git(&rig, &["commit", "-q", "-m", "one"])?;
+    let base = git(&rig, &["rev-parse", "HEAD"])?;
+    git(&rig, &["branch", "-M", "main"])?;
+    git(&rig, &["remote", "add", "upstream", remote])?;
+    git(&rig, &["push", "-q", "upstream", "main"])?;
+    git(&rig, &["remote", "set-head", "upstream", "main"])?;
+
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+    let submit = |knob: Option<&str>, base: Option<&str>| -> Result<Value> {
+        let mut config = "schema_version=1\n[gc]\nfree_floor='1B'\n".to_owned();
+        if let Some(knob) = knob {
+            config.push_str(&format!("[knobs]\nlanes.writer_base='{knob}'\n"));
+        }
+        std::fs::write(rig.state.join("config.toml"), config)?;
+        let mut input = json!({
+            "op":"run","template":"task","brief":"Review the tree","explain":true,
+            "branch":"topic"
+        });
+        if let Some(base) = base {
+            input["base"] = json!(base);
+        }
+        Ok(factory.graph_document(input, budget, &cancel)?)
+    };
+
+    let pinned = submit(None, None)?;
+    assert_eq!(pinned["writer_base"]["commit"], json!(base), "{pinned}");
+    assert!(
+        pinned["writer_base"]["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("default_branch")),
+        "the report must name the effective value and layer: {pinned}"
+    );
+
+    let checkout = submit(Some("checkout"), None)?;
+    assert!(checkout["writer_base"]["commit"].is_null(), "{checkout}");
+
+    let explicit = submit(Some("checkout"), Some(&base))?;
+    assert_eq!(explicit["writer_base"]["commit"], json!(base));
+    assert!(
+        explicit["writer_base"]["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("--base")),
+        "the launch layer must be named: {explicit}"
+    );
+    Ok(())
+}
+
+#[test]
+fn writer_base_value_reads_both_toml_shapes() {
+    assert_eq!(
+        super::writer_base_value("[knobs]\n'lanes.writer_base'='checkout'\n"),
+        Some("checkout".to_owned())
+    );
+    assert_eq!(
+        super::writer_base_value("[knobs.lanes]\nwriter_base='refs/heads/topic'\n"),
+        Some("refs/heads/topic".to_owned())
+    );
+    assert_eq!(
+        super::writer_base_value("[knobs]\nlanes.read_source='auto'\n"),
+        None
+    );
 }
 
 /// An explicit `default_branch` pins the fetched default, not the current

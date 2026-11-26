@@ -401,6 +401,12 @@ pub fn resolve_read_source(
     provider::confinement::resolve_read_source(state, source, choice)
 }
 
+/// Resolve the writer's default-branch base through the same remote discovery
+/// as a read source, so a remote named anything other than `origin` is found.
+pub fn resolve_default_branch(state: &Path, source: &Path) -> Option<ReadSourcePin> {
+    provider::confinement::resolve_default_branch(state, source)
+}
+
 /// The warning a read-only launch carries when a source is pinned, naming the
 /// ref and commit the lane will read and where that choice came from.
 pub fn read_only_source_warning(

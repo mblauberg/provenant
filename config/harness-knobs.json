@@ -17,6 +17,7 @@
       "lanes.verification",
       "lanes.writer_dirty",
       "lanes.read_source",
+      "lanes.writer_base",
       "lanes.gh_budget",
       "lanes.isolation",
       "lanes.receipts",
@@ -1054,6 +1055,12 @@
       "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
       "effect": "Fetch from the resolved remote before `lanes.read_source` resolves its ref, so a remote ref the checkout has not fetched yet can be read. The fetch runs on the host at launch with the host's Git settings, is bounded, and never reaches a lane; a failed fetch warns and the resolver keeps whatever local evidence exists. Set with `provenant config set lanes.read_source_fetch_first true` or under `[knobs]` in config.toml.",
       "trade_off": "A fetch first costs one bounded network call but keeps the read pinned to the remote's current tip; false reads the last fetched ref."
+    },
+    "lanes.writer_base": {
+      "type": "string", "default": "default_branch", "status": "wired",
+      "reader": "tools/front-door/src/fabric/subject.rs, tools/front-door/src/fabric/interface.rs",
+      "effect": "The base a writer starts from when it names no explicit --base. default_branch (the default) resolves the one declared or inferred forge remote's default branch (remote HEAD, then the forge), never a hard-coded origin; checkout keeps the caller checkout with no pinned base; any other value is an explicit Git ref resolved by the one read-source resolver. --base always wins over this knob. The resolved commit and the value with its source appear as writer_base in the run result and in run --explain; an unresolvable value warns, names this key and its source, and falls back to the caller checkout. Read from the host config, host-project and repository config.toml layers, with --base as the launch layer. Set with `provenant config set lanes.writer_base <value>` or under `[knobs]` in config.toml.",
+      "trade_off": "default_branch follows the forge instead of a compiled remote name, which keeps a fork or a renamed remote correct; checkout keeps the local tree as the base; an explicit ref is fixed even if the forge moves. An unresolvable value is advisory and never blocks the launch."
     },
     "lanes.steer_settled": {
       "type": "enum",
