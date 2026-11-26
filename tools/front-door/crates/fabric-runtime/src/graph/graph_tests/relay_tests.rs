@@ -778,6 +778,7 @@ fn settled_parent_stops_running_children(outcome: AttemptOutcome) {
                 attempt_ref: Some("attempt-a".into()),
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+            cause: None,
             },
             AttemptObservation::Pending {
                 attempt_ref: Some("attempt-keep".into()),
@@ -1754,6 +1755,7 @@ fn honest_stop_continuation_replays_its_logical_parents_writer_child() {
             result_warning:None, result_path:None, branch:Some("parent".into()), commit:Some("a".repeat(40)),
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
+        cause: None,
         },
         // The parent restarts in place, ahead of its child in plan order.
         AttemptObservation::Pending { attempt_ref:Some("continuation-attempt".into()) },
@@ -1763,6 +1765,7 @@ fn honest_stop_continuation_replays_its_logical_parents_writer_child() {
             branch:Some("child".into()), commit:Some("a".repeat(40)),
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
+        cause: None,
         },
     ]);
     let run = advance(&document, &mut owner, &mut journal).unwrap();

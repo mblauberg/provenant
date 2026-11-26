@@ -54,6 +54,9 @@ impl WarningCode {
 pub const CONFIG_KEY_IGNORED: WarningCode = WarningCode("CONFIG_KEY_IGNORED");
 /// A configured value was malformed, so the default applied.
 pub const CONFIG_MALFORMED: WarningCode = WarningCode("CONFIG_MALFORMED");
+/// An `on_stop` default was set for a pinned cause, whose table row cannot be
+/// overridden. The declared default was kept and named with its source.
+pub const ON_STOP_PINNED_IGNORED: WarningCode = WarningCode("ON_STOP_PINNED_IGNORED");
 /// A candidate value came from a layer its family does not list.
 pub const SETTING_LAYER_IGNORED: WarningCode = WarningCode("SETTING_LAYER_IGNORED");
 /// A name differed only by case and was folded to its canonical spelling.

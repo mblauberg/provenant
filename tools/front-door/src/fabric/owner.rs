@@ -1552,6 +1552,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 
+    fn graph_on_stop_defaults(&self) -> provenant_records::OnStop {
+        resolve_on_stop_defaults(
+            &self.factory.context.roots,
+            &self.factory.context.identity.project.to_string(),
+        )
+    }
+
     fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
         let mut policy = provenant_fabric_runtime::graph::LaunchRetryPolicy::default();
         let config = match provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
@@ -3229,6 +3236,7 @@ impl BoundGraphOwner<'_> {
                 commit: None,
                 stop: None,
                 settlement_reason: Some(provenant_records::run::SettlementReason::PreLaunchRefusal),
+                cause: None,
             }));
         }
         // A shared writer was authorised and directory-bound by its
@@ -4276,6 +4284,7 @@ impl BoundGraphOwner<'_> {
                     },
                     stop,
                     settlement_reason: attempt.settlement_reason,
+                    cause: attempt.state.terminal_cause(),
                 })
             }
             _ => Ok(AttemptObservation::Pending {
@@ -4283,6 +4292,82 @@ impl BoundGraphOwner<'_> {
             }),
         }
     }
+}
+
+/// Resolve the host/project `on_stop` defaults once, before the graph is
+/// admitted. Configured keys are sealed in the checkpoint; a pinned cause is
+/// reported with its source and keeps its table row.
+fn resolve_on_stop_defaults(
+    roots: &provenant_core::Roots,
+    project: &str,
+) -> provenant_records::OnStop {
+    let config = match provenant_cli::config_reads::read_for(roots, "fabric") {
+        Ok(config) => config,
+        Err(error) => {
+            let error = provenant_records::diagnostic::safe_text(&error.to_string());
+            warn(Warning::new(
+                provenant_records::warning::CONFIG_UNAVAILABLE,
+                format!("graph on_stop defaults unavailable ({error}); using the stop table"),
+            ));
+            return provenant_records::OnStop::default();
+        }
+    };
+    let host = "domains.fabric.graph.on_stop.";
+    let scoped = "domains.fabric.graph.projects.";
+    let mut steps = std::collections::BTreeMap::new();
+    for (key, sourced) in &config.knobs {
+        let name = if let Some(rest) = key.strip_prefix(host) {
+            rest
+        } else if let Some(rest) = key.strip_prefix(scoped) {
+            let Some((owner, rest)) = rest.split_once(".on_stop.") else {
+                continue;
+            };
+            if owner != project {
+                continue;
+            }
+            rest
+        } else {
+            continue;
+        };
+        let cause = match serde_json::from_value::<provenant_records::StopCause>(
+            serde_json::Value::String(name.to_owned()),
+        ) {
+            Ok(cause) => cause,
+            Err(_) => {
+                warn(Warning::new(
+                    provenant_records::warning::CONFIG_MALFORMED,
+                    format!("unknown on_stop cause in {key}"),
+                ));
+                continue;
+            }
+        };
+        let mut object = serde_json::Map::new();
+        object.insert(cause.as_str().to_owned(), sourced.value.clone());
+        let decoded =
+            serde_json::from_value::<provenant_records::OnStop>(serde_json::Value::Object(object));
+        let step = match decoded.ok().and_then(|on_stop| on_stop.get(cause)) {
+            Some(step) => step,
+            None => {
+                warn(Warning::new(
+                    provenant_records::warning::CONFIG_MALFORMED,
+                    format!("on_stop.{cause} is not a declared next step"),
+                ));
+                continue;
+            }
+        };
+        if cause.rule().pinned {
+            warn(
+                Warning::new(
+                    provenant_records::warning::ON_STOP_PINNED_IGNORED,
+                    format!("on_stop.{cause} is pinned; the table default is kept"),
+                )
+                .source(sourced.source.clone()),
+            );
+            continue;
+        }
+        steps.insert(cause, step);
+    }
+    provenant_records::OnStop::new(steps)
 }
 
 /// How a new graph attempt was admitted.
@@ -5755,5 +5840,35 @@ mod recovery_rebuild_tests {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod on_stop_defaults_tests {
+    #[test]
+    fn host_defaults_are_read_and_a_pinned_cause_is_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+        let state = temp.path().join("state");
+        for dir in [&home, &project, &state] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            state.join("config.toml"),
+            "[knobs]\n\
+             \"domains.fabric.graph.on_stop.stopped_no_work\" = \"chair\"\n\
+             \"domains.fabric.graph.on_stop.blocked\" = \"new_route\"\n",
+        )
+        .unwrap();
+        let roots = crate::roots::child(&home, &project, state).unwrap();
+        let defaults = super::resolve_on_stop_defaults(&roots, "project");
+        assert_eq!(
+            defaults.get(provenant_records::StopCause::StoppedNoWork),
+            Some(provenant_records::NextStep::Chair)
+        );
+        // `blocked` is pinned, so its configured default is ignored with
+        // ON_STOP_PINNED_IGNORED and the table row stands.
+        assert_eq!(defaults.get(provenant_records::StopCause::Blocked), None);
     }
 }

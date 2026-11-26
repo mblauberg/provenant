@@ -314,6 +314,7 @@ impl AttemptOwner for Owner {
             commit: commit.map(str::to_owned),
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
+            cause: None,
         })
     }
 }

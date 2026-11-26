@@ -303,12 +303,14 @@ pub(super) fn apply_attempt_observation(
                 commit,
                 stop,
                 settlement_reason,
+                cause,
             } => {
                 let mut result = result;
                 progress.review_settlement = None;
                 attempt.usage = usage;
                 attempt.launched = launched;
                 attempt.stop = stop;
+                attempt.cause = cause;
                 attempt.state = AttemptState::Terminal;
                 attempt.attempt_ref = attempt_ref;
                 // Provider success alone does not satisfy an explicit result contract.
@@ -536,13 +538,7 @@ pub(super) fn apply_attempt_observation(
                     // and pushes no longer revise a settled outcome. One rule
                     // for every writer stop: restart in place on the retained
                     // worktree, or return to the chair (see `next_step`).
-                    progress.advance_error_code = Some(
-                        match outcome {
-                            AttemptOutcome::DeclaredStop => "writer_declared_stop",
-                            _ => "stopped_no_work",
-                        }
-                        .into(),
-                    );
+                    progress.advance_error_code = outcome.advance_code().map(str::to_owned);
                     progress.advance_error = Some(
                         if let Some(handoff) = handoff.filter(|handoff| {
                             handoff.status == provenant_records::handoff::HandoffStatus::Blocked
@@ -1265,6 +1261,7 @@ pub(super) fn begin_attempt(
         input_cap_source: Some(input_cap_source),
         input_manifest: Some(initial_manifest),
         usage: None,
+        cause: None,
     });
     checkpoint.nodes[node_index].state = NodeState::Running;
     checkpoint.nodes[node_index].wait_reason = None;
@@ -2149,6 +2146,7 @@ mod tests {
                     commit: None,
                     stop: None,
                     settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    cause: None,
                 },
                 ObservationFacts {
                     route_index: 0,
@@ -2224,6 +2222,7 @@ mod tests {
             commit: Some(base.clone()),
             stop: None,
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            cause: None,
         };
         apply_attempt_observation(
             &plan,
@@ -2350,6 +2349,7 @@ mod tests {
                     commit: commit.map(str::to_owned),
                     stop: None,
                     settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    cause: None,
                 },
                 ObservationFacts {
                     route_index: 0,
@@ -2404,6 +2404,7 @@ mod tests {
                 commit: None,
                 stop: Some(provenant_records::StopCause::HandoffMissing),
                 settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+                cause: None,
             },
             ObservationFacts {
                 route_index: 0,
@@ -2528,6 +2529,67 @@ mod tests {
         assert_eq!(
             checkpoint.nodes[0].advance_error_code.as_deref(),
             Some("upstream_outputs_too_large")
+        );
+    }
+
+    #[test]
+    fn sealed_cause_lands_on_the_attempt_and_the_code_comes_from_the_outcome() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "sealed-cause",
+            "nodes": [{"id":"one", "access":"worktree_write", "worktree":".worktrees/one",
+                "prompt":"do the work", "routes":[{"adapter":"first", "model":"first/model"}]}]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
+        let mut checkpoint =
+            initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
+        start(&plan, &positions, &mut checkpoint, &limits);
+        apply_attempt_observation(
+            &plan,
+            &mut checkpoint,
+            &positions,
+            0,
+            &limits,
+            AttemptObservation::Terminal {
+                attempt_ref: Some("host/no-work".into()),
+                outcome: AttemptOutcome::StoppedNoWork,
+                launched: true,
+                result: None,
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                stop: Some(provenant_records::StopCause::StoppedNoWork),
+                settlement_reason: Some(provenant_records::run::SettlementReason::DeclaredStop),
+                cause: Some(provenant_records::run::TerminalCause::StoppedNoWork),
+            },
+            ObservationFacts {
+                route_index: 0,
+                usage: None,
+                fallback_evidence: None,
+                evidence_unreadable: false,
+                fallback_evidence_retry: None,
+                fallback_cause: None,
+                skipped_accounts: Vec::new(),
+                review_range: ReviewRange::Unknown,
+            },
+        )
+        .unwrap();
+        let attempt = &checkpoint.nodes[0].attempts[0];
+        assert_eq!(
+            attempt.cause,
+            Some(provenant_records::run::TerminalCause::StoppedNoWork)
+        );
+        assert_eq!(attempt.outcome, Some(AttemptOutcome::StoppedNoWork));
+        assert_eq!(
+            checkpoint.nodes[0].advance_error_code.as_deref(),
+            Some("stopped_no_work")
+        );
+        let status = serde_json::to_value(&checkpoint).unwrap();
+        assert_eq!(
+            status["nodes"][0]["attempts"][0]["cause"],
+            "stopped_no_work"
         );
     }
 }

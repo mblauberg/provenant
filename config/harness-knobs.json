@@ -395,7 +395,9 @@
       "limits.concurrency": {"type": "int", "allowed": "0 or more", "default": "0", "effect": "Graph concurrency limit. Unset or zero uses host lane caps; the bundled configuration sets zero."},
       "decide_timeout_seconds": {"type": "int", "allowed": "1 to 18446744073709 seconds", "min": 1, "default": "300", "effect": "Maximum time a graph decision step may take before it is reported as timed out.", "max": 18446744073709},
       "launch_wait_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "55", "effect": "General launch and read/wait allowance for a graph node."},
-      "writer_provision_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "120", "effect": "Independent allowance for provisioning each writer in a graph; also bounds how long a launch waits for a contended writer lock."}
+      "writer_provision_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "120", "effect": "Independent allowance for provisioning each writer in a graph; also bounds how long a launch waits for a contended writer lock."},
+      "on_stop.<stop_cause>": {"type": "string", "allowed": "same_route, new_route, chair, or a step object", "default": "the stop table row", "effect": "Host default next step for one stop cause, resolved once at graph admission and sealed in the checkpoint. A node's own on_stop entry wins; a pinned cause ignores it and warns ON_STOP_PINNED_IGNORED."},
+      "projects.{project}.on_stop.<stop_cause>": {"type": "string", "allowed": "same_route, new_route, chair, or a step object", "default": "the stop table row", "effect": "Project default next step for one stop cause, resolved once at graph admission and sealed in the checkpoint. A node's own on_stop entry wins; a pinned cause ignores it and warns ON_STOP_PINNED_IGNORED."}
     }
   },
   "host_model_policy_settings": {

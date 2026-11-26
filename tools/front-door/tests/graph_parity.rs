@@ -149,6 +149,7 @@ impl AttemptOwner for Provider {
                 commit: self.terminal_commit.clone(),
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+                cause: None,
             }),
             Some(Step::Pending(reference)) => Ok(AttemptObservation::Pending {
                 attempt_ref: reference.map(str::to_owned),

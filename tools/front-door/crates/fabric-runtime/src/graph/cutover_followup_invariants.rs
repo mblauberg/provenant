@@ -46,6 +46,7 @@ fn terminal(
         branch: None,
         commit: None,
         stop,
+        cause: None,
     }
 }
 
@@ -242,6 +243,7 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
             usage: None,
             settled: 1,
             stop: Some(StopCause::UsageLimited),
+            cause: None,
         });
         let same_model = ModelId::parse("claude/claude-sonnet-5-5").unwrap();
         let higher_model = ModelId::parse("claude/claude-opus-5-5").unwrap();

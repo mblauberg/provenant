@@ -28,6 +28,10 @@ pub enum StopCause {
     /// The handoff says `stopped_early`: work remains and the writer could
     /// not finish it in this attempt.
     StoppedEarly,
+    /// A declared stop with no work to show for it: the launch-pinned head did
+    /// not move. The sealed stop agrees with this cause rather than falling
+    /// back to `stopped_early`, so `on_stop` can treat no-work separately.
+    StoppedNoWork,
     /// The handoff says `blocked` and names an owner decision or a missing
     /// capability in `blocked_on`, or names no kind. The stop carries the
     /// handoff, so its note names what blocks it.
@@ -269,6 +273,7 @@ pub const STOP_TABLE: &[StopRule] = {
     use StopCause::*;
     &[
         rule(StoppedEarly, NEW, crate::run::CauseSource::Provider),
+        rule(StoppedNoWork, NEW, crate::run::CauseSource::Provider),
         pinned(Blocked, crate::run::CauseSource::Owner),
         once(BlockedEnvironment, CHAIR, crate::run::CauseSource::Provider),
         rule(BlockedDependency, CHAIR, crate::run::CauseSource::Provider),
@@ -321,7 +326,7 @@ pub const STOP_TABLE: &[StopRule] = {
 impl StopCause {
     /// Every cause. `ordinal` matches exhaustively, so a new variant fails to
     /// compile there, and the assertion below keeps this list in step.
-    pub const ALL: [StopCause; 47] = {
+    pub const ALL: [StopCause; 48] = {
         use StopCause::*;
         [
             StoppedEarly,
@@ -371,6 +376,7 @@ impl StopCause {
             Steered,
             Unclassified,
             PreparationRefused,
+            StoppedNoWork,
         ]
     };
 
@@ -424,6 +430,7 @@ impl StopCause {
             Steered => 44,
             Unclassified => 45,
             PreparationRefused => 46,
+            StoppedNoWork => 47,
         }
     }
 
@@ -464,13 +471,14 @@ impl StopCause {
     }
 
     /// A stop the work can recover from on its own route: the writer stopped
-    /// early, or the host ended the attempt on a lost lane token or a context
-    /// handoff. With no different route to take, such a stop continues on the
-    /// same route in a fresh session rather than pausing the graph.
+    /// early (with or without work to show for it), or the host ended the
+    /// attempt on a lost lane token or a context handoff. With no different
+    /// route to take, such a stop continues on the same route in a fresh
+    /// session rather than pausing the graph.
     pub const fn continues_on_same_route(self) -> bool {
         matches!(
             self,
-            Self::StoppedEarly | Self::LaneTokenLost | Self::ContextHandoff
+            Self::StoppedEarly | Self::StoppedNoWork | Self::LaneTokenLost | Self::ContextHandoff
         )
     }
 
@@ -550,6 +558,7 @@ impl StopCause {
         use StopCause::*;
         match self {
             StoppedEarly => "stopped_early",
+            StoppedNoWork => "stopped_no_work",
             Blocked => "blocked",
             BlockedEnvironment => "blocked_environment",
             BlockedDependency => "blocked_dependency",
@@ -646,7 +655,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::HostNativeUnconfigured => Self::HostNativeUnconfigured,
             T::IdentityMismatch => Self::IdentityMismatch,
             T::ProviderCaptureDefect { .. } => Self::Unsettled,
-            T::StoppedNoWork => Self::StoppedEarly,
+            T::StoppedNoWork => Self::StoppedNoWork,
             T::EmptyWriterResult => Self::EmptyResult,
             T::ContextHandoff => Self::ContextHandoff,
             T::Blocked => Self::Blocked,

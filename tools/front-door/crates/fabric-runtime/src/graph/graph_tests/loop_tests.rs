@@ -139,6 +139,7 @@ fn loop_composite_review_pins_each_repaired_commit() {
         commit: Some(commit.to_owned()),
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+    cause: None,
     };
     let mut owner = FakeOwner {
         observations: [
@@ -1439,6 +1440,7 @@ fn commit_terminal(commit: &str) -> AttemptObservation {
         commit: Some(commit.to_owned()),
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+    cause: None,
     }
 }
 
@@ -2880,6 +2882,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
         commit: Some("1".repeat(40)),
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+    cause: None,
     };
     let mut owner = repair_reviews(&[
         &finding,

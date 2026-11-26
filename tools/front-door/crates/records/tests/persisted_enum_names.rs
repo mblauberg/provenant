@@ -796,6 +796,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "steered",
             "unclassified",
             "preparation_refused",
+            "stopped_no_work",
         ],
     )?;
     assert_unit_names::<HandoffStatus>("HandoffStatus", &["done", "stopped_early", "blocked"])?;

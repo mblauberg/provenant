@@ -474,7 +474,18 @@ fn decide(
         return None;
     }
     let pause = |reason: String| declared(progress).then_some(Settle::Pause(reason));
-    let mut step = cause.next_step(&node.on_stop, facts(&node.id, cause, checkpoint));
+    // Host/project defaults are resolved once at admission and pinned in the
+    // checkpoint; the node's own entry wins where both name the same cause.
+    let effective = if checkpoint.on_stop_defaults.is_empty() {
+        None
+    } else {
+        let mut steps: std::collections::BTreeMap<_, _> =
+            checkpoint.on_stop_defaults.iter().collect();
+        steps.extend(node.on_stop.iter());
+        Some(provenant_records::OnStop::new(steps))
+    };
+    let on_stop = effective.as_ref().unwrap_or(&node.on_stop);
+    let mut step = cause.next_step(on_stop, facts(&node.id, cause, checkpoint));
     let mut ladder = None;
     let mut fallback = false;
     let routes = match step {
@@ -511,11 +522,12 @@ fn decide(
         }
         NextStep::NewRoute => {
             let routes = restart_routes(node, progress);
-            // An explicit `on_stop` entry for the cause is the node's own
-            // choice of a new route, so it never falls back to the same one.
+            // An explicit `on_stop` entry for the cause names a new route, so
+            // it never falls back to the same one. Defaults count too: they
+            // were resolved at admission and are pinned in the checkpoint.
             if !routes.is_empty()
                 || !cause.continues_on_same_route()
-                || node.on_stop.get(cause).is_some()
+                || on_stop.get(cause).is_some()
             {
                 routes
             } else {

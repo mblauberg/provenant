@@ -49,6 +49,7 @@ impl AttemptOwner for Provider {
                 commit: None,
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+                cause: None,
             })
         } else {
             assert!(replay.stored_ref.is_none());

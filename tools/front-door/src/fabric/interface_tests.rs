@@ -2192,6 +2192,7 @@ fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
                 commit: None,
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }
@@ -4423,6 +4424,7 @@ fn writer_sourced_template_review_selects_shape_and_pins_every_stage() -> Result
                 commit: writer.then(|| self.commit.clone()),
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }

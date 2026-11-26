@@ -663,6 +663,7 @@ fn node_bound(
                 cost_partial: true,
                 cost_unknown_reason: Some(String::new()),
             }),
+            cause: None,
         };
         // A manifest records at most MANIFEST_INPUT_LIMIT selected values. Each
         // entry carries two bounded identifiers, a digest and an optional OID.

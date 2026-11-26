@@ -34,6 +34,9 @@ pub enum AttemptObservation {
         stop: Option<provenant_records::StopCause>,
         /// Exact settlement classification persisted by the run store.
         settlement_reason: Option<provenant_records::run::SettlementReason>,
+        /// The exact typed cause the run sealed, copied into the graph's
+        /// attempt row at settlement.
+        cause: Option<provenant_records::run::TerminalCause>,
     },
 }
 

@@ -74,6 +74,21 @@ pub enum AttemptOutcome {
     Unclassified,
 }
 
+impl AttemptOutcome {
+    /// The advance code settlement owns, if this outcome has one. The two
+    /// declared-stop outcomes are the only settlement-derived codes; every
+    /// other advance code comes from the owner or a launch refusal. Keeping the
+    /// spellings here gives the graph one source for them (docs/specs/run.md
+    /// lists the same two codes).
+    pub const fn advance_code(self) -> Option<&'static str> {
+        match self {
+            Self::DeclaredStop => Some("writer_declared_stop"),
+            Self::StoppedNoWork => Some("stopped_no_work"),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphOutcome {
@@ -89,4 +104,35 @@ pub enum GraphStatus {
     Complete,
     Cancelled,
     Paused,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn advance_codes_are_the_documented_settlement_codes() {
+        let spec = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../docs/specs/run.md"),
+        )
+        .unwrap();
+        let list = spec
+            .split_once("The settlement-derived advance codes are ")
+            .unwrap()
+            .1
+            .lines()
+            .next()
+            .unwrap();
+        let documented: BTreeSet<&str> = list
+            .split_whitespace()
+            .filter_map(|word| word.strip_prefix('`').and_then(|w| w.strip_suffix('`')))
+            .collect();
+        let owned: BTreeSet<&str> = [AttemptOutcome::DeclaredStop, AttemptOutcome::StoppedNoWork]
+            .into_iter()
+            .filter_map(AttemptOutcome::advance_code)
+            .collect();
+        assert_eq!(documented, owned);
+        assert_eq!(AttemptOutcome::Succeeded.advance_code(), None);
+    }
 }

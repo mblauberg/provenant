@@ -407,6 +407,7 @@ fn review_substitute_keeps_writer_chain_exclusion() {
         commit: Some("3".repeat(40)),
         settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
+    cause: None,
     };
     let mut owner = FakeOwner {
         observations: VecDeque::from([

@@ -48,6 +48,7 @@ impl AttemptOwner for Owner {
             commit: None,
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
+            cause: None,
         })
     }
 }

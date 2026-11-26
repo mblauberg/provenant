@@ -506,6 +506,7 @@ fn review_contract_accepts_one_verdict_after_a_valid_closed_handoff() {
             commit: None,
             settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
+        cause: None,
         }]
         .into(),
         ..Default::default()
@@ -565,6 +566,7 @@ fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
                 commit: None,
                 settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
+            cause: None,
             }]
             .into(),
             ..Default::default()
