@@ -118,7 +118,7 @@ impl Default for MatrixSettings {
             },
             records: Sourced {
                 value: defaults.measurement_records,
-                source: source,
+                source,
             },
         }
     }

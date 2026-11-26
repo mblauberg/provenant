@@ -1691,7 +1691,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         intent: provenant_routing::RouteIntent {
             writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
             network: Some(task.access.network(task.writer.is_some())),
-            image_input: false,
+            image_input: !task.access.attachments.is_empty(),
             skill_location: task.profile.require_skill_location,
             workload: task
                 .route

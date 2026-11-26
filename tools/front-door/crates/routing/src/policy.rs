@@ -33,7 +33,7 @@ impl RouteIntent {
         spec.check_launch(&provenant_records::LaunchRequest {
             model: Some(model),
             effort,
-            image_input: false,
+            image_input: self.image_input,
             resume: false,
             network: self.network,
             write: self.writes,

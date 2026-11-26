@@ -336,3 +336,20 @@ mod tests {
         assert!(!temp.path().join(".provenant").exists());
     }
 }
+
+/// Effective `[[adapter_capabilities]]` entries for one read, from the host
+/// state and project layers the compatibility table also reads. An invalid row
+/// warns as an ignored config key and is skipped; it never refuses the caller.
+pub fn capability_overlay(roots: &Roots) -> provenant_records::CapabilityOverlay {
+    let (overlay, warnings) = provenant_config::adapter_capabilities::effective(
+        roots.state.as_path(),
+        Some(roots.checkout()),
+    );
+    for warning in warnings {
+        provenant_records::warning::warn(provenant_records::warning::Warning::new(
+            provenant_records::warning::CONFIG_KEY_IGNORED,
+            warning.to_string(),
+        ));
+    }
+    overlay
+}

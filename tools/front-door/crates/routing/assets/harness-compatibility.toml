@@ -10,7 +10,8 @@
 #
 # `range` is a comma-separated list of >=, >, <, <= and = comparators over
 # MAJOR[.MINOR[.PATCH]]. The first matching row decides the status; an unreadable
-# version is "version_unread" and no match is "supported". Overlay rows in host and
-# project config.toml replace a bundled row by adapter.
+# version is "version_unread", and no entry or no matching range is "unlisted":
+# "supported" needs an explicit range with status = "supported". Overlay rows in
+# host and project config.toml replace a bundled row by adapter.
 #
 # Link every entry to its issue. No entries are bundled today.

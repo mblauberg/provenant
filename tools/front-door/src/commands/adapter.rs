@@ -224,7 +224,7 @@ fn span_p50(span: &Value) -> String {
 fn push_declaration(lines: &mut Vec<String>, label: &str, declaration: &Value) {
     let value = &declaration["value"];
     let is_no = matches!(value, Value::Bool(false))
-        || matches!(value.as_str(), Some("none" | "absent" | "unreported"));
+        || matches!(value.as_str(), Some("absent" | "unreported"));
     if is_no {
         lines.push(format!(
             "  {label}: no — {}; source={}",

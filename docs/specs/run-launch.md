@@ -370,8 +370,8 @@ A bundled, empty table at `crates/routing/assets/harness-compatibility.toml` is 
 `provenant_config::overlays::read_layers`; a later layer replaces the whole entry by adapter.
 An entry declares a `provenant_range`, an optional `recommended_range` and `ranges` of
 comma-separated comparators (`>=`, `>`, `<`, `<=`, `=`) over `MAJOR[.MINOR[.PATCH]]`; the first
-matching range wins and names `supported`, `unsupported`, `broken` or `unknown`. No entry is
-`unlisted` and a version that cannot be read is `version_unread`. An entry whose
+matching range wins and names `supported`, `unsupported` or `broken`. No entry or no matching
+range is `unlisted` and a version that cannot be read is `version_unread`. An entry whose
 `provenant_range` excludes this build's version is ignored, and an invalid entry is skipped
 with an overlay warning naming its layer. `HARNESS_VERSION_UNSUPPORTED` and
 `HARNESS_VERSION_BROKEN` warn by default and may be set to `off` or `refuse` through their

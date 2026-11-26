@@ -1436,8 +1436,6 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
                 // Chair telemetry reads the Claude transcript format only.
                 || (path.ends_with("telemetry/src/ingest.rs")
                     && line_text.contains("PROVIDER"))
-                // 2026-11-26: removed by batch A slice 2.
-                || path.ends_with("fabric-runtime/src/graph/validation.rs")
                 // Host credential declarations are declarative adapter data.
                 || path.ends_with("confinement/src/permissions/policy/host.rs")
                 // Built-in credential inventory is declarative adapter data.

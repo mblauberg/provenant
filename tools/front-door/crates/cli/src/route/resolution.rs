@@ -494,19 +494,9 @@ pub(super) fn with_context<T>(
     });
     // Owner capability entries are config data, not routing I/O: read the same
     // host and project layers the other overlays use here, once, and carry the
-    // effective entries on the routing document. Invalid rows join the route
-    // warnings without refusing the dispatch.
-    let (capability_overlay, overlay_warnings) = provenant_config::adapter_capabilities::effective(
-        roots.state.as_path(),
-        Some(roots.checkout()),
-    );
-    for warning in overlay_warnings {
-        provenant_records::warning::warn(provenant_records::warning::Warning::new(
-            provenant_records::warning::CONFIG_KEY_IGNORED,
-            warning.to_string(),
-        ));
-    }
-    config.capability_overlay = capability_overlay;
+    // effective entries on the routing document. Invalid rows warn without
+    // refusing the dispatch.
+    config.capability_overlay = crate::config_reads::capability_overlay(roots);
     config.allow_unknown_partial_headroom = allow_unknown;
     config.partial_headroom_source = Some(partial_headroom_source);
     resolve_pacing_accounts(&mut config, &domains.accounts)?;

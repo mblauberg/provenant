@@ -250,25 +250,13 @@ fn opencode_access_message(access: &provenant_records::LaneAccessReceipt) -> Str
     )
 }
 
-/// Effective `[[adapter_capabilities]]` entries for one launch, read from the
-/// same host state and project layers as the compatibility table. An invalid
-/// row warns and is skipped rather than refusing the launch.
+/// Effective `[[adapter_capabilities]]` entries for one launch; without
+/// routing roots there are no owner entries.
 fn launch_capability_overlay(registry: &Registry<'_>) -> provenant_records::CapabilityOverlay {
-    registry
-        .roots
-        .map_or_else(provenant_records::CapabilityOverlay::default, |roots| {
-            let (overlay, warnings) = provenant_config::adapter_capabilities::effective(
-                roots.state.as_path(),
-                Some(roots.checkout()),
-            );
-            for warning in warnings {
-                warn(Warning::new(
-                    provenant_records::warning::CONFIG_KEY_IGNORED,
-                    warning.to_string(),
-                ));
-            }
-            overlay
-        })
+    registry.roots.map_or_else(
+        provenant_records::CapabilityOverlay::default,
+        crate::config_reads::capability_overlay,
+    )
 }
 
 fn push_launch_warning(route: &mut ResolvedRoute, warning: impl Into<String>) {
@@ -4783,9 +4771,13 @@ pub(super) fn prepare_candidates_inner(
             None => text,
         };
         let text = if !task.access.attachments.is_empty()
-            && !AdapterSpec::get(adapter.id())
-                .is_some_and(|spec| spec.capabilities.launch.image_input.value)
-        {
+            && !AdapterSpec::get(adapter.id()).is_some_and(|spec| {
+                spec.with_overlay(&capability_overlay)
+                    .capabilities
+                    .launch
+                    .image_input
+                    .value
+            }) {
             let paths = task
                 .access
                 .attachments
@@ -5728,13 +5720,17 @@ pub(super) fn prepare_candidates_inner(
         if let Some(spec) = AdapterSpec::get(&route.adapter) {
             let spec = spec.with_overlay(&capability_overlay);
             let gap_policy = capability_overlay.gap_policy(spec.identity.name, &launch_policy);
-            if let Some(decision) = spec
-                .check_launch(&provenant_records::LaunchRequest {
-                    image_input,
-                    gap_policy,
-                    ..Default::default()
-                })
-                .degraded(provenant_records::LaunchField::ImageInput)
+            let check = spec.check_launch(&provenant_records::LaunchRequest {
+                image_input,
+                gap_policy,
+                ..Default::default()
+            });
+            // An owner-set `refuse` image gap stops the launch; otherwise a
+            // degraded image input leaves the attachments as readable paths.
+            if let Some(decision) = check.refusal() {
+                return Err(PrepareError::Unsupported(decision.clone()).into());
+            }
+            if let Some(decision) = check.degraded(provenant_records::LaunchField::ImageInput)
                 && decision.warn
             {
                 push_launch_warning(

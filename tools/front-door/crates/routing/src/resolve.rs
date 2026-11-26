@@ -3488,15 +3488,21 @@ fn go_quota_observation<'a>(
         .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision))
 }
 
-fn image_input_supported(model: &ModelId, _context: &ValidatedContext<'_>) -> bool {
+fn image_input_supported(model: &ModelId, context: &ValidatedContext<'_>) -> bool {
     #[cfg(test)]
-    let spec = _context
+    let spec = context
         .launch_specs
         .and_then(|lookup| lookup(model.adapter()))
         .or_else(|| provenant_records::AdapterSpec::get(model.adapter()).copied());
     #[cfg(not(test))]
     let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
-    spec.is_some_and(|spec| spec.capabilities.launch.image_input.value)
+    spec.is_some_and(|spec| {
+        spec.with_overlay(&context.config.capability_overlay)
+            .capabilities
+            .launch
+            .image_input
+            .value
+    })
 }
 
 fn classify_pool(

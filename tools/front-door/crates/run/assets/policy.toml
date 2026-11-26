@@ -1276,15 +1276,6 @@ knob = "policy.GRAPH_HOST_NATIVE_FALLBACK"
 justification = "A host-native route without a fallback warns."
 
 [[rule]]
-code = "LAUNCH_FIELD_UNSUPPORTED"
-site = "cli/src/run/provider/preparation.rs#check_launch"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.LAUNCH_FIELD_UNSUPPORTED"
-justification = "A non-write launch field (model, effort, network, resume, skills) unsupported by the route is dropped with a warning; write support stays an authority refusal."
-
-[[rule]]
 code = "SECRET_SHAPED_INPUT"
 site = "fabric-runtime/src/graph/refusal.rs#input_warnings"
 boundary = "none"

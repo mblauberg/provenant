@@ -380,7 +380,8 @@ pub struct HarnessInstall {
 
 const CHAIR_HOOKS_NOT_APPLICABLE: &str =
     "Provenant chair switching is enabled only for adapters declaring chair_switch";
-const CHAIR_HOOKS_SOURCE: &str = "AdapterSpec.chair_switch in crates/records/src/adapters.rs";
+const CHAIR_HOOKS_SOURCE: &str =
+    "AdapterSpec.launch.chair_switch in crates/records/src/adapters.rs";
 const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
     // Claude Code treats a failed PreToolUse hook as a refusal of the tool.
     // Answer delivery offers untrusted inbox data and needs no such authority,
@@ -3085,6 +3086,7 @@ mod gap_policy_tests {
             write: true,
             skill_location: true,
             gap_policy: overlay.gap_policy("command", &policy),
+            ..Default::default()
         });
         assert_eq!(
             check.gaps.iter().map(|gap| gap.field).collect::<Vec<_>>(),

@@ -57,20 +57,9 @@ pub(super) fn prepare_command(
 ) -> Result<run::PreparedLaunch, PrepareError> {
     #[cfg(feature = "fixture")]
     hold_command_preparation_for_fixture();
-    // Load the owner capability entries once for this launch, from the same
-    // host state and project layers the compatibility table reads. An invalid
-    // row warns and is skipped; it never blocks a configured command.
+    // Load the owner capability entries once for this launch.
     let roots = registry.roots.ok_or("routing context is unavailable")?;
-    let (capability_overlay, overlay_warnings) = provenant_config::adapter_capabilities::effective(
-        roots.state.as_path(),
-        Some(roots.checkout()),
-    );
-    for warning in overlay_warnings {
-        provenant_records::warning::warn(provenant_records::warning::Warning::new(
-            provenant_records::warning::CONFIG_KEY_IGNORED,
-            warning.to_string(),
-        ));
-    }
+    let capability_overlay = crate::config_reads::capability_overlay(roots);
     if !AdapterSpec::get(provider)
         .is_some_and(|spec| spec.identity.named_entry == provenant_records::NamedEntry::Command)
     {
@@ -355,13 +344,17 @@ pub(super) fn prepare_command(
     if let Some(spec) = AdapterSpec::get(provider) {
         let spec = spec.with_overlay(&capability_overlay);
         let gap_policy = capability_overlay.gap_policy(provider, &launch_policy);
-        if let Some(decision) = spec
-            .check_launch(&provenant_records::LaunchRequest {
-                image_input,
-                gap_policy,
-                ..Default::default()
-            })
-            .degraded(provenant_records::LaunchField::ImageInput)
+        let check = spec.check_launch(&provenant_records::LaunchRequest {
+            image_input,
+            gap_policy,
+            ..Default::default()
+        });
+        // An owner-set `refuse` image gap stops the launch; otherwise a
+        // degraded image input leaves the attachments as readable paths.
+        if let Some(decision) = check.refusal() {
+            return Err(PrepareError::Unsupported(decision.clone()).into());
+        }
+        if let Some(decision) = check.degraded(provenant_records::LaunchField::ImageInput)
             && decision.warn
         {
             launch_warnings.push(format!("warning: {decision}; attachments remain readable"));

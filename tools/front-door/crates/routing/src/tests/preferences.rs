@@ -303,18 +303,20 @@ fn an_adapter_entry_can_refuse_an_exact_pin_effort_gap() -> Result<(), Box<dyn s
         GapAction, LaunchField, Layer, Source,
     };
     let catalogue = Catalogue::bundled()?;
-    let mut config = RoutingConfig::default();
-    config.capability_overlay = CapabilityOverlay {
-        entries: vec![AdapterOverride {
-            adapter: "codex".into(),
-            disable: vec![],
-            reason: Some("owner requires an effort control".into()),
-            on_gap: vec![(LaunchField::Effort, GapAction::Refuse)],
-            source: Source {
-                layer: Layer::Project,
-                origin: Some(".provenant/config.toml#adapter_capabilities".into()),
-            },
-        }],
+    let config = RoutingConfig {
+        capability_overlay: CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "codex".into(),
+                disable: vec![],
+                reason: Some("owner requires an effort control".into()),
+                on_gap: vec![(LaunchField::Effort, GapAction::Refuse)],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: Some(".provenant/config.toml#adapter_capabilities".into()),
+                },
+            }],
+        },
+        ..RoutingConfig::default()
     };
     let mut no_effort = *AdapterSpec::get("codex").unwrap();
     no_effort.capabilities.launch.effort =
@@ -395,18 +397,20 @@ fn a_disabled_write_fact_refuses_with_the_overlay_source() -> Result<(), Box<dyn
         AdapterOverride, CapabilityOverlay, Layer, OVERLAY_SOURCE, OverridableCapability, Source,
     };
     let catalogue = Catalogue::bundled()?;
-    let mut config = RoutingConfig::default();
-    config.capability_overlay = CapabilityOverlay {
-        entries: vec![AdapterOverride {
-            adapter: "codex".into(),
-            disable: vec![OverridableCapability::Write],
-            reason: None,
-            on_gap: vec![],
-            source: Source {
-                layer: Layer::Project,
-                origin: None,
-            },
-        }],
+    let config = RoutingConfig {
+        capability_overlay: CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "codex".into(),
+                disable: vec![OverridableCapability::Write],
+                reason: None,
+                on_gap: vec![],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: None,
+                },
+            }],
+        },
+        ..RoutingConfig::default()
     };
     let records = [availability()];
     let access = [AccessContext {
