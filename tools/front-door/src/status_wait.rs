@@ -3,7 +3,10 @@
 //! share one event source; pull requests remain on forge observation.
 // This edge owns the real deadline for channel receives and source I/O.
 #![allow(clippy::disallowed_methods)]
-use provenant_cli::{Globals, wait::LocalCadence};
+use provenant_cli::{
+    Globals,
+    wait::{LocalCadence, PrHeadSource, PrHeadUnpinned},
+};
 use provenant_core::{CancelToken, Clock as _, GitOid, WallTime};
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::{
@@ -340,12 +343,18 @@ fn wall_now() -> WallTime {
 
 /// Build the subject a `wait --pr` pins at admission. The invariant: exactly
 /// one head is fixed per wait and `--head` always pins, whatever the forge
-/// later reports. A local tip that differs from the forge becomes the subject
-/// with a `LocalRef` origin; otherwise the forge head carries a `ForgePr` origin.
+/// later reports. `auto` prefers a local tip that differs from the forge,
+/// `forge` always takes the reported head, and `local` takes the branch tip
+/// when there is one. A head without a chosen source leaves the subject unset.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the admission inputs stay explicit at this boundary"
+)]
 fn pr_subject(
     number: u64,
     repository: &Result<String, String>,
     policy: SubjectPolicy,
+    source: PrHeadSource,
     policy_source: &str,
     now: WallTime,
     command_head: Option<&str>,
@@ -376,8 +385,9 @@ fn pr_subject(
         });
     }
     let (sha, branch) = forge?;
-    if let Some(local) = local_tip
-        && local != sha
+    if source != PrHeadSource::Forge
+        && let Some(local) = local_tip
+        && (source == PrHeadSource::Local || local != sha)
         && let Ok(head) = GitOid::parse(&local)
     {
         return Some(make(
@@ -398,6 +408,21 @@ fn pr_subject(
             policy_source,
         )
     })
+}
+
+/// The terminal reading for a wait that refuses to proceed without a head.
+/// The invariant: the cause is the declared `head_unpinned` and the next step
+/// names the key that chose refusal, so the operator can change one setting.
+fn unpinned_refusal(number: u64, source: &str) -> Reading {
+    Reading {
+        settle: Settle::Unsuccessful,
+        line: format!("#{number} head_unpinned ({source})"),
+        data: json!({
+            "number": number,
+            "cause": crate::pr::status::HEAD_UNPINNED,
+            "next": format!("set {source} to first_sample, or rerun with --head"),
+        }),
+    }
 }
 
 /// Apply one PR observation to the wait's pinned subject. Updates `subject`
@@ -487,6 +512,17 @@ fn apply_subject_sample(
 
 fn warn(code: WarningCode, message: String) {
     warning::warn(warning::Warning::new(code, message));
+}
+
+/// Report that a local head was requested but the branch has no local tip.
+/// The source names the key that chose `local`, so a caller can change it.
+fn warn_local_head_unavailable(number: u64, source: &str) {
+    warn(
+        warning::PR_HEAD_LOCAL_UNAVAILABLE,
+        format!(
+            "#{number}: no local branch tip for this pull request; using the forge head ({source})"
+        ),
+    );
 }
 
 /// The tip of a branch known locally, checked in the local repository only.
@@ -1965,12 +2001,21 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     prs.dedup();
     let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
     let actions_grace = Duration::from_secs(settings.actions_grace_seconds);
-    let pr_head_policy = settings.pr_head_policy;
+    // One resolution per wait: the project row the wait resolves its
+    // repository from beats the host section, and every sourced report cites
+    // the key that supplied the effective value.
+    let project_key = project_id.map(|id| id.to_string());
+    let head = settings.pr_head(project_key.as_deref());
+    let pr_head_policy = command.pr_head_policy.unwrap_or(head.policy);
     let pr_policy_source = if command.head.is_some() {
         "--head".to_owned()
+    } else if command.pr_head_policy.is_some() {
+        "--pr-head-policy".to_owned()
     } else {
-        origin.describe(provenant_cli::wait::PR_HEAD_POLICY_KEY)
+        origin.describe(&head.policy_key)
     };
+    let head_source_source = origin.describe(&head.source_key);
+    let unpinned_source = origin.describe(&head.unpinned_key);
     if sources.len() + prs.len() > settings.max_targets as usize {
         return crate::fail(
             "wait",
@@ -2008,21 +2053,32 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             if let (Some((sha, branch)), Some(local)) = (&forge, &local_tip)
                 && local != sha
             {
+                let action = if head.source == PrHeadSource::Forge {
+                    "ignoring the local tip"
+                } else {
+                    "waiting for the local tip"
+                };
                 warning::warn(
                     warning::Warning::new(
                         warning::BRANCH_BEHIND_BASE,
-                        format!(
-                            "#{number}: local tip {local} differs from GitHub head {sha}; waiting for the local tip"
-                        ),
+                        format!("#{number}: local tip {local} differs from GitHub head {sha}; {action}"),
                     )
                     .subject(branch.clone()),
                 );
+            }
+            if head.source == PrHeadSource::Local
+                && command.head.is_none()
+                && local_tip.is_none()
+                && forge.is_some()
+            {
+                warn_local_head_unavailable(number, &head_source_source);
             }
             let unpinned = command.head.is_none() && forge.is_none();
             let subject = pr_subject(
                 number,
                 &repository,
                 pr_head_policy,
+                head.source,
                 &pr_policy_source,
                 wall_now(),
                 command.head.as_deref(),
@@ -2030,10 +2086,17 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 local_tip,
             );
             if unpinned {
-                warn(
-                    warning::PR_HEAD_UNPINNED,
-                    format!("#{number}: forge head unavailable; the first observation pins the subject"),
-                );
+                if head.unpinned == PrHeadUnpinned::Refuse {
+                    validation.insert(
+                        format!("#{number}"),
+                        unpinned_refusal(number, &unpinned_source),
+                    );
+                } else {
+                    warn(
+                        warning::PR_HEAD_UNPINNED,
+                        format!("#{number}: forge head unavailable; the first observation pins the subject ({unpinned_source})"),
+                    );
+                }
             }
             Source::Pr {
                 number,
@@ -3883,6 +3946,7 @@ mod tests {
             7,
             &Ok("owner/repo".into()),
             SubjectPolicy::Pinned,
+            PrHeadSource::Auto,
             "domains.wait.pr_head_policy from the compiled test profile",
             now,
             None,
@@ -3907,6 +3971,7 @@ mod tests {
             7,
             &Ok("owner/repo".into()),
             SubjectPolicy::FollowLatest,
+            PrHeadSource::Auto,
             "--head",
             now,
             Some(&explicit),
@@ -3924,6 +3989,7 @@ mod tests {
             7,
             &Ok("owner/repo".into()),
             SubjectPolicy::Pinned,
+            PrHeadSource::Auto,
             "domains.wait.pr_head_policy from the compiled test profile",
             now,
             None,
@@ -3972,6 +4038,97 @@ mod tests {
         let reading = pr_reading("#7", &Some(subject.clone()), &None, line, false, moved);
         assert_eq!(reading.data["subject"], json!(subject));
         assert_eq!(reading.settle, Settle::Succeeded);
+    }
+
+    #[test]
+    fn a_forge_head_source_ignores_a_differing_local_tip() {
+        let now = WallTime::from_micros(0).expect("fixture time");
+        let forge = "c".repeat(40);
+        let local = "e".repeat(40);
+        let subject = pr_subject(
+            7,
+            &Ok("owner/repo".into()),
+            SubjectPolicy::Pinned,
+            PrHeadSource::Forge,
+            "domains.wait.pr_head_policy from the compiled test profile",
+            now,
+            None,
+            Some((forge.clone(), "feature".into())),
+            Some(local.clone()),
+        )
+        .expect("the forge head pins a subject");
+        assert_eq!(
+            subject.head,
+            oid(&forge),
+            "the differing local tip is ignored"
+        );
+        assert_eq!(
+            subject.origin,
+            SubjectOrigin::ForgePr {
+                repository: "owner/repo".into(),
+                number: 7
+            }
+        );
+    }
+
+    #[test]
+    fn a_local_head_source_without_a_branch_warns_and_uses_the_forge() {
+        let now = WallTime::from_micros(0).expect("fixture time");
+        let forge = "c".repeat(40);
+        let source = "domains.wait.projects.demo.pr_head_source from config.toml";
+        let (subject, warnings) = warning::capture(|| {
+            warn_local_head_unavailable(7, source);
+            pr_subject(
+                7,
+                &Ok("owner/repo".into()),
+                SubjectPolicy::Pinned,
+                PrHeadSource::Local,
+                "domains.wait.pr_head_policy from the compiled test profile",
+                now,
+                None,
+                Some((forge.clone(), "feature".into())),
+                None,
+            )
+        });
+        let subject = subject.expect("the forge head pins a subject");
+        assert_eq!(
+            subject.head,
+            oid(&forge),
+            "no local tip falls back to the forge"
+        );
+        assert_eq!(
+            subject.origin,
+            SubjectOrigin::ForgePr {
+                repository: "owner/repo".into(),
+                number: 7
+            }
+        );
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.code.as_ref() == warning::PR_HEAD_LOCAL_UNAVAILABLE.as_str()
+                    && warning.message.contains(source)
+            }),
+            "the warning names the source of the local choice: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_wait_settles_head_unpinned() {
+        let source = "domains.wait.projects.demo.pr_head_unpinned from config.toml";
+        let reading = unpinned_refusal(7, source);
+        assert_eq!(reading.settle, Settle::Unsuccessful);
+        assert_eq!(
+            reading.data["cause"],
+            json!(crate::pr::status::HEAD_UNPINNED)
+        );
+        assert!(reading.line.contains("#7"));
+        assert!(
+            reading.data["next"]
+                .as_str()
+                .is_some_and(|next| next.contains(source)),
+            "the next step names the supplying key: {}",
+            reading.data["next"]
+        );
     }
 
     #[test]
