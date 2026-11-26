@@ -125,9 +125,9 @@ fn sealed_chair_only_preparation_stop_never_advances_to_another_route() {
     assert!(matches!(
         decision,
         SettlementFallback::Fail {
-            code: Some("on_stop_held"),
-            ..
-        }
+            code: Some("preparation_refused"),
+            message: Some(ref message),
+        } if message == CauseKind::UnsupportedPlatform.detail()
     ));
 }
 

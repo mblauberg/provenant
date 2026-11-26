@@ -891,9 +891,19 @@ pub(super) fn settlement_fallback_decision(
         }
     });
     if custody_released && step != Some(NextStep::NewRoute) {
+        let (code, message) = match outcome {
+            GraphAttemptOutcome::PreparationRefused(refusal) => (
+                "preparation_refused",
+                bounded(refusal.detail(), MAX_ADVANCE_NOTE_BYTES),
+            ),
+            _ => (
+                "on_stop_held",
+                "on_stop keeps this stop off the next route; return to the chair".into(),
+            ),
+        };
         return SettlementFallback::Fail {
-            code: Some("on_stop_held"),
-            message: Some("on_stop keeps this stop off the next route; return to the chair".into()),
+            code: Some(code),
+            message: Some(message),
         };
     }
     let allowed = step == Some(NextStep::NewRoute);

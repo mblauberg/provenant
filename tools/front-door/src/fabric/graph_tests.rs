@@ -1161,12 +1161,12 @@ mod graph_writer_admission_tests {
         }
     }
     #[test]
-    fn graph_accepts_preparation_failure_and_advances_fallback()
+    fn graph_holds_unregistered_account_preparation_failure()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
         use provenant_fabric_runtime::graph::{self, GraphJournal, NodeState};
         if super::peer_tests::host_test(
-            "fabric::graph_writer_admission_tests::graph_accepts_preparation_failure_and_advances_fallback",
+            "fabric::graph_writer_admission_tests::graph_holds_unregistered_account_preparation_failure",
         )? {
             return Ok(());
         }
@@ -1245,10 +1245,10 @@ mod graph_writer_admission_tests {
         let first = advance(&document, &mut owner, &mut journal)?;
         let node = &first.checkpoint.nodes[0];
         assert_eq!(node.state, NodeState::Failed, "{node:?}");
-        assert_ne!(node.advance_code.as_deref(), Some("launch_refused"));
-        assert_eq!(node.attempts.len(), 2);
+        assert_eq!(node.advance_code.as_deref(), Some("preparation_refused"));
+        assert_eq!(node.attempts.len(), 1);
         assert_eq!(node.attempts[0].key.route_index, 0);
-        assert_eq!(node.attempts[1].key.route_index, 1);
+        assert_eq!(node.attempts[0].stop, Some(provenant_records::StopCause::UnregisteredAccount));
         assert!(node.launch_retry.is_none());
         // The graph seals dispatch intent before calling the owner. Provider
         // execution is proved separately by the durable run-lane record.
