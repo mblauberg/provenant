@@ -1708,7 +1708,8 @@ impl FileJournal {
         // A decode-valid record that fails validation is just as unloadable and
         // is retired by the same named command (#4105).
         let retireable = match load_checkpoint(&directory, graph_id) {
-            Ok(stored) => semantic_validation_error(&stored).is_some(),
+            Ok(Some(stored)) => semantic_validation_error(&stored).is_some(),
+            Ok(None) => false,
             Err(error) if !error.is_unreadable() => return Err(error.into()),
             Err(_) => true,
         };
@@ -1732,7 +1733,7 @@ impl FileJournal {
                     decode_verified_checkpoint(&bytes, graph_id, bytes.len() as u64).ok()
                 })
             }
-            Ok(stored) if semantic_validation_error(&stored).is_some() => Some(stored),
+            Ok(Some(stored)) if semantic_validation_error(&stored).is_some() => Some(stored),
             Ok(_) => return Ok(false),
             Err(error) => return Err(error.for_graph(graph_id).into()),
         };
