@@ -3897,6 +3897,21 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
             .find(|node| node.id == "repair--r1--accepted")
             .unwrap();
         assert_eq!(first_gate.state, NodeState::Failed);
+        let adjudication = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id.ends_with("--adjudicate"))
+            .expect("split panel adds one adjudicator");
+        assert_eq!(adjudication.state, NodeState::Succeeded);
+        assert_eq!(
+            adjudication
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.verdict.as_deref()),
+            Some("VERDICT: FAIL"),
+            "an upheld finding returns FAIL successfully so the gate can route repair"
+        );
         if limit == 1 {
             assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
             let findings = &run

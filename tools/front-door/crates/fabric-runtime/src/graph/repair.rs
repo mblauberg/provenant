@@ -226,7 +226,6 @@ pub(super) fn split_verdict_patch(parent: &str, revision: u64) -> patch::Patch {
         "after": [parent],
         "inputs": [{"node": parent, "outputs": ["verdict", "findings"]}],
         "require_findings": true,
-        "required_verdict": "VERDICT: PASS",
         "prompt": "Read only. The panel above reported conflicting verdicts on one head. Resolve the split once: weigh each finding against the code and the named invariant in its top-level `class`. Return every input finding in the findings block with its id and invariant preserved, then exactly one verdict. Do not re-run a full panel or start another review round. If a blocking finding is upheld, name the invariant it breaks and say that repair is required; an upheld changes-request legitimately needs a repair round, but the split itself does not. Give VERDICT: PASS only when no blocking finding survives adjudication, otherwise VERDICT: FAIL or VERDICT: INCONCLUSIVE."
     });
     patch::Patch {
