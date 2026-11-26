@@ -2553,14 +2553,13 @@ fn smoke_explanation_uses_selected_project_from_credential_containing_cwd() -> R
         .ok_or("source admission")?;
     // With no writer the review node is skipped by the issue's gating, so only
     // the read route is admitted here; a caller commit no longer enables review.
-    for node in ["read"] {
-        assert!(
-            rows.iter().any(|row| row["node"]
-                .as_str()
-                .is_some_and(|id| id.split("--").any(|part| part == node))),
-            "missing {node}: {rows:?}"
-        );
-    }
+    let node = "read";
+    assert!(
+        rows.iter().any(|row| row["node"]
+            .as_str()
+            .is_some_and(|id| id.split("--").any(|part| part == node))),
+        "missing {node}: {rows:?}"
+    );
     for row in rows {
         // The source root is admitted, but its credential decision is resolved
         // only when the route is selected.

@@ -947,8 +947,9 @@ fn every_bundled_template_compiles_with_required_bindings() {
 
 #[test]
 // Spec: docs/specs/fabric.md#bundled-template-declarations — the bundled smoke
-// template declares the read, review, write, retry-route and steer-route nodes.
-fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
+// template declares the read, write, review, retry-route and steer-route nodes,
+// with review after the write so it reads the writer's own scratch commit.
+fn smoke_template_compiles_the_read_write_review_retry_and_steer_nodes() {
     let library = library();
     let node = Compiler::new(&library)
         .compile(&json!({"id":"smoke", "use":"smoke"}))
@@ -960,12 +961,14 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
     assert_eq!(composite.exports[0].node, "read");
     let children = composite.nodes;
     let by_id = |id: &str| children.iter().find(|node| node.id == id).unwrap();
+    // The writer runs before review so the review's node source is the smoke
+    // writer's scratch commit, never the caller checkout's commit.
     assert_eq!(
         children
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
-        ["read", "review", "write", "retry-route", "steer-route"]
+        ["read", "write", "review", "retry-route", "steer-route"]
     );
     assert_eq!(by_id("read").access, AccessMode::ReadOnly);
     assert_eq!(by_id("review").access, AccessMode::ReadOnly);
