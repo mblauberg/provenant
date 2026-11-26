@@ -1139,7 +1139,10 @@ fn split_verdict_yields_one_adjudication_node_and_no_new_round() {
     assert_eq!(compiled.access, AccessMode::ReadOnly);
     assert_eq!(compiled.depends_on, ["panel"]);
     assert_eq!(compiled.loop_body, None, "no round is added");
-    assert!(compiled.required_verdict.is_some());
+    assert_eq!(
+        compiled.required_verdict, None,
+        "an upheld finding must be able to return VERDICT: FAIL for repair"
+    );
     assert_eq!(
         patch.idempotency_key,
         super::repair::split_verdict_patch("panel", 2).idempotency_key,
