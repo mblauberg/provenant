@@ -1,5 +1,23 @@
 use super::*;
 
+pub(super) fn advance_after_remote_terminal(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    remote_terminal: bool,
+    advance: impl FnOnce() -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+    if remote_terminal
+        && run
+            .checkpoint
+            .nodes
+            .iter()
+            .any(|node| !node.state.settled())
+    {
+        advance()
+    } else {
+        Ok(run.clone())
+    }
+}
+
 fn graph_run_has_remote_pending(
     run: &provenant_fabric_runtime::graph::GraphRun,
     local_host: Option<provenant_core::HostId>,
@@ -159,7 +177,8 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
     mut observe_remote: impl FnMut(
         &provenant_fabric_runtime::graph::GraphRun,
-    ) -> Result<(), FacadeError>,
+    )
+        -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
 ) -> Result<
     (
         provenant_fabric_runtime::graph::GraphRun,
@@ -185,7 +204,12 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
         run = observe(&run)?;
         remote_pending = history.record(&run, local_host, remote_target);
         if remote_pending {
-            history.record_remote(observe_remote(&run));
+            let observed = observe_remote(&run);
+            if let Ok(observed) = &observed {
+                run = observed.clone();
+                remote_pending = history.record(&run, local_host, remote_target);
+            }
+            history.record_remote(observed.map(|_| ()));
         }
         remote_deadline = next_remote_deadline(
             remote_deadline,
@@ -211,7 +235,12 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
                 remote_pending = history.record(&run, local_host, remote_target);
             }
             if remote_due && remote_pending {
-                history.record_remote(observe_remote(&run));
+                let observed = observe_remote(&run);
+                if let Ok(observed) = &observed {
+                    run = observed.clone();
+                    remote_pending = history.record(&run, local_host, remote_target);
+                }
+                history.record_remote(observed.map(|_| ()));
             }
             remote_deadline = next_remote_deadline(
                 remote_deadline,
@@ -258,7 +287,12 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
             remote_pending = history.record(&run, local_host, remote_target);
         }
         if remote_due && remote_pending {
-            history.record_remote(observe_remote(&run));
+            let observed = observe_remote(&run);
+            if let Ok(observed) = &observed {
+                run = observed.clone();
+                remote_pending = history.record(&run, local_host, remote_target);
+            }
+            history.record_remote(observed.map(|_| ()));
         }
         remote_deadline = next_remote_deadline(
             remote_deadline,
@@ -292,7 +326,9 @@ pub(in crate::fabric) fn wait_submission<C: provenant_core::Clock + ?Sized>(
     observation: &mut crate::status_wait::LocalObservation,
     local_host: Option<provenant_core::HostId>,
     mut observe: impl FnMut(&str) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
-    observe_remote: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> Result<(), FacadeError>,
+    observe_remote: impl FnMut(
+        &provenant_fabric_runtime::graph::GraphRun,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
 ) -> Result<(provenant_fabric_runtime::graph::GraphRun, String, bool), FacadeError> {
     let (run, history) = wait_graph_updates(
         run,

@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub(super) mod observation;
+pub(super) use observation::advance_after_remote_terminal;
 pub(super) use observation::wait_submission;
 use observation::{launch_retry_due, observation_clock_error, wait_graph_updates};
 
@@ -3692,9 +3693,9 @@ impl Factory {
         target: &super::unified::GraphTarget,
         budget: WaitBudget,
         cancel: &CancelToken,
-    ) -> Result<(), FacadeError> {
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         if cancel.is_cancelled() || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-            return Ok(());
+            return Ok(run.clone());
         }
         let mut rows = super::unified::status_rows(run, target);
         let local_host = self.context.identity.host;
@@ -3707,7 +3708,7 @@ impl Factory {
                 })
         });
         if rows.is_empty() {
-            return Ok(());
+            return Ok(run.clone());
         }
         super::unified::enrich_status_rows_within(
             &mut rows,
@@ -3716,17 +3717,35 @@ impl Factory {
             cancel,
             budget,
         )?;
+        // A terminal remote read is the signal to retry graph advancement. The
+        // status path only reads a checkpoint, so it cannot settle a node whose
+        // earlier advancement failed while the home endpoint was unavailable.
+        let remote_terminal = rows
+            .iter()
+            .all(|row| row["kind"] != "attempt" || row["state"] == "terminal");
+        let advanced = observation::advance_after_remote_terminal(run, remote_terminal, || {
+            self.graph(
+                GraphInput::Resume {
+                    extra: Default::default(),
+                    document: run.checkpoint.graph_id.clone().into(),
+                    extend: Vec::new(),
+                },
+                budget,
+                cancel,
+            );
+        })?;
         // A successful reading of a finished lane supersedes the transport
-        // failure held while its home endpoint was unreachable. Keep the error
-        // while any node or remote attempt is still unfinished.
-        if run.checkpoint.nodes.iter().all(|node| node.state.settled())
-            && rows
+        // failure held while its home endpoint was unreachable.
+        if remote_terminal
+            && advanced
+                .checkpoint
+                .nodes
                 .iter()
-                .all(|row| row["kind"] != "attempt" || row["state"] == "terminal")
+                .all(|node| node.state.settled())
             && FileJournal::read_advance_error(
                 &self.context.roots.state,
                 self.context.identity.project,
-                &run.checkpoint.graph_id,
+                &advanced.checkpoint.graph_id,
             )
             .map_err(|_| FacadeError::io("access graph journal"))?
             .is_some()
@@ -3734,12 +3753,12 @@ impl Factory {
             FileJournal::set_advance_error(
                 &self.context.roots.state,
                 self.context.identity.project,
-                &run.checkpoint.graph_id,
+                &advanced.checkpoint.graph_id,
                 None,
             )
             .map_err(|_| FacadeError::io("access graph journal"))?;
         }
-        Ok(())
+        Ok(advanced)
     }
 
     fn wait_cadence(&self) -> Result<provenant_cli::wait::LocalCadence, FacadeError> {

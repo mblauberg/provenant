@@ -94,6 +94,19 @@ in place and is reported as incomplete coverage, never as complete.
 - Why: a partial observation must not hide available work or imply complete
   coverage.
 
+### Graph wait recovery
+
+A graph status refresh is read-only. While a wait observes remote attempts, a
+successful reading that confirms terminal remote work re-drives an unsettled
+graph through the journal-locked advancement owner. A recovered endpoint can
+therefore settle work in the same wait; a successful advance also clears the
+transport error held from an earlier failed attempt to settle it. Unavailable
+remote readings remain pending and are retried within the wait budget; if the
+wait ends pending, it reports the last failed reading.
+
+- Why: terminal remote work must settle as soon as its home endpoint can be
+  reached again, without requiring a second wait or a manual advance.
+
 ### Nested tree
 
 The tree distinguishes dispatch, continuation and retry relationships, and
