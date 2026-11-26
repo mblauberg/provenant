@@ -317,10 +317,10 @@ fn an_execution_saved_before_the_subject_field_loads_with_subject_none() {
     assert!(wire["checkpoint"].get("subject").is_none());
 }
 
-// A review base on the document raises the minimum schema to 2; the subject
-// itself is additive and does not raise it.
+// A review base or admitted subject requires schema 2; schema 1 cannot
+// represent either field.
 #[test]
-fn review_base_raises_the_minimum_document_schema() {
+fn review_base_and_subject_require_document_schema_v2() {
     let mut value = stored()["execution"]["document"].clone();
     value["review_base"] = json!("main");
     let v1: GraphDocument = serde_json::from_value(value.clone()).unwrap();
@@ -333,5 +333,7 @@ fn review_base_raises_the_minimum_document_schema() {
         serde_json::from_value(stored()["execution"]["document"].clone()).unwrap();
     document.schema_version = 1;
     document.subject = Some(subject_with_base(None));
+    assert!(validate_plan_with_limits(&document, &Default::default()).is_err());
+    document.schema_version = 2;
     assert!(validate_plan_with_limits(&document, &Default::default()).is_ok());
 }

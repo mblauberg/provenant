@@ -344,7 +344,7 @@ fn explicit_graph_file_keeps_nodes_and_dependencies_with_route_override() -> Res
 }
 
 #[test]
-fn malformed_graph_refuses_unlisted_outputs_without_disclosing_prompt() -> Result {
+fn graph_refuses_unavailable_outputs_without_disclosing_prompt() -> Result {
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({
         "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
@@ -353,7 +353,7 @@ fn malformed_graph_refuses_unlisted_outputs_without_disclosing_prompt() -> Resul
             "id": "inner", "kind": "composite", "access": "read_only",
             "composite": {
                 "nodes": [{"id":"look", "prompt":"PROMPT_SENTINEL", "access":"read_only", "route":{"alias":"senior"}}],
-                "exports": [{"node":"look", "outputs":["result", "unlisted"]}]
+                "exports": [{"node":"look", "outputs":["result", "branch"]}]
             }
         }]
     }))?;

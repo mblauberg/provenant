@@ -412,7 +412,7 @@ fn peer_reader_is_pinned_to_the_initiator_subject() -> TestResult {
                 "pinned_at":"2000-01-01T00:00:00.000000Z","policy":"pinned"},
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
-            "context":{"graph_id":"origin-graph", "node_id":"read", "attempt":1,
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1,
                 "graph_template_launch":true}}
     }))?;
     let receipt = provenant_cli::run::with_deferred_provider_launch(|| {

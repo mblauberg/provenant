@@ -319,10 +319,6 @@ fn read_only_checkout_warning_reports_the_local_commit_each_resolution_pins()
         &checkout,
         &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
     )?;
-    run(
-        &checkout,
-        &["update-ref", "-d", "refs/remotes/origin/master"],
-    )?;
     let warning = confinement::read_only_checkout_warning(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("advertised default did not warn")?;
     assert!(warning.contains("1 commit behind"), "{warning}");
