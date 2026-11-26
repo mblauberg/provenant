@@ -25,6 +25,7 @@ mod cloud;
 mod config;
 mod console;
 mod custody;
+mod declaration;
 mod disk;
 mod edit;
 mod events;
@@ -80,6 +81,7 @@ pub static DOMAINS: &[&Domain] = &[
     &config::DOMAIN,
     &console::DOMAIN,
     &custody::DOMAIN,
+    &declaration::DOMAIN,
     &disk::DOMAIN,
     &edit::DOMAIN,
     &events::DOMAIN,

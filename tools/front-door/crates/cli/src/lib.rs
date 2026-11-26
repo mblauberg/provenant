@@ -8,6 +8,7 @@ pub mod cloud;
 pub mod config_reads;
 pub mod config_shape;
 pub mod console;
+pub mod declaration;
 pub mod domains;
 pub mod external_contract;
 pub mod fabric;
