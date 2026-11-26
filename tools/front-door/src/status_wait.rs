@@ -445,7 +445,9 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
     }
 }
 
-/// Read one source after a native event or a configured fallback tick.
+/// Read one source after a native event or a configured fallback tick. A graph
+/// read also re-drives the journal-locked advance when its remote reading is
+/// terminal, so a settled peer need not wait for the next host tick.
 fn read(
     source: &Source,
     edge: &provenant_cli::run::Edge<'_>,
@@ -453,6 +455,7 @@ fn read(
     deadline: Instant,
     pr_read_timeout: Duration,
     cancel: &CancelToken,
+    workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Reading {
     let label = source.label();
     let left = deadline.saturating_duration_since(Instant::now());
@@ -469,7 +472,9 @@ fn read(
         ),
         Source::Graph(target) => {
             match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
-                crate::fabric::read_status_rows(target, edge, session, deadline, cancel)
+                crate::fabric::read_status_rows_with_recovery(
+                    target, edge, session, deadline, cancel, workers,
+                )
             }) {
                 Ok(rows) => classify_rows(&label, &rows),
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
@@ -1373,7 +1378,11 @@ fn preflight_error(
     }
 }
 
-pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
+pub(crate) fn run(
+    command: provenant_cli::Wait,
+    globals: &Globals,
+    workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
+) -> u8 {
     use crate::roots::{Product, Workspace};
     let mode = WaitMode::from_command(&command);
     let resolved = match crate::roots::resolve(globals, Workspace::Project, Product::Required) {
@@ -1876,6 +1885,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         deadline,
                         pr_read_timeout,
                         &stop.cancel,
+                        workers,
                     );
                     observation_history.record(&reading, local_host.as_ref());
                     sampled_readings.insert(index, reading.clone());
@@ -2023,6 +2033,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             deadline,
                             pr_read_timeout,
                             &stop.cancel,
+                            workers,
                         );
                         sampled_readings.insert(index, reading.clone());
                         observation_history.record(&reading, local_host.as_ref());
@@ -2121,6 +2132,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         deadline,
                         pr_read_timeout,
                         &stop.cancel,
+                        workers,
                     ),
                     &source.label(),
                     complete,
@@ -2175,6 +2187,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                             deadline,
                                             pr_read_timeout,
                                             &stop.cancel,
+                                            workers,
                                         )
                                     } else {
                                         event
@@ -2189,6 +2202,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                         deadline,
                                         pr_read_timeout,
                                         &stop.cancel,
+                                        workers,
                                     )
                                 }
                             }
@@ -2214,6 +2228,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                     deadline,
                                     pr_read_timeout,
                                     &stop.cancel,
+                                    workers,
                                 )
                             }
                             Ok(None) => continue,
@@ -2242,6 +2257,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 deadline,
                                 pr_read_timeout,
                                 &stop.cancel,
+                                workers,
                             )
                         }
                     };
@@ -2819,6 +2835,7 @@ mod tests {
             deadline,
             Duration::from_secs(1),
             &cancel,
+            &provenant_confinement::worktrees::SystemWorkerObserver,
         );
         assert_eq!(reading.settle, Settle::Unsuccessful);
         assert!(reading.done());

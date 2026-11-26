@@ -17,7 +17,8 @@ use target_faults::{
 mod graph_wait;
 use graph_wait::missing_graph_context;
 pub(crate) use graph_wait::{
-    check_targets, final_status_rows, read_lane_graph, read_status_rows, unsettled_graphs,
+    check_targets, final_status_rows, read_lane_graph, read_status_rows,
+    read_status_rows_with_recovery, recover_after_remote_terminal, unsettled_graphs,
 };
 
 #[derive(Clone, Debug)]

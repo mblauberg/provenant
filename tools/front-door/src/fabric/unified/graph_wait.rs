@@ -200,15 +200,24 @@ pub(crate) fn final_status_rows(
     })
 }
 
-/// A target's rows from this host's graph checkpoint, enriched within the
-/// peer budget `peer_budget` chooses once the local read is done.
-fn local_status_rows(
+/// The checkpoint, resolved target, context and peer budget behind one local
+/// status read. The context stays in the caller's session so a polling waiter
+/// resolves the repository only once.
+fn local_status_parts<'a>(
     target: &provenant_cli::Target,
     edge: &provenant_cli::run::Edge<'_>,
-    session: &mut Option<Context>,
+    session: &'a mut Option<Context>,
     cancel: &CancelToken,
     peer_budget: impl FnOnce(&SystemClock) -> Result<WaitBudget, FacadeError>,
-) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        provenant_fabric_runtime::graph::GraphRun,
+        GraphTarget,
+        &'a Context,
+        WaitBudget,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let context = match session {
         Some(context) => context,
         None => session.insert(read_context(edge)?.ok_or_else(|| {
@@ -229,10 +238,159 @@ fn local_status_rows(
         node: resolved.node,
         attempt: resolved.attempt_ref,
     };
-    let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
     let clock = SystemClock::new();
     let budget = peer_budget(&clock)?;
+    Ok((graph_snapshot(checkpoint), target, context, budget))
+}
+
+/// A target's rows from this host's graph checkpoint, enriched within the
+/// peer budget `peer_budget` chooses once the local read is done.
+fn local_status_rows(
+    target: &provenant_cli::Target,
+    edge: &provenant_cli::run::Edge<'_>,
+    session: &mut Option<Context>,
+    cancel: &CancelToken,
+    peer_budget: impl FnOnce(&SystemClock) -> Result<WaitBudget, FacadeError>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let (run, target, context, budget) =
+        local_status_parts(target, edge, session, cancel, peer_budget)?;
+    let mut rows = status_rows(&run, &target);
+    let clock = SystemClock::new();
     enrich_status_rows_within(&mut rows, context, &clock, cancel, budget)?;
+    Ok(rows)
+}
+
+/// Re-drive the journal-locked advance when a terminal remote attempt says the
+/// peer's work is done but this host's checkpoint is still unsettled. The read
+/// keeps the peer error as a pending observation; only a successful terminal
+/// reading authorises an advance. `advance` is injected so the decision is
+/// deterministic and the call can be pinned without a tick or a peer process.
+pub(crate) fn recover_after_remote_terminal(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    target: &GraphTarget,
+    rows: &mut Vec<Value>,
+    local_host: provenant_core::HostId,
+    peer_error: Option<FacadeError>,
+    advance: impl FnOnce() -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+) -> Result<bool, FacadeError> {
+    let remote_rows: Vec<Value> = rows
+        .iter()
+        .filter(|row| {
+            row["kind"] == "attempt"
+                && row["attempt_id"].as_str().is_some_and(|reference| {
+                    reference.split_once('/').is_some_and(|(owner, _)| {
+                        owner.parse::<provenant_core::HostId>() != Ok(local_host)
+                    })
+                })
+        })
+        .cloned()
+        .collect();
+    if remote_rows.is_empty() {
+        return Ok(false);
+    }
+    let terminal =
+        super::super::interface::observation::remote_status_reading(&remote_rows, peer_error)?;
+    let advanced = super::super::interface::observation::advance_after_remote_terminal(
+        run, terminal, advance,
+    )?;
+    // Only a settled checkpoint replaces the peer-enriched reading: a partial
+    // advance that merely relaunched work is reread on the waiter's next poll,
+    // keeping this reading's digests and peer facts intact.
+    let settled = &advanced != run
+        && advanced
+            .checkpoint
+            .nodes
+            .iter()
+            .all(|node| node.state.settled());
+    if settled {
+        *rows = status_rows(&advanced, target);
+    }
+    Ok(settled)
+}
+
+/// The wait verb's graph read: same rows as `read_status_rows`, plus the
+/// recovery a terminal remote reading justifies. A wait is still a reader of
+/// work; the advance only retries a settlement the peer has already reported,
+/// under the graph journal's own lock. Inside a lane the relay owns the read
+/// and the peer owns advancement, so this path is host-only.
+pub(crate) fn read_status_rows_with_recovery(
+    target: &provenant_cli::Target,
+    edge: &provenant_cli::run::Edge<'_>,
+    session: &mut Option<Context>,
+    deadline: std::time::Instant,
+    cancel: &CancelToken,
+    workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    wait_remaining(deadline, cancel)?;
+    if provenant_cli::fabric::in_lane() {
+        return read_status_rows(target, edge, session, deadline, cancel);
+    }
+    let (run, resolved, context, budget) =
+        local_status_parts(target, edge, session, cancel, |clock| {
+            let left = wait_remaining(deadline, cancel)?;
+            Ok(WaitBudget::up_to(
+                clock.mono_now(),
+                provenant_core::DurationMicros::from_micros(
+                    u64::try_from(left.as_micros()).unwrap_or(u64::MAX),
+                ),
+            ))
+        })?;
+    let clock = SystemClock::new();
+    let mut rows = status_rows(&run, &resolved);
+    // Peer failures stay in the reading as a pending observation; the recovery
+    // helper turns a successful terminal reading into an advance.
+    let peer_error = observe_status_rows_within(&mut rows, context, &clock, cancel, budget)?;
+    let recovered = recover_after_remote_terminal(
+        &run,
+        &resolved,
+        &mut rows,
+        context.identity.host,
+        peer_error,
+        || {
+            let factory = Factory {
+                project_attribution: crate::usage::attribution_enabled(&context.roots),
+                context: Context::open(edge.roots.clone(), edge.home, edge.cwd)
+                    .map_err(|_| FacadeError::io("open graph recovery context"))?,
+                clock: SystemClock::new(),
+                backoff: provenant_core::ThreadPause,
+                executor: SystemExecutor::new(1)
+                    .map_err(|_| FacadeError::io("create graph recovery executor"))?,
+                home: edge.home.to_path_buf(),
+                cwd: edge.cwd.to_path_buf(),
+                assets: edge.assets.to_path_buf(),
+                host_launch: None,
+                workers,
+            };
+            factory.graph(
+                GraphInput::Resume {
+                    extra: Default::default(),
+                    document: run.checkpoint.graph_id.clone().into(),
+                    extend: Vec::new(),
+                },
+                budget,
+                cancel,
+            )
+        },
+    );
+    if matches!(recovered, Ok(true)) {
+        // A successful advance retires the transport failure held from an
+        // earlier attempt to settle the same graph.
+        if FileJournal::read_advance_note(
+            &context.roots.state,
+            context.identity.project,
+            &resolved.graph,
+        )
+        .is_ok_and(|note| note.is_some())
+        {
+            let _ = FileJournal::set_advance_note(
+                &context.roots.state,
+                context.identity.project,
+                &resolved.graph,
+                None,
+            );
+        }
+    }
+    wait_remaining(deadline, cancel)?;
     Ok(rows)
 }
 
