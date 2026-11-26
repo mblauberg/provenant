@@ -539,7 +539,8 @@ mod graph_writer_admission_tests {
             provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(20)),
             "fixture event source unavailable",
         );
-        let successes = Cell::new(0);
+        let reads = Cell::new(0);
+        let successful = Cell::new(0);
         let pending_again = pending.clone();
         let (waited, _, _) = super::interface::wait_submission(
             pending,
@@ -549,25 +550,28 @@ mod graph_writer_admission_tests {
             &mut observation,
             Some(local_host),
             |_| {
-                if successes.get() > 0 {
+                if successful.get() > 0 {
                     Ok(completed.clone())
                 } else {
                     Ok(pending_again.clone())
                 }
             },
             |_| {
-                let call = successes.get() + 1;
-                successes.set(call);
+                let call = reads.get() + 1;
+                reads.set(call);
                 match call {
                     1 => Err(FacadeError::HomeUnavailable),
                     2 => Err(FacadeError::Busy),
-                    _ => Ok(()),
+                    _ => {
+                        successful.set(successful.get() + 1);
+                        Ok(())
+                    }
                 }
             },
         )
         .unwrap();
         assert_eq!(waited.status, GraphStatus::Complete);
-        assert!(successes.get() >= 3);
+        assert!(reads.get() >= 3);
         // A later successful reading clears the failures that preceded it.
         assert_eq!(waited.advance_error.as_deref(), None);
     }
@@ -603,7 +607,8 @@ mod graph_writer_admission_tests {
             provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(20)),
             "fixture event source unavailable",
         );
-        let successes = Cell::new(0);
+        let reads = Cell::new(0);
+        let successful = Cell::new(0);
         let pending_again = pending.clone();
         let (waited, _, _) = super::interface::wait_submission(
             pending,
@@ -613,25 +618,26 @@ mod graph_writer_admission_tests {
             &mut observation,
             Some(local_host),
             |_| {
-                if successes.get() > 0 {
+                if successful.get() > 0 {
                     Ok(completed.clone())
                 } else {
                     Ok(pending_again.clone())
                 }
             },
             |_| {
-                let call = successes.get() + 1;
-                successes.set(call);
+                let call = reads.get() + 1;
+                reads.set(call);
                 if call <= 4 {
                     Err(FacadeError::HomeUnavailable)
                 } else {
+                    successful.set(successful.get() + 1);
                     Ok(())
                 }
             },
         )
         .unwrap();
         assert_eq!(waited.status, GraphStatus::Complete);
-        assert!(successes.get() >= 5);
+        assert!(reads.get() >= 5);
     }
 
     #[test]
