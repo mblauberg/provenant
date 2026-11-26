@@ -2167,7 +2167,7 @@ mod tests {
             .db
             .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
         let mut publication = publication();
-        publication.outcome = Outcome::QuotaLimited;
+        publication.fact.outcome = Outcome::QuotaLimited;
         let terminal = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
         assert!(matches!(
             terminal.state,

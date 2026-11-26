@@ -131,21 +131,16 @@ enum TerminalDecision {
 
 /// Result and route material is supplied by the trusted provider/confinement
 /// composition edge, after secret scanning. This storage API never launches.
+/// Every terminal fact comes from the one pure `settle` decider through `fact`.
 #[derive(Clone)]
 pub struct TerminalPublication<'a> {
-    pub terminal_cause: Option<TerminalCause>,
-    /// Provider handoff evidence decoded by the common terminal classifier.
-    pub handoff: provenant_records::handoff::HandoffResult,
-    /// A bounded sentence Provenant composed from fixed text and typed values,
-    /// such as a retry decision. It is never provider output.
-    pub terminal_note: Option<String>,
-    pub outcome: Outcome,
+    pub fact: provenant_records::settlement::OutcomeFact,
+    /// Digest of the sealed `settlement-evidence.json` the fact was decided from.
+    pub evidence: Option<provenant_records::FileDigest>,
     pub finished_at: WallTime,
     pub started_at: Option<WallTime>,
     pub provider_ms: Option<u64>,
-    pub reason: Option<String>,
     pub result: &'a str,
-    pub complete: bool,
     pub redacted: bool,
     pub resolved_route: Option<RouteRecord>,
     pub applied_route: Option<RouteRecord>,
@@ -153,8 +148,6 @@ pub struct TerminalPublication<'a> {
     pub usage: UsageRecord,
     /// Provider session handle, kept so the attempt can be continued.
     pub session: Option<String>,
-    /// Why the attempt is flagged as a partial finish, if it is.
-    pub partial_signals: Vec<PartialSignal>,
 }
 pub(crate) struct Withdrawal<'a> {
     pub terminal_cause: Option<TerminalCause>,
@@ -1094,26 +1087,15 @@ impl RunStore {
             ));
         }
         if matches!(
-            publication.outcome,
+            publication.fact.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired
         ) && (exit.never_spawned
             || (outcome_exit != Some(0)
-                && !matches!(
-                    SettlementReason::derive(
-                        publication.outcome,
-                        Some(&TerminalEvidence::ProcessExit),
-                        &publication.partial_signals,
-                        publication.terminal_cause,
-                        publication.handoff.as_ref().map(Option::as_ref),
-                    )
-                    .rule()
-                    .terminal_outcome,
-                    provenant_records::run::SettlementTerminalOutcome::Succeeded
-                )))
+                && publication.fact.settlement_reason != SettlementReason::CompletedBeforeBudget))
         {
             return Err(RunError::Validation("success lacks verified provider exit"));
         }
-        if publication.outcome == Outcome::Cancelled
+        if publication.fact.outcome == Outcome::Cancelled
             && !exit.never_spawned
             && exit.cancel_delivered_before_exit != Some(true)
             && !import_cancelled(&self.attempt_dir(id, false)?, Self::scope(&old))?
@@ -1122,7 +1104,7 @@ impl RunStore {
                 "cancellation delivery before exit is unproven",
             ));
         }
-        if publication.outcome == Outcome::Cancelled
+        if publication.fact.outcome == Outcome::Cancelled
             && exit.never_spawned
             && exit.stop_reason
                 != Some(provenant_supervisor::machine::StopReason::ExplicitCancellation)
@@ -1138,8 +1120,8 @@ impl RunStore {
                 exit.stop_reason,
                 exit.cancel_delivered_before_exit,
             ),
-            publication.outcome,
-            publication.terminal_cause,
+            publication.fact.outcome,
+            publication.fact.cause,
         ) {
             return Err(RunError::Validation(
                 "effective cancellation contradicts outcome",
@@ -1340,24 +1322,55 @@ impl RunStore {
             .1
             .unwrap_or_default();
         let refusal_result = provenant_core::bounded_line(&raw_refusal, 256);
+        use provenant_records::settlement::{
+            CustodyFacts, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
+            SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence, classify::settle,
+        };
+        let evidence = SettlementEvidence {
+            schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
+            lane: LaneRole::Reader,
+            host: HostVerdict {
+                outcome,
+                cause: terminal_cause,
+                complete: true,
+                result_empty: false,
+                reason,
+                terminal_note,
+                signals: Vec::new(),
+                denial: None,
+                stopped_handoff: None,
+            },
+            handoff: provenant_records::declaration::DeclarationEvidence::Missing,
+            git: None,
+            custody: CustodyFacts {
+                launched: false,
+                cancelled: outcome == Outcome::Cancelled,
+                steered: false,
+                cancellation_delivered: None,
+                import_cancelled: false,
+                process_exit: false,
+                stall: None,
+                identity: IdentityEvidence {
+                    conflict: false,
+                    incomplete: IdentityPolicyEffect::Complete,
+                    eof_fragment_unsettles: false,
+                },
+            },
+        };
+        let fact = settle(&evidence);
         let publication = TerminalPublication {
-            handoff: Ok(None),
-            terminal_cause,
-            terminal_note,
-            outcome,
+            fact,
+            evidence: None,
             finished_at,
             started_at: None,
             provider_ms: None,
-            reason,
             result: &refusal_result,
-            complete: true,
             redacted: false,
             resolved_route: old.resolved_route.clone(),
             applied_route: old.applied_route.clone(),
             observed_route: old.observed_route.clone(),
             usage: UsageRecord::default(),
             session: None,
-            partial_signals: Vec::new(),
         };
         let result = self
             .commit_terminal(
@@ -1639,14 +1652,14 @@ impl RunStore {
             publication.applied_route.as_ref(),
             publication.observed_route.as_ref(),
         )
-        .permits_success(&publication.partial_signals);
+        .permits_success(&publication.fact.signals);
         let identity_permitted = identity_verified
-            || (publication.outcome == Outcome::ReviewRequired
-                && publication.terminal_cause == Some(TerminalCause::IdentityMismatch));
+            || (publication.fact.outcome == Outcome::ReviewRequired
+                && publication.fact.cause == Some(TerminalCause::IdentityMismatch));
         if matches!(
-            publication.outcome,
+            publication.fact.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired
-        ) && (!publication.complete || publication.result.is_empty() || !identity_permitted)
+        ) && (!publication.fact.complete || publication.result.is_empty() || !identity_permitted)
         {
             return Err(RunError::Validation(
                 "success lacks complete result or verified provider identity",
@@ -1662,69 +1675,44 @@ impl RunStore {
         next.applied_route = publication.applied_route.clone();
         next.observed_route = publication.observed_route.clone();
         next.usage = publication.usage.clone();
-        next.partial_signals
-            .clone_from(&publication.partial_signals);
+        next.partial_signals.clone_from(&publication.fact.signals);
         next.session = publication.session.clone();
         next.result = Some(ArtifactRecord {
             extra: Default::default(),
             path: artifact_path(id, AttemptFile::Result.name())?,
             digest: CanonicalV1::file_digest(publication.result.as_bytes()),
             bytes: publication.result.len() as u64,
-            complete: publication.complete,
+            complete: publication.fact.complete,
             redacted: publication.redacted,
         });
-        let import_cancellation = publication.outcome == Outcome::Cancelled
+        let import_cancellation = publication.fact.outcome == Outcome::Cancelled
             && import_cancelled(&self.attempt_dir(id, false)?, Self::scope(&old))?;
-        let terminal_evidence = if import_cancellation {
-            TerminalEvidence::ImportCancellation
-        } else if publication.outcome == Outcome::Unsettled {
-            TerminalEvidence::Unsettled {
-                reason: publication
-                    .reason
-                    .clone()
-                    .ok_or(RunError::Validation("unsettled reason missing"))?,
-            }
-        } else if publication.outcome == Outcome::Cancelled
-            && publication.terminal_cause != Some(TerminalCause::Steered)
-            && cancellation_delivered == Some(true)
-        {
-            TerminalEvidence::EffectiveCancellation
-        } else if durable_exit.is_some() {
-            TerminalEvidence::ProcessExit
-        } else {
-            TerminalEvidence::PreLaunchRefusal
-        };
-        let classification = SettlementReason::classify(
-            publication.outcome,
-            Some(&terminal_evidence),
-            &next.partial_signals,
-            publication.terminal_cause,
-            publication.handoff.as_ref().map(Option::as_ref),
-        )
-        .map_err(|_| RunError::Validation("terminal classification could not be sealed"))?;
         next.state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: publication.terminal_cause,
+            terminal_cause: publication.fact.cause,
             terminal_note: publication
+                .fact
                 .terminal_note
                 .as_deref()
                 .map(provenant_records::diagnostic::safe_text),
-            stop: classification.stop,
-            outcome: classification.outcome,
+            stop: publication.fact.stop.clone(),
+            outcome: publication.fact.outcome,
             exit_code: outcome_exit,
             finished_at: publication.finished_at,
-            reason: publication.reason.clone(),
+            reason: publication.fact.reason.clone(),
         };
         next.schema_version = 2;
-        next.terminal_evidence = Some(terminal_evidence);
-        next.settlement_reason = Some(classification.reason);
+        next.terminal_evidence = Some(publication.fact.terminal_evidence.clone());
+        next.settlement_reason = Some(publication.fact.settlement_reason);
+        next.progress = publication.fact.progress.clone();
+        next.settlement_evidence = publication.evidence;
         next.publication_error = None;
         next.exit_evidence = durable_exit;
         let attempt = self.attempt_dir(id, false)?;
         if import_cancellation {
             next.cancellation_disposition = Some(CancellationDisposition::ImportEffective);
-        } else if publication.outcome == Outcome::Cancelled
-            && publication.terminal_cause != Some(TerminalCause::Steered)
+        } else if publication.fact.outcome == Outcome::Cancelled
+            && publication.fact.cause != Some(TerminalCause::Steered)
             && ((!launched && decision == TerminalDecision::Ordinary)
                 || cancellation_delivered == Some(true))
         {
@@ -1738,8 +1726,8 @@ impl RunStore {
                         && request.requester
                             == old.verified_owner.unwrap_or(self.context.actor_id) =>
                 {
-                    next.cancellation_disposition = Some(
-                        if publication.terminal_cause == Some(TerminalCause::Steered) {
+                    next.cancellation_disposition =
+                        Some(if publication.fact.cause == Some(TerminalCause::Steered) {
                             CancellationDisposition::Unknown
                         } else {
                             match cancellation_delivered {
@@ -1747,8 +1735,7 @@ impl RunStore {
                                 Some(false) => CancellationDisposition::AcknowledgedIneffective,
                                 None => CancellationDisposition::Unknown,
                             }
-                        },
-                    );
+                        });
                 }
                 Err(_) | Ok(StopIntentState::Invalid) => {
                     next.cancellation_disposition = Some(CancellationDisposition::Unknown);
@@ -1768,7 +1755,7 @@ impl RunStore {
             next.stop_work = writer.stop_work;
             next.warnings = writer.warnings;
         }
-        if classification.outcome == Outcome::Succeeded {
+        if publication.fact.outcome == Outcome::Succeeded {
             // Recovery reports uncertainty from the sealed start marker without
             // repeating an external effect or inferring success from prose.
             let delivery_path = attempt.current_path()?.join("delivery.json");
@@ -1948,27 +1935,59 @@ impl RunStore {
             _ => None,
         };
         let revision = old.revision;
+        use provenant_records::settlement::{
+            CustodyFacts, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
+            SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence, classify::settle,
+        };
+        let bounded_reason = provenant_core::bounded_line(reason, 4096);
+        let evidence = SettlementEvidence {
+            schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
+            lane: LaneRole::Reader,
+            host: HostVerdict {
+                outcome: Outcome::Cancelled,
+                cause: None,
+                complete: true,
+                result_empty: false,
+                reason: Some(bounded_reason),
+                terminal_note: None,
+                signals: Vec::new(),
+                denial: None,
+                stopped_handoff: None,
+            },
+            handoff: provenant_records::declaration::DeclarationEvidence::Missing,
+            git: None,
+            custody: CustodyFacts {
+                launched: !exit.never_spawned,
+                cancelled: true,
+                steered: false,
+                cancellation_delivered: exit.cancel_delivered_before_exit,
+                import_cancelled: false,
+                process_exit: true,
+                stall: None,
+                identity: IdentityEvidence {
+                    conflict: false,
+                    incomplete: IdentityPolicyEffect::Complete,
+                    eof_fragment_unsettles: false,
+                },
+            },
+        };
+        let fact = settle(&evidence);
         let publication = TerminalPublication {
-            handoff: Ok(None),
-            terminal_cause: None,
-            terminal_note: None,
-            outcome: Outcome::Cancelled,
+            fact,
+            evidence: None,
             finished_at: call
                 .clock
                 .wall_now()
                 .map_err(|_| RunError::Validation("wall clock"))?,
             started_at: old.started_at,
             provider_ms: old.provider_ms,
-            reason: Some(provenant_core::bounded_line(reason, 4096)),
             result: "",
-            complete: true,
             redacted: false,
             resolved_route: old.resolved_route.clone(),
             applied_route: old.applied_route.clone(),
             observed_route: old.observed_route.clone(),
             usage: old.usage.clone(),
             session: old.session.clone(),
-            partial_signals: old.partial_signals.clone(),
         };
         self.commit_terminal(
             old,

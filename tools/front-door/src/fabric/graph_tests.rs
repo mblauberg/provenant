@@ -4109,24 +4109,28 @@ mod provisioned_writer_submission_tests {
             model: Some("fixture/model".into()),
             ..Default::default()
         };
+        let outcome = if quota {
+            provenant_records::run::Outcome::QuotaLimited
+        } else {
+            provenant_records::run::Outcome::Succeeded
+        };
+        let fact = provenant_records::settlement::classify::settle(
+            &provenant_records::settlement::SettlementEvidence::fixture(
+                provenant_records::settlement::LaneRole::Reader,
+                outcome,
+                None,
+            ),
+        );
         store.publish_terminal(
             record.attempt_id,
             record.revision,
             &provenant_run::TerminalPublication {
-                handoff: Ok(None),
-                terminal_cause: None,
-                terminal_note: None,
-                outcome: if quota {
-                    provenant_records::run::Outcome::QuotaLimited
-                } else {
-                    provenant_records::run::Outcome::Succeeded
-                },
+                fact,
+                evidence: None,
                 started_at: Some(started),
                 finished_at: finished,
                 provider_ms: Some(1000),
-                reason: None,
                 result: "OK",
-                complete: true,
                 redacted: false,
                 resolved_route: Some(route.clone()),
                 applied_route: Some(route.clone()),
@@ -4142,7 +4146,6 @@ mod provisioned_writer_submission_tests {
                     ..Default::default()
                 },
                 session: None,
-                partial_signals: Vec::new(),
             },
             &exit,
             &call,

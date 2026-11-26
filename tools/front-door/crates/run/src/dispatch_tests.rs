@@ -234,8 +234,6 @@ pub(super) struct Fake {
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.
     quota_stderr: Option<&'static [u8]>,
     failure_note: Option<String>,
-    /// Turn boundaries a decode reports in its answer.
-    turns: Vec<provenant_records::handoff::TurnEnd>,
 }
 
 impl Fake {
@@ -330,7 +328,6 @@ impl Providers for Fake {
             session: self.session.clone(),
             reason: self.reason.clone(),
             partial_signals: self.partial.clone(),
-            turns: self.turns.clone(),
         })
     }
     fn decode_captures(
@@ -367,17 +364,6 @@ fn settle_with_role(
     signals: Vec<PartialSignal>,
     role: Option<&str>,
 ) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
-    settle_with_turns(answer, outcome, signals, role, Vec::new())
-}
-
-/// As `settle_with_role`, with the provider's turn boundaries in `answer`.
-fn settle_with_turns(
-    answer: &str,
-    outcome: Option<Outcome>,
-    signals: Vec<PartialSignal>,
-    role: Option<&str>,
-    turns: Vec<provenant_records::handoff::TurnEnd>,
-) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -412,7 +398,6 @@ fn settle_with_turns(
         outcome,
         answer: Some(answer.into()),
         partial: signals,
-        turns,
         ..Fake::default()
     };
     Ok(store.finish(id, &dir, &observed, &fake, &call)?)

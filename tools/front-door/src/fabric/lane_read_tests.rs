@@ -221,39 +221,41 @@ fn settled_attempt(
         model: Some("gpt-6-luna".into()),
         ..Default::default()
     };
+    let outcome = if success {
+        provenant_records::run::Outcome::Succeeded
+    } else {
+        provenant_records::run::Outcome::Failed
+    };
+    let mut fact = provenant_records::settlement::classify::settle(
+        &provenant_records::settlement::SettlementEvidence::fixture(
+            provenant_records::settlement::LaneRole::Reader,
+            outcome,
+            None,
+        ),
+    );
+    if !success {
+        fact.reason = Some("fixture child provider failed".into());
+    }
     store.publish_terminal(
         id,
         record.revision,
         &provenant_run::TerminalPublication {
-            handoff: Ok(None),
-            terminal_cause: None,
-            terminal_note: None,
-            outcome: if success {
-                provenant_records::run::Outcome::Succeeded
-            } else {
-                provenant_records::run::Outcome::Failed
-            },
+            fact,
+            evidence: None,
             started_at: Some(record.queued_at),
             finished_at: clock.wall_now()?,
             provider_ms: Some(1),
-            reason: if success {
-                None
-            } else {
-                Some("fixture child provider failed".into())
-            },
             result: if success {
                 "child result reached parent"
             } else {
                 "child provider failure details"
             },
-            complete: true,
             redacted: false,
             resolved_route: Some(route.clone()),
             applied_route: Some(route.clone()),
             observed_route: Some(route),
             usage: Default::default(),
             session: None,
-            partial_signals: Vec::new(),
         },
         &exit,
         &call,

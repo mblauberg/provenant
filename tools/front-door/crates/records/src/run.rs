@@ -4160,6 +4160,16 @@ mod tests {
                 serde_json::json!({"Ok":{"schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}}),
                 serde_json::json!({"Ok":{"schema_version":1,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}}),
             ),
+            (
+                "progress",
+                serde_json::json!("moved"),
+                serde_json::json!("not_a_progress"),
+            ),
+            (
+                "settlement_evidence",
+                serde_json::json!(format!("sha256:{}", "a".repeat(64))),
+                serde_json::json!("not-a-digest"),
+            ),
         ];
         for (field, value, malformed_value) in field_values {
             let mut input = base.clone();
