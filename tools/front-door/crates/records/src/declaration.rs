@@ -50,7 +50,7 @@ pub struct SealedDeclaration {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum JournalLine {
+pub enum DeclarationLine {
     Accepted(SealedDeclaration),
     Rejected {
         sequence: u64,
