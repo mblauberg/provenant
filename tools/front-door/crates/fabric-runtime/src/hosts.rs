@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-pub const PROTOCOL: u64 = 14;
+pub const PROTOCOL: u64 = 15;
 pub const MAX_FRAME: usize = 1_048_576;
 
 macro_rules! peer_feature_protocols {

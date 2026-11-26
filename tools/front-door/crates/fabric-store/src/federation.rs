@@ -331,7 +331,8 @@ impl Store {
                         || previous.actor.is_some()
                         || previous.kind != EventKind::RunChanged
                         || previous.entity.as_deref() != Some(entity.as_str())
-                        || previous.detail != detail
+                        || serde_json::from_str::<serde_json::Value>(&previous.detail).ok()
+                            != serde_json::from_str::<serde_json::Value>(&detail).ok()
                     {
                         return Err(Error::Conflict);
                     }
@@ -352,7 +353,8 @@ impl Store {
                     Coverage, ObservationCursor, ObservationEvent, ObservationKind,
                     ObservationLineage,
                 };
-                let state = serde_json::to_value(&event.change).map_err(|_| Error::Invalid("run observation encoding"))?;
+                let state = serde_json::to_value(&event.change)
+                    .map_err(|_| Error::Invalid("run observation encoding"))?;
                 let observation = ObservationEvent {
                     header: provenant_records::RecordHeader::V1,
                     id: format!("run:{host}:{sequence}"),
