@@ -27,6 +27,13 @@ fn writer_plan_stages_scratch_missing_auth() -> Result<(), Box<dyn std::error::E
     writer_preparation_fixture(false, "missing")
 }
 
+// Spec: docs/specs/run-launch.md#layered-brief-preamble
+#[test]
+fn prepared_writer_route_receipt_contains_declared_static_checks_and_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(false, "static-checks")
+}
+
 #[test]
 fn writer_plan_stages_scratch_symlink_auth() -> Result<(), Box<dyn std::error::Error>> {
     writer_preparation_fixture(false, "symlink")
@@ -111,6 +118,9 @@ fn writer_preparation_steps(
         } else {
             match auth_layout {
                 "missing" => "writer_plan_stages_scratch_missing_auth",
+                "static-checks" => {
+                    "prepared_writer_route_receipt_contains_declared_static_checks_and_source"
+                }
                 "pr-policy" => "pr_policy_mediates_gh_when_publishing_is_disabled",
                 "symlink" => "writer_plan_stages_scratch_symlink_auth",
                 "symlink-xdg" => "writer_plan_stages_scratch_symlink_xdg_auth",
@@ -309,6 +319,46 @@ fn writer_preparation_steps(
         cancel: Some(&cancel),
         repo_facts: Default::default(),
     };
+    if auth_layout == "static-checks" {
+        std::fs::create_dir(project.join(".provenant"))?;
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {"static_checks": [{
+                    "argv": ["scripts/check-extra-fields", "--strict"],
+                    "cwd": "tools",
+                    "timeout_seconds": 30
+                }]}
+            }))?,
+        )?;
+        let launch = prepare_with(
+            &registry,
+            &task,
+            "static checks fixture",
+            &paths,
+            None,
+            |name| {
+                if name == "cursor" {
+                    Ok(executable.clone())
+                } else {
+                    Err("fixture provider unavailable".into())
+                }
+            },
+            None,
+        )?;
+        let route = serde_json::to_value(&launch.route)?;
+        assert_eq!(
+            route["static_checks"]["checks"],
+            serde_json::json!([{
+                "argv": ["scripts/check-extra-fields", "--strict"],
+                "cwd": "tools",
+                "timeout_seconds": 30,
+                "source": "project",
+                "key": ".provenant/ports.json#verify.static_checks"
+            }])
+        );
+        return Ok(());
+    }
     // An exhausted fence wait must never probe the updating CLI,
     // including when the lease map is empty.
     if fence_only {
