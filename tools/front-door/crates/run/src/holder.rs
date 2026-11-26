@@ -81,7 +81,7 @@ fn session_attempt_usage(
 }
 
 #[cfg(test)]
-mod codex_usage_tests {
+mod session_usage_tests {
     use super::*;
 
     #[test]
@@ -96,7 +96,7 @@ mod codex_usage_tests {
             ..Default::default()
         };
         let mut first = record(20, 80, 7);
-        codex_attempt_usage(&mut first, Some("t"), None, false);
+        session_attempt_usage(&mut first, Some("t"), None, false);
         assert_eq!(first.tokens.input, Some(20));
         assert_eq!(
             first
@@ -106,7 +106,7 @@ mod codex_usage_tests {
             Some(80)
         );
         let mut second = record(50, 100, 12);
-        codex_attempt_usage(&mut second, Some("t"), Some((Some("t"), &first)), false);
+        session_attempt_usage(&mut second, Some("t"), Some((Some("t"), &first)), false);
         assert_eq!(second.tokens.input, Some(30));
         assert_eq!(second.tokens.cache_read, Some(20));
         assert_eq!(second.tokens.output, Some(5));
@@ -118,7 +118,7 @@ mod codex_usage_tests {
             Some(50)
         );
         let mut unknown = second.clone();
-        codex_attempt_usage(
+        session_attempt_usage(
             &mut unknown,
             Some("t"),
             Some((Some("t"), &UsageRecord::default())),
