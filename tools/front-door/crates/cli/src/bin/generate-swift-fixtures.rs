@@ -442,14 +442,14 @@ mod fixtures {
         .map(
             |(id, graph, node, attempt_number, depth, _children)| -> Result<Value, String> {
                 let mut record = attempt(id, graph, running(), &format!("node {graph}"))?;
-                if graph == "settle-quota-fixtures" {
+                if *graph == "settle-quota-fixtures" {
                     record.retry_of = Some(
                         provenant_core::AttemptId::parse("c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2")
                             .map_err(|error| format!("synthetic retry parent: {error}"))?,
                     );
                 }
                 let row = lane(&record)?;
-                let parents = match graph.as_str() {
+                let parents = match *graph {
                     "review-the-change-set" => json!({"dispatch":"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1","continuation":null}),
                     "write-the-migration-notes" => json!({"dispatch":"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1","continuation":null}),
                     "settle-quota-fixtures" => json!({"dispatch":null,"continuation":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}),
@@ -616,7 +616,7 @@ mod fixtures {
                         &json!("2026-11-02T01:58:27.161938Z"),
                         &board_filters,
                         &[p::board_lane(
-                            &json!({"host":null,"key":board["key"],"attempt_id":board["attempt_id"]}),
+                            &json!({"host":null,"key":board.key,"attempt_id":board.attempt_id}),
                             &Value::Null,
                             &operation("board-101", None)?,
                             &board_lane,

@@ -19,9 +19,9 @@ use serde_json::{Value, json};
 /// One overview lane from an already projected attempt.
 pub fn overview_lane(
     project_id: &Value,
-    project_label: &impl Serialize,
+    project_label: &(impl Serialize + ?Sized),
     key: &Value,
-    task_label: &impl Serialize,
+    task_label: &(impl Serialize + ?Sized),
     attempt: &Value,
     queued_at: &Value,
     attention: bool,
@@ -481,10 +481,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn overview_lane_preserves_missing_task_title_as_null() {
+    fn overview_lane_accepts_borrowed_labels_and_preserves_missing_title() {
         let lane = overview_lane(
             &json!("01010101010101010101010101010101"),
-            &"provenant",
+            "provenant",
             &json!({"graph":"fixture","node":"task","attempt":1}),
             &Option::<String>::None,
             &json!({"attempt_id":"fixture","state":"queued"}),
