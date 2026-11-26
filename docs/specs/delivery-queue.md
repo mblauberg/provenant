@@ -28,6 +28,43 @@ violate writer custody or forge policy.
 
 ## Shared contracts
 
+Every writer binding persists the pre-attempt head. Progress means the head
+moved since that baseline, whoever published it; adopt self-pushed heads, and
+publish commits that are ahead of the remote. Resume from the persisted
+baseline after restart. A lane's failure to commit is `no_commit`, not evidence
+of a flaky check; rerun as a flake only when the handoff classifies the failure
+as one. Repair briefs carry the full failing-test list grouped by failure
+cluster, and escalation includes a wide-repair rung sized to the failure count.
+Require small, frequent commits, bound each lane's scope by expected duration,
+and checkpoint work in progress on timeout. Check every launch exit status and
+retry transient push or launch failures with backoff. The queue owns CI repair
+and resumes it from durable state without depending on a session-owned process.
+
+Forge observations bind to the head reported by the forge. Wait for checks to
+exist on that exact head, and bound publication lag. If the branch ref matches
+the pushed head while the PR head remains stale for five minutes,
+the forge adapter may perform one explicit resynchronisation, distinct from a
+push retry. Treat forge quota exhaustion as a wait, using a separate-quota query
+path where available or backoff until its reported reset time; quota errors are
+never CI verdicts. Bound CI waits by elapsed time and a poll floor, not poll
+count, and do not treat queued reruns as concluded observations. A zero-check
+CI wait also re-evaluates mergeability. An empty failing-test excerpt is an
+`operation_error`, never a reason to dispatch blind repair. A forge quota
+refusal while launching review is typed as retryable, carries its reset time,
+and is retried with backoff. Missing or malformed review evidence triggers a
+bounded re-review, never repair or silent acceptance.
+
+### Batch delivery
+
+A queue item may be a batch with one integration branch and persisted slice
+children. Write the batch specification first; slice 0 lands shared executable
+callback traits, shared interfaces and stub implementations on the
+integration branch. Cut parallel
+slice branches from that branch, then merge slices in dependency order. Treat
+the batch as one item and run one CI, review and repair pass after integration,
+not one full pass per slice. Persist slice dependencies and integration state
+so tick can resume an interrupted batch.
+
 The following names and semantics are the interface between implementation
 slices. They extend the general graph document and template compiler, not a
 `deliver`-specific interpreter. Existing serialised graphs keep their sealed
@@ -37,7 +74,7 @@ plan and replay semantics; new fields are versioned and validated on admission.
 | --- | --- |
 | `loop` | A named bounded cycle with `max_rounds`, a persisted round and a typed outcome edge. A round is consumed once when its repair attempt is admitted, not on observation or replay. `max_ci_rounds` defaults to 3 CI repair attempts per rung. A red result at that bound advances to the next rung and resets the per-rung count; exhaustion of the final rung parks. A separately authorised edit may extend the bound. Admission budgets the expanded worst case. |
 | `escalate` | Ordered route-tier aliases, default `[junior, senior, principal]`, on a node. The first attempt uses the first rung; a typed hygiene outcome or review repair that remains unsuccessful advances one rung; CI red advances at its per-rung bound, never past the final rung. The final rung's brief permits wider scope within actual authority; strict scope and custody still bind. Persist rung and cause. Exhaustion parks. Route unavailability remains distinct from an unsuccessful attempt. |
-| `review` | `single` (default, one independent review after green CI) or `panel` (one existing review panel after green CI). `accept_inconclusive_without_blocking` defaults to `true`; only a valid, complete structured findings result with no blocking finding qualifies. Blocking severity applies even when a finding has no trigger. Missing or malformed evidence parks, never silently accepts. A FAIL or blocking finding routes to repair. |
+| `review` | `single` (default, one independent review after green CI) or `panel` (one existing review panel after green CI). `accept_inconclusive_without_blocking` defaults to `true`; only a valid, complete structured findings result with no blocking finding qualifies. Blocking severity applies even when a finding has no trigger. Missing or malformed evidence triggers bounded re-review; it never becomes repair findings or silent acceptance. A FAIL or blocking finding routes to repair. |
 | `plan` | Existing sourced boolean; default follows `domains.fabric.implement.plan`. When true, a read-only scope result joins the writer brief; failure or missing required plan parks instead of pretending a plan exists. |
 | `hygiene` | A generic post-writer step runs the configured repository formatter in the retained worktree and commits only its changes. Outputs are `clean`, `no_commit`, `uncommitted_edits` or `error`, with before/after heads and handoff. Check all tracked and untracked edits before formatting; never absorb a writer's edits. Compare the attempt's input and output heads, not merely commits ahead of main. Formatter or commit failure is `error`, not success. The two named non-success outcomes feed escalation; errors park with diagnostics. |
 | `park` | An idempotent ask/inbox request records graph/item/node/attempt, typed reason (`loop_exhausted`, `ladder_exhausted`, `no_commit`, `uncommitted_edits`, `ci_unavailable`, `conflict`, `review_evidence`, `operation_error`), bounded lane handoff, head and evidence references. One open request per parking transition; answer alone neither resumes nor grants landing authority. |
@@ -62,13 +99,15 @@ after the principal rung is exhausted.
 
 For each item, the default `deliver` shape is optional scope → writer → hygiene
 → publish PR → conflict gate → CI gate → review → acceptance → land. A conflict
-gate observes the PR before waiting for CI. `CONFLICTING` routes to a rebase
-writer on the same retained worktree, then hygiene, publication and fresh
-conflict/CI gates. Checkpoint validation uses the planned recovery path to keep
+gate observes the PR before waiting for CI. `CONFLICTING` routes to a conflict
+writer on the same retained worktree that merges the base branch into the
+delivery branch, then hygiene, publication and fresh
+conflict/CI gates. Never rebase a conflicting delivery branch. Checkpoint
+validation uses the planned recovery path to keep
 an initial conflict nonterminal while that path is pending. Unknown mergeability
 is pending, not clean. If the head moves
 while mergeability is read, the observation is pending on the new head and
-identifies both heads; stale conflict evidence cannot direct a rebase. A failed CI gate
+identifies both heads; stale conflict evidence cannot direct a merge. A failed CI gate
 passes the failing head, job identities and bounded log excerpts as untrusted
 inputs to `ci-repair`; after hygiene and publication, return through the
 conflict gate to CI on the new head. The delivery CI outcome joins the initial
@@ -76,7 +115,9 @@ green check and the successful repair recheck; review waits for that outcome,
 including when the alternative path is skipped. Review failure similarly passes
 structured findings to a repair writer, then re-enters the gates and obtains fresh review.
 Both paths use the per-node ladder and bounded loops; no new commit is not proof
-of a fix. A CI rerun, if offered, is an explicit sourced policy and records the
+of a fix. CI repair and review repair use independent phase budgets; an explicit
+chair control starts a fresh budget for the phase it resumes.
+A CI rerun, if offered, is an explicit sourced policy and records the
 run and head; it cannot produce a green verdict from stale or absent checks.
 
 Record each gate observation, loop transition, rung, launch intent and operation
@@ -197,7 +238,7 @@ below are acceptance properties, not an instruction to run builds in this lane.
 3. **Execution and hygiene:** `src/fabric/graph_execution.rs`,
    `src/fabric/graph_inputs.rs` and their tests. Test clean formatter commit,
    no-commit, tracked and untracked edits, formatter failure, retained handoff,
-   and conflict → rebase → new-head CI with no duplicate side effect on restart.
+   and conflict → merge base → new-head CI with no duplicate side effect on restart.
 4. **Queue and admission:** `src/graph_interface.rs`, `src/fabric/interface.rs`,
    `src/tick.rs`, `src/admit.rs`, `src/commands/{tick,admit}.rs` and their tests.
    Test query snapshot and duplicate ownership, item concurrency, CI class
