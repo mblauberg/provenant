@@ -584,7 +584,7 @@ fn terminal_checkpoint_with_superseded_header_is_retired() {
         .join(project.to_string())
         .join("graph-g-test.json");
     let mut stored = stored_fixture();
-    stored.schema_version = super::journal::CHECKPOINT_SCHEMA_VERSION - 1;
+    stored.schema_version = 1;
     std::fs::write(&path, CanonicalV1::bytes(&stored).unwrap().as_bytes()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(
@@ -1487,7 +1487,10 @@ fn launched_route_fallback_history_is_readable() {
 }
 #[test]
 fn delivery_retry_reopens_only_the_matching_failed_attempt() {
-    for outcome in [GraphAttemptOutcome::OtherFailure, GraphAttemptOutcome::ReviewRequired] {
+    for outcome in [
+        GraphAttemptOutcome::OtherFailure,
+        GraphAttemptOutcome::ReviewRequired,
+    ] {
         assert_delivery_retry_reopens_matching_attempt(outcome);
     }
 }
@@ -2797,4 +2800,55 @@ mod launch_recovery {
         );
         assert_eq!(ledger.lock().unwrap().starts.len(), 2);
     }
+}
+
+#[test]
+fn v2_checkpoint_migrates_and_is_published_under_the_journal_lock() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    drop(FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap());
+    let path = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+    let mut value = serde_json::to_value(stored_fixture()).unwrap();
+    value["schema_version"] = 2.into();
+    value["checkpoint"]["nodes"][0]["advance_error_code"] = "writer_declared_stop".into();
+    value["checkpoint"]["nodes"][0]["advance_error"] = "waiting".into();
+    let digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&value["checkpoint"], &value["execution"]),
+    )
+    .unwrap();
+    value["digest"] = digest.to_string().into();
+    std::fs::write(&path, CanonicalV1::bytes(&value).unwrap().as_bytes()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    let stored = load_checkpoint(&journal.directory, "g-test")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.checkpoint.nodes[0].advance_code.as_deref(),
+        Some("declared_stop")
+    );
+    assert_eq!(
+        stored.checkpoint.nodes[0].advance_note.as_deref(),
+        Some("waiting")
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["schema_version"], 3);
+    assert!(
+        saved["checkpoint"]["nodes"][0]
+            .get("advance_error_code")
+            .is_none()
+    );
 }
