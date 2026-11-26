@@ -86,6 +86,7 @@ lane_row! {
         priority: Option<i64> => nullable(integer());
         finished_at: Value => any();
         last_output_at: Value => any();
+        first_output_at: Value => any();
         last_event_at: Value => any();
         runtime_deadline: Value => any();
         overdue: Option<bool> => nullable(boolean());
@@ -581,6 +582,7 @@ impl LaneRow {
             priority: lane.priority.map(i64::from),
             finished_at: json!(finished_at),
             last_output_at: json!(lane.last_output_at),
+            first_output_at: json!(lane.first_output_at),
             last_event_at: json!(facts.last_event_at),
             last_event_source: facts.last_event_source,
             stalled: facts.stalled,

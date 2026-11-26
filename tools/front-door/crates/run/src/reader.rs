@@ -1063,6 +1063,8 @@ impl RunStore {
                 #[serde(default)]
                 last_output_at: Option<WallTime>,
                 #[serde(default)]
+                first_output_at: Option<WallTime>,
+                #[serde(default)]
                 priority: Option<i32>,
             }
             let parsed = serde_json::from_slice::<ProcessCheckpoint>(&bytes);
@@ -1087,6 +1089,7 @@ impl RunStore {
             {
                 record.process_observation_valid.0 = true;
                 record.last_output_at = observation.last_output_at;
+                record.first_output_at = observation.first_output_at;
                 record.priority = observation.priority;
             }
         }

@@ -2805,6 +2805,10 @@ pub struct AttemptRecord {
     /// Most recent supervisor-observed stdout/stderr activity while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<WallTime>,
+    /// First supervisor-observed stdout/stderr activity while running. Absent
+    /// when no output was observed; older records never recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_output_at: Option<WallTime>,
     /// Whether the observation checkpoint was absent or could be read and
     /// identity-checked. Used only for live coverage reporting.
     #[serde(skip)]

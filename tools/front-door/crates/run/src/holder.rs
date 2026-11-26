@@ -1135,6 +1135,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             .map_err(custody_error)?;
         // The live capture is newer than the periodically published checkpoint.
         record.last_output_at = last_output;
+        record.first_output_at = record.first_output_at.or(last_output);
         let attempt = store
             .attempt_dir(context.attempt_id, false)
             .map_err(custody_error)?;
