@@ -2651,6 +2651,11 @@ mod tests {
         let autosave = format!(
             "## Provenant session state\nAuto-saved: t1\n\n### Active custody\n- {custody_line}\n\n### Lanes in flight (1)\n- g/a#1\n"
         );
+        // The autosave lives inside the session store, which production creates
+        // private (mode 0o700) under the state root. Establish that same layout
+        // before planting the fixture: no checkpoint has been saved yet here,
+        // so the directory does not otherwise exist.
+        crate::persistence::directory(&root, project, "sessions", "host-1", true).unwrap();
         let autosave_path = path(&root, project, "host-1").join("autosave.md");
         std::fs::write(&autosave_path, autosave.as_bytes()).unwrap();
         set_test_file_time(&autosave_path);
