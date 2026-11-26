@@ -102,7 +102,9 @@ graph through the journal-locked advancement owner. A recovered endpoint can
 therefore settle work in the same wait; a successful advance also clears the
 transport error held from an earlier failed attempt to settle it. Unavailable
 remote readings remain pending and are retried within the wait budget; if the
-wait ends pending, it reports the last failed reading.
+wait ends pending, it reports the last failed reading. A peer read failure
+also projects the attempt as unknown in status; that projection does not erase
+the failure from wait history.
 
 - Why: terminal remote work must settle as soon as its home endpoint can be
   reached again, without requiring a second wait or a manual advance.

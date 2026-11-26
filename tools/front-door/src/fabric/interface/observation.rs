@@ -18,6 +18,19 @@ pub(in crate::fabric) fn advance_after_remote_terminal(
     }
 }
 
+/// Status retains the unknown projection; a wait also needs the typed peer failure.
+pub(in crate::fabric) fn remote_status_reading(
+    rows: &[serde_json::Value],
+    peer_error: Option<FacadeError>,
+) -> Result<bool, FacadeError> {
+    if let Some(error) = peer_error {
+        return Err(error);
+    }
+    Ok(rows
+        .iter()
+        .all(|row| row["kind"] != "attempt" || row["state"] == "terminal"))
+}
+
 impl Factory {
     pub(super) fn observe_remote_graph_attempts(
         &self,
@@ -42,7 +55,7 @@ impl Factory {
         if rows.is_empty() {
             return Ok(run.clone());
         }
-        super::super::unified::enrich_status_rows_within(
+        let peer_error = super::super::unified::observe_status_rows_within(
             &mut rows,
             &self.context,
             &self.clock,
@@ -52,9 +65,7 @@ impl Factory {
         // A terminal remote read is the signal to retry graph advancement. The
         // status path only reads a checkpoint, so it cannot settle a node whose
         // earlier advancement failed while the home endpoint was unavailable.
-        let remote_terminal = rows
-            .iter()
-            .all(|row| row["kind"] != "attempt" || row["state"] == "terminal");
+        let remote_terminal = remote_status_reading(&rows, peer_error)?;
         let advanced = advance_after_remote_terminal(run, remote_terminal, || {
             self.graph(
                 GraphInput::Resume {
