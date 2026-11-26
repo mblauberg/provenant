@@ -481,7 +481,7 @@ fn chair_prompt_checkpoints_falls_back_stops_and_resumes_once() -> Result {
 
 #[test]
 fn native_subagent_session_start_receives_no_checkpoint_or_custody() -> Result {
-    let rig = configured()?;
+    let mut rig = configured()?;
     // Prepare a pending handoff with custody text, exactly as a resumed chair
     // session would find it. A normal SessionStart injects both the handoff and
     // the checkpoint; a native subagent must receive neither.
