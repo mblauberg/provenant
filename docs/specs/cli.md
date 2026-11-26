@@ -210,6 +210,25 @@ repair action. A kind-only failure never loses its local diagnostic detail.
 - Why: the operator can see and fix the cause instead of chasing an opaque
   confinement refusal.
 
+### Upgrade verify failures name the root cause
+
+A failed `provenant upgrade --verify` reports the smoke graph id, the node that
+actually failed, that node's advance code and message, and a next command
+`provenant status GRAPH` carrying the same graph id. The cause is read from a
+checkpoint envelope in the failing child's report: a dependant marked
+`upstream_blocked` whose note begins `blocked by` is not a cause, even when its
+envelope is the innermost typed error. The node with a concrete owner or
+advance code wins, owner code first. The cause's message is bounded before the
+graph, node, code and next command are assembled, so a long checker note cannot
+clip the parts the operator needs from the one-line host reason. A report with
+no recorded cause keeps the innermost typed code and message. The smoke graph
+is ephemeral: its scratch project binding is removed when verification ends,
+including on failure, so the next command names the graph recorded in the
+report and a live reread requires re-running `provenant upgrade --verify`.
+- Why: a blocked dependant names its blocker but not why the blocker failed;
+  the operator needs the failing node and the command to inspect its graph.
+- Owner: `tools/front-door/src/install_report.rs`, `tools/front-door/src/install.rs`
+
 ### Template name errors
 
 An unknown template or flavour names the supplied value and lists the matching

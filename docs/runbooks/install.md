@@ -182,8 +182,15 @@ becomes a registered project. The human view leads with one status line per host
 verdict instead of `run`/`wait`/`status` envelopes, and repeated
 `native_capability_unavailable` notices collapse to a count; `--full` restores
 every captured line. A failed `UPGRADE_FAILED` message names each failing host
-once with its bounded reason. The renderer drops human text when an error is
-set, so run `provenant upgrade --verify --json` for the full per-host detail.
+once with its bounded reason. For a failed smoke, that reason names the graph
+id, the node that actually failed (not the dependant whose `upstream_blocked`
+note just says which node blocked it), that node's code and message, and a next
+command `provenant status GRAPH` for the same graph. The smoke graph is
+ephemeral — its scratch binding is removed at the end of verification, failure
+included — so the command names the graph in the report; to reread live state,
+re-run `provenant upgrade --verify` with the same host and settings. The
+renderer drops human text when an error is set, so run
+`provenant upgrade --verify --json` for the full per-host detail.
 The smoke builds its own scratch checkout, so a verification run from outside a
 Git checkout is not refused just for that reason. `provenant run smoke` by hand, from any checkout,
 runs only the read-only
