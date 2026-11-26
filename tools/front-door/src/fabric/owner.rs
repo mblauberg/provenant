@@ -3462,7 +3462,7 @@ impl BoundGraphOwner<'_> {
         // A graph admitted before subject was recorded behaves as today: no
         // missing-subject pin. An admitted subject without a base is the same
         // advisory state the old flag named.
-        let review_subject_missing = execution
+        let subject_base_missing = execution
             .as_ref()
             .and_then(|execution| execution.document.subject.as_ref())
             .is_some_and(|subject| subject.base.is_none());
@@ -3513,7 +3513,7 @@ impl BoundGraphOwner<'_> {
                 .task
                 .base_ref
                 .clone()
-        } else if review_subject_missing && node.review_base.is_none() {
+        } else if subject_base_missing && node.review_base.is_none() {
             None
         } else if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
             && source_commit.is_some()

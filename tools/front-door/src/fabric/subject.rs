@@ -387,7 +387,7 @@ impl Factory {
                 _ => match resolve("HEAD^") {
                     Ok(base) => (
                         base,
-                        "checkout first parent; default-branch comparison is empty or unavailable",
+                        "checkout HEAD's parent; default-branch comparison is empty or unavailable",
                     ),
                     Err(_) => (
                         head.clone(),

@@ -217,21 +217,32 @@ control (access mode, worktree, branch, base or write scope) and the first one g
 the refusal; the bundled `smoke` template is the exception for worktree and branch/base, which
 bind to its write node only. Remote placement takes no caller path: a caller `worktree` is refused,
 but `--branch` with an optional `--base` is carried as peer-owned worktree intent so the peer
-creates the writer in its own clone. A bundled smoke launch with no branch provisions that intent
-from a sourced scratch branch (overridable with `--branch`/`--base` or `--set write_attempt`), so
-`upgrade --verify --host PEER` exercises the remote writer without a caller-supplied branch. The
-sender's graph does not bind or provision a local worktree for that writer; its checkpoint retains
-the peer provisioning intent for replay. A graph reader without an explicit worktree or attempt
-directory uses its selected project as its source; `upgrade --verify` selects a temporary
-committed scratch project for its smoke graph and binds a fixed review range so no lens fails on
-an empty range. For a manual bundled smoke launch without a `diff_base`, the checkout's first
-parent supplies the range; if unavailable, review is skipped with a reason and the other eligible
-nodes continue. A node may name a small project-relative fixture;
-the host stages its bytes with the task, so a peer places the same file in its own candidate
-scratch and the brief names its path instead of leaking a caller path.
-- Why: a verification graph must run on a real install and exercise a writer, and a skipped node
-  must not refuse the run it does not take part in. A fixture must reach every host that runs a
-  reader, not just the host that owns the checkout.
+creates the writer in its own clone. There is no default remote provisioning: a remote write
+node needs an explicit `--branch` (and optional `--base`) to own that worktree; without one the
+write node is skipped with a repair warning. The sender's graph does not bind or provision a
+local worktree for that writer; its checkpoint retains the peer provisioning intent for replay.
+
+`run smoke` and `upgrade --verify` share one hermetic lifecycle. It creates a deterministic
+fixture repository under `domains.smoke.fixture_root` (default `.local/state/provenant-smoke`,
+home-relative) in the home of every target host. A fresh six-byte hex nonce names the fixture;
+fixed author, committer and 2000-01-01 timestamps make the same nonce yield the same OIDs on any
+host. A `.git/provenant-smoke.json` marker records the nonce, creation time and `FIXTURE_RECIPE`;
+the sweep removes only expired marked fixtures and warns `SMOKE_FIXTURE_FOREIGN` for an unmarked
+directory. The writer commits in the fixture and the review covers that commit. The verdict
+counts only when the nonce appears in both the read and review result summaries; a row that loses
+its nonce fails with the row named, so a false pass cannot masquerade as a result. `--project` on
+`run smoke` is ignored with `SMOKE_PROJECT_IGNORED`, because a caller project would reintroduce
+the checkout leak. `diff_base` defaults to the fixture head and any caller value resolves inside
+the fixture; an unresolvable value is refused with `INVALID (field diff_base)`. A peer below
+`SMOKE_FIXTURE_PROTOCOL` cannot verify the fixture and yields `SmokeVerdict::Unverified`, never a
+pass; `domains.smoke.unverified` chooses warn (exit 0) or fail. The result reports five phases
+(fixture, launch, wait, status, cleanup) and the effective values and sources of the
+`domains.smoke` keys (`fixture_root`, `sweep_after_hours`, `branch_prefix`, `unverified` and
+`set.{parameter}`). Afterwards the lifecycle forgets the fixture's binding and removes it on
+success, failure and refused launch.
+- Why: a verification graph must run on a real install and exercise a writer against evidence
+  only it produced, and a skipped node must not refuse the run it does not take part in. A caller
+  checkout, a caller project or an old peer must never turn a failed smoke into a pass.
 
 Every refusal of a launch input names the field that caused it, or the decoded path of a document
 or patch field; an unnamed `invalid input` is a defect. A refused bind keeps its typed cause to
@@ -381,9 +392,11 @@ and otherwise pins checkout HEAD. `live` reads the live tree locally; on a peer 
 pins HEAD and warns `READ_SOURCE_PINNED_FOR_PEER`. `default_branch` pins the fetched
 default branch; any other value is a Git ref. `--source` accepts the same values
 and overrides configuration. `lanes.read_source_fetch_first` fetches before resolution.
-`bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit. A writer
-launch instead resolves one base by role before sealing its identity: explicit `--base`; else the
-`--branch` default; else the HEAD of a named `--worktree` or a composite bound with
+`bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit. A
+repository file still naming `checkout` warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`;
+it never acts as the live choice. A writer launch instead resolves one base by role before
+sealing its identity: explicit `--base`; else the `--branch` default; else the HEAD of a named
+`--worktree` or a composite bound with
 `--set worktree=PATH`; else none, with an advisory warning that its identity falls back to the
 caller checkout. The writer's own nodes, its launch identity and the stale-checkout warning skip
 the read-only default; its read-only members (a plan node, or a composite's review and gate nodes)
@@ -392,7 +405,11 @@ authored document keep resolving their own subject. Writer-ness is the resolved 
 launch is a writer when a node that will run writes a worktree — not one launch input. The warning
 names the ref, the commit and the layer that chose it; `read_source` on the launch result and the
 explain status names the same commit. Absent or unusable Git evidence stays advisory and never
-refuses the launch.
+refuses the launch. The `lanes.writer_base` knob chooses that default: `default_branch` resolves
+the remote the read-source resolver finds (never a hard-coded `origin`), `checkout` keeps the
+caller HEAD fallback, and any other value is a Git ref. Explicit `--base` always wins; an
+unresolvable value warns and falls back to the caller checkout, naming the key and its source.
+The run result reports `writer_base` with its commit and source.
 - Why: file:line evidence from a stale working tree reports findings upstream has fixed, and a
   plan should read the base it will implement rather than the caller's checkout.
 
