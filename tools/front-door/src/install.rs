@@ -2155,16 +2155,22 @@ fn installed_destination(targets: &provenant_config::Targets) -> PathBuf {
 }
 
 /// `upgrade --verify` runs the same lifecycle as `run smoke`: a nonce fixture
-/// under the host's home, a child graph pinned to that fixture, and cleanup.
-/// The verdict-to-exit mapping lives here: a failed smoke is an error, while
-/// an unverified one is reported with a warning and exits zero until a knob
-/// makes that choice configurable.
+/// under the configured home-relative root, a child graph pinned to that
+/// fixture, and cleanup. A failed smoke errors; an unverified one warns and
+/// exits zero unless `domains.smoke.unverified=fail` makes it an error too.
 fn verify_smoke(
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
 ) -> Result<String, String> {
     let runner = runner_for_verify(targets)?;
     let clock = provenant_os::clock::SystemClock::new();
+    let (settings, origin) = provenant_cli::smoke::Settings::resolve(&targets.roots)
+        .unwrap_or_else(|_| {
+            (
+                provenant_cli::smoke::Settings::default(),
+                provenant_cli::smoke::Origin::compiled(Default::default()),
+            )
+        });
     let outcome = crate::smoke::run_lifecycle(
         &clock,
         &runner,
@@ -2173,12 +2179,7 @@ fn verify_smoke(
         &targets.home,
         args,
     )?;
-    match &outcome.verdict {
-        crate::smoke::SmokeVerdict::Failed { .. } => Err(outcome.text()),
-        crate::smoke::SmokeVerdict::Passed | crate::smoke::SmokeVerdict::Unverified { .. } => {
-            Ok(outcome.text())
-        }
-    }
+    crate::smoke::verdict_exit(&outcome.verdict, &outcome.text(), &settings, &origin)
 }
 
 /// Re-exec the installed binary so its own verifier drives the smoke graph,
@@ -2276,8 +2277,8 @@ fn run_verify_only(
 }
 
 /// The dry run compiles the same fixture-pinned graph the lifecycle would
-/// launch. It never waits or reports a verdict, and it forgets the fixture
-/// binding when it is done.
+/// launch, using the configured fixture root and merged parameters. It never
+/// waits or reports a verdict, and it forgets the fixture binding when done.
 fn preview_smoke(
     runner: &ChildRunner,
     program: &Path,
@@ -2285,10 +2286,19 @@ fn preview_smoke(
     home: &Path,
     args: &cli::Upgrade,
 ) -> Result<Vec<u8>, String> {
-    let _ = crate::smoke::sweep_fixtures(state_dir, home);
+    let roots =
+        crate::roots::child(home, home, state_dir.to_path_buf()).map_err(|e| e.to_string())?;
+    let (settings, _) = provenant_cli::smoke::Settings::resolve(&roots).unwrap_or_else(|_| {
+        (
+            provenant_cli::smoke::Settings::default(),
+            provenant_cli::smoke::Origin::compiled(Default::default()),
+        )
+    });
+    let root = settings.root();
+    let _ = crate::smoke::sweep_fixtures(state_dir, home, &root, settings.sweep_after_hours);
     let nonce = crate::smoke::nonce()?;
-    let commits = crate::smoke::create_fixture(state_dir, home, &nonce)?;
-    let fixture = crate::smoke::fixture_root(home).join(&nonce);
+    let commits = crate::smoke::create_fixture(state_dir, home, &nonce, &root)?;
+    let fixture = crate::smoke::fixture_root(home, &root).join(&nonce);
     let mut argv = vec![
         program.as_os_str().to_owned(),
         "--project".into(),
@@ -2306,21 +2316,18 @@ fn preview_smoke(
     if let Some(route) = &args.route {
         argv.extend(["--route".into(), route.into()]);
     }
-    let mut diff_base_set = false;
-    let mut fixture_base_set = false;
-    for setting in &args.set {
-        if setting.starts_with("diff_base=") {
-            diff_base_set = true;
-        }
-        if setting.starts_with("fixture_base=") {
-            fixture_base_set = true;
-        }
-        argv.extend(["--set".into(), setting.into()]);
+    let set = settings.merged_set(&args.set);
+    let has = |name: &str| {
+        set.iter()
+            .any(|item| item.split_once('=').is_some_and(|(key, _)| key == name))
+    };
+    for setting in &set {
+        argv.extend(["--set".into(), setting.clone().into()]);
     }
-    if !diff_base_set {
+    if !has("diff_base") {
         argv.extend(["--set".into(), format!("diff_base={}", commits.head).into()]);
     }
-    if !fixture_base_set {
+    if !has("fixture_base") {
         argv.extend([
             "--set".into(),
             format!("fixture_base={}", commits.base).into(),
@@ -2329,7 +2336,7 @@ fn preview_smoke(
     let outcome = runner.execute(&argv, None, 1_048_576, 60);
     crate::smoke::report_smoke_cleanup(
         outcome,
-        crate::smoke::remove_fixture(state_dir, home, &nonce),
+        crate::smoke::remove_fixture(state_dir, home, &nonce, &root),
     )
 }
 

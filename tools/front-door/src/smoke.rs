@@ -6,7 +6,13 @@
 //! peer and tick dispatch locate graphs through that binding. A sweep at
 //! lifecycle start removes fixtures left behind by crashed runs.
 
-use provenant_cli::fabric::Context;
+use provenant_cli::{
+    fabric::Context,
+    smoke::{
+        BRANCH_PREFIX_KEY, FIXTURE_ROOT_KEY, Origin as SmokeOrigin, SWEEP_AFTER_HOURS_KEY,
+        Settings, UNVERIFIED_KEY, Unverified,
+    },
+};
 use provenant_core::{CancelToken, Clock, GitOid, HostId, WaitBudget, WallTime};
 use provenant_fabric_runtime::{
     coordination::facade::FacadeError,
@@ -18,9 +24,21 @@ use provenant_records::warning::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     io::Read,
     path::{Path, PathBuf},
 };
+
+/// Resolve the one `[domains.smoke]` view for an entry point. Unreadable
+/// configuration warns and leaves compiled defaults; never refuse smoke for it.
+pub(crate) fn settings(roots: &provenant_core::Roots) -> (Settings, SmokeOrigin) {
+    Settings::resolve(roots).unwrap_or_else(|_| {
+        (
+            Settings::default(),
+            SmokeOrigin::compiled(Default::default()),
+        )
+    })
+}
 
 /// The two commits a deterministic fixture creates: the base the writer starts
 /// from and the head carrying the nonce.
@@ -64,25 +82,43 @@ pub struct SmokePhase {
     pub elapsed_ms: u64,
 }
 
-/// The structured result of one lifecycle: verdict, phase timings and the
-/// typed envelopes that produced them.
+/// One effective smoke template parameter and the layer that supplied it:
+/// `config.toml`, `--set`, or the lifecycle's own fixture defaults.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmokeParameter {
+    pub value: String,
+    pub source: String,
+}
+
+/// The structured result of one lifecycle: verdict, phase timings, the effective
+/// parameters with sources and the typed envelopes that produced them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmokeOutcome {
     pub verdict: SmokeVerdict,
     pub phases: Vec<SmokePhase>,
+    pub parameters: BTreeMap<String, SmokeParameter>,
+    pub config: BTreeMap<String, SmokeParameter>,
     pub output: String,
 }
 
 impl SmokeOutcome {
-    /// The typed result line: verdict fields and all five phase timings. It
-    /// carries no command envelope, so verdict readers keep using the child
-    /// envelopes in `output`.
+    /// The typed result line: verdict fields, all five phase timings and the
+    /// sourced parameters. It carries no command envelope, so verdict readers
+    /// keep using the child envelopes in `output`.
     pub fn result_json(&self) -> Value {
         let mut value = serde_json::to_value(&self.verdict).unwrap_or(Value::Null);
         if let Some(map) = value.as_object_mut() {
             map.insert(
                 "phases".into(),
                 serde_json::to_value(&self.phases).unwrap_or(Value::Null),
+            );
+            map.insert(
+                "parameters".into(),
+                serde_json::to_value(&self.parameters).unwrap_or(Value::Null),
+            );
+            map.insert(
+                "config".into(),
+                serde_json::to_value(&self.config).unwrap_or(Value::Null),
             );
         }
         value
@@ -118,10 +154,11 @@ pub(crate) fn nonce() -> Result<String, String> {
     Ok(provenant_core::hex(&bytes))
 }
 
-/// The home-relative root for every smoke fixture. A fixture path derived
-/// here resolves identically on the initiator and every peer.
-pub(crate) fn fixture_root(home: &Path) -> PathBuf {
-    home.join(".local").join("state").join("provenant-smoke")
+/// The configured home-relative root for smoke fixtures. `root` has already
+/// passed [`provenant_cli::smoke::validate_root`] on both hosts, so the same
+/// relative path resolves under each host's home without carrying a caller path.
+pub(crate) fn fixture_root(home: &Path, root: &Path) -> PathBuf {
+    home.join(root)
 }
 
 /// Run one Git command in `directory` with a hermetic environment. Author,
@@ -170,11 +207,12 @@ pub(crate) fn create_fixture(
     state: &Path,
     home: &Path,
     nonce: &str,
+    root: &Path,
 ) -> Result<FixtureCommits, String> {
     if !valid_nonce(nonce) {
         return Err("smoke fixture nonce must be twelve lowercase hex digits".into());
     }
-    let fixture = fixture_root(home).join(nonce);
+    let fixture = fixture_root(home, root).join(nonce);
     if fixture.exists() {
         std::fs::remove_dir_all(&fixture).map_err(|error| error.to_string())?;
     }
@@ -240,11 +278,16 @@ pub(crate) fn create_fixture(
 
 /// Forget the fixture's binding and remove its directory. The nonce is the
 /// only path guard; every caller has already proved it is twelve hex digits.
-pub(crate) fn remove_fixture(state: &Path, home: &Path, nonce: &str) -> Result<(), String> {
+pub(crate) fn remove_fixture(
+    state: &Path,
+    home: &Path,
+    nonce: &str,
+    root: &Path,
+) -> Result<(), String> {
     if !valid_nonce(nonce) {
         return Err("smoke fixture nonce must be twelve lowercase hex digits".into());
     }
-    let fixture = fixture_root(home).join(nonce);
+    let fixture = fixture_root(home, root).join(nonce);
     let directory = provenant_config::host_project_dir(state, &fixture)
         .ok_or_else(|| "smoke fixture project has no host binding path".to_owned())?;
     let id = directory
@@ -259,22 +302,32 @@ pub(crate) fn remove_fixture(state: &Path, home: &Path, nonce: &str) -> Result<(
     Ok(())
 }
 
-/// Remove fixtures older than twenty-four hours at lifecycle start. Only a
-/// directory with a parsed marker whose nonce matches its name and whose
-/// creation time is past the threshold is ours to remove; a directory without
-/// such a marker is foreign and is left in place with SMOKE_FIXTURE_FOREIGN.
-/// Each removal is returned as a warning; a bind that cannot be forgotten is
-/// left for the next sweep rather than failing the current smoke.
-pub(crate) fn sweep_fixtures(state: &Path, home: &Path) -> Vec<String> {
+/// Remove fixtures older than the configured window at lifecycle start. Zero
+/// hours skips the sweep entirely. Only a directory with a parsed marker whose
+/// nonce matches its name and whose creation time is past the threshold is ours
+/// to remove; a directory without such a marker is foreign and is left in place
+/// with SMOKE_FIXTURE_FOREIGN. Each removal is returned as a warning; a bind
+/// that cannot be forgotten is left for the next sweep rather than failing smoke.
+pub(crate) fn sweep_fixtures(
+    state: &Path,
+    home: &Path,
+    root: &Path,
+    after_hours: u64,
+) -> Vec<String> {
     let mut warnings = Vec::new();
-    let Ok(entries) = std::fs::read_dir(fixture_root(home)) else {
+    if after_hours == 0 {
+        return warnings;
+    }
+    let Ok(entries) = std::fs::read_dir(fixture_root(home, root)) else {
         return warnings;
     };
     let now = provenant_os::clock::SystemClock::new()
         .wall_now()
         .map(|time| time.as_micros())
         .unwrap_or(i64::MAX);
-    let threshold = 24 * 60 * 60 * 1_000_000_i64;
+    let threshold = after_hours
+        .saturating_mul(60 * 60 * 1_000_000)
+        .min(i64::MAX as u64) as i64;
     for entry in entries.flatten() {
         if !entry.path().is_dir() {
             continue;
@@ -294,7 +347,7 @@ pub(crate) fn sweep_fixtures(state: &Path, home: &Path) -> Vec<String> {
         if age < threshold {
             continue;
         }
-        match remove_fixture(state, home, &name) {
+        match remove_fixture(state, home, &name, root) {
             Ok(()) => warnings.push(format!("smoke removed stale fixture {name}")),
             Err(error) => warnings.push(format!(
                 "smoke could not remove stale fixture {name}: {error}"
@@ -313,8 +366,9 @@ fn peer_fixture(
     host: &str,
     nonce: &str,
     create: bool,
+    root: &Path,
 ) -> Result<SmokeFixtureReceipt, String> {
-    let fixture = fixture_root(home).join(nonce);
+    let fixture = fixture_root(home, root).join(nonce);
     let common = std::fs::canonicalize(fixture.join(".git")).map_err(|error| error.to_string())?;
     let roots =
         crate::roots::child(home, home, state.to_path_buf()).map_err(|error| error.to_string())?;
@@ -333,6 +387,7 @@ fn peer_fixture(
         SmokeFixtureOp::Create {
             nonce: nonce.to_owned(),
             recipe: FIXTURE_RECIPE,
+            root: root.to_string_lossy().into_owned(),
         }
     } else {
         SmokeFixtureOp::Remove {
@@ -383,11 +438,12 @@ fn peer_fixture_matches(
     Ok(())
 }
 
-/// A unique graph name for this lifecycle invocation.
-fn smoke_graph_name() -> String {
+/// A unique graph name for this lifecycle invocation, under the configured
+/// branch prefix. The prefix has already passed Git ref validation.
+fn smoke_graph_name(prefix: &str) -> String {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     format!(
-        "smoke-{}-{}",
+        "{prefix}{}-{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     )
@@ -500,6 +556,26 @@ fn verify_status(status: &str, nonce: &str, write_enabled: bool) -> Result<(), S
     Ok(())
 }
 
+/// Map a typed verdict and its report to an exit result. A failure always
+/// fails; an unverified result fails only under the configured `fail` policy,
+/// whose source is named in the report. The choice is host configuration, never
+/// an implicit pass.
+pub(crate) fn verdict_exit(
+    verdict: &SmokeVerdict,
+    text: &str,
+    settings: &Settings,
+    origin: &SmokeOrigin,
+) -> Result<String, String> {
+    match verdict {
+        SmokeVerdict::Failed { .. } => Err(text.to_owned()),
+        SmokeVerdict::Unverified { .. } if settings.unverified == Unverified::Fail => Err(format!(
+            "{text}\nsource: {}",
+            origin.describe(UNVERIFIED_KEY)
+        )),
+        SmokeVerdict::Passed | SmokeVerdict::Unverified { .. } => Ok(text.to_owned()),
+    }
+}
+
 /// Cleanup is secondary to the smoke verdict, but a retained binding is never
 /// silent: its warning accompanies a passed smoke and is appended to a failed
 /// one.
@@ -531,7 +607,41 @@ pub(crate) fn run_lifecycle(
     home: &Path,
     args: &cli::Upgrade,
 ) -> Result<SmokeOutcome, String> {
-    let mut warnings = sweep_fixtures(state, home);
+    let roots =
+        crate::roots::child(home, home, state.to_path_buf()).map_err(|error| error.to_string())?;
+    let (settings, origin) = settings(&roots);
+    let root = settings.root();
+    let mut warnings = sweep_fixtures(state, home, &root, settings.sweep_after_hours);
+    let config = BTreeMap::from([
+        (
+            FIXTURE_ROOT_KEY.to_owned(),
+            SmokeParameter {
+                value: root.to_string_lossy().into_owned(),
+                source: origin.describe(FIXTURE_ROOT_KEY),
+            },
+        ),
+        (
+            SWEEP_AFTER_HOURS_KEY.to_owned(),
+            SmokeParameter {
+                value: settings.sweep_after_hours.to_string(),
+                source: origin.describe(SWEEP_AFTER_HOURS_KEY),
+            },
+        ),
+        (
+            BRANCH_PREFIX_KEY.to_owned(),
+            SmokeParameter {
+                value: settings.branch_prefix.clone(),
+                source: origin.describe(BRANCH_PREFIX_KEY),
+            },
+        ),
+        (
+            UNVERIFIED_KEY.to_owned(),
+            SmokeParameter {
+                value: settings.unverified.as_str().to_owned(),
+                source: origin.describe(UNVERIFIED_KEY),
+            },
+        ),
+    ]);
     let nonce = nonce()?;
     let initial = clock.mono_now();
     // Each phase keeps its begin/end reading; skipped phases stay at zero.
@@ -542,18 +652,18 @@ pub(crate) fn run_lifecycle(
     let mut cleanup_phase = (initial, initial);
 
     fixture_phase.0 = clock.mono_now();
-    let commits = create_fixture(state, home, &nonce)?;
+    let commits = create_fixture(state, home, &nonce, &root)?;
     let mut verdict = SmokeVerdict::Passed;
     let host = args
         .host
         .as_deref()
         .filter(|host| !host.is_empty() && !matches!(*host, "local" | "localhost"));
     if let Some(host) = host {
-        match peer_fixture(state, home, host, &nonce, true) {
+        match peer_fixture(state, home, host, &nonce, true, &root) {
             Ok(receipt) => {
                 if let Err(error) = peer_fixture_matches(&receipt, commits) {
-                    let _ = peer_fixture(state, home, host, &nonce, false);
-                    let _ = remove_fixture(state, home, &nonce);
+                    let _ = peer_fixture(state, home, host, &nonce, false, &root);
+                    let _ = remove_fixture(state, home, &nonce, &root);
                     return Err(error);
                 }
             }
@@ -566,14 +676,14 @@ pub(crate) fn run_lifecycle(
                 };
             }
             Err(error) => {
-                let _ = remove_fixture(state, home, &nonce);
+                let _ = remove_fixture(state, home, &nonce, &root);
                 return Err(error);
             }
         }
     }
     fixture_phase.1 = clock.mono_now();
-    let graph = smoke_graph_name();
-    let fixture = fixture_root(home).join(&nonce);
+    let graph = smoke_graph_name(&settings.branch_prefix);
+    let fixture = fixture_root(home, &root).join(&nonce);
     let program = program.as_os_str().to_owned();
     let mut run = vec![
         program.clone(),
@@ -587,7 +697,7 @@ pub(crate) fn run_lifecycle(
         "--name".into(),
         graph.clone().into(),
         "--branch".into(),
-        format!("smoke/{graph}").into(),
+        format!("{}{graph}", settings.branch_prefix).into(),
         "--base".into(),
         commits.head.to_string().into(),
     ];
@@ -597,27 +707,65 @@ pub(crate) fn run_lifecycle(
     if let Some(route) = &args.route {
         run.extend(["--route".into(), route.clone().into()]);
     }
-    let mut diff_base_set = false;
-    let mut fixture_base_set = false;
-    for setting in &args.set {
-        if setting.starts_with("diff_base=") {
-            diff_base_set = true;
+    // Configured parameters are merged under `--set`; a command-line item of
+    // the same key wins. Each effective value carries the layer that chose it.
+    let mut parameters = BTreeMap::new();
+    let cli_keys: std::collections::BTreeSet<&str> = args
+        .set
+        .iter()
+        .map(|item| item.split_once('=').map_or(item.as_str(), |(key, _)| key))
+        .collect();
+    for (key, value) in &settings.set {
+        if !cli_keys.contains(key.as_str()) {
+            parameters.insert(
+                key.clone(),
+                SmokeParameter {
+                    value: value.clone(),
+                    source: format!("config.toml (domains.smoke.set.{key})"),
+                },
+            );
         }
-        if setting.starts_with("fixture_base=") {
-            fixture_base_set = true;
+    }
+    for item in &args.set {
+        if let Some((key, value)) = item.split_once('=') {
+            parameters.insert(
+                key.to_owned(),
+                SmokeParameter {
+                    value: value.to_owned(),
+                    source: "--set".into(),
+                },
+            );
         }
+    }
+    let mut set = settings.merged_set(&args.set);
+    let has = |name: &str| {
+        set.iter()
+            .any(|item| item.split_once('=').is_some_and(|(key, _)| key == name))
+    };
+    if !has("diff_base") {
+        set.push(format!("diff_base={}", commits.head));
+        parameters.insert(
+            "diff_base".to_owned(),
+            SmokeParameter {
+                value: commits.head.to_string(),
+                source: "lifecycle (fixture head)".into(),
+            },
+        );
+    }
+    if !has("fixture_base") {
+        set.push(format!("fixture_base={}", commits.base));
+        parameters.insert(
+            "fixture_base".to_owned(),
+            SmokeParameter {
+                value: commits.base.to_string(),
+                source: "lifecycle (fixture base)".into(),
+            },
+        );
+    }
+    for setting in &set {
         run.extend(["--set".into(), setting.clone().into()]);
     }
-    if !diff_base_set {
-        run.extend(["--set".into(), format!("diff_base={}", commits.head).into()]);
-    }
-    if !fixture_base_set {
-        run.extend([
-            "--set".into(),
-            format!("fixture_base={}", commits.base).into(),
-        ]);
-    }
-    let write_enabled = !args.set.iter().any(|setting| setting == "write=false");
+    let write_enabled = !set.iter().any(|item| item == "write=false");
     let mut output = String::new();
     launch_phase.0 = clock.mono_now();
     let launched = runner.execute(&run, None, 1_048_576, 3600);
@@ -716,14 +864,14 @@ pub(crate) fn run_lifecycle(
     // locator, so remove remotely first and locally afterwards.
     cleanup_phase.0 = clock.mono_now();
     let peer_cleanup = match host {
-        Some(host) => match peer_fixture(state, home, host, &nonce, false) {
+        Some(host) => match peer_fixture(state, home, host, &nonce, false, &root) {
             Ok(_) => Ok(()),
             Err(error) if peer_too_old(&error) => Ok(()),
             Err(error) => Err(error),
         },
         None => Ok(()),
     };
-    let local_cleanup = remove_fixture(state, home, &nonce);
+    let local_cleanup = remove_fixture(state, home, &nonce, &root);
     let cleanup_result = peer_cleanup.and(local_cleanup);
     cleanup_phase.1 = clock.mono_now();
     if matches!(verdict, SmokeVerdict::Unverified { .. }) {
@@ -757,6 +905,8 @@ pub(crate) fn run_lifecycle(
     let outcome = SmokeOutcome {
         verdict,
         phases,
+        parameters,
+        config,
         output,
     };
     report_smoke_cleanup(Ok(outcome), cleanup_result)
@@ -769,10 +919,13 @@ mod tests {
     #[test]
     fn fixture_root_is_home_relative() {
         let home = Path::new("/tmp/provenant-home");
+        let default = provenant_cli::smoke::Settings::default().root();
         assert_eq!(
-            fixture_root(home),
+            fixture_root(home, &default),
             Path::new("/tmp/provenant-home/.local/state/provenant-smoke")
         );
+        let custom = Path::new("scratch/fixtures");
+        assert_eq!(fixture_root(home, custom), home.join(custom));
     }
 
     #[test]
@@ -842,6 +995,14 @@ mod tests {
                     elapsed_ms: 1,
                 })
                 .collect(),
+            parameters: BTreeMap::from([(
+                "write".to_owned(),
+                SmokeParameter {
+                    value: "false".into(),
+                    source: "config.toml (domains.smoke.set.write)".into(),
+                },
+            )]),
+            config: BTreeMap::new(),
             output: "child envelopes".into(),
         };
         let json = outcome.result_json();
@@ -849,6 +1010,11 @@ mod tests {
         assert_eq!(json["row"], "read");
         assert_eq!(json["reason"], "the nonce is missing");
         assert_eq!(json["phases"].as_array().map(Vec::len), Some(5));
+        assert_eq!(json["parameters"]["write"]["value"], "false");
+        assert_eq!(
+            json["parameters"]["write"]["source"],
+            "config.toml (domains.smoke.set.write)"
+        );
         let text = outcome.text();
         assert!(text.starts_with("child envelopes\n"), "{text}");
         assert!(text.contains("\"verdict\":\"failed\""), "{text}");
@@ -889,9 +1055,10 @@ mod tests {
         let state = temp.path().join("state");
         provenant_os::fixture::private_state_dir(&state)?;
         let nonce = "0123456789ab";
-        create_fixture(&state, &home, nonce)?;
+        let root = Settings::default().root();
+        create_fixture(&state, &home, nonce, &root)?;
         let bytes = std::fs::read(
-            fixture_root(&home)
+            fixture_root(&home, &root)
                 .join(nonce)
                 .join(".git")
                 .join("provenant-smoke.json"),
@@ -912,24 +1079,25 @@ mod tests {
         provenant_os::fixture::private_state_dir(&state)?;
         let fresh = "000000000001";
         let stale = "000000000002";
-        create_fixture(&state, &home, fresh)?;
-        create_fixture(&state, &home, stale)?;
-        let marker_path = fixture_root(&home)
+        let root = Settings::default().root();
+        create_fixture(&state, &home, fresh, &root)?;
+        create_fixture(&state, &home, stale, &root)?;
+        let marker_path = fixture_root(&home, &root)
             .join(stale)
             .join(".git")
             .join("provenant-smoke.json");
         let mut marker: FixtureMarker = serde_json::from_slice(&std::fs::read(&marker_path)?)?;
         marker.created_at = WallTime::from_micros(0)?;
         std::fs::write(&marker_path, serde_json::to_string(&marker)?)?;
-        let warnings = sweep_fixtures(&state, &home);
+        let warnings = sweep_fixtures(&state, &home, &root, 24);
         assert!(
             warnings
                 .iter()
                 .any(|warning| warning.contains("removed stale fixture") && warning.contains(stale)),
             "{warnings:?}"
         );
-        assert!(!fixture_root(&home).join(stale).exists());
-        assert!(fixture_root(&home).join(fresh).exists());
+        assert!(!fixture_root(&home, &root).join(stale).exists());
+        assert!(fixture_root(&home, &root).join(fresh).exists());
         Ok(())
     }
 
@@ -941,10 +1109,12 @@ mod tests {
         std::fs::create_dir(&home)?;
         let state = temp.path().join("state");
         provenant_os::fixture::private_state_dir(&state)?;
-        std::fs::create_dir_all(fixture_root(&home))?;
-        let foreign = fixture_root(&home).join("000000000003");
+        let root = Settings::default().root();
+        std::fs::create_dir_all(fixture_root(&home, &root))?;
+        let foreign = fixture_root(&home, &root).join("000000000003");
         std::fs::create_dir(&foreign)?;
-        let (_, warnings) = provenant_records::warning::capture(|| sweep_fixtures(&state, &home));
+        let (_, warnings) =
+            provenant_records::warning::capture(|| sweep_fixtures(&state, &home, &root, 24));
         assert!(
             warnings
                 .iter()
@@ -952,6 +1122,91 @@ mod tests {
             "{warnings:?}"
         );
         assert!(foreign.exists(), "a foreign directory is never removed");
+        Ok(())
+    }
+
+    #[test]
+    fn a_custom_root_fixture_is_forgotten_and_removed() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home)?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let settings = Settings {
+            fixture_root: "scratch/fixtures".into(),
+            ..Settings::default()
+        };
+        let root = settings.root();
+        let nonce = "0123456789ab";
+        create_fixture(&state, &home, nonce, &root)?;
+        let fixture = fixture_root(&home, &root).join(nonce);
+        assert!(fixture.exists());
+        std::fs::write(fixture.join("smoke.txt"), "written\n")?;
+        let location = provenant_config::ProjectLocation::new(fixture.join(".git"))?;
+        remove_fixture(&state, &home, nonce, &root)?;
+        assert!(!fixture.exists(), "the fixture directory is removed");
+        assert!(
+            provenant_config::lookup_project(
+                &crate::roots::child(&home, &home, state.clone())?,
+                &location
+            )?
+            .is_none(),
+            "the fixture binding is forgotten"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unverified_exit_policy_is_configurable_and_sourced() {
+        let origin = SmokeOrigin::compiled(Default::default());
+        let unverified = SmokeVerdict::Unverified {
+            reason: "peer below protocol".into(),
+        };
+        let warn = Settings::default();
+        assert!(verdict_exit(&unverified, "report", &warn, &origin).is_ok());
+        let fail = Settings {
+            unverified: Unverified::Fail,
+            ..Settings::default()
+        };
+        let error = verdict_exit(&unverified, "report", &fail, &origin)
+            .expect_err("fail makes an unverified result an error");
+        assert!(error.contains("report"), "{error}");
+        assert!(error.contains(UNVERIFIED_KEY), "{error}");
+        assert!(verdict_exit(&SmokeVerdict::Passed, "report", &fail, &origin).is_ok());
+        assert!(
+            verdict_exit(
+                &SmokeVerdict::Failed {
+                    row: "read".into(),
+                    reason: "no nonce".into()
+                },
+                "report",
+                &warn,
+                &origin
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_zero_sweep_window_leaves_expired_fixtures_in_place()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home)?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let root = Settings::default().root();
+        let nonce = "000000000004";
+        create_fixture(&state, &home, nonce, &root)?;
+        let marker_path = fixture_root(&home, &root)
+            .join(nonce)
+            .join(".git")
+            .join("provenant-smoke.json");
+        let mut marker: FixtureMarker = serde_json::from_slice(&std::fs::read(&marker_path)?)?;
+        marker.created_at = WallTime::from_micros(0)?;
+        std::fs::write(&marker_path, serde_json::to_string(&marker)?)?;
+        assert!(sweep_fixtures(&state, &home, &root, 0).is_empty());
+        assert!(fixture_root(&home, &root).join(nonce).exists());
         Ok(())
     }
 }

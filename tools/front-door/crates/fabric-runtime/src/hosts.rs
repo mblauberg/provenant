@@ -490,17 +490,25 @@ pub enum PeerAction {
 /// Fixture operations are fenced independently of the base peer protocol.
 /// `recipe` versions the deterministic fixture identity; peers echo the value
 /// they actually built so recipe drift cannot masquerade as the same fixture.
+/// `root` is the initiator's home-relative fixture root; the peer validates it
+/// and uses it for both creation and removal so the two hosts build one fixture.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum SmokeFixtureOp {
-    Create { nonce: String, recipe: u32 },
-    Remove { nonce: String },
+    Create {
+        nonce: String,
+        recipe: u32,
+        root: String,
+    },
+    Remove {
+        nonce: String,
+    },
 }
 
 peer_feature_protocols! {
     SMOKE_FIXTURE_PROTOCOL = 16 => [
         (SmokeFixture, "smoke_fixture", PeerAction::SmokeFixture {
-            extra: Default::default(), op: SmokeFixtureOp::Create { nonce: "0".repeat(12), recipe: 1 },
+            extra: Default::default(), op: SmokeFixtureOp::Create { nonce: "0".repeat(12), recipe: 1, root: ".local/state/provenant-smoke".into() },
         }),
     ],
     OUTPUT_AUDIENCE_PROTOCOL = 15 => [

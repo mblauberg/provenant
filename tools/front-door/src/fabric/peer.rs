@@ -1,6 +1,9 @@
 use super::*;
 use provenant_fabric_runtime::runs::SubmissionReceipt;
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 fn console_tree_command(
     max_depth: u64,
@@ -637,14 +640,20 @@ pub fn peer(
         let common = request.project.resolve(&home)?;
         // A Create request names a fixture that does not exist on this host
         // yet. Build and bind it before project-root preparation needs it;
-        // Remove still sees it until its own arm deletes it. The locator's
-        // home-relative path is the only authority for the fixture location.
+        // Remove still sees it until its own arm deletes it. The root is
+        // validated on both sides: an absolute or `..` root is a real removal
+        // boundary and is refused here rather than ever reaching `remove_dir`.
+        let mut smoke_remove_root: Option<PathBuf> = None;
         let smoke_created = match &request.action {
             PeerAction::SmokeFixture {
-                op: SmokeFixtureOp::Create { nonce, .. },
+                op: SmokeFixtureOp::Create { nonce, root, .. },
                 ..
             } => {
-                let expected = crate::smoke::fixture_root(&home).join(nonce).join(".git");
+                let root =
+                    provenant_cli::smoke::validate_root(root).map_err(|_| PeerError::Project)?;
+                let expected = crate::smoke::fixture_root(&home, &root)
+                    .join(nonce)
+                    .join(".git");
                 if common != expected {
                     return Err(PeerError::Project.into());
                 }
@@ -652,16 +661,32 @@ pub fn peer(
                     host.roots.state.as_path(),
                     &home,
                     nonce,
+                    &root,
                 )?)
             }
             PeerAction::SmokeFixture {
                 op: SmokeFixtureOp::Remove { nonce },
                 ..
             } => {
-                let expected = crate::smoke::fixture_root(&home).join(nonce).join(".git");
+                // Remove carries no root: derive it from the home-relative
+                // locator path, which ProjectLocator::resolve already proved
+                // has only normal components, then apply the same validator.
+                let fixture_dir = common
+                    .parent()
+                    .and_then(Path::parent)
+                    .ok_or(PeerError::Project)?;
+                let relative = fixture_dir
+                    .strip_prefix(&home)
+                    .map_err(|_| PeerError::Project)?;
+                let root = provenant_cli::smoke::validate_root(&relative.to_string_lossy())
+                    .map_err(|_| PeerError::Project)?;
+                let expected = crate::smoke::fixture_root(&home, &root)
+                    .join(nonce)
+                    .join(".git");
                 if common != expected {
                     return Err(PeerError::Project.into());
                 }
+                smoke_remove_root = Some(root);
                 None
             }
             _ => None,
@@ -744,8 +769,9 @@ pub fn peer(
                         },
                         None => refused(),
                     },
-                    SmokeFixtureOp::Remove { nonce } => {
-                        match crate::smoke::remove_fixture(state, &home, nonce) {
+                    SmokeFixtureOp::Remove { nonce } => match smoke_remove_root.as_deref() {
+                        Some(root) => match crate::smoke::remove_fixture(state, &home, nonce, root)
+                        {
                             Ok(()) => PeerResult::SmokeFixture {
                                 data: SmokeFixtureReceipt {
                                     extra: Default::default(),
@@ -757,8 +783,9 @@ pub fn peer(
                                 extra: Default::default(),
                             },
                             Err(_) => refused(),
-                        }
-                    }
+                        },
+                        None => refused(),
+                    },
                 }
             }
             PeerAction::Inbox { input, .. } => {
