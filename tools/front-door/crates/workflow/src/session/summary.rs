@@ -107,6 +107,11 @@ fn heading(line: &str) -> Option<(usize, &str)> {
     Some((level, trimmed[level..].trim()))
 }
 
+/// The H1 of the empty console checkpoint template. It is a placeholder, not
+/// an author-supplied title, so it must not become a chair's summary line when
+/// the checkpoint has no Intent, Goal or Done section.
+const TEMPLATE_TITLE: &str = "console checkpoint";
+
 /// Derive one short line from a saved checkpoint without a model call.
 /// `Intent`, then `Goal`, then `Done` win over the title; the first meaningful
 /// line of the first matching section is used. Frontmatter and fenced code are
@@ -148,7 +153,7 @@ pub fn checkpoint_summary_line(markdown: &str) -> Option<SummaryLine> {
                 }
                 _ => section = None,
             }
-            if level == 1 && title.is_none() {
+            if level == 1 && title.is_none() && !text.eq_ignore_ascii_case(TEMPLATE_TITLE) {
                 title = meaningful_line(text);
             }
             continue;
@@ -896,10 +901,22 @@ mod tests {
 
     #[test]
     fn checkpoint_summary_line_falls_back_to_title() {
-        let line = checkpoint_summary_line("# Console checkpoint\n\nBody\n").unwrap();
-        assert_eq!(line.text, "Console checkpoint");
+        let line = checkpoint_summary_line("# Review the console\n\nBody\n").unwrap();
+        assert_eq!(line.text, "Review the console");
         assert_eq!(line.source, SummarySource::Title);
         assert!(checkpoint_summary_line("legacy checkpoint\n").is_none());
+    }
+
+    #[test]
+    fn checkpoint_summary_line_skips_the_template_title() {
+        // An untouched template carries no author intent: its H1 is not a
+        // summary. A real title with the same words in a section still wins.
+        assert!(checkpoint_summary_line("# Console checkpoint\n\nBody\n").is_none());
+        let line =
+            checkpoint_summary_line("# Console checkpoint\n\n## Intent\nKeep the console useful\n")
+                .unwrap();
+        assert_eq!(line.text, "Keep the console useful");
+        assert_eq!(line.source, SummarySource::Intent);
     }
 
     #[test]

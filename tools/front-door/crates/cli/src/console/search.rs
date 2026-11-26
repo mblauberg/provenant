@@ -111,9 +111,10 @@ pub(super) fn read(
                     Ok(Some(bytes)) => bytes,
                     Ok(None) => continue,
                     Err(error) => {
-                        artifact_errors.push(
-                            json!({"attempt_id":attempt.attempt_id,"reason":error.to_string()}),
-                        );
+                        artifact_errors.push(super::projection::search_artifact_error(
+                            &json!(attempt.attempt_id),
+                            &error.to_string(),
+                        ));
                         continue;
                     }
                 };
@@ -138,14 +139,25 @@ pub(super) fn read(
                 let start = match_position.saturating_sub(SNIPPET_CHARS / 3);
                 let snippet: String = chars.iter().skip(start).take(SNIPPET_CHARS).collect();
                 let key = &attempt.key;
-                matches.push(json!({"lane_id":{"host":null,"project_id":attempt.project_id,"key":key,"attempt_id":attempt.attempt_id},"part":part,"snippet":snippet,"artifact_bytes":expected_bytes}));
+                let lane_id = super::projection::lane_id(
+                    &Value::Null,
+                    &serde_json::to_value(attempt.project_id).map_err(|_| Error::Encode)?,
+                    &serde_json::to_value(key).map_err(|_| Error::Encode)?,
+                    &serde_json::to_value(attempt.attempt_id).map_err(|_| Error::Encode)?,
+                );
+                matches.push(super::projection::search_match(
+                    &lane_id,
+                    part,
+                    &snippet,
+                    expected_bytes,
+                ));
             }
             if page.next.is_none() {
                 break;
             }
         }
     }
-    let snapshot = digest(&(
+    let snapshot = super::projection::search_snapshot(
         query,
         part,
         session,
@@ -153,7 +165,8 @@ pub(super) fn read(
         scanned,
         scan_bytes,
         truncated,
-    ))?;
+    )
+    .map_err(|_| Error::Encode)?;
     let offset = if let Some(cursor) = cursor {
         let (found_snapshot, found_offset, checksum) = cursor
             .split_once('.')
@@ -182,9 +195,20 @@ pub(super) fn read(
     } else {
         None
     };
-    Ok(
-        json!({"schema_version":1,"snapshot":snapshot,"query":query,"part":part,"matches":&matches[offset..end],"next_cursor":next_cursor,"truncated":truncated || end < matches.len(),"coverage":{"scope":"local","peers":"not_searched","files_scanned":scanned,"bytes_scanned":scan_bytes,"file_limit":FILE_LIMIT,"per_artifact_bytes":ARTIFACT_BYTES,"total_bytes":TOTAL_BYTES,"artifact_errors":artifact_errors,"restart":"If the cursor is invalid or stale, restart with the same query and filters without --cursor."}}),
-    )
+    Ok(super::projection::search(
+        &snapshot,
+        query,
+        part,
+        &matches[offset..end],
+        next_cursor.as_deref(),
+        truncated || end < matches.len(),
+        scanned,
+        scan_bytes,
+        &artifact_errors,
+        FILE_LIMIT,
+        ARTIFACT_BYTES,
+        TOTAL_BYTES,
+    ))
 }
 
 #[cfg(test)]
@@ -278,6 +302,10 @@ mod tests {
         );
         let result = read(&roots, "searchable", "prompt", None, 100, None)?;
         assert!(result["coverage"]["files_scanned"].as_u64().unwrap() > 0);
+        assert_eq!(
+            result["matches"][0]["lane_id"]["project_id"],
+            json!(binding.project_id())
+        );
         assert!(result["matches"][0]["lane_id"]["key"].is_object());
         assert!(result["matches"][0]["lane_id"].get("run_id").is_none());
         assert!(result["matches"][0]["lane_id"].get("task_id").is_none());

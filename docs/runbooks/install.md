@@ -224,7 +224,9 @@ is still installed and the previous app is left untouched.
 Set `PROVENANT_APPS_DIR` to an absolute directory to keep the app somewhere
 other than `~/Applications`; install, upgrade, doctor and the installer all
 honour it. LaunchServices opens the console by bundle identifier regardless of
-the directory.
+the directory. When the directory moves, the installer warns if a bundle is
+still in `~/Applications`: it never removes the old bundle without the owner's
+say-so, but a leftover can still be launched and may be stale.
 
 ### Test a candidate binary
 
