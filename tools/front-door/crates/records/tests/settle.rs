@@ -63,7 +63,7 @@ fn base(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> Settlemen
             terminal_note: None,
             signals: vec![],
             denial: None,
-            stopped_handoff: None,
+            host_handoff: None,
         },
         handoff: DeclarationEvidence::Missing,
         declarations: DeclarationCounts::default(),
@@ -505,7 +505,7 @@ fn pushed_head_and_uncommitted_paths_are_not_settlement_evidence() {
 #[test]
 fn a_host_stop_records_a_host_handoff_source() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::ReviewRequired, None);
-    evidence.host.stopped_handoff = Some(handoff(
+    evidence.host.host_handoff = Some(handoff(
         HandoffStatus::StoppedEarly,
         "the host stopped this attempt",
     ));

@@ -62,7 +62,7 @@ pub struct HostFacts {
     pub terminal_note: Option<String>,
     pub signals: Vec<SettlementSignal>,
     pub denial: Option<String>,
-    pub stopped_handoff: Option<Handoff>,
+    pub host_handoff: Option<Handoff>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,7 +180,7 @@ impl SettlementEvidence {
                 terminal_note: None,
                 signals: vec![],
                 denial: None,
-                stopped_handoff: None,
+                host_handoff: None,
             },
             handoff: DeclarationEvidence::Missing,
             declarations: DeclarationCounts::default(),

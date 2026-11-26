@@ -2838,7 +2838,7 @@ fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std
         }),
     );
     if matches!(case, BudgetStopCase::WrapUpBlocked) {
-        let mut blocked = stopped_handoff(None, "Owner decision required before continuing.");
+        let mut blocked = host_handoff(None, "Owner decision required before continuing.");
         blocked.status = provenant_records::handoff::HandoffStatus::Blocked;
         fake.answer = Some(blocked.fenced());
     }

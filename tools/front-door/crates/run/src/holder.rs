@@ -2822,7 +2822,7 @@ impl RunStore {
         let mut uncommitted: Option<String> = None;
         let mut uncommitted_paths: Vec<String> = Vec::new();
         let mut primary = provenant_records::settlement::PrimaryCheckout::NotChecked;
-        let mut stopped_handoff: Option<provenant_records::handoff::Handoff> = None;
+        let mut host_handoff: Option<provenant_records::handoff::Handoff> = None;
         // A late request alone cannot invalidate a verified clean exit. If the
         // current guardian could not establish ordering, its receipt stays unknown.
         let steered = exit.stop_reason == Some(StopReason::Steered)
@@ -3133,7 +3133,7 @@ impl RunStore {
             && handoff_error.is_none()
         {
             decoded.outcome = Outcome::ReviewRequired;
-            let stopped = stopped_handoff(
+            let stopped = host_handoff(
                 handoff.take(),
                 "Token target crossed; a same-session budget wrap-up is pending.",
             );
@@ -3143,7 +3143,7 @@ impl RunStore {
             }
             decoded.result = stopped.fenced();
             decoded.complete = true;
-            stopped_handoff = Some(stopped);
+            host_handoff = Some(stopped);
             decoded.reason = Some(if blocked {
                 "token budget crossed; the writer's handoff is blocked, so read its blocked_on and note before continuing".into()
             } else {
@@ -3653,7 +3653,7 @@ impl RunStore {
             decoded.outcome = Outcome::ReviewRequired;
             decoded.cause = Some(CauseKind::ContextHandoff);
             decoded.reason = Some(CauseKind::ContextHandoff.detail().into());
-            stopped_handoff = Some(stopped);
+            host_handoff = Some(stopped);
         }
         // A writer whose launch-time token copy was lost settles the same way:
         // a declared stop on its latest handoff, continued on a new token. The
@@ -3665,7 +3665,7 @@ impl RunStore {
             && task.writer.is_some()
             && !cancelled
         {
-            let stopped = stopped_handoff(
+            let stopped = host_handoff(
                 handoff.take(),
                 "The lane's access token was lost before it recorded a progress handoff; inspect the branch and worktree.",
             );
@@ -3675,7 +3675,7 @@ impl RunStore {
             );
             decoded.complete = true;
             decoded.outcome = Outcome::ReviewRequired;
-            stopped_handoff = Some(stopped);
+            host_handoff = Some(stopped);
         }
         let answer_limit = RESULT_LIMIT as usize;
         if decoded.result.len() > answer_limit {
@@ -3772,7 +3772,7 @@ impl RunStore {
                 denial: denial
                     .as_ref()
                     .map(|denial| denial.diagnostic().to_string()),
-                stopped_handoff: stopped_handoff.clone(),
+                host_handoff: host_handoff.clone(),
             },
             handoff: declared,
             declarations: declaration_counts,
@@ -4009,7 +4009,7 @@ pub(crate) fn seal_manifest(
 fn context_handoff(
     progress: Option<provenant_records::handoff::Handoff>,
 ) -> provenant_records::handoff::Handoff {
-    stopped_handoff(
+    host_handoff(
         progress,
         "Stopped at the context handoff threshold before the lane recorded a progress handoff; inspect the branch and worktree.",
     )
@@ -4017,7 +4017,7 @@ fn context_handoff(
 
 /// The lane's latest unfinished progress handoff, or a stopped-early one
 /// carrying `missing` when it recorded none.
-fn stopped_handoff(
+fn host_handoff(
     progress: Option<provenant_records::handoff::Handoff>,
     missing: &str,
 ) -> provenant_records::handoff::Handoff {

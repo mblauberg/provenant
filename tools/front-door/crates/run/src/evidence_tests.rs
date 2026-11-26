@@ -31,7 +31,7 @@ fn evidence(pinned: Option<GitOid>, head: Option<GitOid>) -> SettlementEvidence 
             terminal_note: None,
             signals: vec![],
             denial: None,
-            stopped_handoff: None,
+            host_handoff: None,
         },
         handoff: DeclarationEvidence::Missing,
         declarations: Default::default(),

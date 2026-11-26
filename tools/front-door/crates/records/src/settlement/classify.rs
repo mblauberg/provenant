@@ -271,7 +271,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
 
     // 5. A host-synthesised stop outranks a declaration; otherwise the last
     // accepted journal line is the declaration, the rejected lines its error.
-    let stopped = host.stopped_handoff.clone();
+    let stopped = host.host_handoff.clone();
     let declaration: HandoffResult = match &stopped {
         Some(handoff) => Ok(Some(handoff.clone())),
         None => match &evidence.handoff {

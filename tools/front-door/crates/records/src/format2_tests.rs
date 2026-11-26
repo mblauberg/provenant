@@ -420,7 +420,7 @@ fn evidence_for(
             terminal_note: None,
             signals: vec![],
             denial: None,
-            stopped_handoff: None,
+            host_handoff: None,
         },
         handoff: crate::declaration::DeclarationEvidence::Missing,
         declarations: Default::default(),
