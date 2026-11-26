@@ -1133,8 +1133,10 @@ fn project_delivery_receipt(
     // Push delivery needs a named remote; the integrate cases keep the
     // local destination the integration fixture uses.
     let remote = match &mode {
-        provenant_records::run::DeliveryMode::Integrate(_) => String::new(),
-        _ => "origin".into(),
+        provenant_records::run::DeliveryMode::Integrate(_) => {
+            provenant_records::run::Destination::Local
+        }
+        _ => provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
     };
     input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
@@ -1177,13 +1179,13 @@ fn project_delivery_receipt(
 
 fn delivered_receipt(
     branch: &str,
-    remote: &str,
+    remote: provenant_records::run::Destination,
     head: provenant_core::GitOid,
 ) -> WriterDeliveryReceipt {
     WriterDeliveryReceipt {
         extra: Default::default(),
         schema_version: 1,
-        remote: provenant_records::run::Destination::from_name(remote).expect("fixture remote"),
+        remote,
         branch: branch.into(),
         head: Some(head),
         review_acceptance: None,
@@ -1201,7 +1203,13 @@ fn delivered_receipt(
 fn delivery_receipt_with_wrong_branch_is_not_projected() -> TestResult {
     let (projected, delivered) = project_delivery_receipt(
         provenant_records::run::DeliveryMode::Integrate("batch/next".into()),
-        |base, _| delivered_receipt("another-branch", "", base),
+        |base, _| {
+            delivered_receipt(
+                "another-branch",
+                provenant_records::run::Destination::Local,
+                base,
+            )
+        },
     )?;
     assert!(matches!(
         projected,
@@ -1219,7 +1227,14 @@ fn delivery_receipt_with_wrong_branch_is_not_projected() -> TestResult {
 fn delivery_receipt_with_wrong_remote_is_not_projected() -> TestResult {
     let (projected, delivered) = project_delivery_receipt(
         provenant_records::run::DeliveryMode::Integrate("batch/next".into()),
-        |base, _| delivered_receipt("batch/next", "another-remote", base),
+        |base, _| {
+            delivered_receipt(
+                "batch/next",
+                provenant_records::run::Destination::from_name("another-remote")
+                    .expect("fixture remote"),
+                base,
+            )
+        },
     )?;
     assert!(matches!(
         projected,
@@ -1243,7 +1258,11 @@ fn failed_delivery_receipt_is_not_projected_as_delivered() -> TestResult {
                 stage: WriterDeliveryStage::Integrate,
                 reason: Some("integration_conflict".into()),
             },
-            ..delivered_receipt("batch/next", "", base)
+            ..delivered_receipt(
+                "batch/next",
+                provenant_records::run::Destination::Local,
+                base,
+            )
         },
     )?;
     assert!(matches!(
@@ -1264,7 +1283,13 @@ fn failed_delivery_receipt_is_not_projected_as_delivered() -> TestResult {
 fn push_delivery_receipt_with_different_head_is_not_projected() -> TestResult {
     let (projected, delivered) = project_delivery_receipt(
         provenant_records::run::DeliveryMode::Push,
-        |_, integrated| delivered_receipt("batch/next", "origin", integrated),
+        |_, integrated| {
+            delivered_receipt(
+                "batch/next",
+                provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
+                integrated,
+            )
+        },
     )?;
     assert!(matches!(
         projected,
