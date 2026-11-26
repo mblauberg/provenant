@@ -101,10 +101,19 @@ fn wait_for_chair_ingest(rig: &TestRig) -> Result {
         Duration::from_secs(30),
         || stored_rows(rig).unwrap_or_default(),
         |text| {
-            text.lines()
+            let rows: Vec<Value> = text
+                .lines()
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .count()
-                >= 2
+                .collect();
+            // Wait for this fixture's two transcript messages, not just any two
+            // rows, so the fixture cannot pass on unrelated stored data.
+            rows.len() >= 2
+                && rows
+                    .iter()
+                    .any(|row| row["message"] == "m1" && row["output"] == 1_000_000)
+                && rows
+                    .iter()
+                    .any(|row| row["message"] == "m2" && row["output"] == 1_500_000)
         },
     )
     .map(|_| ())
