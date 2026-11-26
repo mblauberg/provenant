@@ -110,12 +110,12 @@
     },
     "retry_of": null,
     "reviewer": {
-      "actor_id": "unknown",
+      "actor_id": "2397e8a2d23f72cef6c203f72b38e6ea",
       "family": "unknown",
       "model": "unknown",
       "provenance": "unknown"
     },
-    "reviewer_provenance": "Reviewer provenance: unknown, actor unknown, model unknown, family unknown",
+    "reviewer_provenance": "Reviewer provenance: unknown, actor 2397e8a2d23f72cef6c203f72b38e6ea, model unknown, family unknown",
     "role": "reviewer",
     "runtime_deadline": null,
     "settlement": {
@@ -130,7 +130,7 @@
     "superseded_by": null,
     "tail_clamped": false,
     "tail_lines": 1,
-    "tail_text": "Reviewer provenance: unknown, actor unknown, model unknown, family unknown",
+    "tail_text": "Reviewer provenance: unknown, actor 2397e8a2d23f72cef6c203f72b38e6ea, model unknown, family unknown\n",
     "title": "Receipt fixture",
     "transcript": null,
     "usage": {

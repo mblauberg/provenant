@@ -223,7 +223,7 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(receiptTail["tail_clamped"] as? Bool, false)
         XCTAssertEqual(
             receiptTail["tail_text"] as? String,
-            "Reviewer provenance: unknown, actor unknown, model unknown, family unknown"
+            "Reviewer provenance: unknown, actor 2397e8a2d23f72cef6c203f72b38e6ea, model unknown, family unknown\n"
         )
 
         let resultWritten = try data("output-result-written")

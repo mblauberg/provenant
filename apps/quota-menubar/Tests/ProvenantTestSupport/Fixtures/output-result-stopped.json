@@ -17,7 +17,6 @@
       "basis": "attempt",
       "counted": 742,
       "limit": 1000,
-      "notice": null,
       "reported_input": 801,
       "source": "host",
       "unit": "fresh_tokens",
@@ -64,7 +63,7 @@
     "protected_paths": [],
     "queued_at": "2026-11-02T01:57:31.075623Z",
     "read_only_writable": [],
-    "reason": "the lane was cancelled; inspect its result and local evidence",
+    "reason": "the lane was cancelled; inspect its status before taking further action",
     "recorded_state": null,
     "requested_route": {
       "effort": "high",
@@ -116,7 +115,7 @@
     "retry_of": null,
     "runtime_deadline": null,
     "settlement": {
-      "reason": "the lane was cancelled; inspect its result and local evidence"
+      "reason": "the lane was cancelled; inspect its status before taking further action"
     },
     "settlement_class": null,
     "signals": [],
