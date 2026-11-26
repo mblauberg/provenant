@@ -1919,6 +1919,17 @@ fn continuation_and_land_wiring_is_checked_before_launch() {
 }
 
 #[test]
+fn an_unresolved_continues_error_lists_the_upstream_writers() {
+    let mut value = json!({"schema_version":1, "graph_id":"g-land", "nodes":nodes("routine")});
+    value["nodes"][2]["continues"] = json!("missing");
+    let document: GraphDocument = serde_json::from_value(value).unwrap();
+    let error = document
+        .validate(&crate::config::GraphLimits::default())
+        .unwrap_err();
+    assert!(error.to_string().contains("candidates: write"), "{error}");
+}
+
+#[test]
 fn a_loop_body_cannot_land() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"g-land", "nodes":[

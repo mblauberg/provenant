@@ -13,7 +13,15 @@ owns the rules. Everything below is overridable in the selected state's
 `provenant route list` shows model sources and pools, and `provenant route resolve
 NAME` previews a choice with its sources. `provenant route --help` lists the
 commands that change pools or exclude a route. Readiness can change after the
-preview, so read the attempt record for the resolved route.
+preview, so read the attempt record for the resolved route. `provenant run --file
+delivery.toml --explain` adds a `node_routes` row per launchable node: adapter, model
+and effort with the source of each (`node field`, `policy`, `pool` or `default`). A
+pool lists each candidate's model, adapter and effective effort with per-value
+sources, rather than a pick, because the weighted draw, account and credential
+decision are made at launch; a node-level effort overrides each candidate's
+pool effort. Model-less adapter routes show the provider as `adapter` and keep
+the configured entry name in `route_name`. Check those rows before submitting
+a graph that depends on pool routing.
 
 ## Pacing
 

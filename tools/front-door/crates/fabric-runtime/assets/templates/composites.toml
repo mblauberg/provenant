@@ -230,6 +230,6 @@ nodes = [
 max_repair_cycles = { type = "integer", default = 3, min = 1 }
 worktree = { type = "string", default = "" }
 write_scope = { type = "list", default = [] }
-writer = { type = "string", default = "" }
+writer = { type = "string", default = "", doc = "Delivering writer to continue; an authored id resolves to its expanded node id" }
 lenses = { type = "list", default = ["correctness", "security", "tests", "contract", "design", "adversarial"], min = 1 }
 integration_branch = { type = "string", default = "" }
