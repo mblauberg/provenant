@@ -1595,7 +1595,7 @@ fn tick_reports_corrupt_checkpoints_once_until_bytes_change_or_retired() {
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     // Keep the stored checkpoint valid: only the bytes are corrupted below, so
     // a tick must report a decode failure, not a quarantined bad checkpoint.
-    let mut fixture: StoredCheckpoint = stored_fixture();
+    let fixture: StoredCheckpoint = stored_fixture();
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
