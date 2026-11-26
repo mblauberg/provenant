@@ -183,15 +183,18 @@ pub(super) fn read_inner(
                 let parents = json!({"dispatch":parents.0,"continuation":parents.1});
                 let operation = serde_json::to_value(&lane.operation).map_err(|_| Error::Encode)?;
                 nodes.push(super::projection::tree_node(
-                    &lane_id,
-                    depth,
-                    &serde_json::to_value(owner_attempt).map_err(|_| Error::Encode)?,
-                    include_store_path.then_some(store_path.as_str()),
-                    &usage,
-                    &parents,
-                    &operation,
-                    &projected,
-                    &[],
+                    super::projection::TreeNodeInput {
+                        lane_id: &lane_id,
+                        depth,
+                        store_parent_attempt: &serde_json::to_value(owner_attempt)
+                            .map_err(|_| Error::Encode)?,
+                        store_path: include_store_path.then_some(store_path.as_str()),
+                        usage: &usage,
+                        parents: &parents,
+                        operation: &operation,
+                        attempt: &projected,
+                        children: &[],
+                    },
                 ));
             }
             match page.next {

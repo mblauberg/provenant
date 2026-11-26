@@ -225,18 +225,20 @@ pub(super) fn read(
             let wait = serde_json::to_value(waits.iter().find(|w| w.attempt_id == attempt_id))
                 .map_err(|_| Error::Encode)?;
             lanes.push(super::projection::board_lane(
-                &lane_id,
-                &chair,
-                &operation,
-                &attempt,
-                &wait,
-                attention,
-                &known,
-                &missing,
-                if observed.contains(&attempt_id) {
-                    "complete"
-                } else {
-                    "unavailable"
+                super::projection::BoardLaneInput {
+                    lane_id: &lane_id,
+                    chair: &chair,
+                    operation: &operation,
+                    attempt: &attempt,
+                    wait: &wait,
+                    attention,
+                    known: &known,
+                    missing: &missing,
+                    observation: if observed.contains(&attempt_id) {
+                        "complete"
+                    } else {
+                        "unavailable"
+                    },
                 },
             ));
         }

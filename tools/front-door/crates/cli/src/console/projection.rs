@@ -48,35 +48,63 @@ pub fn overview_needs_you(
         "project_id":project_id,"project_label":project_label})
 }
 
+/// Inputs for one board lane, including owner metadata and census coverage.
+pub struct BoardLaneInput<'a> {
+    pub lane_id: &'a Value,
+    pub chair: &'a Value,
+    pub operation: &'a Value,
+    pub attempt: &'a Value,
+    pub wait: &'a Value,
+    pub attention: bool,
+    pub known: &'a [&'a str],
+    pub missing: &'a [&'a str],
+    pub observation: &'a str,
+}
+
 /// One board lane, including the owner operation metadata and census coverage.
-pub fn board_lane(
-    lane_id: &Value,
-    chair: &Value,
-    operation: &Value,
-    attempt: &Value,
-    wait: &Value,
-    attention: bool,
-    known: &[&str],
-    missing: &[&str],
-    observation: &str,
-) -> Value {
+pub fn board_lane(input: BoardLaneInput<'_>) -> Value {
+    let BoardLaneInput {
+        lane_id,
+        chair,
+        operation,
+        attempt,
+        wait,
+        attention,
+        known,
+        missing,
+        observation,
+    } = input;
     json!({"lane_id":lane_id,"chair":chair,"metadata":{"operation":operation,"attempt":attempt},
         "wait":wait,"attention":attention,"usage_coverage":{"known":known,"missing":missing},
         "observation_coverage":observation})
 }
 
+/// Inputs for one tree node with derived display fields beside the source record.
+pub struct TreeNodeInput<'a> {
+    pub lane_id: &'a Value,
+    pub depth: u64,
+    pub store_parent_attempt: &'a Value,
+    pub store_path: Option<&'a str>,
+    pub usage: &'a Value,
+    pub parents: &'a Value,
+    pub operation: &'a Value,
+    pub attempt: &'a Value,
+    pub children: &'a [Value],
+}
+
 /// One tree node with all derived display fields kept beside the source record.
-pub fn tree_node(
-    lane_id: &Value,
-    depth: u64,
-    store_parent_attempt: &Value,
-    store_path: Option<&str>,
-    usage: &Value,
-    parents: &Value,
-    operation: &Value,
-    attempt: &Value,
-    children: &[Value],
-) -> Value {
+pub fn tree_node(input: TreeNodeInput<'_>) -> Value {
+    let TreeNodeInput {
+        lane_id,
+        depth,
+        store_parent_attempt,
+        store_path,
+        usage,
+        parents,
+        operation,
+        attempt,
+        children,
+    } = input;
     let mut node = json!({"lane_id":lane_id,"depth":depth,
         "store_parent_attempt":store_parent_attempt,"usage":usage,"parents":parents,
         "metadata":{"operation":operation,"attempt":attempt},"children":children,
@@ -476,26 +504,6 @@ pub fn search_snapshot(
     .map_err(|error| error.to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn overview_lane_accepts_borrowed_labels_and_preserves_missing_title() {
-        let lane = overview_lane(
-            &json!("01010101010101010101010101010101"),
-            "provenant",
-            &json!({"graph":"fixture","node":"task","attempt":1}),
-            &Option::<String>::None,
-            &json!({"attempt_id":"fixture","state":"queued"}),
-            &Value::Null,
-            false,
-        );
-
-        assert_eq!(lane["task_label"], Value::Null);
-    }
-}
-
 /// `output` data for one artifact byte range. The attempt identity and state
 /// are already projected by the run owner; this assembles the response.
 #[allow(clippy::too_many_arguments)]
@@ -529,4 +537,46 @@ pub fn output(
         "digest": digest,
         "bytes": bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn board_lane_projection_keeps_owner_fields_and_coverage_together() {
+        let lane = board_lane(BoardLaneInput {
+            lane_id: &json!({"attempt_id":"attempt-1"}),
+            chair: &json!({"session_id":"session-1"}),
+            operation: &json!({"name":"review"}),
+            attempt: &json!({"state":"running"}),
+            wait: &Value::Null,
+            attention: true,
+            known: &["input"],
+            missing: &["output"],
+            observation: "complete",
+        });
+
+        assert_eq!(lane["lane_id"]["attempt_id"], "attempt-1");
+        assert_eq!(lane["metadata"]["operation"]["name"], "review");
+        assert_eq!(lane["metadata"]["attempt"]["state"], "running");
+        assert_eq!(lane["usage_coverage"]["known"][0], "input");
+        assert_eq!(lane["usage_coverage"]["missing"][0], "output");
+        assert_eq!(lane["observation_coverage"], "complete");
+    }
+
+    #[test]
+    fn overview_lane_accepts_borrowed_labels_and_preserves_missing_title() {
+        let lane = overview_lane(
+            &json!("01010101010101010101010101010101"),
+            "provenant",
+            &json!({"graph":"fixture","node":"task","attempt":1}),
+            &Option::<String>::None,
+            &json!({"attempt_id":"fixture","state":"queued"}),
+            &Value::Null,
+            false,
+        );
+
+        assert_eq!(lane["task_label"], Value::Null);
+    }
 }

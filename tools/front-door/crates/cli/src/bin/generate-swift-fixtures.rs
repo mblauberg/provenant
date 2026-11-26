@@ -461,11 +461,17 @@ mod fixtures {
                 let tree_lane_id = p::lane_id(
                     &Value::Null, &project_id, &lane_key(graph, node, *attempt_number, id)["key"], &json!(id),
                 );
-                Ok(p::tree_node(
-                    &tree_lane_id, *depth, &Value::Null, None,
-                    &json!({"tokens":{"input":null,"cache_read":null,"cache_write":null,"cache_write_1h":null,"output":null,"reasoning":null},"source":"stream","context_basis_points":null}),
-                    &parents, &operation, &row, &child_rows,
-                ))
+                Ok(p::tree_node(p::TreeNodeInput {
+                    lane_id: &tree_lane_id,
+                    depth: *depth,
+                    store_parent_attempt: &Value::Null,
+                    store_path: None,
+                    usage: &json!({"tokens":{"input":null,"cache_read":null,"cache_write":null,"cache_write_1h":null,"output":null,"reasoning":null},"source":"stream","context_basis_points":null}),
+                    parents: &parents,
+                    operation: &operation,
+                    attempt: &row,
+                    children: &child_rows,
+                }))
             },
         )
         .collect::<Result<_, _>>()?;
@@ -615,17 +621,17 @@ mod fixtures {
                         "events:101",
                         &json!("2026-11-02T01:58:27.161938Z"),
                         &board_filters,
-                        &[p::board_lane(
-                            &json!({"host":null,"key":board.key,"attempt_id":board.attempt_id}),
-                            &Value::Null,
-                            &operation("board-101", None)?,
-                            &board_lane,
-                            &lane_wait("65656565656565656565656565656565")?,
-                            false,
-                            &[],
-                            &["input", "cache_read", "cache_write", "output", "reasoning"],
-                            "complete",
-                        )],
+                        &[p::board_lane(p::BoardLaneInput {
+                            lane_id: &json!({"host":null,"key":board.key,"attempt_id":board.attempt_id}),
+                            chair: &Value::Null,
+                            operation: &operation("board-101", None)?,
+                            attempt: &board_lane,
+                            wait: &lane_wait("65656565656565656565656565656565")?,
+                            attention: false,
+                            known: &[],
+                            missing: &["input", "cache_read", "cache_write", "output", "reasoning"],
+                            observation: "complete",
+                        })],
                         Some(
                             "2.101.101.sha256:88fdd1c45d28a6ed462639aaadc725d8f7821fd400d0c5b0481ba269745061c7",
                         ),
