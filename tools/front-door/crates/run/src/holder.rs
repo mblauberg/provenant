@@ -204,7 +204,7 @@ fn provider_identity(
 
 /// The route identity fact the classifier applies: the observed provider route
 /// against the resolved and applied routes, with the identities it names.
-fn route_identity_fact(
+pub(crate) fn route_identity_fact(
     resolved: Option<&RouteRecord>,
     applied: Option<&RouteRecord>,
     observed: Option<&RouteRecord>,
@@ -326,10 +326,11 @@ mod identity_policy_tests {
         let base = provenant_core::GitOid::parse(&"a".repeat(40))?;
         let head = provenant_core::GitOid::parse(&"b".repeat(40))?;
         // A writer whose head moved keeps it for review; a writer with no new
-        // commit and a reader keep the fatal decision.
+        // commit and a reader keep the fatal decision. An adapter writer owes
+        // no handoff, so the reason is the mismatch text alone.
         for (lane, writer_head, expected) in [
-            (LaneRole::ModelWriter, Some(head), Outcome::ReviewRequired),
-            (LaneRole::ModelWriter, Some(base), Outcome::Failed),
+            (LaneRole::AdapterWriter, Some(head), Outcome::ReviewRequired),
+            (LaneRole::AdapterWriter, Some(base), Outcome::Failed),
             (LaneRole::Reader, None, Outcome::Failed),
         ] {
             let mut evidence = SettlementEvidence::fixture(lane, Outcome::Succeeded, None);
@@ -349,9 +350,12 @@ mod identity_policy_tests {
             assert_eq!(fact.cause, Some(CauseKind::IdentityMismatch));
             let reason = fact.reason.as_deref().ok_or("mismatch reason")?;
             if expected == Outcome::ReviewRequired {
-                assert!(reason.contains("fixture/model"), "{reason}");
-                assert!(reason.contains("fixture/other"), "{reason}");
-                assert!(reason.contains(&head.to_string()), "{reason}");
+                assert_eq!(
+                    reason,
+                    format!(
+                        "warning: observed provider identity (provider fixture, model fixture/other, effort high) differs from the requested route (provider fixture, model fixture/model, effort high); kept commit {head} for review"
+                    )
+                );
                 assert!(fact.complete);
             } else {
                 assert_eq!(reason, CauseKind::IdentityMismatch.detail());

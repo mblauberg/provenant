@@ -1317,16 +1317,40 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
         })?,
         RECORD_LIMIT,
     )?;
-    let mut publication = publication();
-    publication.fact.outcome = Outcome::ReviewRequired;
-    publication.fact.cause = Some(CauseKind::IdentityMismatch);
-    publication.observed_route = Some(RouteRecord {
+    // The fact comes from `settle` over the same route evidence the holder
+    // seals, so the reason is the classifier's own text.
+    let observed = RouteRecord {
         model: Some("other/model".into()),
         ..route()
+    };
+    let base = provenant_core::GitOid::parse(&"a".repeat(40))?;
+    let mut evidence = provenant_records::settlement::SettlementEvidence::fixture(
+        // An adapter writer owes no handoff, so the reason is the mismatch alone.
+        provenant_records::settlement::LaneRole::AdapterWriter,
+        Outcome::Succeeded,
+        None,
+    );
+    evidence.custody.identity.route =
+        crate::holder::route_identity_fact(Some(&route()), Some(&route()), Some(&observed));
+    evidence.git = Some(provenant_records::settlement::GitEvidence {
+        input_head: Some(base),
+        writer_head: Some(head),
+        uncommitted: None,
+        uncommitted_paths: Vec::new(),
+        pushed_head: None,
+        primary: provenant_records::settlement::PrimaryCheckout::Clean,
     });
-    publication.fact.reason = Some(
-        "warning: observed provider identity (model other/model) differs from the requested route (model fixture/model); kept commit for review"
-            .into(),
+    let mut publication = publication();
+    publication.fact = provenant_records::settlement::classify::settle(&evidence);
+    publication.observed_route = Some(observed);
+    assert_eq!(
+        publication.fact.reason.as_deref(),
+        Some(
+            format!(
+                "warning: observed provider identity (provider fixture, model other/model, effort high) differs from the requested route (provider fixture, model fixture/model, effort high); kept commit {head} for review"
+            )
+            .as_str()
+        )
     );
     let record = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
     assert_eq!(record.head, Some(head));

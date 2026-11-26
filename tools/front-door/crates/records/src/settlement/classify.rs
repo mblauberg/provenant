@@ -503,15 +503,47 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
                 reason = Some(IDENTITY_EOF_REASON.into());
             }
         }
-        // A contradicted route keeps a writer's moved head for review, naming
-        // both identities; it never discards the work. Every other lane keeps
-        // the fatal mismatch decision. Missing route evidence is a signal.
-        // The holder scopes the fact to an attempt that would otherwise stand,
-        // and it runs last so a contradicted route outranks an unsettling effect.
+    }
+
+    // 11. A sealed stall policy names the typed cause; provider text never does.
+    if let Some(stall) = custody.stall {
+        outcome = Outcome::Failed;
+        cause = Some(stall);
+        reason = Some(stall.detail().into());
+    }
+
+    // 12. Uncertain custody does not keep a writer's other typed causes.
+    if matches!(
+        outcome,
+        Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
+    ) && !matches!(
+        cause,
+        Some(
+            CauseKind::Steered
+                | CauseKind::IdentityMismatch
+                | CauseKind::ProviderCaptureDefect { .. }
+                | CauseKind::ProviderStalled
+                | CauseKind::ProviderStalledRetry
+        )
+    ) {
+        cause = None;
+    }
+
+    // 13. A contradicted route keeps a writer's moved head for review, naming
+    // both identities; it never discards the work. Every other lane keeps the
+    // fatal mismatch decision. Missing route evidence is a signal. The holder
+    // scopes the fact to an attempt that would otherwise stand. It runs after
+    // every other outcome step, so neither an unsettling identity effect nor a
+    // stall policy overrides it, and before the class, so the class, release
+    // and delivery eligibility follow it. A host identity conflict already
+    // failed the attempt in step 10.
+    if !identity.conflict {
         match &identity.route {
             RouteIdentityFact::Observed => {}
             RouteIdentityFact::Unobserved => {
                 signals.push(SettlementSignal::IdentityUnobserved);
+                signals.sort();
+                signals.dedup();
             }
             RouteIdentityFact::Mismatch {
                 requested,
@@ -545,31 +577,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         }
     }
 
-    // 11. A sealed stall policy names the typed cause; provider text never does.
-    if let Some(stall) = custody.stall {
-        outcome = Outcome::Failed;
-        cause = Some(stall);
-        reason = Some(stall.detail().into());
-    }
-
-    // 12. Uncertain custody does not keep a writer's other typed causes.
-    if matches!(
-        outcome,
-        Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
-    ) && !matches!(
-        cause,
-        Some(
-            CauseKind::Steered
-                | CauseKind::IdentityMismatch
-                | CauseKind::ProviderCaptureDefect { .. }
-                | CauseKind::ProviderStalled
-                | CauseKind::ProviderStalledRetry
-        )
-    ) {
-        cause = None;
-    }
-
-    // 13. Terminal evidence follows the custody ladder, not the prose.
+    // 14. Terminal evidence follows the custody ladder, not the prose.
     let terminal_basis = if custody.import_cancelled {
         TerminalBasis::ImportCancellation
     } else if outcome == Outcome::Unsettled {
@@ -589,7 +597,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         TerminalBasis::PreLaunchRefusal
     };
 
-    // 14. One reason, then one stop, source and graph result from that reason.
+    // 15. One reason, then one stop, source and graph result from that reason.
     // Every signal stays on the fact. A non-releasing action (fail, warn, off)
     // withholds its signal and cause from the class ladder, so the class is a
     // plain failure or a completed lane instead of the recorded partial state.
@@ -637,7 +645,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     let source = stop_cause.map_or(settlement_class.rule().source, StopCause::source);
     let release: DependantRelease = settlement_class.release(stop_cause);
 
-    // 15. HeadProgress is the sealed head against the sealed launch pin only.
+    // 16. HeadProgress is the sealed head against the sealed launch pin only.
     let head_progress = evidence.git.as_ref().map(|git| git.head_progress());
     signals.sort();
     signals.dedup();

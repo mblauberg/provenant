@@ -692,3 +692,28 @@ fn a_route_value_is_sealed_with_the_policy() {
     assert_eq!(fact.applied.len(), 1);
     assert_eq!(fact.applied[0].source.layer, Layer::Route);
 }
+
+// A contradicted route is decided last among the outcome steps, so a stall
+// policy cannot override it, and the class follows the decision.
+#[test]
+fn a_route_mismatch_outranks_a_stall_policy_and_is_never_delivered() {
+    use provenant_records::settlement::RouteIdentityFact;
+    for (head, expected) in [(HEAD, Outcome::ReviewRequired), (BASE, Outcome::Failed)] {
+        let mut evidence = base(LaneRole::AdapterWriter, Outcome::Succeeded, None);
+        evidence.git = git_at(Some(BASE), Some(head));
+        evidence.custody.stall = Some(CauseKind::ProviderStalled);
+        evidence.custody.identity.route = RouteIdentityFact::Mismatch {
+            requested: "model fixture/model".into(),
+            observed: "model other/model".into(),
+        };
+        let fact = settle(&evidence);
+        assert_eq!(fact.outcome, expected, "{head}");
+        assert_eq!(fact.cause, Some(CauseKind::IdentityMismatch), "{head}");
+        assert!(!fact.delivery_eligible, "{head}");
+        assert_eq!(
+            fact.release,
+            provenant_records::run::DependantRelease::Hold,
+            "{head}"
+        );
+    }
+}
