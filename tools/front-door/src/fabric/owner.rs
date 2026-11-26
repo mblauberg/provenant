@@ -2057,9 +2057,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }
             return Ok(Some(tip.to_string()));
         }
-        // Admission already resolved `lanes.writer_base` into this intent;
-        // only an unresolved default (a peer, or no Git evidence) is
-        // re-derived from the forge default here.
+        // Admission resolved `lanes.writer_base` into this intent; only an
+        // unresolved default (a peer, or no Git evidence) is re-derived here.
         if default_base && let Ok(admitted) = provenant_core::GitOid::parse(reference) {
             return Ok(Some(admitted.to_string()));
         }
@@ -4696,9 +4695,8 @@ impl BoundGraphOwner<'_> {
             &key.graph_id,
         )
         .map_err(graph_journal_error)?;
-        // Only the review fallback's empty range leaves a task without a base.
-        // A read subject never carries a base, and its tasks keep the read
-        // path's base below.
+        // Only the review fallback's empty range leaves a task without a base;
+        // a read subject carries none, so its tasks keep the read base below.
         let subject_base_missing = execution
             .as_ref()
             .and_then(|execution| execution.document.subject.as_ref())
@@ -4794,12 +4792,6 @@ impl BoundGraphOwner<'_> {
         };
         // Peer roots retain the exact requested route, including family
         // exclusions, rather than resolving a second, broader alias.
-        let execution = provenant_fabric_runtime::graph::FileJournal::execution(
-            &self.factory.context.roots.state,
-            self.factory.context.identity.project,
-            &key.graph_id,
-        )
-        .map_err(graph_journal_error)?;
         let peer_root = execution.as_ref().is_some_and(|execution| {
             execution
                 .peer_origin_context
@@ -4807,9 +4799,8 @@ impl BoundGraphOwner<'_> {
                 .and_then(|origin| origin.node_id.as_deref())
                 == Some(key.node_id.as_str())
         });
-        // Graph tasks carry the admitted subject beside the source commit so a
-        // peer can later compare its own head with the one admission pinned.
-        // In-flight graphs predating subject keep the field absent.
+        // Tasks carry the admitted subject so a peer can compare its head with
+        // the pinned one; graphs admitted before subjects leave it absent.
         let admitted_subject = execution
             .as_ref()
             .and_then(|execution| execution.document.subject.clone());
