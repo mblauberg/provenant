@@ -68,12 +68,13 @@ pub fn template_gaps(markdown: &str) -> Vec<String> {
     gaps
 }
 
-/// A checkpoint split into its frontmatter and its headed sections. Each
+/// A checkpoint split into its frontmatter, preamble and headed sections. Each
 /// section keeps its heading line and body; a repeated heading replaces the
 /// earlier one, so later text always wins when sections are merged.
-fn split(markdown: &str) -> (Option<String>, Vec<(String, String)>) {
+fn split(markdown: &str) -> (Option<String>, String, Vec<(String, String)>) {
     let end = header_end(markdown).ok().flatten().unwrap_or(0);
     let frontmatter = (end > 0).then(|| markdown[..end].to_owned());
+    let mut preamble = String::new();
     let mut sections: Vec<(String, String)> = Vec::new();
     let mut current = None;
     for line in body(markdown).split_inclusive('\n') {
@@ -92,9 +93,11 @@ fn split(markdown: &str) -> (Option<String>, Vec<(String, String)>) {
         }
         if let Some(index) = current {
             sections[index].1.push_str(line);
+        } else {
+            preamble.push_str(line);
         }
     }
-    (frontmatter, sections)
+    (frontmatter, preamble, sections)
 }
 
 fn section<'a>(sections: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -167,35 +170,54 @@ fn push_section(out: &mut String, text: &str) {
 /// the previous revision; a section present in neither is scaffolded empty.
 /// Root frontmatter keys carry forward unless the input supplies that key; the
 /// typed standing record carries forward unless the input supplies a valid one.
-/// Unknown sections are appended so a scaffold never drops owner content.
+/// Preamble and unknown sections carry forward unless replaced by input.
 /// A first save has no previous revision and gets the empty scaffold.
 pub fn scaffold_checkpoint(previous: Option<&str>, input: &str) -> Result<String, TemplateError> {
-    let (previous_frontmatter, previous_sections) =
-        previous.map(split).unwrap_or((None, Vec::new()));
-    let (input_frontmatter, input_sections) = split(input);
+    let (previous_frontmatter, previous_preamble, mut sections) =
+        previous.map(split).unwrap_or_default();
+    let (input_frontmatter, input_preamble, input_sections) = split(input);
+    let input_title = input_sections
+        .iter()
+        .find(|(name, _)| name.starts_with("# "))
+        .map(|(name, _)| name.clone());
+    for (name, text) in input_sections {
+        if let Some((_, existing)) = sections.iter_mut().find(|(key, _)| *key == name) {
+            *existing = text;
+        } else {
+            sections.push((name, text));
+        }
+    }
     let mut out = String::new();
     let frontmatter = merged_frontmatter(
         input_frontmatter.as_deref(),
         previous_frontmatter.as_deref(),
     )?;
     push_section(&mut out, &frontmatter);
-    if let Some(title) = input_sections
-        .iter()
-        .find(|(name, _)| name.starts_with("# ") && !name.starts_with("## "))
+    let preamble = if input_preamble.trim().is_empty() {
+        &previous_preamble
+    } else {
+        &input_preamble
+    };
+    if !preamble.is_empty() {
+        push_section(&mut out, preamble);
+    }
+    let title = input_title
+        .as_deref()
+        .and_then(|key| section(&sections, key))
         .or_else(|| {
-            previous_sections
+            sections
                 .iter()
-                .find(|(name, _)| name.starts_with("# ") && !name.starts_with("## "))
-        })
-        .map(|(_, text)| text.as_str())
-    {
+                .find(|(name, _)| name.starts_with("# "))
+                .map(|(_, text)| text.as_str())
+        });
+    if let Some(title) = title {
         push_section(&mut out, title);
     } else {
         out.push_str(TITLE);
         out.push_str("\n\n");
     }
     for heading in TEMPLATE_HEADINGS {
-        match section(&input_sections, heading).or_else(|| section(&previous_sections, heading)) {
+        match section(&sections, heading) {
             Some(text) => push_section(&mut out, text),
             None => {
                 out.push_str(heading);
@@ -203,15 +225,10 @@ pub fn scaffold_checkpoint(previous: Option<&str>, input: &str) -> Result<String
             }
         }
     }
-    for (name, text) in previous_sections.iter().chain(input_sections.iter()) {
-        if name.is_empty()
-            || name.starts_with("# ")
-            || TEMPLATE_HEADINGS.contains(&name.as_str())
-            || out.contains(&format!("\n{name}\n"))
-        {
-            continue;
+    for (name, text) in &sections {
+        if !name.starts_with("# ") && !TEMPLATE_HEADINGS.contains(&name.as_str()) {
+            push_section(&mut out, text);
         }
-        push_section(&mut out, text);
     }
     Ok(out)
 }
@@ -293,6 +310,29 @@ mod tests {
         assert!(scaffold.contains("Now named."));
         assert!(scaffold.contains("Keep this."));
         assert!(template_gaps(&scaffold).is_empty(), "{scaffold}");
+    }
+
+    #[test]
+    fn scaffold_preserves_preamble_and_gives_input_sections_precedence() {
+        let first = scaffold_checkpoint(None, "Unheaded checkpoint prose.\n").unwrap();
+        assert!(first.contains("Unheaded checkpoint prose."), "{first}");
+
+        let previous = "Previous preamble.\n# Checkpoint\n## Goal\nOld goal.\n## Background\nOld background.\n## Extra\nKeep this.\n";
+        let input = "New preamble.\n## Goal\nNew goal.\n## Background\nNew background.\n";
+        let merged = scaffold_checkpoint(Some(previous), input).unwrap();
+        for text in [
+            "New preamble.",
+            "New goal.",
+            "New background.",
+            "Keep this.",
+        ] {
+            assert!(merged.contains(text), "{merged}");
+        }
+        for text in ["Previous preamble.", "Old goal.", "Old background."] {
+            assert!(!merged.contains(text), "{merged}");
+        }
+        let carried = scaffold_checkpoint(Some(previous), "## Goal\nUpdated.\n").unwrap();
+        assert!(carried.contains("Previous preamble."), "{carried}");
     }
 
     #[test]

@@ -110,8 +110,9 @@ frontmatter root keys carry forward from the current revision unless the input
 supplies the same key, preserving structured summaries while allowing input
 values to win. A valid typed standing record carries forward unless the input
 supplies a valid one; an empty record is scaffolded only when neither header
-has a valid record. Unknown sections are appended so nothing is dropped. A
-first save has no previous revision and starts from an empty standing record.
+has a valid record. Preamble text and unknown sections carry forward; input
+nonblank preamble replaces previous preamble and input sections replace matching
+previous sections, including unknown headings. A first save has no previous revision and starts from an empty standing record.
 `session show` renders the whole checkpoint as its default human output;
 `--json` stays an independent transport and an explicit `--full` keeps the same
 complete text.

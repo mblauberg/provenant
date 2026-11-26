@@ -24,8 +24,9 @@ soft budget floored at 8 KiB, so a small body produces neither size warning.
 `--from-template` scaffolds the template's sections from the current revision
 and overlays the sections in `--file` (`-` reads stdin): sections in the file
 win, missing ones are filled from the previous revision, and unknown sections
-are appended. Frontmatter root keys carry forward unless the input supplies
-the same key. A valid typed standing record carries forward unless the input
+use the same heading-based merge. Preamble text carries forward unless the input
+supplies a nonblank preamble. Frontmatter root keys carry forward unless the
+input supplies the same key. A valid typed standing record carries forward unless the input
 supplies a valid one; when neither header has one, an empty record is
 scaffolded. Missing template sections are scaffolded empty.
 For example:

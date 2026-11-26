@@ -11,7 +11,8 @@ quiet. `workflow session show` prints the whole checkpoint by default instead
 of the bounded compact view; `--json` is unchanged and `--full` remains
 explicit. `workflow session save --from-template` scaffolds every template
 section, prefilled from the previous revision and overridden per section by
-`--file` (`-` reads stdin), carrying the typed standing record forward; the
+`--file` (`-` reads stdin), including custom sections and preamble text,
+carrying the typed standing record forward; the
 first save starts from an empty record. The chair's standing grants belong in
 that typed record with their source and expiry, so hooks restore only sourced,
 unexpired grants. (#4029)
