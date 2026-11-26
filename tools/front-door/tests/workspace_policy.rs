@@ -1880,14 +1880,16 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/records/src/run.rs", 4500),
         ("crates/redact/src/lib.rs", 2500),
         ("crates/routing/src/catalog.rs", 2500),
-        // Pinned-account offer judgement and the same-reason refusal detail (#3892).
-        ("crates/routing/src/resolve.rs", 4500),
+        // One owner for offer evidence, pinned-account judgement and the
+        // same-reason refusal detail (#3892, #3933).
+        ("crates/routing/src/resolve.rs", 4750),
         ("crates/routing/src/review.rs", 3000),
         ("crates/run/src/build_dir_gc.rs", 6250),
         // Static-check launch guidance and receipt provenance (#3652).
         ("crates/run/src/completion.rs", 2750),
-        // Stall detection and its opt-in policy (#3903).
-        ("crates/run/src/controls.rs", 5250),
+        // Stall detection and its opt-in policy (#3903); unreadable-record
+        // writer-lease reclaim under writer exclusion (#3829).
+        ("crates/run/src/controls.rs", 5500),
         ("crates/run/src/delivery.rs", 4750),
         ("crates/run/src/git_context.rs", 3000),
         // The #3941 end-to-end settlement test for trailing prose.

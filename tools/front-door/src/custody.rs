@@ -529,6 +529,53 @@ pub fn collect_cloud(
     Ok(())
 }
 
+/// Safety valve for `release attempt:ID`: reclaim a writer lease fenced by an
+/// undecodable attempt record whose owner is proved gone. The recorded custody
+/// release already happened; this only clears the run-store lease it named and
+/// is advisory, so a liveness failure warns instead of reversing that release.
+fn release_unreadable_writer_lease(
+    resolved: &roots::Resolved,
+    project: ProjectId,
+    actor: provenant_core::ActorId,
+    id: provenant_core::AttemptId,
+    clock: &dyn Clock,
+    cancel: &CancelToken,
+) {
+    let context = provenant_run::ExecutionContext {
+        state_root: resolved.roots.state.clone(),
+        project_id: project,
+        actor_id: actor,
+        read_prompts: false,
+    };
+    let call = provenant_run::Request { clock, cancel };
+    let outcome = (|| -> Result<Option<provenant_run::Reconciled>, Error> {
+        let store = provenant_run::RunStore::open(&context, &call)?;
+        Ok(store.release_unreadable_writer_lease(id, &call)?)
+    })();
+    match outcome {
+        Ok(Some(provenant_run::Reconciled::UnreadableReleased { source, .. })) => {
+            provenant_records::warning::warn(provenant_run::unreadable_record_warning(
+                &source, true,
+            ));
+        }
+        Ok(Some(provenant_run::Reconciled::Uncertain {
+            reason: provenant_run::UncertainReason::UnreadableLivenessUnknown { source },
+        })) => provenant_records::warning::warn(provenant_run::unreadable_record_warning(
+            &source, false,
+        )),
+        // A readable record stays under normal custody; there is nothing for
+        // this safety valve to do.
+        Ok(_) => {}
+        Err(error) => provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::UNREADABLE_RECORD_HELD,
+                format!("writer lease for attempt {id} could not be inspected: {error}"),
+            )
+            .subject(id.to_string()),
+        ),
+    }
+}
+
 pub fn command(globals: &Globals, subject: Subject, release: bool) -> u8 {
     let leaf = if release { "release" } else { "adopt" };
     let action = || -> Result<CustodyRecord, Error> {
@@ -558,13 +605,26 @@ pub fn command(globals: &Globals, subject: Subject, release: bool) -> u8 {
                     subject, old.holder
                 ));
             }
-            Ok(ledger.change_custody_state(
+            let record = ledger.change_custody_state(
                 context.identity.project,
                 &subject,
                 CustodyState::Released,
                 Some(chair.actor),
                 &call,
-            )?)
+            )?;
+            if subject.kind == SubjectKind::Attempt
+                && let Ok(id) = provenant_core::AttemptId::parse(&subject.id)
+            {
+                release_unreadable_writer_lease(
+                    &resolved,
+                    context.identity.project,
+                    chair.actor,
+                    id,
+                    &clock,
+                    &cancel,
+                );
+            }
+            Ok(record)
         } else {
             let change = ledger.acquire_custody(
                 context.identity.project,

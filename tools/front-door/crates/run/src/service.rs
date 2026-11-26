@@ -1037,7 +1037,9 @@ impl From<&RunError> for ErrorKind {
             {
                 Self::UpgradeRequired
             }
-            RunError::Decode(_) | RunError::ArtifactMismatch(_) => Self::StateCorrupt,
+            RunError::Decode(_) | RunError::Version(_) | RunError::ArtifactMismatch(_) => {
+                Self::StateCorrupt
+            }
             _ => Self::Io,
         }
     }

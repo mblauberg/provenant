@@ -2,7 +2,7 @@
 //! process state; uncertain custody stays fenced and is reported as such.
 use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_core::{AttemptId, MessageId, OperationId, WallTime};
-use provenant_records::custody::Scope;
+use provenant_records::{custody::Scope, warning::Warning};
 use provenant_supervisor::{
     census::{ProcessObserver, SystemProcessObserver},
     custody::{self, CustodyError, Observation, RecoveryState, StopReceipt},
@@ -756,7 +756,68 @@ pub enum Reconciled {
     Escaped { pids: Vec<i64> },
     /// Custody cannot be proven either way; it stays fenced.
     Uncertain { reason: UncertainReason },
+    /// An undecodable attempt record was preserved and its writer lease
+    /// released after liveness was disproved. The source names what could not
+    /// be decoded so the host can warn with the exact record identity.
+    UnreadableReleased {
+        source: UnreadableSource,
+        locks: Vec<std::path::PathBuf>,
+    },
 }
+
+/// The identity of a stored attempt record that no longer decodes. This is
+/// evidence for a host-side typed warning, never a substitution for the bytes:
+/// the bytes stay in the run database and a copy is sealed under `quarantine/`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UnreadableSource {
+    pub attempt: AttemptId,
+    pub path: std::path::PathBuf,
+    pub schema_version: Option<u64>,
+    pub error: String,
+}
+
+impl std::fmt::Display for UnreadableSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} attempt {}", self.path.display(), self.attempt)?;
+        if let Some(version) = self.schema_version {
+            write!(f, " (schema version {version})")?;
+        }
+        write!(f, ": {}", self.error)
+    }
+}
+
+/// A decode failure plus the original bytes, held together so recovery can
+/// preserve the record before it releases the lease it fenced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnreadableAttempt {
+    pub source: UnreadableSource,
+    pub(crate) raw: Vec<u8>,
+}
+
+/// The one typed warning for an undecodable attempt record. Its subject carries
+/// the source path, schema and error; admission refusals stay fixed text.
+pub fn unreadable_record_warning(source: &UnreadableSource, released: bool) -> Warning {
+    use provenant_records::warning::{UNREADABLE_RECORD_HELD, UNREADABLE_RECORD_RELEASED};
+    Warning::new(
+        if released {
+            UNREADABLE_RECORD_RELEASED
+        } else {
+            UNREADABLE_RECORD_HELD
+        },
+        format!(
+            "stored record for attempt {} could not be decoded; {}",
+            source.attempt,
+            if released {
+                "its writer lease was released after liveness was disproved and the bytes were preserved"
+            } else {
+                "its writer lease is retained because liveness could not be disproved"
+            }
+        ),
+    )
+    .subject(source.to_string())
+    .repair("inspect the preserved copy under quarantine/, then rerun reconcile")
+}
+
 fn reservation_issue_blocks_report(reservation: &std::path::Path, issue: &std::path::Path) -> bool {
     reservation.starts_with(issue)
         || reservation
@@ -807,6 +868,15 @@ impl std::fmt::Display for Reconciled {
                     .join(", ")
             ),
             Self::Uncertain { reason } => write!(f, "uncertain: {reason}"),
+            Self::UnreadableReleased { source, locks } => write!(
+                f,
+                "unreadable_record_released {source}; writer leases {}",
+                locks
+                    .iter()
+                    .map(|lock| lock.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -894,6 +964,9 @@ pub enum UncertainReason {
         holder: String,
         holder_live: bool,
     },
+    /// The record is unreadable and no liveness disproof was possible, so the
+    /// writer lease stays fenced and the evidence is retained.
+    UnreadableLivenessUnknown { source: UnreadableSource },
 }
 /// The source of an unavailable reboot proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -961,6 +1034,12 @@ impl std::fmt::Display for UncertainReason {
                 "waiting for writer lock {}, held by {holder}",
                 lock.display()
             ),
+            Self::UnreadableLivenessUnknown { source } => {
+                write!(
+                    f,
+                    "unreadable attempt record still fenced: {source}; liveness not disproved"
+                )
+            }
         }
     }
 }
@@ -4388,6 +4467,17 @@ impl RunStore {
     ) -> Reconciled {
         if matches!(
             &state,
+            Reconciled::UnreadableReleased { .. }
+                | Reconciled::Uncertain {
+                    reason: UncertainReason::UnreadableLivenessUnknown { .. }
+                }
+        ) {
+            // The record cannot be decoded, so progress cannot derive a scope
+            // from it. The typed source already carries the evidence.
+            return state;
+        }
+        if matches!(
+            &state,
             Reconciled::Uncertain {
                 reason: UncertainReason::HostStalled
             }
@@ -4912,6 +5002,148 @@ impl RunStore {
         }))
     }
 
+    /// Safety valve for `release attempt:ID`. A record that still decodes stays
+    /// under normal custody; only an undecodable record whose owner is proved
+    /// gone has its writer lease released here. Returns `None` when this path
+    /// has nothing to do, so the caller keeps the ordinary release outcome.
+    pub fn release_unreadable_writer_lease(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<Reconciled>> {
+        let unreadable = match self.recovery_record(id, call)? {
+            crate::reader::AttemptRecordRead::Decoded(_) => return Ok(None),
+            crate::reader::AttemptRecordRead::Unreadable(unreadable) => unreadable,
+        };
+        Ok(Some(self.reconcile_unreadable(
+            &unreadable,
+            &SystemProcessObserver,
+            call,
+        )))
+    }
+
+    /// Reclaim a writer lease fenced by an undecodable attempt record. The
+    /// release is gated on a supervisor quiescence proof held under writer
+    /// exclusion, an absent reservation, and no unresolved exit cleanup. A
+    /// completed exit can prove same-boot quiescence; an exit still settling
+    /// cannot. The bytes are preserved under `quarantine/` before the
+    /// reservation is cleared; the database row keeps its original bytes.
+    fn reconcile_unreadable(
+        &self,
+        unreadable: &UnreadableAttempt,
+        observer: &dyn ProcessObserver,
+        call: &Request<'_>,
+    ) -> Reconciled {
+        let retained = || {
+            Reconciled::uncertain(UncertainReason::UnreadableLivenessUnknown {
+                source: unreadable.source.clone(),
+            })
+        };
+        let attempt = match self.attempt_dir(unreadable.source.attempt, false) {
+            Ok(attempt) => attempt,
+            Err(_) => return retained(),
+        };
+        let fence = match self.writer_fences() {
+            Ok(fences) => fences
+                .into_iter()
+                .find(|fence| fence.scope.attempt == unreadable.source.attempt),
+            Err(_) => return retained(),
+        };
+        let Some(fence) = fence else {
+            // Already released: the source is still reported without a lock.
+            return Reconciled::UnreadableReleased {
+                source: unreadable.source.clone(),
+                locks: Vec::new(),
+            };
+        };
+        let directory = match fence
+            .custody_directory()
+            .map(provenant_os::fs::Directory::open_anchor)
+            .transpose()
+        {
+            Ok(Some(directory)) => directory,
+            _ => return retained(),
+        };
+        let recovery = match custody::acquire_recovery(
+            directory,
+            fence.scope,
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            call.cancel,
+            call.clock,
+        ) {
+            Ok(recovery) => recovery,
+            Err(_) => return retained(),
+        };
+        if recovery.scope() != fence.scope
+            || !custody::attempt_quiescent(&attempt, fence.scope, observer)
+            || recovery.observe_with(observer) != RecoveryState::Absent
+        {
+            return retained();
+        }
+        if let Err(error) = self.preserve_unreadable(unreadable, &attempt) {
+            return Reconciled::uncertain(UncertainReason::ReconcileFailed {
+                error: error.to_string(),
+            });
+        }
+        if let Err(error) = recovery.release_lost() {
+            return Reconciled::uncertain(UncertainReason::ReconcileFailed {
+                error: error.to_string(),
+            });
+        }
+        let lock = fence
+            .reservation
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map(|slot| slot.join("writer.lock"))
+            .unwrap_or_else(|| fence.reservation.clone());
+        Reconciled::UnreadableReleased {
+            source: unreadable.source.clone(),
+            locks: vec![lock],
+        }
+    }
+
+    /// Keep the undecodable bytes and their typed source together, never
+    /// replacing or deleting the stored record. `quarantine/` already holds
+    /// retained attempt evidence, so the copy survives settlement and GC.
+    fn preserve_unreadable(
+        &self,
+        unreadable: &UnreadableAttempt,
+        attempt: &provenant_os::fs::Directory,
+    ) -> Result<()> {
+        let quarantine =
+            crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), true)?;
+        let record_name = "unreadable-attempt-record.json";
+        if crate::artifacts::read_sealed(&quarantine, record_name, TERMINAL_RECORD_LIMIT)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            crate::artifacts::seal(
+                &quarantine,
+                record_name,
+                &unreadable.raw,
+                TERMINAL_RECORD_LIMIT,
+            )?;
+        }
+        let source_name = "unreadable-attempt-source.json";
+        if crate::artifacts::read_sealed(&quarantine, source_name, RECORD_LIMIT)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let manifest = crate::db::bytes(&serde_json::json!({
+                "schema_version": 1,
+                "kind": "unreadable_attempt_record",
+                "attempt": unreadable.source.attempt,
+                "path": unreadable.source.path,
+                "record_schema_version": unreadable.source.schema_version,
+                "error": unreadable.source.error,
+            }))?;
+            crate::artifacts::seal(&quarantine, source_name, &manifest, RECORD_LIMIT)?;
+        }
+        Ok(())
+    }
+
     fn reconcile_attempt(
         &self,
         id: AttemptId,
@@ -4919,7 +5151,12 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
-        let record = self.record(id, call)?;
+        let record = match self.recovery_record(id, call)? {
+            crate::reader::AttemptRecordRead::Decoded(record) => *record,
+            crate::reader::AttemptRecordRead::Unreadable(unreadable) => {
+                return Ok(Some(self.reconcile_unreadable(&unreadable, observer, call)));
+            }
+        };
         let directory = self.attempt_dir(id, false)?;
         if let Some(state) = crate::settlement::abandoned(&directory, Self::scope(&record))? {
             return Ok(Some(state));

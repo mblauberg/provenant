@@ -127,8 +127,12 @@ as `partial` and counts as progress. Read the tick logs when a sweep fails.
 
 Port command receipts and graph checkpoints have their own classes. A
 collected graph name stays reserved so its identity is never reused, and an
-unreadable receipt is reported and kept. For uncertain custody see
-[worktrees](../worktrees.md) and [lane recovery](lane-lifecycle.md#recovery).
+unreadable receipt is reported and kept. An undecodable attempt record is likewise preserved under
+`quarantine/`; once supervisor evidence proves its owner quiescent, reconcile reclaims the writer
+lease with a typed warning naming the source, and neither collection nor release deletes the
+record. Completed exit evidence can prove same-boot quiescence; an exit still settling keeps the
+fence. For uncertain
+custody see [worktrees](../worktrees.md) and [lane recovery](lane-lifecycle.md#recovery).
 
 ## Detached services and unsettled lanes
 

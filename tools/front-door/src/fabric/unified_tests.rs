@@ -451,6 +451,82 @@ fn unreadable_attempt_keeps_other_status_rows() {
     assert_eq!(rows[1]["state"], "running");
 }
 
+// Spec: docs/specs/cli.md#graph-wait-recovery
+#[test]
+fn wait_reports_latest_peer_failure_after_unknown_status_projection()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{Clock, MonoTime, TestClock, WallTime};
+    use std::cell::Cell;
+
+    let rig = crate::worktree_tests::support::TestRig::new()?;
+    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+    let context = Context::open(roots, &rig.home, &rig.project)?;
+    let system_clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let facts = StatusFacts::gather(&context, &system_clock, &cancel)?;
+    let target = GraphTarget {
+        graph: "g".into(),
+        node: None,
+        attempt: None,
+    };
+    let mut pending = graph_snapshot(checkpoint("g"));
+    pending.advance_error = Some("earlier settlement error".into());
+    let local_host = context.identity.host;
+    let remote_host = if local_host == provenant_core::HostId::from_bytes([1; 16]) {
+        provenant_core::HostId::from_bytes([2; 16])
+    } else {
+        provenant_core::HostId::from_bytes([1; 16])
+    };
+    pending.checkpoint.nodes[0].attempts[0].attempt_ref =
+        Some(format!("{remote_host}/22222222222222222222222222222222"));
+    let pending_again = pending.clone();
+    let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+    let budget = WaitBudget::cli(clock.mono_now(), 1)?;
+    let mut observation = crate::status_wait::LocalObservation::paced(
+        provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(20)),
+        "fixture event source unavailable",
+    );
+    let reads = Cell::new(0);
+    let (waited, _, _) = super::super::interface::wait_submission(
+        pending,
+        budget,
+        &clock,
+        &cancel,
+        &mut observation,
+        Some(local_host),
+        |_| Ok(pending_again.clone()),
+        |run| {
+            let mut rows = status_rows(run, &target);
+            rows.retain(|row| row["kind"] == "attempt");
+            let error = enrich_status_rows_with_facts(
+                &mut rows,
+                &context,
+                &system_clock,
+                &facts,
+                &mut |_, _| {
+                    let n = reads.get();
+                    reads.set(n + 1);
+                    Ok(Err(if n == 0 {
+                        FacadeError::HomeUnavailable
+                    } else {
+                        FacadeError::OwnerUnavailable
+                    }
+                    .into()))
+                },
+            )?;
+            assert_eq!(rows[0]["state"], "unknown");
+            super::super::interface::observation::remote_status_reading(&rows, error)?;
+            Ok(run.clone())
+        },
+    )?;
+    assert!(reads.get() >= 2);
+    assert_eq!(
+        waited.advance_error.as_deref(),
+        Some("run execution owner is unavailable")
+    );
+    Ok(())
+}
+
 fn checkpoint(graph: &str) -> GraphCheckpoint {
     serde_json::from_value(json!({"schema_version":2,"graph_id":graph,"plan_digest":"digest","nodes":[
             {"id":"parent","state":"running","worktree":null,"attempts":[

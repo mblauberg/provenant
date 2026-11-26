@@ -3740,38 +3740,6 @@ impl Factory {
         Ok(receipt)
     }
 
-    fn observe_remote_graph_attempts(
-        &self,
-        run: &provenant_fabric_runtime::graph::GraphRun,
-        target: &super::unified::GraphTarget,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<(), FacadeError> {
-        if cancel.is_cancelled() || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-            return Ok(());
-        }
-        let mut rows = super::unified::status_rows(run, target);
-        let local_host = self.context.identity.host;
-        rows.retain(|row| {
-            row["kind"] == "attempt"
-                && row["attempt_id"].as_str().is_some_and(|reference| {
-                    reference.split_once('/').is_some_and(|(owner, _)| {
-                        owner.parse::<provenant_core::HostId>() != Ok(local_host)
-                    })
-                })
-        });
-        if rows.is_empty() {
-            return Ok(());
-        }
-        super::unified::enrich_status_rows_within(
-            &mut rows,
-            &self.context,
-            &self.clock,
-            cancel,
-            budget,
-        )
-    }
-
     fn wait_cadence(&self) -> Result<provenant_cli::wait::LocalCadence, FacadeError> {
         crate::status_wait::local_cadence(&self.context.roots)
     }

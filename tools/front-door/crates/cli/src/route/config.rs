@@ -975,8 +975,21 @@ pub(super) fn execute_in(
                         )
                     },
                 );
-                let (mut recorded_readiness, offered_exclusions) =
-                    filter_unoffered_readiness(recorded, &model, context.catalogue, records);
+                let offer_policy = provenant_routing::OfferEvidencePolicy {
+                    accounts: records,
+                    freshness: &context.config.freshness,
+                    quota_policies: policies,
+                    catalogue_revision: context.catalogue.revision(),
+                    now_seconds: now.unix_seconds(),
+                };
+                let (mut recorded_readiness, offered_exclusions) = filter_unoffered_readiness(
+                    recorded,
+                    &model,
+                    context.catalogue,
+                    &offer_policy,
+                    context.availability,
+                    query.account.as_deref(),
+                );
                 let pools = context.catalogue.admission_pools(&model);
                 let quota_evidence = quota_observations(
                     context.catalogue,

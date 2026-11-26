@@ -108,7 +108,7 @@ pub enum Command {
     Adopt {
         subject: provenant_records::custody::Subject,
     },
-    /// Release an item from custody (KIND:ID)
+    /// Release an item from custody (KIND:ID); an attempt whose record no longer decodes also has its dead writer lease reclaimed
     Release {
         subject: provenant_records::custody::Subject,
     },
@@ -194,7 +194,7 @@ pub enum Command {
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
-    /// Settle open attempts and report uncertain custody
+    /// Settle open attempts, reclaim dead leases behind undecodable records, and report uncertain custody
     Reconcile(Reconcile),
     /// Report local usage and cost
     #[command(subcommand)]
