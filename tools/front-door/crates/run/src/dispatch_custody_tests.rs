@@ -125,9 +125,15 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     assert!(prompt.contains(&path.join("process-exit.json").display().to_string()));
     assert!(prompt.contains("only durable outputs"));
     assert!(prompt.contains("Files in $TMPDIR are discarded when the attempt ends."));
+    // The brief now directs the lane to the declaration journal instead of a
+    // progress handoff file; prose and fenced blocks are never parsed.
     assert!(prompt.contains(
-        "Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them; your progress handoff JSON under provider-state is yours to update throughout the task and is kept."
+        "Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them. Declare your result with `provenant declare --stdin`"
     ));
+    assert!(prompt.contains(
+        "The last accepted declaration settles the lane; prose and fenced blocks are not read."
+    ));
+    assert!(prompt.contains("To stop early, declare `stopped_early` or `blocked`."));
     assert!(prompt.ends_with("exact prompt"));
     let fact = store.attempt(run.attempt_id, &call)?;
     assert_eq!(
@@ -255,6 +261,21 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
             )?;
         }
         seal_exit(&store, &observed)?;
+        // The completed host budget and a zero exit both need the lane's done
+        // declaration; a fenced block in stdout is only captured output now.
+        crate::dispatch_tests::declare_handoff(
+            &store,
+            id,
+            "publication-done",
+            serde_json::json!({
+                "schema_version": 2,
+                "status": "done",
+                "note": "finished",
+                "remaining": [],
+                "decisions": [],
+                "verify": [],
+            }),
+        )?;
         let record = store.finish(id, &dir, &observed, &fake, &call)?;
         if code == 0 {
             assert_eq!(

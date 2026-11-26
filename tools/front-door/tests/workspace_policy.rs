@@ -1704,6 +1704,10 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "console search",
         "console sessions",
         "console tree",
+        // #4020 replaces the handoff prose channel with a typed declaration.
+        // `declare` is the new persisted top-level verb: the unit string is a
+        // contract, so record its spelling alongside the other verbs.
+        "declare",
         "disk report",
         // #4028 adds a real top-level doctor beside `hosts doctor`; the unit
         // string is part of the persisted verb set, so declare the new spelling.
@@ -2007,13 +2011,18 @@ fn settlement_outcome_has_one_writer() -> Result<(), Box<dyn Error>> {
         for (start, end) in spans {
             let start = start.max(cursor).min(source.len());
             let end = end.min(source.len());
-            if start > cursor {
-                out.push_str(&source[cursor..start]);
+            // A nested test item can lie wholly inside an enclosing `#[cfg(test)]`
+            // module scope: after the outer span the cursor is already past the
+            // inner end. That span is blanked already; skip it rather than slice
+            // a reversed byte range.
+            if start >= end {
+                continue;
             }
+            out.push_str(&source[cursor..start]);
             for ch in source[start..end].chars() {
                 out.push(if ch == '\n' { '\n' } else { ' ' });
             }
-            cursor = cursor.max(end);
+            cursor = end;
         }
         if cursor < source.len() {
             out.push_str(&source[cursor..]);

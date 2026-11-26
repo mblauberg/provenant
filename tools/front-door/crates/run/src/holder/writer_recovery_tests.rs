@@ -1115,22 +1115,31 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         } else {
             "Acceptance remains unfinished"
         };
-        let status = if budget || late {
-            "done"
+        let (status, declared_note) = if budget || late {
+            ("done", "Delivered")
         } else if blocked {
-            "blocked"
+            ("blocked", note)
         } else {
-            "stopped_early"
+            ("stopped_early", note)
         };
-        fake.answer = Some(format!(
-            "```handoff\n{{\"schema_version\":2,\"status\":\"{status}\",\"note\":\"{note}\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}}\n```"
-        ));
-        if late {
-            fake.answer = Some("```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"Delivered\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```".into());
-        }
-        if budget {
-            fake.answer = Some("```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"Delivered\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```".into());
-        }
+        // The lane declares its stop on the journal; a fenced block in the
+        // answer would be captured output and could not settle the attempt.
+        crate::dispatch_tests::declare_handoff(
+            &store,
+            id,
+            "writer-stop",
+            serde_json::json!({
+                "schema_version": 2,
+                "status": status,
+                "note": declared_note,
+                "remaining": if status == "done" { [] } else { ["Finish work"] },
+                "decisions": [],
+                "verify": [],
+            }),
+        )?;
+        // Keep a plain provider report as the result; only the declaration
+        // above can settle the lane.
+        fake.answer = Some(format!("Lane report: {declared_note}"));
         if deferred_outcome {
             let holder_context = HolderContext {
                 schema_version: 1,
@@ -2206,7 +2215,9 @@ fn writer_that_lost_its_lane_token_settles_on_its_handoff()
             "decisions": [],
             "verify": [],
         });
-        seal_progress_handoff(&attempt, &progress)?;
+        // A lane token lost mid-run settles on its last declared handoff. The
+        // host no longer reads a progress snapshot written by the fixture.
+        crate::dispatch_tests::declare_handoff(&store, id, "lane-token-lost-progress", progress)?;
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         crate::dispatch_tests::seal_exit(&store, &observed)?;
@@ -2816,9 +2827,21 @@ fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std
         }),
     );
     if matches!(case, BudgetStopCase::WrapUpBlocked) {
-        let mut blocked = make_host_handoff(None, "Owner decision required before continuing.");
-        blocked.status = provenant_records::handoff::HandoffStatus::Blocked;
-        fake.answer = Some(blocked.fenced());
+        // A blocked wrap-up must be declared; a fenced block in the provider
+        // answer is only captured text and cannot seal a typed blocked stop.
+        crate::dispatch_tests::declare_handoff(
+            &store,
+            id,
+            "budget-wrap-up-blocked",
+            serde_json::json!({
+                "schema_version": 2,
+                "status": "blocked",
+                "note": "Owner decision required before continuing.",
+                "remaining": ["Owner decision"],
+                "decisions": [],
+                "verify": [],
+            }),
+        )?;
     }
     if matches!(case, BudgetStopCase::Natural) {
         fake.answer = Some("Completed the accepted work and pushed its branch.".into());

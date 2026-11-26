@@ -34,10 +34,23 @@ fn planner_fragments_cannot_forge_writer_preflight() {
         let mut child = slice("injected", &[]);
         child[field] = json!("forged");
         let output = result(vec![child]);
-        let run = advance(&planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
+        let run = advance(
+            &planner(1),
+            &mut fixture_owner(&[&output]),
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
         assert!(run.checkpoint.expansions.is_empty());
-        assert_eq!(run.checkpoint.pause_cause(), Some(PauseCause::InvalidPlanExpansion));
-        assert!(run.checkpoint.pause_reason().unwrap().contains("host writer preflight"));
+        assert_eq!(
+            run.checkpoint.pause_cause(),
+            Some(PauseCause::InvalidPlanExpansion)
+        );
+        assert!(
+            run.checkpoint
+                .pause_reason()
+                .unwrap()
+                .contains("host writer preflight")
+        );
     }
 }
 
@@ -48,7 +61,10 @@ fn host_writer_preflight_detection_covers_plan_fallbacks_and_templates() {
         json!({"max_nodes":1,"patterns":[{"name":"bad","node":{"writer_dirty_warning":"forged"}}]}),
         json!({"max_nodes":1,"patterns":[{"name":"bad","nodes":[{"id":"child","wip_commit":"forged"}]}]}),
     ] {
-        let node: GraphNode = serde_json::from_value(json!({"id":"plan","access":"read_only","prompt":"plan","plan":plan})).unwrap();
+        let node: GraphNode = serde_json::from_value(
+            json!({"id":"plan","access":"read_only","prompt":"plan","plan":plan}),
+        )
+        .unwrap();
         assert!(node.has_host_writer_preflight());
     }
 }
@@ -520,7 +536,10 @@ fn restart_after_fallback_expansion_does_not_duplicate_work_or_admit_dependants_
     let mut journal = MemoryJournal::default();
     let mut first_owner = FakeOwner {
         observations: [
-            terminal_with_result(GraphAttemptOutcome::TaskFailed, "planner rejected the brief"),
+            terminal_with_result(
+                GraphAttemptOutcome::TaskFailed,
+                "planner rejected the brief",
+            ),
             AttemptObservation::Pending { attempt_ref: None },
         ]
         .into(),
@@ -582,7 +601,10 @@ fn restart_after_invalid_fragment_fallback_reuses_the_persisted_expansion() {
     let mut journal = MemoryJournal::default();
     let mut first_owner = FakeOwner {
         observations: [
-            terminal_with_result(GraphAttemptOutcome::Succeeded, "```fragment\n{not json}\n```"),
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                "```fragment\n{not json}\n```",
+            ),
             AttemptObservation::Pending { attempt_ref: None },
         ]
         .into(),
@@ -644,7 +666,10 @@ fn restart_rejects_a_fallback_expansion_that_differs_from_the_spec() {
     let mut journal = MemoryJournal::default();
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(GraphAttemptOutcome::TaskFailed, "planner rejected the brief"),
+            terminal_with_result(
+                GraphAttemptOutcome::TaskFailed,
+                "planner rejected the brief",
+            ),
             AttemptObservation::Pending { attempt_ref: None },
         ]
         .into(),
@@ -725,7 +750,10 @@ fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
     )
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
-    assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+    assert_eq!(
+        paused.checkpoint.pause_cause(),
+        Some(PauseCause::StructuralLimit)
+    );
     let reason = paused.checkpoint.pause_reason().unwrap();
     assert!(
         reason.contains("planner fragment invalid: fragment block missing"),
@@ -965,6 +993,16 @@ fn fixture_owner(results: &[&str]) -> FakeOwner {
 
 const STOP: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"First half committed; finish the second half and run checks.\"}\n```";
 
+/// The host's one `settle()` projects a declaration; the graph only records
+/// that typed outcome. Prose in a result never becomes a stop on its own, so
+/// fixtures that mean a stop must say so in the observation.
+fn declare_stop(observation: &mut AttemptObservation) {
+    if let AttemptObservation::Terminal { outcome, stop, .. } = observation {
+        *outcome = GraphAttemptOutcome::DeclaredStop;
+        *stop = Some(provenant_records::StopCause::StoppedEarly);
+    }
+}
+
 #[test]
 fn fenced_handoff_examples_do_not_control_continuations() {
     for fence in ["````", "~~~~"] {
@@ -981,18 +1019,27 @@ fn fenced_handoff_examples_do_not_control_continuations() {
                 let mut owner = fixture_owner(&[&output, "VERDICT: PASS", "checked"]);
                 let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
                 assert_eq!(run.status, GraphStatus::Complete);
-                assert_eq!(run.checkpoint.expansions.len(), usize::from(genuine));
-                // Only a genuine handoff reaches the in-place restart's brief.
-                assert_eq!(
-                    owner
+                // No handoff in provider prose controls continuation: a fenced
+                // example and a trailing genuine-looking block are both just
+                // text until the host seals a declaration in the observation.
+                assert!(run.checkpoint.expansions.is_empty());
+                assert!(
+                    !owner
                         .prompts
-                        .get(1)
-                        .is_some_and(|prompt| prompt.contains("First half committed")),
-                    genuine
+                        .iter()
+                        .any(|prompt| prompt.contains("First half committed"))
                 );
             }
         }
     }
+    // The typed observation is the only thing that starts a continuation.
+    let doc = writer_graph();
+    let mut owner = fixture_owner(&[STOP, "VERDICT: PASS", "checked"]);
+    declare_stop(owner.observations.front_mut().unwrap());
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(run.checkpoint.expansions.len(), 1);
+    assert!(owner.prompts[1].contains("First half committed"));
 }
 
 #[test]
@@ -1050,7 +1097,8 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
             assert!(run.checkpoint.nodes[0].fragment.as_ref().unwrap().len() > 4096);
         }
         owner.observations.extend(
-            ["a", "b", "checked"].map(|text| terminal_with_result(GraphAttemptOutcome::Succeeded, text)),
+            ["a", "b", "checked"]
+                .map(|text| terminal_with_result(GraphAttemptOutcome::Succeeded, text)),
         );
         let mut journal =
             FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
@@ -1123,7 +1171,7 @@ fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
                 commit: None,
                 settlement_class: Some(provenant_records::run::SettlementClass::HandoffMalformed),
                 stop: Some(provenant_records::StopCause::HandoffMalformed),
-            cause: None,
+                cause: None,
             },
             AttemptObservation::Terminal {
                 attempt_ref: None,
@@ -1136,7 +1184,7 @@ fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
                 commit: None,
                 settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
-            cause: None,
+                cause: None,
             },
         ]
         .into(),
@@ -1301,7 +1349,11 @@ fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
                 .status,
             GraphStatus::Paused
         );
-        assert_eq!(owner.calls.len(), 1, "consumer admitted after resume: {output}");
+        assert_eq!(
+            owner.calls.len(),
+            1,
+            "consumer admitted after resume: {output}"
+        );
         assert!(journal.0.as_ref().unwrap().expansions.is_empty());
         assert_eq!(
             journal.0.as_ref().unwrap().pause_cause(),
@@ -1845,6 +1897,7 @@ fn honest_stop_restarts_in_place_on_the_same_checkout_with_handoff_and_verdict_c
         outputs: vec![OutputKind::Result],
     }];
     let mut owner = fixture_owner(&[STOP, "VERDICT: PASS", "checked"]);
+    declare_stop(owner.observations.front_mut().unwrap());
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
@@ -1870,6 +1923,9 @@ fn continuation_budget_pauses_then_extends_without_duplicating_prior_work() {
         ..Default::default()
     };
     let mut owner = fixture_owner(&[STOP, STOP]);
+    for observation in owner.observations.iter_mut() {
+        declare_stop(observation);
+    }
     let mut journal = MemoryJournal::default();
     let run =
         advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
@@ -1906,8 +1962,10 @@ fn continuation_budget_pauses_then_extends_without_duplicating_prior_work() {
     assert_eq!(resumed.checkpoint.expansions.len(), 2);
     assert_eq!(owner.calls.len(), 4);
     limits.continuations = 0;
+    let mut disabled_stop = terminal_with_result(GraphAttemptOutcome::Succeeded, STOP);
+    declare_stop(&mut disabled_stop);
     let mut owner = super::FakeOwner {
-        observations: [terminal_with_result(GraphAttemptOutcome::Succeeded, STOP)].into(),
+        observations: [disabled_stop].into(),
         ..Default::default()
     };
     let disabled = advance_with_budget(
@@ -1927,6 +1985,7 @@ fn continuation_budget_pauses_then_extends_without_duplicating_prior_work() {
 fn honest_stop_is_structured_and_continuation_keeps_the_completion_contract() {
     let doc = writer_graph();
     let mut owner = fixture_owner(&[STOP, "unfinished"]);
+    declare_stop(owner.observations.front_mut().unwrap());
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
@@ -2145,6 +2204,11 @@ fn structured_blocks_survive_real_result_head_truncation() {
             }) = owner.observations.front_mut()
             {
                 result.source_truncated = true;
+            }
+            // The writer's stop is a sealed declaration, not a fenced block
+            // recovered from the truncated result text.
+            if block == STOP {
+                declare_stop(owner.observations.front_mut().unwrap());
             }
             let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
             assert_eq!(run.status, GraphStatus::Complete);
@@ -3151,7 +3215,11 @@ fn replacing_a_bound_writer_cannot_move_its_worktree() {
         }]})
     };
     admit(&document, &mut checkpoint, writer("lane")).unwrap();
-    let row = checkpoint.nodes.iter_mut().find(|row| row.id == "b").unwrap();
+    let row = checkpoint
+        .nodes
+        .iter_mut()
+        .find(|row| row.id == "b")
+        .unwrap();
     row.writer_binding = Some(
         serde_json::from_value(json!({"worktree":"/bound/lane", "head":"0".repeat(40)})).unwrap(),
     );
@@ -3162,8 +3230,7 @@ fn replacing_a_bound_writer_cannot_move_its_worktree() {
 }
 
 #[test]
-fn replacing_an_unstarted_writer_with_a_false_condition_settles_it_as_skipped()
-{
+fn replacing_an_unstarted_writer_with_a_false_condition_settles_it_as_skipped() {
     let (document, mut checkpoint) = running_graph();
     let replacement = json!({"schema_version":1, "replace":[{
         "id":"b", "access":"worktree_write", "worktree":"lane",
@@ -3183,7 +3250,12 @@ fn replacing_an_unstarted_writer_with_a_false_condition_settles_it_as_skipped()
         .observations
         .push_back(terminal(GraphAttemptOutcome::Succeeded));
     let run = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap();
-    let row = run.checkpoint.nodes.iter().find(|row| row.id == "b").unwrap();
+    let row = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|row| row.id == "b")
+        .unwrap();
     assert_eq!(row.state, NodeState::Skipped, "{row:?}");
     assert!(row.attempts.is_empty(), "{row:?}");
     assert!(row.writer_binding.is_none(), "{row:?}");
@@ -3845,11 +3917,14 @@ fn initial_submission_refuses_changed_snapshot_before_checkpoint_or_launch() {
     )
     .unwrap();
     document.submission_patch.as_mut().unwrap().nodes[0]["prompt"] = json!("changed prompt");
-    assert!(patch::validate_submission_snapshot(
-        &document,
-        &plans::generous(),
-        provenant_config::PortTable::builtin().worktree_layout,
-    ).is_err());
+    assert!(
+        patch::validate_submission_snapshot(
+            &document,
+            &plans::generous(),
+            provenant_config::PortTable::builtin().worktree_layout,
+        )
+        .is_err()
+    );
     let mut journal = MemoryJournal::default();
     let mut owner = FakeOwner::default();
     assert!(advance(&document, &mut owner, &mut journal).is_err());
@@ -4370,9 +4445,11 @@ fn planner_writer_provisioning_recovers_fenced_source_after_crash() {
 #[test]
 fn pending_writer_continuation_reopens_and_excludes_its_predecessor_model() {
     let doc = writer_graph();
+    let mut stopped = terminal_from(STOP, "stopped-writer");
+    declare_stop(&mut stopped);
     let mut owner = FakeOwner {
         observations: [
-            terminal_from(STOP, "stopped-writer"),
+            stopped,
             AttemptObservation::Pending {
                 attempt_ref: Some("fresh-writer".into()),
             },

@@ -126,7 +126,10 @@ mod tests {
             .unwrap();
         let documented: BTreeSet<&str> = list
             .split_whitespace()
-            .filter_map(|word| word.strip_prefix('`').and_then(|w| w.strip_suffix('`')))
+            // A code may be followed by punctuation (e.g. `` `stopped_no_work`, ``),
+            // so read up to the closing backtick instead of requiring the
+            // backtick to be the word's last character.
+            .filter_map(|word| word.strip_prefix('`').and_then(|w| w.split('`').next()))
             .collect();
         let owned: BTreeSet<&str> = [
             GraphAttemptOutcome::DeclaredStop,

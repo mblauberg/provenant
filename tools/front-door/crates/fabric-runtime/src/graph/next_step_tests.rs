@@ -193,16 +193,15 @@ fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
             "remaining":if status == "done" { vec![] } else { vec!["Finish the brief"] },
             "decisions":[], "verify":[]
         })));
-        let mut observation = terminal(
-            "a/1",
-            if status.is_some() {
-                GraphAttemptOutcome::Succeeded
-            } else {
-                GraphAttemptOutcome::StoppedNoWork
-            },
-            None,
-            text.as_deref(),
-        );
+        // The host's one pure `settle()` projects the declared stop; the graph
+        // only records that projected outcome (it no longer derives one from a
+        // handoff). A finished brief stays provider success.
+        let outcome = match status {
+            Some("done") => GraphAttemptOutcome::Succeeded,
+            Some(_) => GraphAttemptOutcome::DeclaredStop,
+            None => GraphAttemptOutcome::StoppedNoWork,
+        };
+        let mut observation = terminal("a/1", outcome, None, text.as_deref());
         if let AttemptObservation::Terminal { commit, .. } = &mut observation {
             *commit = status.map(|_| "a".repeat(40));
         }
@@ -873,7 +872,7 @@ fn stopped_round(reference: &str, remaining: &[&str], commit: char) -> AttemptOb
     let handoff = stopped_early_handoff(remaining);
     let mut observation = terminal(
         reference,
-        GraphAttemptOutcome::Succeeded,
+        GraphAttemptOutcome::DeclaredStop,
         None,
         Some(&handoff),
     );
@@ -912,7 +911,14 @@ fn a_recoverable_stop_on_a_single_route_continues_on_the_same_route() {
         let document = single_route_document(serde_json::Value::Null);
         let handoff = stopped_early_handoff(&["Finish the renderer"]);
         let stopped = if cause == StopCause::StoppedEarly {
-            terminal("a/1", GraphAttemptOutcome::Succeeded, None, Some(&handoff))
+            // The host projects the unfinished handoff to a declared stop; the
+            // graph only records that outcome and then continues it.
+            terminal(
+                "a/1",
+                GraphAttemptOutcome::DeclaredStop,
+                None,
+                Some(&handoff),
+            )
         } else {
             terminal(
                 "a/1",
@@ -1093,7 +1099,7 @@ fn blocked_handoff(blocked_on: Option<&str>) -> String {
 fn blocked_round(reference: &str, blocked_on: Option<&str>) -> AttemptObservation {
     terminal(
         reference,
-        GraphAttemptOutcome::Succeeded,
+        GraphAttemptOutcome::DeclaredStop,
         None,
         Some(&blocked_handoff(blocked_on)),
     )

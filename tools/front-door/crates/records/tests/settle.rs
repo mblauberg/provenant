@@ -494,6 +494,31 @@ fn progress_is_pin_relative_and_never_reads_remote_state() {
 }
 
 #[test]
+fn no_work_keeps_the_declared_stop_even_though_the_fact_cause_changes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.git = git_at(Some(BASE), Some(BASE));
+    evidence.handoff = accepted(handoff(HandoffStatus::StoppedEarly, "Nothing left to do."));
+    let fact = settle(&evidence);
+
+    // No-work is a Git fact on the outcome and the graph's advance code.
+    assert_eq!(fact.cause, Some(CauseKind::StoppedNoWork));
+    let record = terminal_record(&fact, true)?;
+    assert_eq!(
+        graph_outcome(&record),
+        Some(GraphAttemptOutcome::StoppedNoWork)
+    );
+    // The writer still declared a stopped_early handoff, and the sealed stop
+    // agrees with it. A fact about the head does not rewrite the declaration.
+    assert_eq!(
+        fact.stop.as_ref().map(|stop| stop.cause()),
+        Some(StopCause::StoppedEarly)
+    );
+    assert_eq!(fact.settlement_class, SettlementClass::DeclaredStop);
+    Ok(())
+}
+
+#[test]
 fn the_budget_gate_requires_a_done_accepted_declaration() {
     let done = accepted(handoff(HandoffStatus::Done, "Delivered and pushed"));
     assert!(budget_completed(Outcome::Failed, &done));
@@ -632,6 +657,20 @@ fn declaration_malformed_off_keeps_the_error_but_completes_the_lane() {
     assert!(fact.signals.contains(&SettlementSignal::HandoffMalformed));
     assert!(fact.handoff.is_err());
     assert_eq!(fact.applied.len(), 1);
+}
+
+#[test]
+fn declaration_malformed_fail_keeps_the_signal_but_not_the_class() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.handoff = DeclarationEvidence::Rejected {
+        error: HandoffError::new("status", "expected status done, stopped_early or blocked"),
+    };
+    evidence.policy.declaration_malformed = sourced_action(DeclarationAction::Fail);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Failed);
+    assert_eq!(fact.settlement_class, SettlementClass::Failed);
+    // Fail withholds the signal from the class ladder, not from the fact.
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMalformed));
 }
 
 #[test]

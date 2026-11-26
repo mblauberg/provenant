@@ -5447,16 +5447,15 @@ impl BoundGraphOwner<'_> {
                 Ok(AttemptObservation::Terminal {
                     launched,
                     attempt_ref: reference,
-                    outcome: if result_warning.is_some() {
-                        GraphAttemptOutcome::OtherFailure
-                    } else if outcome == Outcome::Succeeded
-                        && effective_delivery.is_some_and(|delivery| {
-                            matches!(
-                                delivery.state,
-                                provenant_records::run::WriterDeliveryState::Failed { .. }
-                                    | provenant_records::run::WriterDeliveryState::NotAttempted { .. }
-                            )
-                        })
+                    outcome: if result_warning.is_some()
+                        || (outcome == Outcome::Succeeded
+                            && effective_delivery.is_some_and(|delivery| {
+                                matches!(
+                                    delivery.state,
+                                    provenant_records::run::WriterDeliveryState::Failed { .. }
+                                        | provenant_records::run::WriterDeliveryState::NotAttempted { .. }
+                                )
+                            }))
                     {
                         GraphAttemptOutcome::OtherFailure
                     } else if outcome == Outcome::TimedOut
@@ -5924,7 +5923,7 @@ mod on_stop_defaults_tests {
         }
         std::fs::write(
             state.join("config.toml"),
-            "[knobs]\n\
+            "schema_version = 1\n[knobs]\n\
              \"domains.fabric.graph.on_stop.stopped_no_work\" = \"chair\"\n\
              \"domains.fabric.graph.on_stop.blocked\" = \"new_route\"\n",
         )

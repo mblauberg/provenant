@@ -348,6 +348,25 @@ impl Providers for Fake {
     }
 }
 
+/// Declare one handoff on the attempt's journal: the lane's only handoff
+/// channel. Handoff prose in an answer is captured output, never a declaration.
+pub(super) fn declare_handoff(
+    store: &RunStore,
+    id: AttemptId,
+    request_id: &str,
+    payload: serde_json::Value,
+) -> TestResult {
+    store.declare(
+        id,
+        &provenant_records::declaration::DeclarationInput {
+            request_id: request_id.into(),
+            payload,
+        },
+        &provenant_records::declaration::DeclarationLimit::shipped(),
+    )?;
+    Ok(())
+}
+
 /// Settle one attempt whose provider reported `outcome` and `signals`, with
 /// `answer` as its final answer, and return the committed record.
 fn settle_with(
@@ -355,7 +374,17 @@ fn settle_with(
     outcome: Option<Outcome>,
     signals: Vec<SettlementSignal>,
 ) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
-    settle_with_role(answer, outcome, signals, None)
+    settle_with_role(answer, outcome, signals, None, None)
+}
+
+/// The same, with a typed declaration rather than handoff prose in `answer`.
+fn settle_with_declared(
+    handoff: serde_json::Value,
+    answer: &str,
+    outcome: Option<Outcome>,
+    signals: Vec<SettlementSignal>,
+) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
+    settle_with_role(answer, outcome, signals, None, Some(handoff))
 }
 
 fn settle_with_role(
@@ -363,6 +392,7 @@ fn settle_with_role(
     outcome: Option<Outcome>,
     signals: Vec<SettlementSignal>,
     role: Option<&str>,
+    declaration: Option<serde_json::Value>,
 ) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -388,6 +418,9 @@ fn settle_with_role(
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
     let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    if let Some(payload) = declaration {
+        declare_handoff(&store, id, "settled-declaration", payload)?;
+    }
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     // A cancelled outcome requires proof that the stop preceded the exit.

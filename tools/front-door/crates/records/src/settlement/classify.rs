@@ -177,6 +177,10 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     let mut terminal_note = host.terminal_note.clone();
     let mut complete = host.complete;
     let mut signals = host.signals.clone();
+    // Signals withheld from the class ladder by a failure outcome are still
+    // facts about the attempt. They are kept here and returned on OutcomeFact;
+    // `signals` stays the ladder's input, so clearing it changes no class.
+    let mut withheld_signals: Vec<SettlementSignal> = Vec::new();
 
     // A recorded signal is a fact. An action changes the outcome and whether
     // the signal reaches the class ladder; only a non-default action that
@@ -391,6 +395,10 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         signals.sort();
         signals.dedup();
     } else {
+        // A failure outcome withholds its recorded signals from the class
+        // ladder, but they remain facts on the returned OutcomeFact. Keep a
+        // copy for the fact and clear only the ladder's view.
+        withheld_signals = signals.clone();
         signals.clear();
     }
 
@@ -512,20 +520,26 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         reason = Some(stall.detail().into());
     }
 
-    // 12. Uncertain custody does not keep a writer's other typed causes.
-    if matches!(
-        outcome,
-        Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
-    ) && !matches!(
-        cause,
-        Some(
-            CauseKind::Steered
-                | CauseKind::IdentityMismatch
-                | CauseKind::ProviderCaptureDefect { .. }
-                | CauseKind::ProviderStalled
-                | CauseKind::ProviderStalledRetry
+    // 12. Uncertain custody does not keep a writer's other typed causes. A
+    // refusal decided before launch is not uncertain custody: the cause the
+    // host sealed for the failed preparation is the reason the lane stopped,
+    // even when an explicit cancellation arrived first.
+    if custody.launched
+        && matches!(
+            outcome,
+            Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
         )
-    ) {
+        && !matches!(
+            cause,
+            Some(
+                CauseKind::Steered
+                    | CauseKind::IdentityMismatch
+                    | CauseKind::ProviderCaptureDefect { .. }
+                    | CauseKind::ProviderStalled
+                    | CauseKind::ProviderStalledRetry
+            )
+        )
+    {
         cause = None;
     }
 
@@ -601,6 +615,10 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     // Every signal stays on the fact. A non-releasing action (fail, warn, off)
     // withholds its signal and cause from the class ladder, so the class is a
     // plain failure or a completed lane instead of the recorded partial state.
+    let mut fact_signals = withheld_signals;
+    fact_signals.extend_from_slice(&signals);
+    fact_signals.sort();
+    fact_signals.dedup();
     let empty_result_missing = cause == Some(CauseKind::EmptyWriterResult);
     let class_signals: Vec<SettlementSignal> = signals
         .iter()
@@ -647,8 +665,6 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
 
     // 16. HeadProgress is the sealed head against the sealed launch pin only.
     let head_progress = evidence.git.as_ref().map(|git| git.head_progress());
-    signals.sort();
-    signals.dedup();
 
     // Provenance is a fact about where the settled handoff came from. A host
     // stop outranks a declaration; an accepted declaration is the lane's own.
@@ -670,7 +686,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         cause_source: source,
         release,
         terminal_basis,
-        signals,
+        signals: fact_signals,
         head_progress,
         handoff: declaration,
         declaration_source,

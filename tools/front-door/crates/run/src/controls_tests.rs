@@ -1335,9 +1335,10 @@ fn terminal_proof_revises_live_resume_without_losing_acknowledgement() -> TestRe
                 }
                 Case::LiveThenTerminalIncomplete => {
                     exit.provider_identity_evidence_incomplete = true;
+                    let reason = "terminal provider evidence was incomplete".to_owned();
                     publication.fact.outcome = Outcome::Unsettled;
-                    publication.fact.reason =
-                        Some("terminal provider evidence was incomplete".into());
+                    publication.fact.reason = Some(reason.clone());
+                    publication.fact.terminal_basis = TerminalBasis::Unsettled { reason };
                     publication.result = "terminal provider evidence was incomplete";
                     publication.fact.complete = false;
                     publication.session = None;
@@ -1377,9 +1378,10 @@ fn terminal_proof_revises_live_resume_without_losing_acknowledgement() -> TestRe
                     exit.cancel_delivered_before_exit = Some(true);
                     exit.provider_identity_eof_fragment = true;
                     exit.provider_identity_evidence_incomplete = true;
+                    let reason = "provider identity evidence was incomplete".to_owned();
                     publication.fact.outcome = Outcome::Unsettled;
-                    publication.fact.reason =
-                        Some("provider identity evidence was incomplete".into());
+                    publication.fact.reason = Some(reason.clone());
+                    publication.fact.terminal_basis = TerminalBasis::Unsettled { reason };
                     publication.result = "provider identity evidence was incomplete";
                     publication.fact.complete = false;
                     publication.session = None;

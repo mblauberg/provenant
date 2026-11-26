@@ -430,7 +430,10 @@ mod tests {
         );
         assert!(added.iter().any(|path| path.ends_with(JOURNAL)));
         assert!(before.difference(&after).next().is_none());
-        let other_dir = store.attempt_dir(other, false)?;
+        // `create` reserves a queued attempt's private directory on disk: a
+        // stored row alone has no journal to close. This happens after the
+        // snapshot, so it cannot hide a stray write from the declaration above.
+        let other_dir = store.attempt_dir(other, true)?;
         let (evidence, counts) = store.close_declarations(&other_dir)?;
         assert_eq!(evidence, DeclarationEvidence::Missing);
         assert_eq!(counts.accepted, 0);

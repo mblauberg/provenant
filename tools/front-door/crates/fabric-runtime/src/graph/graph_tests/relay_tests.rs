@@ -778,7 +778,7 @@ fn settled_parent_stops_running_children(outcome: GraphAttemptOutcome) {
                 attempt_ref: Some("attempt-a".into()),
                 settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
-            cause: None,
+                cause: None,
             },
             AttemptObservation::Pending {
                 attempt_ref: Some("attempt-keep".into()),
@@ -1749,12 +1749,14 @@ fn honest_stop_continuation_replays_its_logical_parents_writer_child() {
     let first = add(&document, &mut checkpoint, "parent", &request).unwrap();
     journal.0 = Some(checkpoint);
     owner.observations.extend([
+        // The handoff text is evidence for the brief, but the stop itself is
+        // the host's typed declaration; the graph never derives one from prose.
         AttemptObservation::Terminal {
-            attempt_ref:Some("first-attempt".into()), outcome:GraphAttemptOutcome::Succeeded, launched:true,
+            attempt_ref:Some("first-attempt".into()), outcome:GraphAttemptOutcome::DeclaredStop, launched:true,
             result:Some(Box::new(capture("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Continue checking\"}\n```"))),
             result_warning:None, result_path:None, branch:Some("parent".into()), commit:Some("a".repeat(40)),
-            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
-            stop: None,
+            settlement_class: Some(provenant_records::run::SettlementClass::DeclaredStop),
+            stop: Some(provenant_records::StopCause::StoppedEarly),
         cause: None,
         },
         // The parent restarts in place, ahead of its child in plan order.

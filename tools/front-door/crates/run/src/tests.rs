@@ -4239,12 +4239,22 @@ fn base_14_settlement_fields_migrate_once_without_extra_fields() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let record = store.record_refusal(
-        &input,
-        provenant_records::diagnostic::Diagnostic::new("REFUSED"),
-        None,
-        &call,
-    )?;
+    // The old row is an attempt record: its `state` is the internally tagged
+    // AttemptState object, not an OperationState string. A refusal’s old
+    // `terminal_cause` lived under that object, beside the other terminal
+    // fields; the settlement names were top-level on the attempt record.
+    store.create(&input, &call)?;
+    let mut record = store.record(input.attempt_id, &call)?;
+    record.state = AttemptState::Terminal {
+        extra: Default::default(),
+        cause: None,
+        terminal_note: None,
+        stop: None,
+        outcome: Outcome::Rejected,
+        exit_code: None,
+        finished_at: provenant_core::WallTime::from_micros(1)?,
+        reason: Some("pre_launch_refusal".into()),
+    };
     let mut value = serde_json::to_value(record)?;
     value["state"]["terminal_cause"] = serde_json::json!("handoff_refused");
     value["state"].as_object_mut().unwrap().remove("cause");

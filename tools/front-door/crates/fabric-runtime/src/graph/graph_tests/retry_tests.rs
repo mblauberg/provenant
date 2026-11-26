@@ -1322,10 +1322,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
             1 => {
                 candidate.nodes[work_index].attempts[0].attempt_ref = Some("host/uncertain".into())
             }
-            2 => {
-                candidate.nodes[work_index].advance_code =
-                    Some("launch_retry_exhausted".into())
-            }
+            2 => candidate.nodes[work_index].advance_code = Some("launch_retry_exhausted".into()),
             3 => candidate.nodes[work_index].state = NodeState::Running,
             4 => candidate.nodes[work_index].attempts[0].state = AttemptState::Running,
             _ => {
@@ -1924,7 +1921,10 @@ fn public_retry_preserves_live_spawn_only_children() {
 
 #[test]
 fn no_work_writer_continues_in_place_and_records_the_patch() {
-    for final_outcome in [GraphAttemptOutcome::StoppedNoWork, GraphAttemptOutcome::Succeeded] {
+    for final_outcome in [
+        GraphAttemptOutcome::StoppedNoWork,
+        GraphAttemptOutcome::Succeeded,
+    ] {
         let mut work = node("work", pool_route("junior"));
         work.access = AccessMode::WorktreeWrite;
         work.worktree = Some(".worktrees/work".into());
@@ -2001,7 +2001,7 @@ fn no_work_stop(head: Option<&str>) -> AttemptObservation {
         commit: head.map(str::to_owned),
         settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
-    cause: None,
+        cause: None,
     }
 }
 
@@ -2034,10 +2034,33 @@ fn writer_stop_restarts_only_for_enabled_writers_and_leaves_others_failed() {
         }
         let document = graph(vec![work]);
         let mut stopped = no_work_stop(head.as_deref());
-        if head.as_deref() != Some("a".repeat(40).as_str())
-            && let AttemptObservation::Terminal { outcome, .. } = &mut stopped
+        // A stop is a sealed fact from the host's one classifier. The writer
+        // that stopped at the pinned head declares `stopped_early`; a reader
+        // that stopped without a declaration carries `handoff_missing`. Their
+        // projected outcome alone must not be re-read as text was before.
+        let (cause, settlement_class) = if access == AccessMode::ReadOnly {
+            (
+                provenant_records::StopCause::HandoffMissing,
+                provenant_records::run::SettlementClass::HandoffMissing,
+            )
+        } else {
+            (
+                provenant_records::StopCause::StoppedEarly,
+                provenant_records::run::SettlementClass::DeclaredStop,
+            )
+        };
+        if let AttemptObservation::Terminal {
+            outcome,
+            stop,
+            settlement_class: sealed_class,
+            ..
+        } = &mut stopped
         {
-            *outcome = GraphAttemptOutcome::DeclaredStop;
+            *stop = Some(cause);
+            *sealed_class = Some(settlement_class);
+            if head.as_deref() != Some("a".repeat(40).as_str()) {
+                *outcome = GraphAttemptOutcome::DeclaredStop;
+            }
         }
         let mut observations = vec![stopped];
         if restarts {
@@ -2241,19 +2264,13 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     plans::clear_expansion_pause(&mut checkpoint, 0, true);
     assert!(checkpoint.pause.is_none());
     let original = checkpoint.nodes[0].clone();
-    assert_eq!(
-        original.advance_code.as_deref(),
-        Some("stopped_no_work")
-    );
+    assert_eq!(original.advance_code.as_deref(), Some("stopped_no_work"));
     assert!(next_step::pending(&checkpoint));
     cancel_node_subtree(&document, &mut checkpoint, "work", Some("chair stop")).unwrap();
     assert_eq!(checkpoint.nodes[0].attempts, original.attempts);
     assert_eq!(checkpoint.nodes[0].state, original.state);
     assert_eq!(checkpoint.nodes[0].advance_note, original.advance_note);
-    assert_eq!(
-        checkpoint.nodes[0].advance_code,
-        original.advance_code
-    );
+    assert_eq!(checkpoint.nodes[0].advance_code, original.advance_code);
     journal.save(&checkpoint).unwrap();
     drop(journal);
 
@@ -2268,10 +2285,7 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     assert!(!next_step::pending(&checkpoint));
     assert_eq!(checkpoint.nodes[0].attempts, original.attempts);
     assert_eq!(checkpoint.nodes[0].advance_note, original.advance_note);
-    assert_eq!(
-        checkpoint.nodes[0].advance_code,
-        original.advance_code
-    );
+    assert_eq!(checkpoint.nodes[0].advance_code, original.advance_code);
     let mut recovery_owner = FakeOwner::default();
     let run = advance(&document, &mut recovery_owner, &mut journal).unwrap();
     assert!(recovery_owner.calls.is_empty());
@@ -2555,12 +2569,10 @@ fn writer_owner_decision_or_missing_capability_returns_to_chair_without_launch()
         "Owner must choose the release target",
         "Missing capability: network access is required",
     ] {
-        for outcome in [
-            GraphAttemptOutcome::Succeeded,
-            GraphAttemptOutcome::DeclaredStop,
-            GraphAttemptOutcome::StoppedNoWork,
-        ] {
-            let no_work = outcome == GraphAttemptOutcome::StoppedNoWork;
+        // The host's one `settle()` projects a blocked declaration; the graph
+        // only records that typed outcome. A fenced handoff in provider prose
+        // is never read as the stop itself.
+        {
             let mut work = node("work", pool_route("senior"));
             work.access = AccessMode::WorktreeWrite;
             work.worktree = Some(".worktrees/work".into());
@@ -2569,19 +2581,19 @@ fn writer_owner_decision_or_missing_capability_returns_to_chair_without_launch()
                 "```handoff\n{}\n```",
                 serde_json::json!({"schema_version":2,"status":"blocked","note":note,"remaining":["Finish accepted brief"],"decisions":[],"verify":[]})
             );
-            let mut observation = if no_work {
-                no_work_stop(Some(&"a".repeat(40)))
-            } else {
-                done_as("blocked")
-            };
+            let mut observation = done_as("blocked");
             if let AttemptObservation::Terminal {
                 result,
                 outcome: observed,
+                stop,
+                settlement_class,
                 ..
             } = &mut observation
             {
-                *observed = outcome;
+                *observed = GraphAttemptOutcome::DeclaredStop;
                 *result = Some(Box::new(capture(&handoff)));
+                *stop = Some(provenant_records::StopCause::Blocked);
+                *settlement_class = Some(provenant_records::run::SettlementClass::DeclaredStop);
             }
             let mut owner = FakeOwner {
                 observations: [observation].into(),
@@ -2589,7 +2601,7 @@ fn writer_owner_decision_or_missing_capability_returns_to_chair_without_launch()
             };
             let mut journal = MemoryJournal::default();
             let run = advance(&document, &mut owner, &mut journal).unwrap();
-            assert_eq!(run.status, GraphStatus::Paused, "{note}, no_work={no_work}");
+            assert_eq!(run.status, GraphStatus::Paused, "{note}");
             assert_eq!(owner.calls.len(), 1);
             assert!(run.checkpoint.expansions.is_empty());
             assert!(

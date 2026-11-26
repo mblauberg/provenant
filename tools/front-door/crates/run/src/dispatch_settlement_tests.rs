@@ -385,6 +385,21 @@ fn path_denial_case(
         DenialAnswer::CompletedHandoff => COMPLETED,
         DenialAnswer::Empty => "",
     };
+    if matches!(answer_case, DenialAnswer::CompletedHandoff) {
+        declare_handoff(
+            &store,
+            id,
+            "path-denial-done",
+            serde_json::json!({
+                "schema_version": 2,
+                "status": "done",
+                "note": "done",
+                "remaining": [],
+                "decisions": [],
+                "verify": [],
+            }),
+        )?;
+    }
     let fake = Fake {
         observed: Some(route()),
         answer: Some(answer.into()),
@@ -691,10 +706,23 @@ fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestRe
     assert_eq!(repeat.revision, record.revision);
     Ok(())
 }
+/// A typed declaration, not a fenced block in the result text.
+fn declared(status: &str, note: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 2,
+        "status": status,
+        "note": note,
+        "remaining": [],
+        "decisions": [],
+        "verify": [],
+    })
+}
+
 #[test]
 fn a_declared_stop_settles_review_required() -> TestResult {
-    let record = settle_with(
-        &format!("Done: parser.\n\n{STOPPED_EARLY}\n"),
+    let record = settle_with_declared(
+        declared("stopped_early", "Parser done; renderer and tests remain."),
+        "Done: parser.",
         Some(Outcome::Succeeded),
         Vec::new(),
     )?;
@@ -708,8 +736,12 @@ fn a_declared_stop_settles_review_required() -> TestResult {
     assert_eq!(record.signals, [SettlementSignal::DeclaredStop]);
     let reason = reason.as_deref().ok_or("no reason")?;
     assert!(reason.contains("renderer and tests remain"), "{reason}");
-    let blocked = STOPPED_EARLY.replace("stopped_early", "blocked");
-    let record = settle_with(&blocked, Some(Outcome::Succeeded), Vec::new())?;
+    let record = settle_with_declared(
+        declared("blocked", "Parser done; renderer and tests remain."),
+        "Done: parser.",
+        Some(Outcome::Succeeded),
+        Vec::new(),
+    )?;
     assert!(matches!(
         record.state,
         AttemptState::Terminal {
@@ -724,9 +756,13 @@ fn a_declared_stop_settles_review_required() -> TestResult {
 fn trailing_prose_does_not_change_a_declared_stop() -> TestResult {
     // The declaration channel settles the lane; trailing prose and a later
     // tool call in the answer can never supersede it.
-    let answer =
-        format!("Done: parser.\n\n{STOPPED_EARLY}\nThe wait was redundant; nothing changed.");
-    let record = settle_with(&answer, Some(Outcome::Succeeded), Vec::new())?;
+    let answer = "Done: parser.\nThe wait was redundant; nothing changed.";
+    let record = settle_with_declared(
+        declared("stopped_early", "Parser done; renderer and tests remain."),
+        answer,
+        Some(Outcome::Succeeded),
+        Vec::new(),
+    )?;
     assert_eq!(record.signals, [SettlementSignal::DeclaredStop]);
     assert!(matches!(
         record.state,
@@ -775,8 +811,9 @@ fn provider_stops_are_kept_and_failures_carry_no_flag() -> TestResult {
         vec![SettlementSignal::ProviderStop],
     )?;
     assert_eq!(record.signals, [SettlementSignal::ProviderStop]);
-    let record = settle_with(
-        &format!("{STOPPED_EARLY}\n"),
+    let record = settle_with_declared(
+        declared("stopped_early", "Parser done; renderer and tests remain."),
+        "answer",
         Some(Outcome::Failed),
         vec![SettlementSignal::ProviderStop],
     )?;
@@ -791,21 +828,41 @@ fn provider_stops_are_kept_and_failures_carry_no_flag() -> TestResult {
 }
 #[test]
 fn handoff_missing_and_done_outcome_contradictions() -> TestResult {
-    let done = STOPPED_EARLY.replace("stopped_early", "done");
-    let success = settle_with(&done, Some(Outcome::Succeeded), Vec::new())?;
+    // A declared `done` is never an unfinished handoff, even when the host's
+    // final outcome contradicts it. The old reason text came from reading the
+    // result prose; the declaration channel settles this without that text.
+    let done = declared("done", "finished");
+    let success =
+        settle_with_declared(done.clone(), "answer", Some(Outcome::Succeeded), Vec::new())?;
     assert!(success.signals.is_empty());
     for outcome in [Outcome::Cancelled, Outcome::ReviewRequired] {
-        let record = settle_with(&done, Some(outcome), Vec::new())?;
+        let record = settle_with_declared(done.clone(), "answer", Some(outcome), Vec::new())?;
         let AttemptState::Terminal {
             outcome: actual,
             reason,
+            stop,
             ..
         } = record.state
         else {
             return Err("not terminal".into());
         };
         assert_eq!(actual, outcome);
-        assert!(reason.unwrap_or_default().contains("handoff declared done"));
+        assert!(
+            record.signals.is_empty(),
+            "{outcome:?}: {:?}",
+            record.signals
+        );
+        assert!(
+            !stop.as_ref().is_some_and(|stop| matches!(
+                stop.cause(),
+                provenant_records::StopCause::StoppedEarly | provenant_records::StopCause::Blocked
+            )),
+            "a done declaration must not become a declared stop: {stop:?}"
+        );
+        assert!(
+            !reason.unwrap_or_default().contains("lane stopped early"),
+            "a done declaration must not report unfinished work"
+        );
     }
     Ok(())
 }

@@ -460,6 +460,21 @@ mod identity_policy_tests {
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         crate::dispatch_tests::seal_exit(&store, &observed)?;
+        // A finished writer declares `done`; the fenced report in its answer is
+        // captured output and no longer settles the attempt.
+        crate::dispatch_tests::declare_handoff(
+            &store,
+            id,
+            "independent-primary-done",
+            serde_json::json!({
+                "schema_version": 2,
+                "status": "done",
+                "note": "finished",
+                "remaining": [],
+                "decisions": [],
+                "verify": [],
+            }),
+        )?;
         let fake = crate::dispatch_tests::Fake::with_observed(
             Some(crate::tests::route()),
             Some(Outcome::Succeeded),
@@ -4295,6 +4310,22 @@ mod outcome_release_tests {
                 exit.unresolved_pids.clear();
             }
             crate::dispatch_tests::seal_exit(&store, &exit)?;
+            // The provider's report closes with a done handoff; declare it so
+            // the settlement fact carries it through the failed drive and the
+            // replay that finally commits the outcome.
+            crate::dispatch_tests::declare_handoff(
+                &store,
+                id,
+                "outcome-release-done",
+                serde_json::json!({
+                    "schema_version": 2,
+                    "status": "done",
+                    "note": "finished",
+                    "remaining": [],
+                    "decisions": [],
+                    "verify": ["fixture"],
+                }),
+            )?;
             let holder_context = HolderContext {
                 schema_version: 1,
                 roots: RootSeed {
@@ -4561,7 +4592,11 @@ mod budget_result_tests {
     fn an_empty_budget_result_keeps_the_done_handoff_as_a_review_record()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let (finished, result) = settle_budget_stop(None, Some(false))?;
-        assert!(result.is_empty() || result.contains("the provider sent no final message"));
+        // With no provider answer the host keeps the lane's declared done
+        // handoff as the review record, so the result is its fenced report.
+        assert!(result.contains("```handoff"), "{result}");
+        assert!(result.contains("\"status\":\"done\""), "{result}");
+        assert!(result.contains("\"note\":\"finished\""), "{result}");
         let AttemptState::Terminal { outcome, .. } = &finished.state else {
             return Err("budget stop must settle".into());
         };

@@ -4086,7 +4086,7 @@ mod tests {
                 serde_json::json!({"Ok":{"schema_version":1,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}}),
             ),
             (
-                "progress",
+                "head_progress",
                 serde_json::json!("moved"),
                 serde_json::json!("not_a_progress"),
             ),

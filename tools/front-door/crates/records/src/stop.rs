@@ -29,8 +29,9 @@ pub enum StopCause {
     /// not finish it in this attempt.
     StoppedEarly,
     /// A declared stop with no work to show for it: the launch-pinned head did
-    /// not move. The sealed stop agrees with this cause rather than falling
-    /// back to `stopped_early`, so `on_stop` can treat no-work separately.
+    /// not move. No-work is a fact on the outcome, not a stop the writer
+    /// declared, so the sealed stop keeps the handoff's `stopped_early` cause;
+    /// the graph projects no-work from the fact cause instead.
     StoppedNoWork,
     /// The handoff says `blocked` and names an owner decision or a missing
     /// capability in `blocked_on`, or names no kind. The stop carries the
@@ -765,7 +766,14 @@ impl Stop {
         let host = if reason == crate::run::SettlementClass::HandoffMalformed {
             Some(StopCause::HandoffMalformed)
         } else {
-            cause.map(Into::into).or(reason.rule().stop_cause)
+            cause
+                // `stopped_no_work` is a fact about the launch-pinned head,
+                // not a cause the writer declared. Keep it on the outcome
+                // fact; the sealed stop keeps the handoff's declared cause
+                // (`stopped_early`) so the two agree on the stop itself.
+                .filter(|cause| *cause != crate::run::CauseKind::StoppedNoWork)
+                .map(Into::into)
+                .or(reason.rule().stop_cause)
         }
         .or_else(|| {
             StopCause::of_outcome(outcome)

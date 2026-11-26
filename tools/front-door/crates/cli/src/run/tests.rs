@@ -1008,7 +1008,14 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                                     None,
                                 ),
                             );
+                            // A terminal record's reason and its unsettled basis are
+                            // one fact: change both so the fixture stays internally
+                            // consistent under reader validation.
                             fact.reason = Some("publish refused".into());
+                            fact.terminal_basis =
+                                provenant_records::run::TerminalBasis::Unsettled {
+                                    reason: "publish refused".into(),
+                                };
                             fact
                         },
                         evidence: None,
