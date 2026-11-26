@@ -208,6 +208,10 @@ names: writer, review or read-only. A missing or unreadable file warns with its 
 launch proceeds without it. A writer's preamble also lists the project's declared no-build
 static checks from the port table under `Static checks:`, to run before pushing. Readers do
 not get that list.
+- A writer with valid `verify.lane` entries receives those tiers, commands, scopes and source as
+  its authoritative verification guidance; the legacy format-only scope does not also apply. The
+  launch receipt records the same effective entries and source. With no valid entries, the
+  resolved `lanes.verification` scope or formatter and hooks default remains in force.
 - Why: standing rules belong in one owned file per layer, not repeated in every brief, and a
   writer should run the cheap checks the project declares before CI does.
 

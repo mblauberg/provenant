@@ -34,9 +34,12 @@ data.
 ## Lane verification
 
 Writer lanes run the commands and scopes declared in the project's `verify.lane`
-port. With no declaration they run the repository formatter and declared
-pre-commit hooks. Git hooks are part of commit and push. Build admission and
-shared caches remain subject to host policy.
+port. A valid declaration is authoritative over the resolved legacy
+`lanes.verification` format-only scope; its tiers, commands, scopes and source
+also appear in the launch receipt. With no valid declaration writers run the
+repository formatter and declared pre-commit hooks. Git hooks are part of
+commit and push. Build admission and shared caches remain subject to host
+policy.
 
 ## Publication order
 
@@ -118,7 +121,9 @@ and never fails the tick.
 
 A writer preamble renders the project's `verify.lane` entries with their tier,
 argv, scope and source. Invalid entries warn and are omitted; without a usable
-entry the formatter and declared pre-commit hooks are the default.
+entry the resolved `lanes.verification` scope or formatter and declared
+pre-commit hooks remain in force. The launch receipt records the same effective
+valid entries and source as the writer preamble.
 
 Admission attribution has host scope and serves the chair's host-owned warm
 check. Before confinement each lane registers under

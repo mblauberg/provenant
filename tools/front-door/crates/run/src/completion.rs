@@ -934,8 +934,8 @@ pub fn lane_preamble_with(
                 })
                 .unwrap_or_default();
             let verification = match (&extras.verification, &extras.brief) {
-                (Some(scope), Some(brief)) if !brief.lane_checks.is_empty() => {
-                    format!("{}{}", scope.paragraph(), brief.lane_verification_paragraph())
+                (Some(_), Some(brief)) if !brief.lane_checks.is_empty() => {
+                    brief.lane_verification_paragraph()
                 }
                 (Some(scope), _) => scope.paragraph(),
                 (None, Some(brief)) => brief.lane_verification_paragraph(),
@@ -1246,6 +1246,10 @@ mod tests {
             None,
             &PreambleExtras {
                 brief: Some(brief),
+                verification: Some(crate::VerificationResolution::resolve(
+                    &Default::default(),
+                    "",
+                )),
                 ..Default::default()
             },
         );
@@ -1255,6 +1259,7 @@ mod tests {
             assert!(writer.contains(&check.tier), "{writer}");
         }
         assert!(writer.contains(".provenant/ports.json#verify.lane"));
+        assert!(!writer.contains("Verification: format only."), "{writer}");
         assert!(!writer.contains("do not compile"));
     }
 

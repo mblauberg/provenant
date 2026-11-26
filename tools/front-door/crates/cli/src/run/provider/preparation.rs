@@ -5889,6 +5889,26 @@ pub(super) fn prepare_candidates_inner(
                 key: "lanes.ci_scope".into(),
                 extra: Default::default(),
             });
+            provider.lane_verification = extras.brief.as_ref().and_then(|brief| {
+                if brief.lane_checks.is_empty() {
+                    return None;
+                }
+                Some(provenant_records::run::LaneVerificationReceipt {
+                    checks: brief
+                        .lane_checks
+                        .iter()
+                        .map(
+                            |check| provenant_records::run::LaneVerificationCheckReceipt {
+                                tier: check.tier.clone(),
+                                argv: check.argv.clone(),
+                                scope: check.scope.clone(),
+                            },
+                        )
+                        .collect(),
+                    source: brief.lane_checks_source.clone()?,
+                    extra: Default::default(),
+                })
+            });
         }
         gh_selection.finalise_environment(&mut spec.env);
         if adapter_spec.is_some_and(|spec| {
