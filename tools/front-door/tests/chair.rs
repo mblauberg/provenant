@@ -580,7 +580,7 @@ fn native_subagent_session_start_receives_no_checkpoint_or_custody() -> Result {
     let context = value["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .ok_or("chair context")?;
-    assert!(context.contains("subagents must not see this.") && context.contains(checkpoint));
+    assert!(context.contains("custody-source") && context.contains(checkpoint));
     let advisory = session_start(Some(top_level_agent))?;
     let value: serde_json::Value = serde_json::from_slice(&advisory.stdout.bytes)?;
     let text = value["hookSpecificOutput"]["additionalContext"]
