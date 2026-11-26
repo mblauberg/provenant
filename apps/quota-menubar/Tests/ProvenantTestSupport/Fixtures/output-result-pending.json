@@ -27,6 +27,7 @@
     "eof": true,
     "exit_code": null,
     "finished_at": null,
+    "first_output_at": null,
     "git_grants_digest": null,
     "graph": "output-result-pending",
     "head": null,
