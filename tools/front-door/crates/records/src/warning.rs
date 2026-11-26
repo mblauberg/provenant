@@ -407,6 +407,9 @@ pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIAL
 /// A route model is a full `ADAPTER/ID` that the effective catalogue does not
 /// know. The declared spelling is preserved; the warning names it.
 pub const ROUTE_MODEL_NOT_CATALOGUED: WarningCode = WarningCode("ROUTE_MODEL_NOT_CATALOGUED");
+/// An overlay entry or adapter selector could not be applied to the capability
+/// matrix; the matrix still reports the compiled facts.
+pub const ADAPTER_CAPABILITIES_OVERLAY: WarningCode = WarningCode("ADAPTER_CAPABILITIES_OVERLAY");
 /// A declaration succeeded but its journal is nearly full. The claim still
 /// succeeds; the named setting is the one to raise.
 pub const DECLARATION_JOURNAL_NEAR_FULL: WarningCode = WarningCode("DECLARATION_JOURNAL_NEAR_FULL");
