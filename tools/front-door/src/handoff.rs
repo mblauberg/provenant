@@ -264,6 +264,19 @@ fn unsafe_wip(tree: &Tree) -> bool {
     tree.primary || tree.branch.is_none() || tree.live_writer || tree.writer_unknown || tree.unknown
 }
 
+/// An advisory observation about a writer worktree is a typed warning: it does
+/// not block the handoff, and it travels once per change in the JSON envelope.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn emit_writer_advisory(advisory: &str) {
+    provenant_records::warning::warn(
+        provenant_records::warning::Warning::new(
+            provenant_records::warning::WRITER_ADVISORY,
+            provenant_fabric_runtime::hosts::plain_text(advisory, 4096),
+        )
+        .once_per_change(),
+    );
+}
+
 fn wip_unsafe_description(tree: &Tree) -> String {
     let detail = match (tree.writer_unknown, tree.writer_evidence.as_deref()) {
         (true, Some(evidence)) => format!("; writer custody unknown: {evidence}"),
@@ -727,13 +740,7 @@ fn execute(
         .iter()
         .filter_map(|tree| tree.writer_advisory.as_deref())
     {
-        provenant_records::warning::warn(
-            provenant_records::warning::Warning::new(
-                provenant_records::warning::WRITER_ADVISORY,
-                provenant_fabric_runtime::hosts::plain_text(advisory, 4096),
-            )
-            .once_per_change(),
-        );
+        emit_writer_advisory(advisory);
     }
     let problems: Vec<Tree> = trees
         .iter()
