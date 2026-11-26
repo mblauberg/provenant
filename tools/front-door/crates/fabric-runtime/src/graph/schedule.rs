@@ -319,7 +319,12 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
     if let Err(error) = &split {
         replan_error = Some((*error).to_owned());
     }
-    if let Ok(Some((parent, head, revision))) = split {
+    if let Ok(Some(repair::SplitAdjudication {
+        parent,
+        head,
+        revision,
+    })) = split
+    {
         let library = template::TemplateLibrary::bundled();
         let resolvers = Default::default();
         let change = repair::split_verdict_patch(&parent, head.as_deref(), revision);

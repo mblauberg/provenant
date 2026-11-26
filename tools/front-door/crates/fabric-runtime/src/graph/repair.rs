@@ -286,11 +286,18 @@ pub(super) fn panel_adjudicator<'a>(
         })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct SplitAdjudication {
+    pub(super) parent: String,
+    pub(super) head: Option<String>,
+    pub(super) revision: u64,
+}
+
 /// A gate only adjudicates split panels whose verdicts it consumes.
 pub(super) fn split_adjudication(
     gate: &PlannedNode,
     checkpoint: &GraphCheckpoint,
-) -> Result<Option<(String, Option<String>, u64)>, &'static str> {
+) -> Result<Option<SplitAdjudication>, &'static str> {
     let candidates = gate.inputs.iter().flat_map(|input| {
         std::iter::once(input.node.as_str()).chain(
             panel_expansion(checkpoint, &input.node)
@@ -314,11 +321,11 @@ pub(super) fn split_adjudication(
         }
         let head = split_panel_head(&parent.id, checkpoint)?;
         if panel_adjudicator(&parent.id, head, checkpoint).is_none() {
-            return Ok(Some((
-                parent.id.clone(),
-                head.map(str::to_owned),
-                patch::revision(checkpoint),
-            )));
+            return Ok(Some(SplitAdjudication {
+                parent: parent.id.clone(),
+                head: head.map(str::to_owned),
+                revision: patch::revision(checkpoint),
+            }));
         }
     }
     Ok(None)
@@ -1174,7 +1181,11 @@ mod tests {
         });
         assert_eq!(
             split_adjudication(&plan.nodes[1], &checkpoint).unwrap(),
-            Some(("panel".into(), None, patch::revision(&checkpoint)))
+            Some(SplitAdjudication {
+                parent: "panel".into(),
+                head: None,
+                revision: patch::revision(&checkpoint),
+            })
         );
         checkpoint.expansions.push(
             serde_json::from_value(serde_json::json!({
