@@ -181,9 +181,11 @@ pub fn project_lane(
         root,
         now_wall,
         (HostView::from_observation(observe_host), &[]),
-        None,
-        false,
-        None,
+        PresenceEvidence {
+            census: None,
+            unknown_when_unobserved: false,
+            relayed: None,
+        },
     )
 }
 
@@ -218,9 +220,11 @@ pub fn project_lane_with_census(
         root,
         now_wall,
         (HostView::from_observation(observe_host), &[]),
-        Some(census),
-        true,
-        None,
+        PresenceEvidence {
+            census: Some(census),
+            unknown_when_unobserved: true,
+            relayed: None,
+        },
     )
 }
 
@@ -239,9 +243,11 @@ pub fn project_lane_with_admission(
         root,
         now_wall,
         (HostView::from_observation(observe_host), holders),
-        Some(census),
-        true,
-        None,
+        PresenceEvidence {
+            census: Some(census),
+            unknown_when_unobserved: true,
+            relayed: None,
+        },
     )
 }
 
@@ -261,9 +267,11 @@ pub fn project_lane_with_relayed_presence(
         root,
         now_wall,
         (HostView::Unobserved, &[]),
-        None,
-        true,
-        Some(presence),
+        PresenceEvidence {
+            census: None,
+            unknown_when_unobserved: true,
+            relayed: Some(presence),
+        },
     )
 }
 
@@ -310,9 +318,11 @@ pub fn project_lane_presence_only(
         root,
         now_wall,
         (HostView::PresenceOnly, &[]),
-        Some(Err(())),
-        true,
-        None,
+        PresenceEvidence {
+            census: Some(Err(())),
+            unknown_when_unobserved: true,
+            relayed: None,
+        },
     )
 }
 
@@ -392,24 +402,38 @@ fn stalled_projection(
     now.map(|now| run::stalled_at(lane, now, true))
 }
 
+/// Where a projection gets writer presence. Bundled so a new evidence source
+/// does not grow `project_lane_inner`'s argument list: the host's own census,
+/// no observation at all, or a peer's relayed observation.
+struct PresenceEvidence<'a> {
+    /// This host's census result; `Err(())` records that it was unavailable.
+    census: Option<std::result::Result<&'a provenant_supervisor::census::Census, ()>>,
+    /// An unobserved running attempt reads `unknown`, not absent.
+    unknown_when_unobserved: bool,
+    /// The owner's own observation, relayed with a peer's status result.
+    relayed: Option<provenant_records::wire::LanePresence>,
+}
+
 fn project_lane_inner(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
     root: &Path,
     now_wall: Option<WallTime>,
     host: (HostView, &[provenant_os::admission::HeldInfo]),
-    census: Option<std::result::Result<&provenant_supervisor::census::Census, ()>>,
-    unknown_when_host_unobserved: bool,
-    relayed_presence: Option<provenant_records::wire::LanePresence>,
+    evidence: PresenceEvidence<'_>,
 ) -> provenant_records::wire::LaneRow {
+    let PresenceEvidence {
+        census,
+        unknown_when_unobserved,
+        relayed,
+    } = evidence;
     let (view, lane_holders) = host;
     let usage = lane.effective_usage();
     let host_artifacts = view.projects_host_artifacts();
     let presence = if !view.observes_presence() {
-        relayed_presence.or_else(|| {
-            (unknown_when_host_unobserved
-                && matches!(lane.state, run::AttemptState::Running { .. }))
-            .then_some(provenant_records::wire::LanePresence::Unknown)
+        relayed.or_else(|| {
+            (unknown_when_unobserved && matches!(lane.state, run::AttemptState::Running { .. }))
+                .then_some(provenant_records::wire::LanePresence::Unknown)
         })
     } else {
         let observed = match census {

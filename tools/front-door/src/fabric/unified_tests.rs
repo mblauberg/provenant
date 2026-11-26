@@ -2853,8 +2853,17 @@ fn relayed_peer_presence_reports_a_live_writer_as_running() -> Result<(), Box<dy
 {
     let graph = "peer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let attempt = peer_attempt_fixture(graph, "22222222222222222222222222222222")?;
-    let unobserved =
-        provenant_cli::run::project_lane(&attempt, &[], Path::new("/unused"), None, false);
+    // The launching host observes no peer census, so without a relay the row
+    // stays unknown even though the peer's writer is live.
+    let unobserved = provenant_cli::run::project_lane_with_admission(
+        &attempt,
+        &[],
+        Path::new("/unused"),
+        None,
+        false,
+        Err(()),
+        &[],
+    );
     assert_eq!(unobserved.state, "unknown");
 
     let relayed = provenant_cli::run::project_lane_with_relayed_presence(

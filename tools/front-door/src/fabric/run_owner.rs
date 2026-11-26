@@ -2041,7 +2041,7 @@ impl BinaryRunOwner<'_> {
                 // launching host reports the same presence we do, instead of
                 // guessing from the age of relayed output events.
                 let presence = provenant_cli::run::relayed_presence(
-                    &self.factory.context.roots.state,
+                    self.factory.context.roots.state.as_path(),
                     &attempt,
                 );
                 Ok(RunResult::Status {
