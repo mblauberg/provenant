@@ -56,6 +56,42 @@ folded into another, and a provider that reports no cache split is `missing` in
 the cache-read share, never a miss.
 - Why: a partial or zero-filled total reads as a real one.
 
+## Per-window value is measured, never filled in
+
+`telemetry value` is the only producer of plan value, effective rate and token
+totals by account. It joins the usage ledger with quota history: for each
+requested window it reports API-equivalent cost per full window and its trend,
+the value multiple against the plan price in force, the share unused at the last
+reset, a sample count and priced coverage. Credit accounts add a draw-down rate
+and days to exhaustion, or a named unavailable reason. The plan price and the
+window set are stated with the source that supplied them.
+
+The trend compares API-equivalent cost scaled to full utilisation across completed
+windows. Each cycle uses its last pre-reset reading and ledger costs from the
+cycle start through that reading; it requires known reset bounds and a fully
+priced cost. An unusable cycle makes the trend unavailable rather than silently
+skipping it. JSON reports the change in microdollars and the number of usable
+windows.
+
+An unused share is the last reading before the reset, labelled
+`observed_before_reset` with its timestamp and sample count; a reset with no
+reading before it is named unavailable. If the immediately preceding snapshot
+omits the pool, `missing_reading_before_reset` is reported instead of treating
+the missing quota as zero. A reset, an unpriced bucket and an attribution gap
+are reported as such and never zero-filled: unpriced cost is a bound, and a
+failed optional read names its cause and degrades that field. A plan price is
+compared with USD API-equivalent cost only when its currency is USD or it has
+an explicit `notional_usd`; a foreign-currency amount is not treated as USD.
+`--since` limits the report summary, while bounded-window cost uses ledger rows
+from the cycle start through the quota observation paired with its utilisation.
+If the observation falls outside valid cycle bounds, full-window cost is named
+`incomplete_window` rather than scaled from a partial report range.
+Plan suggestions are expiring recommendations with evidence counts; nothing
+applies them.
+- Why: a full window priced from a partial window, or a guessed zero for an
+  unobserved reset, reads as a measurement that was never made.
+- Owner: `crates/telemetry/src/value.rs`, `crates/cli/src/telemetry_value.rs`
+
 ## Exact money and prices
 
 Cost accumulates in checked integers and rounds once; no floating point. Prices
