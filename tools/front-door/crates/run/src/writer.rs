@@ -1340,6 +1340,22 @@ struct GitPins {
     base: GitOid,
 }
 
+/// The launch-pinned Git base, read from the sealed writer pins. This is the
+/// only progress pin settlement uses; remote-tracking refs and pushes are not
+/// evidence. Absent pins mean progress is unknown, never no-work.
+pub(crate) fn launch_pin(attempt: &Directory) -> Result<Option<GitOid>> {
+    let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "writer-git-pins.json", crate::RECORD_LIMIT)?
+    else {
+        return Ok(None);
+    };
+    let pins: GitPins = crate::db::decode(&raw)?;
+    if pins.schema_version != 1 {
+        return Err(RunError::Validation("writer Git pins version mismatch"));
+    }
+    Ok(Some(pins.base))
+}
+
 /// The primary checkout as launch found it, sealed beside the attempt: the
 /// branch it sat on and every local and remote-tracking branch tip. A lane bound
 /// to a linked worktree that works in the primary checkout instead leaves
@@ -4064,6 +4080,20 @@ pub(crate) struct WriterTerminal {
     /// Settlement warnings recorded once, so a resume does not re-emit them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// The terminal Git head, read from the sealed writer terminal record.
+pub(crate) fn terminal_head(attempt: &Directory) -> Result<Option<GitOid>> {
+    let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "writer-terminal.json", crate::RECORD_LIMIT)?
+    else {
+        return Ok(None);
+    };
+    let terminal: WriterTerminal = crate::db::decode(&raw)?;
+    if terminal.schema_version != 1 {
+        return Err(RunError::Validation("writer terminal version mismatch"));
+    }
+    Ok(Some(terminal.head))
 }
 #[derive(serde::Serialize)]
 struct WriterManifest {
