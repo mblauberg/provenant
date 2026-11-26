@@ -45,6 +45,67 @@ pub(crate) trait OrphanProbe {
 }
 
 pub(super) struct SystemProbe;
+#[cfg(target_os = "macos")]
+fn darwin_process_environment(pid: i64) -> Option<Vec<u8>> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROCARGS2,
+        i32::try_from(pid).ok()?,
+    ];
+    let mut size = 0;
+    // SAFETY: sysctl borrows the three initialized MIB entries and writes only
+    // the returned length; a null output requests the current record size.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || size < std::mem::size_of::<libc::c_int>()
+        || size > 1_048_576
+    {
+        return None;
+    }
+    let mut bytes = vec![0; size];
+    // SAFETY: bytes has exactly the requested capacity and sysctl updates size
+    // to the number of initialized bytes. The MIB contains only scalar values.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || size > bytes.len()
+    {
+        return None;
+    }
+    bytes.truncate(size);
+    let argc = i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?);
+    if argc < 0 {
+        return None;
+    }
+    let mut cursor = 4;
+    cursor = bytes.get(cursor..)?.iter().position(|byte| *byte == 0)? + cursor + 1;
+    while bytes.get(cursor) == Some(&0) {
+        cursor += 1;
+    }
+    for _ in 0..argc {
+        cursor = bytes.get(cursor..)?.iter().position(|byte| *byte == 0)? + cursor + 1;
+    }
+    Some(bytes.get(cursor..)?.to_vec())
+}
+
 impl OrphanProbe for SystemProbe {
     #[cfg(target_os = "macos")]
     fn in_attempt_sandbox(&self, pid: i64, scope: &Scope) -> bool {
@@ -64,21 +125,22 @@ impl OrphanProbe for SystemProbe {
     }
     fn in_attempt_attribution(&self, pid: i64, scope: &Scope) -> bool {
         #[cfg(target_os = "linux")]
-        {
-            let Ok(bytes) = std::fs::read(format!("/proc/{pid}/environ")) else {
-                return false;
-            };
-            let needle =
-                format!("{}={}\0", crate::custody::ATTEMPT_MARK_ENV, scope.attempt).into_bytes();
-            bytes
-                .windows(needle.len())
-                .any(|window| window == needle.as_slice())
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (pid, scope);
-            false
-        }
+        let bytes = std::fs::read(format!("/proc/{pid}/environ")).ok();
+        #[cfg(target_os = "macos")]
+        let bytes = darwin_process_environment(pid);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let bytes: Option<Vec<u8>> = {
+            let _ = pid;
+            None
+        };
+        let Some(bytes) = bytes else {
+            return false;
+        };
+        let needle =
+            format!("{}={}\0", crate::custody::ATTEMPT_MARK_ENV, scope.attempt).into_bytes();
+        bytes
+            .windows(needle.len())
+            .any(|window| window == needle.as_slice())
     }
     fn signal(&self, identity: &ProcessIdentity, escalation: bool) -> bool {
         crate::process_os::provider::signal_identity(identity, escalation)
@@ -1017,6 +1079,36 @@ mod tests {
             report.stopped.is_empty() && report.survivors.is_empty() && report.unproven.is_empty()
         );
         assert!(world.signals.borrow().is_empty());
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_probe_finds_attempt_mark_after_process_changes_session() -> TestResult {
+        use std::os::unix::process::CommandExt;
+        let scope = scope();
+        let mut command = std::process::Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .env(crate::custody::ATTEMPT_MARK_ENV, scope.attempt.to_string());
+        // SAFETY: setsid is async-signal-safe and affects only the spawned child.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let mut child = command.spawn()?;
+        let attributed = SystemProbe.in_attempt_attribution(i64::from(child.id()), &scope);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            attributed,
+            "macOS process inspection must find inherited marks after setsid"
+        );
         Ok(())
     }
 

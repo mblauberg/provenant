@@ -418,9 +418,9 @@ struct HolderAdmission {
 const HOLDER_GENERATION: &str = "holder-generation.json";
 const HOLDER_ADMISSION: &str = "holder-admission.json";
 
-/// Durable attribution for the processes a lane spawns. The guardian writes it
-/// at provider spawn, before exec, so a later recovery can still name the
-/// lane's processes when the guardian died before publishing an exit.
+/// Durable attribution for the processes a lane spawns. The identity gate
+/// publishes it in the reservation before provider exec, so a later recovery
+/// can still name the lane's processes if the guardian dies before an exit.
 ///
 /// `contained` says whether an OS mark is in effect that survives a
 /// double-fork and setsid. Without one, group and session identify members of

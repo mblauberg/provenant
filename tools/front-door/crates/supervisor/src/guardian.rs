@@ -1325,21 +1325,8 @@ impl Driver<'_> {
                     interval,
                 )
             });
-        if write_record(
-            &self.writer_dir,
-            "reservation.json",
-            &self.reservation,
-            PublishMode::Replace,
-        )
-        .and_then(|publication| publication.require_durable().map_err(Into::into))
-        .is_err()
-        {
-            warn(
-                &mut warnings,
-                &mut omitted_warnings,
-                "provider identity publication failed",
-            );
-        }
+        // The spawn identity gate published and synced these fields before
+        // acknowledging exec; the in-memory copy now matches that record.
         state = machine::step(state, Event::Started, Tick::at(0)).0;
         let out_events = Events::default();
         let err_events = Events::default();
@@ -2564,6 +2551,9 @@ impl Driver<'_> {
             OsString::from(crate::custody::ATTEMPT_MARK_ENV),
             OsString::from(self.reservation.scope.attempt.to_string()),
         ));
+        let writer_dir = self.writer_dir.try_clone().map_err(io::Error::other)?;
+        let mut reservation = self.reservation.clone();
+        let contained = self.profile_file.is_some();
         crate::process_os::provider::ProviderGroup::spawn(
             provenant_os::sys::raw_exec::SpawnSpec {
                 argv,
@@ -2586,6 +2576,25 @@ impl Driver<'_> {
                 .ok_or_else(|| io::Error::other("writer custody missing"))?,
             &self.reservation.boot,
             self.priority,
+            move |identity| {
+                reservation.launch_state = LaunchState::Spawned;
+                reservation.sandboxed = contained;
+                reservation.attribution = Some(ProcessAttribution {
+                    boot: reservation.boot.clone(),
+                    group_id: identity.group_id,
+                    session_id: identity.session_id,
+                    contained,
+                });
+                reservation.provider = Some(identity.clone());
+                write_record(
+                    &writer_dir,
+                    "reservation.json",
+                    &reservation,
+                    PublishMode::Replace,
+                )
+                .and_then(|publication| publication.require_durable().map_err(Into::into))
+                .map_err(io::Error::other)
+            },
         )
     }
     /// Publish a launch refusal while retaining the scoped custody proof. If

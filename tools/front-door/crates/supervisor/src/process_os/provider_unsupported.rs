@@ -204,6 +204,7 @@ mod tests {
             &lease,
             "boot",
             0,
+            |_| Ok(()),
         )
         .err()
         .ok_or_else(|| io::Error::other("provider spawned"))?;

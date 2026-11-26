@@ -518,6 +518,7 @@ fn spawn_identified(
     boot: &str,
     permit: Permit,
     descriptors: SpawnDescriptors<'_>,
+    before_exec: impl FnOnce(&ProcessIdentity) -> io::Result<()> + Send + 'static,
 ) -> io::Result<(Child, ProcessIdentity, Permit)> {
     let SpawnDescriptors { secret, profile } = descriptors;
     let observer =
@@ -572,6 +573,10 @@ fn spawn_identified(
             parent.read_exact(&mut pid)?;
             match observer.observe(i64::from(i32::from_ne_bytes(pid))) {
                 ProcessObservation::Present(fact) => {
+                    if let Err(error) = before_exec(&fact.identity) {
+                        let _ = parent.write_all(&[0]);
+                        return Err(error);
+                    }
                     parent.write_all(&[1])?;
                     Ok(fact.identity)
                 }
@@ -776,6 +781,7 @@ impl ProviderGroup {
         _lease: &provenant_os::fs::LockGuard,
         boot: &str,
         priority: u8,
+        before_exec: impl FnOnce(&ProcessIdentity) -> io::Result<()> + Send + 'static,
     ) -> io::Result<Self> {
         let profile = spec
             .inherited_profile
@@ -837,6 +843,7 @@ impl ProviderGroup {
                 secret: secret.as_ref(),
                 profile: profile.as_ref().map(|pipe| pipe.fd()),
             },
+            before_exec,
         )?;
         if let Some(profile) = profile
             && let Err(error) = profile.finish(&mut child)
@@ -1678,6 +1685,50 @@ mod tests {
     }
 
     #[test]
+    fn provider_exec_is_refused_when_attribution_cannot_be_published()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = provenant_os::fs::Directory::open_anchor(root.path())?;
+        let lease = directory.try_lock(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let marker = root.path().join("provider-executed");
+        let argv: Vec<OsString> = [
+            "/bin/sh".into(),
+            "-c".into(),
+            format!("printf started > '{}'", marker.display()).into(),
+        ]
+        .into_iter()
+        .collect();
+        let result = ProviderGroup::spawn(
+            provenant_os::sys::raw_exec::SpawnSpec {
+                argv: &argv,
+                env: Some(&[]),
+                cwd: root.path(),
+                input: false,
+                secret_input: None,
+                inherited_lease: None,
+                inherited_profile: None,
+                inherited_ports: None,
+                process_group: false,
+                capture_stdout: false,
+                capture_stderr: false,
+            },
+            &lease,
+            &super::super::census::SystemProcessObserver::boot_identity()?,
+            0,
+            |_| Err(io::Error::other("injected durable reservation failure")),
+        );
+        assert!(
+            result.is_err(),
+            "failed reservation publication must reject spawn"
+        );
+        assert!(!marker.exists(), "provider executable must not start");
+        Ok(())
+    }
+
+    #[test]
     fn lane_descriptors_are_cloexec() -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let directory = provenant_os::fs::Directory::open_anchor(root.path())?;
@@ -1747,6 +1798,7 @@ mod tests {
             lease,
             &boot,
             0,
+            |_| Ok(()),
         )?;
         let mut ready = [0];
         let stdout = group.stdout.as_mut().ok_or("missing stdout")?;
@@ -1871,6 +1923,7 @@ mod tests {
             &lease,
             &boot,
             0,
+            |_| Ok(()),
         )
         .unwrap();
         assert!(group.child.as_mut().unwrap().wait().unwrap().success());
@@ -1950,6 +2003,7 @@ mod tests {
             &lease,
             &boot,
             10,
+            |_| Ok(()),
         )
         .unwrap();
         assert!(group.child.as_mut().unwrap().wait().unwrap().success());
