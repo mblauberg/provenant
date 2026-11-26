@@ -779,8 +779,8 @@ jobs:
         run: ../../scripts/run-native-test-group tls cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'package(=provenant-providers) & test(claude_network_on)'
 
       # Issue #4070: these fixtures failed only on a clean macOS host (long
-      # TMPDIR, APFS non-UTF-8 names, and a scoped macOS census). Run them on
-      # every macOS native batch so the repaired behaviour stays pinned.
+      # TMPDIR, APFS non-UTF-8 names, and an inconclusive process census).
+      # Run them on every macOS native batch so the repaired behaviour stays pinned.
       - name: Pin macOS socket and relay fixtures
         if: ${{ !cancelled() && matrix.group == 'light' }}
         working-directory: tools/front-door
