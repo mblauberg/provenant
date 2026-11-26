@@ -176,8 +176,8 @@ fn host_stops_preserve_complete_handoffs_and_completed_budgets_succeed() {
     let mut dirty = evidence_for(Outcome::Succeeded, Some(CauseKind::TokenBudget));
     dirty.handoff = accepted(handoff);
     dirty.git = Some(GitEvidence {
-        pinned: None,
-        head: None,
+        input_head: None,
+        writer_head: None,
         uncommitted: Some("M src/main.rs".into()),
         uncommitted_paths: vec!["src/main.rs".into()],
         pushed_head: None,
@@ -624,8 +624,8 @@ fn stray_work_holds_dependants_instead_of_completing() {
     let mut evidence = evidence_for(Outcome::ReviewRequired, None);
     evidence.lane = LaneRole::Reader;
     evidence.git = Some(GitEvidence {
-        pinned: None,
-        head: None,
+        input_head: None,
+        writer_head: None,
         uncommitted: None,
         uncommitted_paths: Vec::new(),
         pushed_head: None,

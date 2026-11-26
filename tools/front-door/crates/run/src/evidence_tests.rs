@@ -36,8 +36,8 @@ fn evidence(pinned: Option<GitOid>, head: Option<GitOid>) -> SettlementEvidence 
         handoff: DeclarationEvidence::Missing,
         declarations: Default::default(),
         git: Some(GitEvidence {
-            pinned,
-            head,
+            input_head: pinned,
+            writer_head: head,
             uncommitted: None,
             uncommitted_paths: Vec::new(),
             pushed_head: None,
@@ -190,7 +190,7 @@ fn restart_cannot_change_the_sealed_pin() -> TestResult {
     let (kept, kept_digest) = seal_evidence(&dir, &evidence(Some(oid(0xcc)), Some(oid(0xdd))))?;
     assert_eq!(kept, sealed);
     assert_eq!(kept_digest, digest);
-    assert_eq!(kept.git.expect("writer evidence").pinned, Some(base));
+    assert_eq!(kept.git.expect("writer evidence").input_head, Some(base));
     assert_eq!(
         kept.git.expect("writer evidence").head_progress(),
         HeadProgress::Moved

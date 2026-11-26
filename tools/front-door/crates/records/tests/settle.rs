@@ -88,8 +88,8 @@ fn base(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> Settlemen
 
 fn git_at(pinned: Option<&str>, head: Option<&str>) -> Option<GitEvidence> {
     Some(GitEvidence {
-        pinned: pinned.map(|text| GitOid::parse(text).unwrap()),
-        head: head.map(|text| GitOid::parse(text).unwrap()),
+        input_head: pinned.map(|text| GitOid::parse(text).unwrap()),
+        writer_head: head.map(|text| GitOid::parse(text).unwrap()),
         uncommitted: None,
         uncommitted_paths: Vec::new(),
         pushed_head: None,
@@ -147,8 +147,8 @@ fn rows() -> Vec<Row> {
 
     let mut stray = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     stray.git = Some(GitEvidence {
-        pinned: Some(GitOid::parse(BASE).unwrap()),
-        head: Some(GitOid::parse(HEAD).unwrap()),
+        input_head: Some(GitOid::parse(BASE).unwrap()),
+        writer_head: Some(GitOid::parse(HEAD).unwrap()),
         uncommitted: None,
         uncommitted_paths: Vec::new(),
         pushed_head: None,
@@ -172,8 +172,8 @@ fn rows() -> Vec<Row> {
 
     let mut uncommitted = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     uncommitted.git = Some(GitEvidence {
-        pinned: Some(GitOid::parse(BASE).unwrap()),
-        head: Some(GitOid::parse(HEAD).unwrap()),
+        input_head: Some(GitOid::parse(BASE).unwrap()),
+        writer_head: Some(GitOid::parse(HEAD).unwrap()),
         uncommitted: Some("M src/lib.rs".into()),
         uncommitted_paths: vec!["src/lib.rs".into()],
         pushed_head: None,

@@ -3777,8 +3777,8 @@ impl RunStore {
             handoff: declared,
             declarations: declaration_counts,
             git: (task.writer.is_some()).then(|| provenant_records::settlement::GitEvidence {
-                pinned: crate::evidence::launch_pin(attempt)?,
-                head: crate::evidence::terminal_head(attempt)?,
+                input_head: crate::evidence::launch_pin(attempt)?,
+                writer_head: crate::evidence::terminal_head(attempt)?,
                 uncommitted: uncommitted.clone(),
                 uncommitted_paths: uncommitted_paths.clone(),
                 pushed_head,

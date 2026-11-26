@@ -98,8 +98,8 @@ pub enum IdentityPolicyEffect {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct GitEvidence {
-    pub pinned: Option<crate::GitOid>,
-    pub head: Option<crate::GitOid>,
+    pub input_head: Option<crate::GitOid>,
+    pub writer_head: Option<crate::GitOid>,
     pub uncommitted: Option<String>,
     /// The bounded, sorted paths behind the census note. Diagnostic only:
     /// the classifier keeps deciding from `uncommitted`.
@@ -113,7 +113,7 @@ pub struct GitEvidence {
 }
 impl GitEvidence {
     pub fn head_progress(&self) -> HeadProgress {
-        match (&self.pinned, &self.head) {
+        match (&self.input_head, &self.writer_head) {
             (Some(pinned), Some(head)) if pinned == head => HeadProgress::Unchanged,
             (Some(_), Some(_)) => HeadProgress::Moved,
             _ => HeadProgress::Unknown,
