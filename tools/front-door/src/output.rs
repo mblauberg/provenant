@@ -1629,7 +1629,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let mut printed = 0;
+            let key = warning.key();
             for _ in 0..2 {
                 let _sink = install_command_sink(false);
                 warning::warn(warning.clone());
@@ -1639,12 +1639,21 @@ mod tests {
                     emit_with_writers(&result, &human, &mut out, &mut err, "", false, None),
                     0
                 );
-                printed += String::from_utf8_lossy(&err)
-                    .lines()
-                    .filter(|line| line.contains("WRITER_CENSUS"))
-                    .count();
             }
-            assert_eq!(printed, 1, "a person sees the census notice once");
+            // A human warning prints to the process stderr as it arrives, so it
+            // never appears in the emitter's writer. Its per-change row is
+            // advanced only after a successful display, which makes the row's
+            // count the number of times a person actually saw the notice.
+            let db = open_connection(&root.join("warnings.sqlite3"), true).expect("db");
+            let shown: i64 = db
+                .query_row(
+                    "SELECT count FROM seen WHERE key = ?1",
+                    rusqlite::params![key],
+                    |row| row.get(0),
+                )
+                .expect("the census notice was shown");
+            assert_eq!(shown, 1, "a person sees the census notice once");
+            drop(db);
 
             let _sink = install_command_sink(true);
             warning::warn(warning);
