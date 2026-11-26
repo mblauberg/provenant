@@ -65,6 +65,12 @@ def manifest():
         raise ValueError('invalid evidence.lookback')
     if not isinstance(data['request']['full_label'], str) or not data['request']['full_label']:
         raise ValueError('invalid full label')
+    request = data['request']
+    if not isinstance(request.get('macos_label'), str) or not request['macos_label']:
+        raise ValueError('invalid macos label')
+    strings(request.get('macos_suites'), 'request.macos_suites', True)
+    if any(name not in names for name in request['macos_suites']):
+        raise ValueError('unknown macos suite')
     return data
 
 
@@ -231,7 +237,9 @@ def select(config, env):
         for s in config['suite']:
             name = s['name']
             relevant_main = [c[0] for c in changes if relevant(s, config['defaults']['inert'], c)]
-            if not relevant_main:
+            if name in config['request']['macos_suites'] and (event == 'workflow_dispatch' or (event == 'pull_request' and config['request']['macos_label'] in labels)):
+                state, why, evidence = 'run', 'macOS suites requested', None
+            elif not relevant_main:
                 state, why, evidence = 'covered', f'no {name} input changed since green main {main[:8]}', main
             elif p and p_states.get(name) in ('run', 'covered') and not any(relevant(s, config['defaults']['inert'], c) for c in p_changes):
                 state, why, evidence = 'covered', f'no {name} input changed since green PR {p[:8]}', p

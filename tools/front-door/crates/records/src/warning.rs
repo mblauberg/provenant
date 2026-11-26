@@ -60,6 +60,8 @@ pub const SETTING_LAYER_IGNORED: WarningCode = WarningCode("SETTING_LAYER_IGNORE
 pub const NAME_CASE_FOLDED: WarningCode = WarningCode("NAME_CASE_FOLDED");
 /// A name matched a declared alias rather than its canonical spelling.
 pub const NAME_ALIAS_USED: WarningCode = WarningCode("NAME_ALIAS_USED");
+/// A target was found in a registered project other than the caller's.
+pub const CROSS_PROJECT_TARGET_FOUND: WarningCode = WarningCode("CROSS_PROJECT_TARGET_FOUND");
 /// The lane's branch is behind its base and will be updated.
 pub const BRANCH_BEHIND_BASE: WarningCode = WarningCode("BRANCH_BEHIND_BASE");
 /// An existing worktree was adopted although it had uncommitted changes.

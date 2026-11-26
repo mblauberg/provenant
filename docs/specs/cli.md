@@ -256,6 +256,18 @@ serves every listed graph, so a `--full` page never repeats those scans per grap
 The admission summary reuses that holder reading, and the process census is
 taken only when local attempt evidence needs it.
 
+`status NAME` resolves the name in the caller's project first. On a miss it
+searches the state root's other registered projects: one match is read through
+the owning project's identity and reported with a `CROSS_PROJECT_TARGET_FOUND`
+warning naming that project; several matches refuse with `AMBIGUOUS_TARGET`
+listing every project instead of guessing one. Inside a lane the relay's project
+and chair-session read scope still applies
+([fabric](fabric.md#lane-graph-read-scope)).
+
+- Why: a graph in another registered project stays reachable without the caller
+  having to know which project owns it, and an ambiguous name is never resolved
+  by guessing.
+
 `status --mine` reads active custody across projects (or one `--project`),
 including attempts nested under the current chair and unattended items open to
 adoption. `status --adoptable` lists only the unattended items open to adoption.
