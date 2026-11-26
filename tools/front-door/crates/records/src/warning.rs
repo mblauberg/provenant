@@ -315,6 +315,8 @@ pub const ARGUMENT_VALUE_SUSPECT: WarningCode = WarningCode("ARGUMENT_VALUE_SUSP
 pub const PRIVATE_CHECK_DIR_UNCLEAN: WarningCode = WarningCode("PRIVATE_CHECK_DIR_UNCLEAN");
 /// A project or its roots could not be resolved for a hook.
 pub const PROJECT_UNAVAILABLE: WarningCode = WarningCode("PROJECT_UNAVAILABLE");
+/// A hook ran past its local budget and was cut short before the host timeout.
+pub const HOOK_BUDGET_OVERRUN: WarningCode = WarningCode("HOOK_BUDGET_OVERRUN");
 /// A check or local gate could not be run.
 pub const CHECK_UNAVAILABLE: WarningCode = WarningCode("CHECK_UNAVAILABLE");
 /// Import pins could not be collected for a project.

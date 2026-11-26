@@ -36,6 +36,11 @@ pub use pr_policy::{KNOB as PR_KNOB, PrPolicy, ResolvedPrPolicy};
 mod harness;
 mod hooks;
 pub use hooks::{hook_plugin_source, lane_hook_settings, registrations as hook_registrations};
+pub mod hooks_config;
+pub use hooks_config::{
+    DEFAULT_HOOK_TIMEOUT_SECS, HOOK_BUDGET_PERCENT, SECTION as HOOKS_SECTION,
+    Settings as HookSettings, hook_budget,
+};
 mod inspection;
 mod knobs;
 mod lane_history;

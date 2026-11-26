@@ -21,6 +21,22 @@ when the metadata or the registry omits one.
 - Why: three independently kept lists drift silently unless each is checked
   against what the runtime accepts.
 
+## Chair hook budget
+
+`domains.hooks.timeout_secs` (default 10) is the one installed timeout for
+chair-start, chair-stop and chair-prompt, both for native registrations and for
+the chair's own switch settings. Every hook runs under a single local budget of
+60% of that value. A hook that reaches the budget warns with `HOOK_BUDGET_OVERRUN`,
+records the overrun and its setting source under the state root's
+`hooks/diagnostics/failures.jsonl`, and returns before the host timeout. Usage
+ingest is never done on the hook path: chair hooks queue a detached
+`telemetry ingest --incremental` worker, which resumes durable transcript cursors
+and has no time window to rescan. `provenant doctor` (and `provenant hosts doctor`)
+shows the installed timeout with its source and every overrun in the last 24 h.
+
+- Why: a slow transcript must not cost the chair a hook, and the operator can see
+  both the setting and its effect without reading raw diagnostics.
+
 ## Targets
 
 Target verbs share one grammar and resolve only the named graph. Ambiguity is
@@ -242,8 +258,13 @@ taken only when local attempt evidence needs it.
 
 `status --mine` reads active custody across projects (or one `--project`),
 including attempts nested under the current chair and unattended items open to
-adoption. Settled custody leaves the view, and the session-start digest reads
-this view instead of extracting PRs from prose.
+adoption. `status --adoptable` lists only the unattended items open to adoption.
+Settled custody leaves the view. The session-start digest reads this view
+instead of extracting PRs from prose: it names only custody this chair holds in
+the hook's project, and collapses unattended and other projects' rows into one
+`Unattended: N (M this project) — provenant status --adoptable` line. Set
+`session.digest.scope = all` under `[knobs]` to list the chair's custody across
+projects again; the effective scope and its layer appear in that line.
 
 Writer presence is `live`, `unattended`, `settling` or `unknown`. `running` shows
 only while the recorded guardian or provider identity is present. A changed boot
