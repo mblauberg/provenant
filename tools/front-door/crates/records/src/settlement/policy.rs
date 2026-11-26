@@ -32,6 +32,16 @@ pub enum NoWork {
     Off,
 }
 
+/// The values each settlement key allows, declared once. Routing's catalog,
+/// the knob resolver and the generated reference read these, so a value one of
+/// them accepts is a value every one of them accepts.
+pub const HANDOFF_MISSING_VALUES: &[&str] = &["review", "fail", "warn", "off"];
+pub const HANDOFF_MALFORMED_VALUES: &[&str] = &["review", "fail", "warn", "off"];
+pub const EMPTY_RESULT_VALUES: &[&str] = &["review", "fail", "warn"];
+pub const UNCOMMITTED_WORK_VALUES: &[&str] = &["hold", "review", "warn", "off"];
+pub const STRAY_WORK_VALUES: &[&str] = &["review", "warn", "off"];
+pub const NO_WORK_VALUES: &[&str] = &["detect", "off"];
+
 /// The effective policy for one attempt. Every field carries its layer so a
 /// re-drive and an audit reproduce the same decision.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

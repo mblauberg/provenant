@@ -1073,27 +1073,27 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("model_policy.defaults.lane.stop_early_ok", "bool"),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.handoff_missing",
-        &["review", "fail", "warn", "off"],
+        provenant_records::settlement::policy::HANDOFF_MISSING_VALUES,
     ),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.handoff_malformed",
-        &["review", "fail", "warn", "off"],
+        provenant_records::settlement::policy::HANDOFF_MALFORMED_VALUES,
     ),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.empty_result",
-        &["review", "fail", "warn"],
+        provenant_records::settlement::policy::EMPTY_RESULT_VALUES,
     ),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.uncommitted_work",
-        &["hold", "review", "warn", "off"],
+        provenant_records::settlement::policy::UNCOMMITTED_WORK_VALUES,
     ),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.stray_work",
-        &["review", "warn", "off"],
+        provenant_records::settlement::policy::STRAY_WORK_VALUES,
     ),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.no_work",
-        &["detect", "off"],
+        provenant_records::settlement::policy::NO_WORK_VALUES,
     ),
     FieldMetadata::new("model_policy.defaults.lane.read_only", "bool"),
     FieldMetadata::enumeration("model_policy.defaults.lane.access", &["host", "isolated"]),

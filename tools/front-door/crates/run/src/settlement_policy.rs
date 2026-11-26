@@ -12,7 +12,9 @@ use provenant_config::knob_source;
 use provenant_records::provenance::{Layer, Source, Sourced, warn_ignored};
 use provenant_records::run::HarnessProfile;
 use provenant_records::settlement::policy::{
-    RouteSettlement, SETTLEMENT_PRECEDENCE, SettlementPolicy,
+    EMPTY_RESULT_VALUES, HANDOFF_MALFORMED_VALUES, HANDOFF_MISSING_VALUES, NO_WORK_VALUES,
+    RouteSettlement, SETTLEMENT_PRECEDENCE, STRAY_WORK_VALUES, SettlementPolicy,
+    UNCOMMITTED_WORK_VALUES,
 };
 use provenant_records::warning::{SETTLEMENT_POLICY_INVALID, Warning, warn};
 use serde::de::DeserializeOwned;
@@ -86,22 +88,41 @@ impl SettlementConfig {
     }
 }
 
-/// Parse and merge one key's candidates. An unrecognised value warns with its
-/// layer and origin and is dropped, so a valid lower layer or the default
-/// applies; a candidate from an undeclared layer is warned and ignored.
+/// Each knob with the values it allows, in `KNOBS` order.
+pub const ALLOWED: [&[&str]; 6] = [
+    HANDOFF_MISSING_VALUES,
+    HANDOFF_MALFORMED_VALUES,
+    EMPTY_RESULT_VALUES,
+    UNCOMMITTED_WORK_VALUES,
+    STRAY_WORK_VALUES,
+    NO_WORK_VALUES,
+];
+
+/// Parse and merge one key's candidates. A value outside the key's declared
+/// set warns with its layer and origin and is dropped, so a valid lower layer
+/// or the default applies; a candidate from an undeclared layer is warned and
+/// ignored.
 fn resolve_one<T: Clone + DeserializeOwned>(
     key: &str,
+    allowed: &[&str],
     default: T,
     candidates: Vec<Sourced<Value>>,
 ) -> Sourced<T> {
     let mut parsed = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        match serde_json::from_value::<T>(candidate.value.clone()) {
-            Ok(value) => parsed.push(Sourced {
+        let declared = candidate
+            .value
+            .as_str()
+            .is_some_and(|value| allowed.contains(&value));
+        match serde_json::from_value::<T>(candidate.value.clone())
+            .ok()
+            .filter(|_| declared)
+        {
+            Some(value) => parsed.push(Sourced {
                 value,
                 source: candidate.source,
             }),
-            Err(_) => {
+            None => {
                 let layer = candidate.source.layer.description();
                 warn(
                     Warning::new(
@@ -112,7 +133,7 @@ fn resolve_one<T: Clone + DeserializeOwned>(
                     )
                     .subject(key)
                     .source(candidate.source)
-                    .repair(format!("set {key} to a declared value")),
+                    .repair(format!("set {key} to one of {}", allowed.join(", "))),
                 );
             }
         }
@@ -144,6 +165,43 @@ fn with_route(
     candidates
 }
 
+/// The `--explain` view of the host and project layers: each key's effective
+/// value with its layer and origin, resolved by the same code the holder seals
+/// with, and the warnings that resolution gave. The route layer joins at launch,
+/// once the route is chosen.
+pub fn explain(knobs: &BTreeMap<String, Sourced<Value>>) -> Value {
+    let config = SettlementConfig {
+        knobs: knobs
+            .iter()
+            .filter(|(name, _)| KNOBS.contains(&name.as_str()))
+            .map(|(name, sourced)| Sourced {
+                value: (name.clone(), sourced.value.clone()),
+                source: sourced.source.clone(),
+            })
+            .collect(),
+    };
+    let (policy, warnings) = resolve(&config, None);
+    let resolved = serde_json::to_value(&policy).unwrap_or_default();
+    let knobs: Vec<Value> = KNOBS
+        .iter()
+        .zip(ALLOWED)
+        .map(|(key, allowed)| {
+            let field = key.trim_start_matches("lanes.settlement.");
+            let mut entry = resolved.get(field).cloned().unwrap_or_default();
+            if let Value::Object(map) = &mut entry {
+                map.insert("key".into(), Value::from(*key));
+                map.insert("allowed".into(), Value::from(allowed.to_vec()));
+            }
+            entry
+        })
+        .collect();
+    serde_json::json!({
+        "precedence": SETTLEMENT_PRECEDENCE.0.iter().map(|layer| layer.as_str()).collect::<Vec<_>>(),
+        "knobs": knobs,
+        "warnings": warnings,
+    })
+}
+
 /// Resolve one attempt's settlement policy. The only side effect is the typed
 /// warnings, returned to the caller so launch, check and explain report the
 /// same findings the sealed policy was built from.
@@ -155,6 +213,7 @@ pub fn resolve(
     let (policy, warnings) = provenant_records::warning::capture(|| SettlementPolicy {
         handoff_missing: resolve_one(
             KNOBS[0],
+            ALLOWED[0],
             shipped.handoff_missing.value,
             with_route(
                 config.candidates(KNOBS[0]),
@@ -163,6 +222,7 @@ pub fn resolve(
         ),
         handoff_malformed: resolve_one(
             KNOBS[1],
+            ALLOWED[1],
             shipped.handoff_malformed.value,
             with_route(
                 config.candidates(KNOBS[1]),
@@ -171,6 +231,7 @@ pub fn resolve(
         ),
         empty_result: resolve_one(
             KNOBS[2],
+            ALLOWED[2],
             shipped.empty_result.value,
             with_route(
                 config.candidates(KNOBS[2]),
@@ -179,6 +240,7 @@ pub fn resolve(
         ),
         uncommitted_work: resolve_one(
             KNOBS[3],
+            ALLOWED[3],
             shipped.uncommitted_work.value,
             with_route(
                 config.candidates(KNOBS[3]),
@@ -187,6 +249,7 @@ pub fn resolve(
         ),
         stray_work: resolve_one(
             KNOBS[4],
+            ALLOWED[4],
             shipped.stray_work.value,
             with_route(
                 config.candidates(KNOBS[4]),
@@ -195,6 +258,7 @@ pub fn resolve(
         ),
         no_work: resolve_one(
             KNOBS[5],
+            ALLOWED[5],
             shipped.no_work.value,
             with_route(
                 config.candidates(KNOBS[5]),
@@ -272,6 +336,40 @@ mod tests {
             Some(Layer::Host)
         );
         assert!(warnings[0].message.contains(KNOBS[2]));
+    }
+
+    #[test]
+    fn a_value_outside_its_keys_declared_set_warns_and_keeps_the_default() {
+        // `hold` is a SignalAction but not an empty-result action; `fail` is
+        // not a stray-work action. Each key admits only its declared values.
+        let config = SettlementConfig {
+            knobs: value_map(Layer::Host, KNOBS[2], json!("hold"))
+                .into_iter()
+                .chain(value_map(Layer::Project, KNOBS[4], json!("fail")))
+                .collect(),
+        };
+        let (policy, warnings) = resolve(&config, None);
+        assert_eq!(
+            policy.empty_result,
+            SettlementPolicy::shipped().empty_result
+        );
+        assert_eq!(policy.stray_work, SettlementPolicy::shipped().stray_work);
+        assert_eq!(warnings.len(), 2);
+        assert!(
+            warnings
+                .iter()
+                .all(|warning| warning.code.as_ref() == SETTLEMENT_POLICY_INVALID.0)
+        );
+    }
+
+    #[test]
+    fn every_shipped_default_is_one_of_its_keys_declared_values() {
+        let shipped = serde_json::to_value(SettlementPolicy::shipped()).unwrap();
+        for (key, allowed) in KNOBS.iter().zip(ALLOWED) {
+            let field = key.trim_start_matches("lanes.settlement.");
+            let value = shipped[field]["value"].as_str().unwrap();
+            assert!(allowed.contains(&value), "{key}={value} not in {allowed:?}");
+        }
     }
 
     #[test]

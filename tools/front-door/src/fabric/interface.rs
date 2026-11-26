@@ -2670,30 +2670,7 @@ impl Factory {
                 },
                 // Settlement knobs are sealed with the evidence, so an
                 // explanation shows the same layers the holder will seal.
-                "settlement": {
-                    "precedence": ["default", "host", "project", "route"],
-                    "knobs": provenant_run::settlement_policy::KNOBS.iter().map(|key| {
-                        let shipped = match *key {
-                            "lanes.settlement.uncommitted_work" => json!("hold"),
-                            "lanes.settlement.no_work" => json!("detect"),
-                            _ => json!("review"),
-                        };
-                        match config.knobs.get(*key) {
-                            Some(sourced) => json!({
-                                "key": key,
-                                "value": sourced.value,
-                                "layer": sourced.source.layer.as_str(),
-                                "origin": sourced.source.origin,
-                            }),
-                            None => json!({
-                                "key": key,
-                                "value": shipped,
-                                "layer": "default",
-                                "origin": null,
-                            }),
-                        }
-                    }).collect::<Vec<_>>(),
-                },
+                "settlement": provenant_run::settlement_policy::explain(&config.knobs),
                 "implement_plan": {
                     "value": input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).cloned().unwrap_or(json!(self.context.config.implement.plan)),
                     "source": if input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).is_some() { json!("parameter (--plan or --set)") } else {
