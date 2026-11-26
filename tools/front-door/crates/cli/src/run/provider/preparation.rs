@@ -2222,6 +2222,7 @@ fn prepare_inner(
             fixture_token,
             wait,
             Some(name),
+            delegated_gap_warning,
         )?;
         if launch.route.model.as_deref() != Some(model) {
             return Err("host-native requires its configured model; use graph routes for non-native fallback".into());
@@ -2246,6 +2247,7 @@ fn prepare_inner(
         fixture_token,
         wait,
         None,
+        delegated_gap_warning,
     )
 }
 
@@ -3177,6 +3179,7 @@ pub(super) fn prepare_candidates(
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
     host_native: Option<&str>,
+    delegated_gap_warning: Option<String>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     prepare_candidates_inner(
         registry,
@@ -3189,6 +3192,7 @@ pub(super) fn prepare_candidates(
         fixture_token,
         wait,
         host_native,
+        delegated_gap_warning,
         #[cfg(test)]
         None,
     )
@@ -3209,6 +3213,7 @@ pub(super) fn prepare_candidates_inner(
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
     host_native: Option<&str>,
+    delegated_gap_warning: Option<String>,
     #[cfg(test)] alter_availability: Option<&AlterAvailability<'_>>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {

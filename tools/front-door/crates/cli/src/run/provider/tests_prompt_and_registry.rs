@@ -1102,6 +1102,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             None,
             None,
             None,
+            None,
             Some(&alter),
         );
         assert!(
@@ -1124,6 +1125,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         &paths,
         None,
         Some(&locate),
+        None,
         None,
         None,
         None,
