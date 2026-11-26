@@ -220,7 +220,7 @@ pub(crate) fn shared_settings(
         .filter(|entry| {
             !entry.settings.is_empty()
                 && provenant_records::AdapterSpec::get(&entry.adapter)
-                    .is_some_and(|spec| spec.shared_account_settings)
+                    .is_some_and(|spec| spec.accounts.shared_settings)
         })
         .map(|entry| {
             (
@@ -859,9 +859,13 @@ fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
                 worktrees_path.display()
             );
             warn(
-                Warning::new(GIT_OPERATION_RETAINED, message.clone())
-                    .subject(worktrees_path.display().to_string())
-                    .once_per_change(),
+                Warning::new(
+                    GIT_OPERATION_RETAINED,
+                    message.clone(),
+                    provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+                )
+                .subject(worktrees_path.display().to_string())
+                .once_per_change(),
             );
             return Some(message);
         }
@@ -876,9 +880,13 @@ fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
                 worktrees_path.display()
             );
             warn(
-                Warning::new(GIT_OPERATION_RETAINED, message.clone())
-                    .subject(worktrees_path.display().to_string())
-                    .once_per_change(),
+                Warning::new(
+                    GIT_OPERATION_RETAINED,
+                    message.clone(),
+                    provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+                )
+                .subject(worktrees_path.display().to_string())
+                .once_per_change(),
             );
             return Some(message);
         }
@@ -909,9 +917,13 @@ fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
         inspection_issue?
     };
     warn(
-        Warning::new(GIT_OPERATION_RETAINED, message.clone())
-            .subject(worktrees_path.display().to_string())
-            .once_per_change(),
+        Warning::new(
+            GIT_OPERATION_RETAINED,
+            message.clone(),
+            provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+        )
+        .subject(worktrees_path.display().to_string())
+        .once_per_change(),
     );
     Some(message)
 }
@@ -948,9 +960,13 @@ fn warn_live_record_change(
         ),
     };
     warn(
-        Warning::new(LIVE_RECORD_FORMAT_CHANGED, message.clone())
-            .subject(destination.state.as_path().display().to_string())
-            .once_per_change(),
+        Warning::new(
+            LIVE_RECORD_FORMAT_CHANGED,
+            message.clone(),
+            provenant_records::warning::detected_source(LIVE_RECORD_FORMAT_CHANGED),
+        )
+        .subject(destination.state.as_path().display().to_string())
+        .once_per_change(),
     );
     Some(message)
 }
@@ -969,7 +985,7 @@ fn orphaned_targets(
         .harness_targets
         .iter()
         .filter(|record| {
-            if !record.harness.spec().account_config_dir {
+            if !record.harness.spec().accounts.config_dir {
                 return false;
             }
             let mut defaults = Targets::new(
@@ -1106,8 +1122,8 @@ fn detected_batches(
                             .hook_file
                             .map(|path| path.to_path_buf())
                             .transpose()?,
-                        instruction: record
-                            .instruction
+                        instruction_file: record
+                            .instruction_file
                             .map(|path| path.to_path_buf())
                             .transpose()?,
                     })
@@ -1124,7 +1140,7 @@ fn detected_batches(
         .filter(|spec| spec.install.is_some())
     {
         if std::env::split_paths(&path)
-            .any(|dir| provenant_os::sys::is_executable(&dir.join(spec.binary)))
+            .any(|dir| provenant_os::sys::is_executable(&dir.join(spec.identity.binary)))
         {
             batches.push(selected_targets_in(environment, &[spec.id])?);
         }
@@ -1138,10 +1154,11 @@ fn detected_batches(
         let name = entry.file_name();
         for spec in provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|spec| spec.account_config_dir && spec.install.is_some())
+            .filter(|spec| spec.accounts.config_dir && spec.install.is_some())
         {
             if spec
-                .account_directory_prefix
+                .accounts
+                .directory_prefix
                 .is_some_and(|prefix| name.as_encoded_bytes().starts_with(prefix.as_bytes()))
             {
                 directories.push((entry.path(), spec.id));
@@ -1551,9 +1568,13 @@ fn apply_install(
         && let Some(message) = reporter.stopped_report(&state)
     {
         warn(
-            Warning::new(GIT_OPERATION_RETAINED, message.clone())
-                .subject(state.display().to_string())
-                .once_per_change(),
+            Warning::new(
+                GIT_OPERATION_RETAINED,
+                message.clone(),
+                provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+            )
+            .subject(state.display().to_string())
+            .once_per_change(),
         );
     }
     let result = match result {
@@ -1624,9 +1645,13 @@ fn apply_install(
         && let Some(message) = reporter.stopped_report(&state)
     {
         warn(
-            Warning::new(GIT_OPERATION_RETAINED, message.clone())
-                .subject(state.display().to_string())
-                .once_per_change(),
+            Warning::new(
+                GIT_OPERATION_RETAINED,
+                message.clone(),
+                provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+            )
+            .subject(state.display().to_string())
+            .once_per_change(),
         );
     }
     Ok(Applied {
@@ -1759,9 +1784,13 @@ fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
                 path.display()
             );
             warn(
-                Warning::new(STATE_ROOT_OVERLAP, message.clone())
-                    .subject(path.display().to_string())
-                    .once_per_change(),
+                Warning::new(
+                    STATE_ROOT_OVERLAP,
+                    message.clone(),
+                    provenant_records::warning::detected_source(STATE_ROOT_OVERLAP),
+                )
+                .subject(path.display().to_string())
+                .once_per_change(),
             );
             return Some(message);
         }
@@ -1772,9 +1801,13 @@ fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
             path.display()
         );
         warn(
-            Warning::new(STATE_ROOT_OVERLAP, message.clone())
-                .subject(path.display().to_string())
-                .once_per_change(),
+            Warning::new(
+                STATE_ROOT_OVERLAP,
+                message.clone(),
+                provenant_records::warning::detected_source(STATE_ROOT_OVERLAP),
+            )
+            .subject(path.display().to_string())
+            .once_per_change(),
         );
         return Some(message);
     }
@@ -1791,9 +1824,13 @@ fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
     };
     if message.starts_with("could not remove") {
         warn(
-            Warning::new(STATE_ROOT_OVERLAP, message.clone())
-                .subject(path.display().to_string())
-                .once_per_change(),
+            Warning::new(
+                STATE_ROOT_OVERLAP,
+                message.clone(),
+                provenant_records::warning::detected_source(STATE_ROOT_OVERLAP),
+            )
+            .subject(path.display().to_string())
+            .once_per_change(),
         );
     } else {
         let _ = writeln!(io::stderr().lock(), "{message}");
@@ -1889,7 +1926,7 @@ fn adopt_settings(globals: &cli::Globals, account: &str) -> Result<Vec<String>, 
     let id = cli::accounts::resolve(accounts, account)?;
     let entry = accounts.entries.get(&id).ok_or("unknown account")?;
     if !provenant_records::AdapterSpec::get(&entry.adapter)
-        .is_some_and(|spec| spec.shared_account_settings)
+        .is_some_and(|spec| spec.accounts.shared_settings)
     {
         return Err("only Claude accounts have shared settings".into());
     }
@@ -2494,6 +2531,9 @@ fn report_smoke_cleanup<T>(
         Warning::new(
             provenant_records::warning::SMOKE_BINDING_RETAINED,
             warning.clone(),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::SMOKE_BINDING_RETAINED,
+            ),
         )
         .once_per_change(),
     );

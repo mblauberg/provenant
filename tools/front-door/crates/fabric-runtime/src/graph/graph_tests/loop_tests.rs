@@ -413,9 +413,11 @@ fn loop_body_preserves_outer_node_sources_and_entry_dependencies() {
         .find(|node| node.id == "cycle--r1--settled-reader")
         .unwrap();
     assert!(settled_reader.after_settled.contains(&"writer".to_owned()));
-    assert!(!settled_reader
-        .after_settled
-        .contains(&"cycle--r1--writer".to_owned()));
+    assert!(
+        !settled_reader
+            .after_settled
+            .contains(&"cycle--r1--writer".to_owned())
+    );
     assert!(validate_flat_plan(&expanded, &Default::default()).is_ok());
 }
 
@@ -3442,6 +3444,41 @@ fn checked_shared_flaw_at_first_round_routes_to_design() {
             .as_deref(),
         Some("checked findings share a design flaw")
     );
+
+    // The class is the named invariant: two distinct findings that name the
+    // same invariant are one shared flaw even without the boolean.
+    let shared = |id: &str, file: &str| {
+        serde_json::json!({
+            "id":id,"lens":"correctness","severity":"high","file":file,"line":1,
+            "class":"input boundary","summary":"constraint","status":"open",
+            "evidence":"counterexample","proposed_fix":"repair","design_defect":false,
+            "trigger":{"sequence":"invoke the default operation","reach":"default_path","observed":true},
+            "triage":{"decision":"confirmed","reason":"counterexample reproduced","worth_fixing":true,
+                "root_cause":"constraint","blocking_class":"default_path_defect","shared_flaw":false}
+        })
+    };
+    let report = format!(
+        "```findings\n{}\n```\nVERDICT: FAIL",
+        serde_json::json!({"schema_version":1,"findings":[shared("F1","a.rs"), shared("F2","b.rs")]})
+    );
+    let mut owner = repair_reviews(&[&report, "structural alternative"]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "repair")
+            .unwrap()
+            .gate
+            .as_ref()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("checked findings share a design flaw")
+    );
 }
 
 #[test]
@@ -3810,7 +3847,11 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
         );
         let new_finding = initial
             .replace("F1", "F2")
-            .replace("correctness", "security");
+            .replace("correctness", "security")
+            .replace(
+                "\"summary\":\"constraint\"",
+                "\"class\":\"security invariant\",\"summary\":\"constraint\"",
+            );
         let checked_new_finding = new_finding.replace(
             "\"status\":\"open\"",
             "\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Reproduced on the repaired head\"",
@@ -3824,6 +3865,9 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
                 pass,
                 &new_finding,
                 &checked_new_finding,
+                // A split between the correctness and security lenses now
+                // gets one read-only adjudication before the design fallback.
+                &checked_new_finding,
                 "principal options",
             ])
         } else {
@@ -3834,6 +3878,8 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
                 pass,
                 &new_finding,
                 &checked_new_finding,
+                // The adjudicator upholds the finding, so round two repairs it.
+                &checked_new_finding,
                 "fix two",
                 pass,
                 pass,
@@ -3842,7 +3888,7 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
             ])
         };
         owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
-        for (index, oid) in [(1, 'a'), (6, 'b')] {
+        for (index, oid) in [(1, 'a'), (7, 'b')] {
             if let Some(AttemptObservation::Terminal { commit, .. }) =
                 owner.observations.get_mut(index)
             {
@@ -3860,6 +3906,27 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
             .find(|node| node.id == "repair--r1--accepted")
             .unwrap();
         assert_eq!(first_gate.state, NodeState::Failed);
+        let adjudicators: Vec<_> = run
+            .checkpoint
+            .nodes
+            .iter()
+            .filter(|node| node.id.ends_with("--adjudicate"))
+            .collect();
+        assert_eq!(
+            adjudicators.len(),
+            1,
+            "nested lens split adds one adjudicator"
+        );
+        let adjudication = adjudicators[0];
+        assert_eq!(adjudication.state, NodeState::Succeeded);
+        assert_eq!(
+            adjudication
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.verdict.as_deref()),
+            Some("VERDICT: FAIL"),
+            "an upheld finding returns FAIL successfully so the gate can route repair"
+        );
         if limit == 1 {
             assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
             let findings = &run
@@ -4380,7 +4447,11 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
     let initial = repair_finding(false);
     let security = initial
         .replace("F1", "F2")
-        .replace("correctness", "security");
+        .replace("correctness", "security")
+        .replace(
+            "\"summary\":\"constraint\"",
+            "\"class\":\"security invariant\",\"summary\":\"constraint\"",
+        );
     let checked_security = security.replace(
         "\"status\":\"open\"",
         "\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Reproduced on the repaired head\"",
@@ -4395,6 +4466,8 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
         pass,
         &security,
         &checked_security,
+        // The split panel is adjudicated before the second repair writer runs.
+        &checked_security,
         "fix two",
         pass,
         pass,
@@ -4403,7 +4476,7 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
         pass,
     ]);
     owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
-    for (index, oid) in [(1, 'a'), (7, 'b')] {
+    for (index, oid) in [(1, 'a'), (8, 'b')] {
         if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[index] {
             *commit = Some(oid.to_string().repeat(40));
         }

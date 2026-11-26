@@ -795,6 +795,7 @@ fn outputs(
                 .push(bounded(&format!("unavailable {entry}"), WARNING_BYTES));
         }
     }
+    let mut split = false;
     if spec.reduce_verdict {
         use provenant_records::workflow::ReviewVerdict;
         let rank = |verdict| match verdict {
@@ -803,7 +804,7 @@ fn outputs(
             ReviewVerdict::Inconclusive => 2,
             ReviewVerdict::RequestChanges => 3,
         };
-        let verdict = exporting_members(spec, positions)
+        let verdicts: Vec<_> = exporting_members(spec, positions)
             .into_iter()
             .map(|index| &checkpoint.nodes[index])
             .filter(|member| member.state == NodeState::Succeeded)
@@ -822,7 +823,15 @@ fn outputs(
                     })
                     .unwrap_or(ReviewVerdict::Inconclusive)
             })
-            .max_by_key(|verdict| rank(*verdict));
+            .collect();
+        // A split on one head is not a fresh review round: the single
+        // adjudication node resolves it. Flag the split so a reduced verdict
+        // is never silently treated as an agreed changes-request.
+        // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+        split = verdicts
+            .first()
+            .is_some_and(|first| verdicts.iter().any(|verdict| verdict != first));
+        let verdict = verdicts.into_iter().max_by_key(|verdict| rank(*verdict));
         selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
         selected.verdict_error = None;
     }
@@ -907,6 +916,14 @@ fn outputs(
             Some(own) => format!("{own}\n{inherited}"),
             None => inherited,
         });
+    }
+    if split {
+        selected.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
+        truncation_warning_indices.retain(|index| *index < selected.warnings.len());
+        selected.warnings.push(bounded(
+            "review_split_verdict: conflicting verdicts on one head go to the adjudicator, not a new round",
+            WARNING_BYTES,
+        ));
     }
     selected.result = match results.as_slice() {
         [] => None,

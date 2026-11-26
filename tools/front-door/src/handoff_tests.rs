@@ -94,10 +94,21 @@ fn wip_refuses_held_or_uncertain_writer_custody() {
         (tree.live_writer, tree.writer_unknown) = handoff_writer_state(&advisory);
         assert!(!unsafe_wip(&tree), "{advisory:?} is advisory");
     }
-    let mut output = Vec::new();
-    write_writer_advisory(&mut output, "/repo/lane: census incomplete").expect("advisory written");
-    let output = String::from_utf8(output).expect("UTF-8 advisory");
-    assert!(output.contains("/repo/lane: census incomplete"));
+    // A writer advisory is a typed warning, not a printed line: it carries the
+    // WRITER_ADVISORY code and is shown once per change, while the JSON envelope
+    // keeps every instance. Spec: docs/specs/cli.md#warnings-are-typed-values
+    let ((), warnings) = provenant_records::warning::capture(|| {
+        emit_writer_advisory("/repo/lane: census incomplete");
+    });
+    assert_eq!(warnings.len(), 1, "one advisory is one typed warning");
+    let warning = &warnings[0];
+    assert_eq!(warning.code.as_ref(), "WRITER_ADVISORY");
+    assert_eq!(warning.dedup, provenant_records::warning::Dedup::PerChange);
+    assert!(
+        warning.message.contains("/repo/lane: census incomplete"),
+        "{}",
+        warning.message
+    );
     tree.writer_unknown = true;
     tree.writer_evidence = Some("/repo: process census incomplete".into());
     let refusal = wip_unsafe_description(&tree);

@@ -382,6 +382,16 @@ pub(super) fn apply_attempt_observation(
                     outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(2));
                     outputs.warnings.extend(marker_warnings);
                 }
+                let invariant_warnings = review::invariant_warnings(node, &outputs);
+                let return_warnings = review::repair_return_warnings(node, &outputs);
+                let contract_warning_count = invariant_warnings.len() + return_warnings.len();
+                if contract_warning_count > 0 {
+                    outputs
+                        .warnings
+                        .truncate(MAX_WARNINGS.saturating_sub(contract_warning_count));
+                    outputs.warnings.extend(invariant_warnings);
+                    outputs.warnings.extend(return_warnings);
+                }
                 // A lens that stopped without any reply has no verdict to
                 // correct: settlement names it unavailable instead of relaunching
                 // it for an isolated verdict correction.
@@ -484,6 +494,7 @@ pub(super) fn apply_attempt_observation(
                 let disposition_error = disposition_error
                     .or(propagation_error)
                     .or(review_contract_error)
+                    .or_else(|| review::invariant_error(node, &outputs))
                     .or_else(|| review::repair_result_error(node, &upstream_findings, &outputs));
                 if template::review_behaviour(node).is_some() {
                     retain_synthesis_findings(&mut outputs, &upstream_findings);

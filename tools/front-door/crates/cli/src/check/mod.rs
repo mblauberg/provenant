@@ -547,6 +547,9 @@ pub fn install_page(
                 warn(Warning::new(
                     provenant_records::warning::INSTALL_FINDING_ADVISORY,
                     detail.clone(),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::INSTALL_FINDING_ADVISORY,
+                    ),
                 ));
             }
             continue;
@@ -572,18 +575,18 @@ pub fn install_page(
                 format!(
                     "account {} ({}): registered directory is missing or unusable",
                     account.label,
-                    account.harness.spec().name
+                    account.harness.spec().identity.name
                 )
             }
             ("unsynced_account", Some(account)) => format!(
                 "account {} ({}): managed content is not installed; run `provenant accounts sync`",
                 account.label,
-                    account.harness.spec().name
+                    account.harness.spec().identity.name
             ),
             ("account_missing_entry", Some(account)) => format!(
                 "account {} ({}): lacks managed content its sibling accounts have; run `provenant accounts sync`",
                 account.label,
-                    account.harness.spec().name
+                    account.harness.spec().identity.name
             ),
             ("settings_drift", _) => format!(
                 "shared setting is out of step ({}); run `provenant accounts sync`",
@@ -599,7 +602,7 @@ pub fn install_page(
             (_, Some(account)) => format!(
                 "account {} ({}): managed installation differs from its recorded identity",
                 account.label,
-                    account.harness.spec().name
+                    account.harness.spec().identity.name
             ),
             ("account_missing_entry", None) => {
                 "target lacks managed content its sibling targets have; run `provenant accounts sync`".into()
@@ -652,15 +655,16 @@ mod tests {
                 continue;
             };
             for support in [
-                install.instructions,
-                install.answer_delivery,
-                install.precompact_context,
+                install.native.instructions,
+                install.native.answer_delivery,
+                install.native.precompact_context,
             ] {
-                let provenant_records::CapabilitySupport::Unsupported { reason, source } = support
-                else {
+                if support.value {
                     continue;
-                };
-                let detail = format!("{}: {reason} (source: {source})", spec.name);
+                }
+                let reason = support.reason;
+                let source = support.source;
+                let detail = format!("{}: {reason} (source: {source})", spec.identity.name);
                 let inspection = provenant_config::InstallInspection {
                     error: None,
                     findings: vec![provenant_config::InstallFinding {

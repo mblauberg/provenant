@@ -2025,6 +2025,7 @@ impl GraphJournal for FileJournal {
                 warn(Warning::new(
                     GRAPH_OBSERVATION_DEFERRED,
                     format!("graph observation indexing deferred: {error}"),
+                    provenant_records::warning::detected_source(GRAPH_OBSERVATION_DEFERRED),
                 ));
             }
             Ok(())

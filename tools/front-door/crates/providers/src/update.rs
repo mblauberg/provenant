@@ -248,7 +248,9 @@ fn command(provider: &str, executable: &Path, setting: &ProviderUpdate) -> Optio
         }
         ProviderUpdate::Enabled(true) => {}
     }
-    let update = provenant_records::AdapterSpec::get(provider)?.update;
+    let update = provenant_records::AdapterSpec::get(provider)?
+        .identity
+        .update;
     match update {
         provenant_records::UpdateCommand::None => None,
         provenant_records::UpdateCommand::Subcommand(subcommand) => {
@@ -287,19 +289,6 @@ fn command(provider: &str, executable: &Path, setting: &ProviderUpdate) -> Optio
             }
         }
     }
-}
-
-fn version(executor: &dyn Executor, executable: &Path, cwd: &Path) -> Option<String> {
-    let argv = [executable.into(), "--version".into()];
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
-    options.stdout = StreamPolicy::Capture { limit: 128 };
-    options.stderr = StreamPolicy::Discard;
-    let result = executor.execute(options).ok()?;
-    if result.termination != Termination::Exit(0) || result.timed_out || result.stdout.truncated {
-        return None;
-    }
-    let text = std::str::from_utf8(&result.stdout.bytes).ok()?.trim();
-    (!text.is_empty() && !text.chars().any(char::is_control)).then(|| text.to_owned())
 }
 
 /// A busy provider is left for the next event, without spending its interval.
@@ -413,7 +402,8 @@ fn check_inner(
         save(&dir, &record_name(provider), &record)?;
         return Ok(Some((&record).into()));
     };
-    if let Some(old_version) = version(executor, executable, state) {
+    let probe_timeout = settings.version_probe_timeout(provider);
+    if let Some(old_version) = crate::version::probe(executor, executable, state, probe_timeout) {
         record.old_version = Some(old_version.clone());
         record.new_version = Some(old_version);
     }
@@ -435,8 +425,8 @@ fn check_inner(
     let result = executor.execute(options);
     let succeeded =
         result.is_ok_and(|out| out.termination == Termination::Exit(0) && !out.timed_out);
-    record.new_version =
-        version(executor, executable, state).or_else(|| record.old_version.clone());
+    record.new_version = crate::version::probe(executor, executable, state, probe_timeout)
+        .or_else(|| record.old_version.clone());
     record.outcome = if succeeded { "updated" } else { "failed" }.into();
     save(&dir, &record_name(provider), &record)?;
     Ok(Some((&record).into()))
@@ -1236,6 +1226,19 @@ mod tests {
             )
             .ok_or("override")?,
             vec![OsString::from("custom"), "update".into()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn declared_update_subcommand_comes_from_the_identity_group()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // With no explicit override, the updater comes from the adapter's
+        // `identity` group, where the spec refactor moved the declared command.
+        let binary = Path::new("/usr/local/bin/claude");
+        assert_eq!(
+            command("claude", binary, &ProviderUpdate::Enabled(true)).ok_or("no updater")?,
+            vec![binary.as_os_str().to_os_string(), OsString::from("update")]
         );
         Ok(())
     }

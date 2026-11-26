@@ -1,19 +1,28 @@
 //! Provider checks compose routing inventory and the ordinary graph/run owner.
 use crate::fabric;
 use provenant_cli::{Globals, check::Providers};
+use provenant_config::overlays::OverlayWarning;
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, Pause};
 use provenant_fabric_runtime::{
     coordination::facade::GraphInput,
     graph::{GraphAttemptOutcome, GraphRun, NodeState},
 };
+use provenant_os::exec::SystemExecutor;
 use provenant_providers::host::LocalSignin;
 use provenant_quota::{QuotaStatus, ReadinessReason};
-use provenant_records::{CommandResult, Outcome, StopCause};
-use provenant_routing::{Catalogue, ModelId};
+use provenant_records::{
+    CommandResult, Outcome, StopCause,
+    policy::{Facts, Policy},
+};
+use provenant_routing::{
+    Catalogue, ModelId,
+    compatibility::{self, CompatibilityStatus},
+};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::time::Duration;
 
 const PROMPT: &str = "Reply with exactly one word: OK. Do not use tools, read files, change files, run commands or perform any other work.";
@@ -174,7 +183,7 @@ fn inventory(roots: &provenant_core::Roots) -> Result<Vec<Row>, Box<dyn std::err
         };
         let harness_found = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
             .filter(|path| path.is_absolute())
-            .any(|path| provenant_os::sys::is_executable(&path.join(spec.binary)));
+            .any(|path| provenant_os::sys::is_executable(&path.join(spec.identity.binary)));
         let login = logins.iter().find(|row| {
             row.account.adapter == account.adapter && row.account.account_key == account.key
         });
@@ -208,7 +217,8 @@ fn inventory(roots: &provenant_core::Roots) -> Result<Vec<Row>, Box<dyn std::err
             // Namespaced free accounts and subscription pools have only partial
             // allowance coverage today. Never promote a login's quota to Zen.
             let governed = spec
-                .quota_model_prefix
+                .quota
+                .model_prefix
                 .is_none_or(|prefix| model.model().starts_with(prefix));
             let snapshot = snapshot.filter(|_| governed);
             let known = snapshot.is_some_and(|snapshot| {
@@ -224,7 +234,7 @@ fn inventory(roots: &provenant_core::Roots) -> Result<Vec<Row>, Box<dyn std::err
             let quota = Quota {
                 coverage: if !known {
                     Coverage::Unknown
-                } else if spec.quota_model_prefix.is_some()
+                } else if spec.quota.model_prefix.is_some()
                     || snapshot
                         .and_then(|snapshot| snapshot.details.as_ref())
                         .and_then(|details| details.coverage.as_deref())
@@ -531,15 +541,180 @@ fn live(
     }
 }
 
+/// One harness-version finding, from the same assessment and policy check the
+/// launch path uses. The layer names the config row that set the status.
+#[derive(Clone, Debug, Serialize)]
+struct Finding {
+    adapter: String,
+    version: Option<String>,
+    status: CompatibilityStatus,
+    reason: Option<String>,
+    issue: Option<u64>,
+    recommended_range: Option<String>,
+    #[serde(flatten)]
+    source: provenant_records::Source,
+    policy: Option<String>,
+    blocks: bool,
+}
+
+impl Finding {
+    fn human(&self) -> String {
+        format!(
+            "adapter={} version={} status={} reason={} issue={} source={} policy={}",
+            self.adapter,
+            self.version.as_deref().unwrap_or("-"),
+            self.status.as_str(),
+            self.reason.as_deref().unwrap_or("-"),
+            self.issue
+                .map_or_else(|| "-".into(), |issue| issue.to_string()),
+            self.source.layer.as_str(),
+            self.policy.as_deref().unwrap_or("-")
+        )
+    }
+}
+
+/// An active `[[adapter_capabilities]]` entry, printed as an info line.
+#[derive(Clone, Debug, Serialize)]
+struct OverlayLine {
+    adapter: String,
+    disabled: Vec<String>,
+    reason: Option<String>,
+    layer: String,
+    origin: Option<String>,
+}
+
+/// A declared limitation, printed for every adapter that carries one.
+#[derive(Clone, Debug, Serialize)]
+struct CaveatLine {
+    adapter: String,
+    code: String,
+    note: String,
+    source: String,
+}
+
+/// The version findings and the owner data that explains them.
+#[derive(Serialize)]
+struct CompatibilityReport {
+    findings: Vec<Finding>,
+    warnings: Vec<OverlayWarning>,
+    overlays: Vec<OverlayLine>,
+    caveats: Vec<CaveatLine>,
+}
+
+/// One finding per installed adapter whose declared compatibility status is
+/// unsupported or broken, resolved through the shared policy table.
+fn compatibility_findings(
+    state: &Path,
+    project: &Path,
+    providers: &BTreeMap<String, provenant_config::ProviderSettings>,
+) -> Result<CompatibilityReport, Box<dyn std::error::Error>> {
+    let (table, mut warnings) = compatibility::CompatibilityTable::effective(state, Some(project));
+    let (overlay, overlay_warnings) =
+        provenant_config::adapter_capabilities::effective(state, Some(project));
+    warnings.extend(overlay_warnings);
+    let project_key = provenant_config::ports::project_key_for(project).unwrap_or_default();
+    let policy: Policy = provenant_config::policy::read(state, &project_key, &BTreeMap::new());
+    let mut overlays = Vec::new();
+    let mut caveats = Vec::new();
+    for spec in provenant_records::ADAPTER_SPECS {
+        if let Some(entry) = overlay.entry(spec.identity.name) {
+            overlays.push(OverlayLine {
+                adapter: spec.identity.name.to_owned(),
+                disabled: entry
+                    .disable
+                    .iter()
+                    .map(|item| item.key().to_owned())
+                    .collect(),
+                reason: entry.reason.clone(),
+                layer: entry.source.layer.as_str().to_owned(),
+                origin: entry.source.origin.clone(),
+            });
+        }
+        for caveat in spec.capabilities.caveats {
+            caveats.push(CaveatLine {
+                adapter: spec.identity.name.to_owned(),
+                code: caveat.code.to_owned(),
+                note: caveat.note.to_owned(),
+                source: caveat.source.to_owned(),
+            });
+        }
+    }
+    let Ok(executor) = SystemExecutor::new(1) else {
+        // Version probing is best-effort; declared overlays and caveats remain
+        // useful even when this process cannot create an executor.
+        return Ok(CompatibilityReport {
+            findings: Vec::new(),
+            warnings,
+            overlays,
+            caveats,
+        });
+    };
+    let mut findings = Vec::new();
+    for spec in provenant_records::ADAPTER_SPECS {
+        let Some(executable) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .filter(|path| path.is_absolute())
+            .map(|path| path.join(spec.identity.binary))
+            .find(|path| provenant_os::sys::is_executable(path))
+        else {
+            continue;
+        };
+        let (version, disabled) = match provenant_providers::version::configured(
+            spec.identity.name,
+            providers.get(spec.identity.name),
+        ) {
+            Ok(timeout) => (
+                provenant_providers::version::shared().read(&executor, &executable, state, timeout),
+                None,
+            ),
+            Err(reason) => (None, Some(reason)),
+        };
+        let mut assessment = table.assess(spec.identity.name, version.as_deref());
+        if disabled.is_some() {
+            assessment.reason = disabled;
+        }
+        let Some(code) = compatibility::policy_code(assessment.status) else {
+            continue;
+        };
+        let detail = assessment.detail();
+        let effect = policy.check(code, Facts::violation(detail));
+        let blocks = effect.blocks();
+        let policy = effect.message().map(str::to_owned);
+        findings.push(Finding {
+            adapter: assessment.adapter,
+            version: assessment.version,
+            status: assessment.status,
+            reason: assessment.reason,
+            issue: assessment.issue,
+            recommended_range: assessment.recommended_range,
+            source: assessment.source,
+            policy,
+            blocks,
+        });
+    }
+    Ok(CompatibilityReport {
+        findings,
+        warnings,
+        overlays,
+        caveats,
+    })
+}
+
 #[derive(Serialize)]
 struct Report {
     live: bool,
     settings: Settings,
     rows: Vec<Row>,
+    findings: Vec<Finding>,
+    overlay_warnings: Vec<OverlayWarning>,
+    overlays: Vec<OverlayLine>,
+    caveats: Vec<CaveatLine>,
 }
 impl Report {
     fn exit(&self) -> u8 {
-        u8::from(self.rows.iter().any(|row| row.status == Verdict::Fail))
+        u8::from(
+            self.rows.iter().any(|row| row.status == Verdict::Fail)
+                || self.findings.iter().any(|finding| finding.blocks),
+        )
     }
 }
 
@@ -553,6 +728,11 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
         )?;
         let mut rows = select(inventory(&resolved.roots)?, &args.routes)?;
         let config = provenant_cli::config_reads::read_for(&resolved.roots, "check providers")?;
+        let compatibility = compatibility_findings(
+            resolved.roots.state.as_ref(),
+            &resolved.project,
+            &config.providers,
+        )?;
         let (wait, origin) = provenant_cli::wait::Settings::resolved(&config);
         let cadence = origin.local_cadence(&wait);
         let cadence = &cadence;
@@ -586,6 +766,10 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
             live: args.live,
             settings,
             rows,
+            findings: compatibility.findings,
+            overlay_warnings: compatibility.warnings,
+            overlays: compatibility.overlays,
+            caveats: compatibility.caveats,
         })
     })();
     match result {
@@ -634,6 +818,28 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
                     row.pools.join(","),
                     row.observation.as_deref().unwrap_or("-")
                 );
+            }
+            for warning in &report.overlay_warnings {
+                human += &format!("warning: {warning}\n");
+            }
+            for overlay in &report.overlays {
+                human += &format!(
+                    "info: adapter capabilities entry adapter={} disabled={} reason={} layer={} origin={}\n",
+                    overlay.adapter,
+                    overlay.disabled.join(","),
+                    overlay.reason.as_deref().unwrap_or("-"),
+                    overlay.layer,
+                    overlay.origin.as_deref().unwrap_or("-")
+                );
+            }
+            for caveat in &report.caveats {
+                human += &format!(
+                    "info: caveat adapter={} code={} note={} source={}\n",
+                    caveat.adapter, caveat.code, caveat.note, caveat.source
+                );
+            }
+            for finding in &report.findings {
+                human += &format!("{}\n", finding.human());
             }
             crate::emit(
                 &CommandResult::new(

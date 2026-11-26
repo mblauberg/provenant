@@ -363,12 +363,7 @@ fn policy_layer(policy: &Policy) -> Layer {
         .iter()
         .map(|rule| rule.source)
         .max_by_key(|source| rank(*source))
-        .map(|source| match source {
-            PolicySource::CompiledDefault => Layer::Default,
-            PolicySource::Host => Layer::Host,
-            PolicySource::Project => Layer::Project,
-            PolicySource::Dispatch => Layer::Route,
-        })
+        .map(PolicySource::layer)
         .unwrap_or(Layer::Default)
 }
 

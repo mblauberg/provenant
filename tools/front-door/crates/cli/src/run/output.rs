@@ -1496,7 +1496,13 @@ pub fn attempt_provider(
         .flatten()
         .find_map(|route| {
             if route.host_native.is_some() {
-                Some(provenant_records::Harness::HostNative.spec().name.into())
+                Some(
+                    provenant_records::Harness::HostNative
+                        .spec()
+                        .identity
+                        .name
+                        .into(),
+                )
             } else {
                 route.provider.clone()
             }

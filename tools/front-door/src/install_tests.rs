@@ -1055,7 +1055,7 @@ fn orphan_detection_keeps_default_environment_and_registered_targets()
             skills_dir: AbsolutePath::new(&dir.join("skills"))?,
             config_file: AbsolutePath::new(&dir.join("settings.json"))?,
             hook_file: None,
-            instruction: None,
+            instruction_file: None,
             hooks_relinquished: false,
         })
     };

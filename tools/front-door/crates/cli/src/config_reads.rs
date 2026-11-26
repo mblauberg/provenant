@@ -20,6 +20,7 @@ macro_rules! reads {
 }
 reads! {
     "help" => [], "root" => [], "process-tree" => [], "ci" => [],
+    "adapter" => ["adapter"],
     "events" => ["fabric"], "notes" => ["fabric"], "declare" => ["run"],
     "ask" => ["fabric", "accounts"], "inbox" => ["fabric", "accounts"],
     "answer" => ["fabric", "accounts"], "accounts" => ["accounts"],
@@ -149,6 +150,23 @@ pub fn sections_for(
         Some(names) => crate::domains::SECTIONS.scoped(names),
         None => provenant_config::DomainSections::new(crate::domains::SECTIONS.entries),
     })
+}
+
+/// Effective `[[adapter_capabilities]]` entries for one read, from the host
+/// state and project layers the compatibility table also reads. An invalid row
+/// warns as an ignored config key and is skipped; it never refuses the caller.
+pub fn capability_overlay(roots: &Roots) -> provenant_records::CapabilityOverlay {
+    let (overlay, warnings) = provenant_config::adapter_capabilities::effective(
+        roots.state.as_path(),
+        Some(roots.checkout()),
+    );
+    for warning in warnings {
+        provenant_records::warning::warn(provenant_records::warning::Warning::new(
+            provenant_records::warning::CONFIG_KEY_IGNORED,
+            warning.to_string(),
+        ));
+    }
+    overlay
 }
 
 #[cfg(test)]

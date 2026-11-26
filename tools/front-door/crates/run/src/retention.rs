@@ -195,7 +195,7 @@ impl SqlCancellation {
                     Warning::new(
                         RESOURCE_PROBE_FAILED,
                         format!("cannot monitor retention SQLite cancellation; using bounded batches: {error}"),
-                    )
+                     provenant_records::warning::detected_source(RESOURCE_PROBE_FAILED))
                     .subject("retention cancellation monitor"),
                 );
                 None
@@ -2328,10 +2328,9 @@ fn expire(
             }
             let candidate = subdir(&state, name, false)?;
             let provider = candidate_provider(&candidate)?;
-            if !matches!(
-                provider.as_str(),
-                "codex" | "claude" | "cursor" | "opencode"
-            ) {
+            if !provenant_records::AdapterSpec::get(&provider)
+                .is_some_and(|s| s.retention.transcript_layout.value)
+            {
                 // Until an adapter's transcript layout is established, keep
                 // its unclassified payload as history rather than lose it.
                 state.rename_noreplace(name, &history, name)?;
@@ -2350,25 +2349,38 @@ fn expire(
                     candidate.sync()?;
                 }
             }
-            for (parent, artifact) in [(".cursor", "chats"), ("data", "opencode")] {
+            for retained in provenant_records::AdapterSpec::get(&provider)
+                .into_iter()
+                .flat_map(|s| s.retention.artifacts.iter())
+            {
                 if !keep_going() {
                     return Err(RunError::Cancelled);
                 }
+                let (parent, artifact, scrub) = (retained.parent, retained.name, retained.scrub);
                 if let Some(source) = existing(&candidate, parent)? {
                     match source.metadata_at(OsStr::new(artifact), false) {
                         Ok(_) => {
-                            if artifact == "opencode"
-                                && let Some(data) = existing(&source, artifact)?
-                            {
-                                // The launcher places an authentication link here.
-                                // Never archive it if earlier credential cleanup was refused.
-                                let first = report.removed.len();
-                                dispose(&data, OsStr::new("auth.json"), false, report, keep_going)?;
-                                prefix_removals(
-                                    report,
-                                    first,
-                                    &PathBuf::from(STATE).join(name).join(parent).join(artifact),
-                                );
+                            for scrub_name in scrub {
+                                if let Some(data) = existing(&source, artifact)? {
+                                    // The launcher places an authentication link here.
+                                    // Never archive it if earlier credential cleanup was refused.
+                                    let first = report.removed.len();
+                                    dispose(
+                                        &data,
+                                        OsStr::new(scrub_name),
+                                        false,
+                                        report,
+                                        keep_going,
+                                    )?;
+                                    prefix_removals(
+                                        report,
+                                        first,
+                                        &PathBuf::from(STATE)
+                                            .join(name)
+                                            .join(parent)
+                                            .join(artifact),
+                                    );
+                                }
                             }
                             let target = subdir(&archive, OsStr::new(parent), true)?;
                             source.rename_noreplace(

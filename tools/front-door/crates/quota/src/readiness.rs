@@ -197,7 +197,7 @@ impl RouteReadiness {
             && (self.reason == Some(ReadinessReason::AccountMismatch)
                 || !provenant_records::AdapterSpec::get(&self.scope.adapter).is_some_and(|spec| {
                     matches!(
-                        spec.login_observation,
+                        spec.login.observation,
                         provenant_records::LoginObservation::ExecutableOnly
                             | provenant_records::LoginObservation::None
                     )

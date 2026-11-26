@@ -19,7 +19,8 @@ fn effect_kind(adapter: &str) -> Result<QuotaEffectKind, QuotaError> {
     Ok(
         match AdapterSpec::get(adapter)
             .ok_or(QuotaError::Disabled)?
-            .quota_probe
+            .quota
+            .probe
         {
             QuotaProbeKind::None => return Err(QuotaError::Disabled),
             QuotaProbeKind::HttpGet => QuotaEffectKind::HttpGet,

@@ -77,7 +77,7 @@ pub(crate) fn harness_parser() -> impl clap::builder::TypedValueParser<Value = H
         provenant_records::ADAPTER_SPECS
             .iter()
             .filter(|spec| spec.install.is_some())
-            .map(|spec| spec.name),
+            .map(|spec| spec.identity.name),
     )
     .try_map(|name| serde_json::from_value::<Harness>(serde_json::Value::String(name)))
 }
@@ -148,7 +148,10 @@ mod tests {
     #[test]
     fn adapter_specs_cover_config_routing_and_cli_names() -> Result<(), Box<dyn std::error::Error>>
     {
-        let specs: BTreeSet<_> = ADAPTER_SPECS.iter().map(|spec| spec.name).collect();
+        let specs: BTreeSet<_> = ADAPTER_SPECS
+            .iter()
+            .map(|spec| spec.identity.name)
+            .collect();
         assert_eq!(specs.len(), ADAPTER_SPECS.len());
         let parser = harness_parser();
         let cli: BTreeSet<_> = parser
@@ -161,7 +164,7 @@ mod tests {
             ADAPTER_SPECS
                 .iter()
                 .filter(|spec| spec.install.is_some())
-                .map(|spec| spec.name.to_owned())
+                .map(|spec| spec.identity.name.to_owned())
                 .collect()
         );
         let harnesses = ADAPTER_SPECS
@@ -184,7 +187,7 @@ mod tests {
             assert_eq!(
                 ADAPTER_SPECS
                     .iter()
-                    .filter(|spec| spec.name == model.model.adapter())
+                    .filter(|spec| spec.identity.name == model.model.adapter())
                     .count(),
                 1
             );
@@ -197,8 +200,8 @@ mod tests {
         let provider_specs: BTreeSet<_> = ADAPTER_SPECS
             .iter()
             .filter(|spec| spec.id != provenant_records::Harness::HostNative)
-            .filter(|spec| spec.name != "fixture-provider")
-            .map(|spec| spec.name)
+            .filter(|spec| spec.identity.name != "fixture-provider")
+            .map(|spec| spec.identity.name)
             .collect();
         assert_eq!(providers, provider_specs);
         assert_eq!(providers.len(), provenant_providers::REGISTRY.len());

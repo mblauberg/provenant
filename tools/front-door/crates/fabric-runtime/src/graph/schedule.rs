@@ -312,6 +312,69 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
 ) -> Result<GateStep, GraphError<R::Error, J::Error>> {
     let node = &plan.nodes[node_index];
     let mut replan_error = None;
+    // A split verdict on one head goes to one adjudication node. The patch adds
+    // no round, so the gate waits for the adjudicator instead of failing into a
+    // fresh repair cycle. Only a gate downstream of the split panel admits it.
+    let split = repair::split_adjudication(node, checkpoint);
+    if let Err(error) = &split {
+        replan_error = Some((*error).to_owned());
+    }
+    if let Ok(Some(repair::SplitAdjudication {
+        parent,
+        head,
+        revision,
+    })) = split
+    {
+        let library = template::TemplateLibrary::bundled();
+        let resolvers = Default::default();
+        let change = repair::split_verdict_patch(&parent, head.as_deref(), revision);
+        let result = (|| -> Result<_, String> {
+            let mut prospective = checkpoint.clone();
+            patch::admit_patch(
+                &mut patch::LiveGraph {
+                    document,
+                    checkpoint: &mut prospective,
+                },
+                Some(&parent),
+                &change,
+                &patch::PatchContext {
+                    catalogue: None,
+                    library: &library,
+                    resolvers: &resolvers,
+                    journal: None,
+                    limits,
+                    worktree_layout: worktree_layout.clone(),
+                },
+            )
+            .map_err(|error| error.message)?;
+            let preview = plans::expand(
+                document,
+                &prospective.extensions,
+                &prospective.expansions,
+                limits,
+            )
+            .map_err(|error| error.to_string())?;
+            let (new_plan, new_positions) = validate_flat_plan(&preview, &plans::generous())
+                .map_err(|error| error.to_string())?;
+            owner
+                .validate_expansion(&preview, &prospective)
+                .map_err(|error| error.to_string())?;
+            Ok((prospective, preview, new_plan, new_positions))
+        })();
+        match result {
+            Ok((prospective, preview, new_plan, new_positions)) => {
+                journal.save(&prospective).map_err(GraphError::Journal)?;
+                *checkpoint = prospective;
+                *expanded = preview;
+                *plan = new_plan;
+                *positions = new_positions;
+                return Ok(GateStep::Reschedule);
+            }
+            Err(error) => {
+                replan_error = Some(format!("split adjudication patch refused: {error}"));
+            }
+        }
+    }
     let reported = repair::growth_in_round(node, &*plan, &*checkpoint, &*positions);
     let mut growth = reported;
     if repair::is_repair_gate(node, &*plan, &*positions) {

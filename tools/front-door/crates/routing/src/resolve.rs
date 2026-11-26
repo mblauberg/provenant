@@ -361,8 +361,8 @@ pub fn list(
                 }))
                 .chain(
                     provenant_records::AdapterSpec::get(m.model.adapter())
-                        .filter(|s| s.local_login)
-                        .map(|s| s.local_account.1.to_owned()),
+                        .filter(|s| s.login.local)
+                        .map(|s| s.accounts.local_entry.1.to_owned()),
                 )
                 .collect();
             accounts
@@ -667,7 +667,8 @@ pub fn recorded_offer_models(
 fn recorded_offer_list(
     inputs: &OfferEvidenceInputs<'_>,
 ) -> Option<(Vec<String>, OfferSource, i64)> {
-    if !provenant_records::AdapterSpec::get(inputs.adapter).is_some_and(|spec| spec.offered_models)
+    if !provenant_records::AdapterSpec::get(inputs.adapter)
+        .is_some_and(|spec| spec.identity.offered_models)
     {
         return None;
     }
@@ -732,7 +733,8 @@ fn account_serves_model(
     {
         return false;
     }
-    if provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|spec| spec.offered_models)
+    if provenant_records::AdapterSpec::get(model.adapter())
+        .is_some_and(|spec| spec.identity.offered_models)
     {
         return record.account_key.as_deref().is_none_or(|key| {
             recorded_offer_models(
@@ -783,7 +785,9 @@ fn adapter_offered_evidence(
     adapter: &str,
     model: &ModelId,
 ) -> Vec<OfferEvidence> {
-    if !provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
+    if !provenant_records::AdapterSpec::get(adapter)
+        .is_some_and(|spec| spec.identity.offered_models)
+    {
         return Vec::new();
     }
     let hint = context.policy_account_hint;
@@ -846,7 +850,9 @@ fn pool_member_retained_by_offerings(
         return true;
     }
     let adapter = member.model.adapter();
-    if !provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
+    if !provenant_records::AdapterSpec::get(adapter)
+        .is_some_and(|spec| spec.identity.offered_models)
+    {
         return true;
     }
     let evidence = adapter_offered_evidence(context, adapter, &member.model);
@@ -936,7 +942,7 @@ fn pacing_policy(catalogue: &Catalogue, config: &RoutingConfig, model: &ModelId)
         return *policy;
     }
     let key = provenant_records::AdapterSpec::get(model.adapter())
-        .and_then(|spec| spec.pacing_keys)
+        .and_then(|spec| spec.quota.pacing_keys)
         .map_or(model.adapter(), |(free, paid)| {
             if catalogue.is_free_model(model) {
                 free
@@ -1037,7 +1043,7 @@ fn window_matches(
         PacingWindow::Daily => window.window_seconds == Some(86_400) || name.ends_with("daily"),
         PacingWindow::Rolling => {
             provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                spec.quota.probe == provenant_records::QuotaProbeKind::LocalLedger
             }) && (name.ends_with("five_hour") || name.ends_with("rolling"))
         }
     }
@@ -1225,7 +1231,7 @@ fn pace_snapshot_factor(
             let reset = match window.resets_unix_seconds {
                 Some(reset) if reset > now => reset,
                 None if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                    spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                    spec.quota.probe == provenant_records::QuotaProbeKind::LocalLedger
                 }) && snapshot
                     .details
                     .as_ref()
@@ -1311,7 +1317,7 @@ fn pacing_factor_basis_points(
         expiry.map(|e| format!(" until={e}")).unwrap_or_default()
     );
     let detail = match (
-        provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.grouped_quota_pools),
+        provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.quota.grouped_pools),
         context.catalogue.quota_pool(model),
     ) {
         (true, Some(pool)) => format!("{detail} quota_pool={pool}"),
@@ -1321,7 +1327,7 @@ fn pacing_factor_basis_points(
         _ => detail,
     };
     let detail = if provenant_records::AdapterSpec::get(model.adapter())
-        .and_then(|spec| spec.allowance_prefix)
+        .and_then(|spec| spec.quota.allowance_prefix)
         .is_some_and(|prefix| model.model().starts_with(prefix))
     {
         let observation = go_quota_observation(model, account, context);
@@ -1745,7 +1751,7 @@ fn pacing_reserve_window(
                 && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
                     || (window.resets_unix_seconds.is_none()
                         && provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                            spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                            spec.quota.probe == provenant_records::QuotaProbeKind::LocalLedger
                         })
                         && snapshot
                             .details
@@ -1979,7 +1985,8 @@ fn recorded_offers(
     availability: &AvailabilityRecord,
     context: &RoutingContext<'_>,
 ) -> Option<provenant_records::run::AccountOfferMismatch> {
-    if !provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|spec| spec.offered_models)
+    if !provenant_records::AdapterSpec::get(model.adapter())
+        .is_some_and(|spec| spec.identity.offered_models)
     {
         return None;
     }
@@ -2266,7 +2273,7 @@ fn model_pool_exhausted(
     pool: Option<&str>,
     now: i64,
 ) -> bool {
-    if !provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.grouped_quota_pools)
+    if !provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.quota.grouped_pools)
     {
         return false;
     }
@@ -2321,17 +2328,6 @@ fn admissible<'c>(
         .find(|r| r.adapter.id() == model.adapter())
         .ok_or_else(|| RoutingError::unknown_adapter(model.adapter()))?;
     let entry = context.catalogue.model(model);
-    // Backstop for uncatalogued models; catalogued ones record their own efforts.
-    if let Some(effort) = effort
-        && let Some(spec) = provenant_records::AdapterSpec::get(model.adapter())
-        && !spec.launch.effort
-    {
-        return Err(RoutingError::UnsupportedEffort {
-            model: model.as_str().to_owned(),
-            effort: effort.to_owned(),
-            support: format!("{} takes no effort control", spec.name),
-        });
-    }
     if entry.is_none()
         && let Some(effort) = effort
     {
@@ -2625,7 +2621,7 @@ fn normalised_effort<'e>(
     let dropped = effort.filter(|value| {
         crate::request::effort_valid(value)
             && provenant_records::AdapterSpec::get(model.adapter())
-                .is_some_and(|spec| spec.drop_unsupported_effort)
+                .is_some_and(|spec| spec.launch.drop_unrecorded_effort)
             && context
                 .catalogue
                 .model(model)
@@ -2643,7 +2639,9 @@ fn candidate(
     for_pool: bool,
 ) -> Result<RouteAlternative, RoutingError> {
     check_declared_effort(model, effort, context)?;
-    let (effort, dropped_effort) = normalised_effort(model, effort, context);
+    let (mut effort, dropped_effort) = normalised_effort(model, effort, context);
+    // (requested effort, declaration source, declaration reason)
+    let mut effort_gap: Option<(String, &'static str, &'static str)> = None;
     let entry = admissible(model, effort, context)?;
     #[cfg(test)]
     let spec = context
@@ -2653,9 +2651,39 @@ fn candidate(
     #[cfg(not(test))]
     let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
     if let Some(spec) = spec {
-        intent
-            .check_launch(&spec, model.model(), effort)
-            .map_err(|error| RoutingError::UnsupportedLaunch(error.to_string()))?;
+        // Owner entries can narrow a row's facts; routing reads the effective
+        // spec, never the raw row. The gap policy joins the already layered
+        // launch policy with that adapter's `on_gap` overrides.
+        let spec = spec.with_overlay(&context.config.capability_overlay);
+        let gap_policy = context
+            .config
+            .capability_overlay
+            .gap_policy(spec.identity.name, &context.config.launch_policy);
+        let check = intent.check_launch(&spec, model.model(), effort, gap_policy);
+        // A refusal or a missing model control makes the candidate ineligible:
+        // pools and fallbacks move on, and an exact pin reports the decision.
+        // An owner-set `refuse` gap is a refusal here, even on an exact pin.
+        if let Some(decision) = check
+            .refusal()
+            .or_else(|| check.degraded(provenant_records::LaunchField::Model))
+        {
+            return Err(RoutingError::UnsupportedLaunch(decision.to_string()));
+        }
+        // A missing effort control degrades. Pools prefer a fallback; an exact
+        // route drops the selector and records the declaration in the envelope.
+        // An `off` gap drops it silently instead.
+        if let Some(decision) = check.degraded(provenant_records::LaunchField::Effort) {
+            // `degraded(Effort)` only fires when a control was requested, so the
+            // warning records that selector as a String, matching EffortWarning.
+            let requested = effort.unwrap_or_default().to_owned();
+            if for_pool {
+                return Err(RoutingError::UnsupportedLaunch(decision.to_string()));
+            }
+            effort = None;
+            if decision.warn {
+                effort_gap = Some((requested, decision.source, decision.reason));
+            }
+        }
     }
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
     let offer_policy = context.offer_policy();
@@ -2853,8 +2881,17 @@ fn candidate(
             requested: value.into(),
             applied: effort.map(str::to_owned),
             model: model.as_str().into(),
-            source: "adapter:drop_unsupported_effort".into(),
+            source: "adapter:drop_unrecorded_effort".into(),
             reason: "unsupported model effort dropped".into(),
+        });
+    } else if let Some((requested, source, reason)) = effort_gap {
+        diagnostics.effort_warning = Some(EffortWarning {
+            extra: Default::default(),
+            requested,
+            applied: None,
+            model: model.as_str().into(),
+            source: source.into(),
+            reason: reason.into(),
         });
     }
     if availability.is_none()
@@ -3220,8 +3257,8 @@ impl Excluded<'_> {
     /// Provider-family constraints apply to exact models as well as pools.
     fn family_reason(&self, model: &ModelId) -> Option<String> {
         self.required_family.and_then(|required| {
-            let actual =
-                provenant_records::AdapterSpec::get(model.adapter()).map(|spec| spec.family);
+            let actual = provenant_records::AdapterSpec::get(model.adapter())
+                .map(|spec| spec.identity.family);
             (actual != Some(required)).then(|| {
                 format!(
                     "required family {required} count 1; candidate family {}",
@@ -3577,15 +3614,21 @@ fn go_quota_observation<'a>(
         .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision))
 }
 
-fn image_input_supported(model: &ModelId, _context: &ValidatedContext<'_>) -> bool {
+fn image_input_supported(model: &ModelId, context: &ValidatedContext<'_>) -> bool {
     #[cfg(test)]
-    let spec = _context
+    let spec = context
         .launch_specs
         .and_then(|lookup| lookup(model.adapter()))
         .or_else(|| provenant_records::AdapterSpec::get(model.adapter()).copied());
     #[cfg(not(test))]
     let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
-    spec.is_some_and(|spec| spec.launch.image_input)
+    spec.is_some_and(|spec| {
+        spec.with_overlay(&context.config.capability_overlay)
+            .capabilities
+            .launch
+            .image_input
+            .value
+    })
 }
 
 fn classify_pool(

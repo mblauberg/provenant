@@ -48,6 +48,8 @@ candidate's isolated state and then the installed state, and read the readiness
 report. With authority to spend quota, add `--live` to launch one tiny read-only
 lane per route; `--route ADAPTER/ACCOUNT/MODEL` selects routes. Keep the JSON and
 attempt IDs as release evidence, and rerun after repairing a failed route.
+The readiness report includes sourced adapter overlays and declared caveats
+even when the optional version-probe executor cannot start.
 
 ## Agy accounts
 

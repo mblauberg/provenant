@@ -312,6 +312,9 @@ fn switch(
                 provenant_records::warning::Warning::new(
                     provenant_records::warning::CHAIR_SWITCH_QUOTA_STALE,
                     "chair switch: current quota below threshold or unavailable/stale; continuing",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CHAIR_SWITCH_QUOTA_STALE,
+                    ),
                 )
                 .once_per_change(),
             );
@@ -1018,7 +1021,7 @@ fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIde
         .map_err(|_| provenant_providers::ProviderError::UnknownIdentity)?;
         // The chair state carries the Claude configuration directory, so the
         // identity comes from that harness's adapter, named by registry data.
-        let claude = provenant_records::Harness::Claude.spec().name;
+        let claude = provenant_records::Harness::Claude.spec().identity.name;
         let adapter = provenant_providers::REGISTRY
             .iter()
             .find(|registration| registration.adapter.id() == claude)
@@ -1034,6 +1037,9 @@ fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIde
             provenant_records::warning::Warning::new(
                 provenant_records::warning::ACCOUNT_IDENTITY_UNVERIFIED,
                 "Claude account identity could not be verified; usage is attributed as unknown",
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::ACCOUNT_IDENTITY_UNVERIFIED,
+                ),
             )
             .once_per_change(),
         );

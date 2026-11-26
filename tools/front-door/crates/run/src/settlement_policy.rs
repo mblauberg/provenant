@@ -133,9 +133,9 @@ fn resolve_key(
             Warning::new(
                 SETTLEMENT_POLICY_INVALID,
                 format!("{name} from {layer} has an unrecognised value; the default applies"),
+                candidate.source,
             )
             .subject(name)
-            .source(candidate.source)
             .repair(format!("set {name} to one of {}", key.values().join(", "))),
         );
     }
@@ -316,10 +316,7 @@ mod tests {
         assert_eq!(policy.empty_result.source.layer, Layer::Default);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code.as_ref(), SETTLEMENT_POLICY_INVALID.0);
-        assert_eq!(
-            warnings[0].source.as_ref().map(|source| source.layer),
-            Some(Layer::Host)
-        );
+        assert_eq!(warnings[0].source.layer, Layer::Host);
         assert!(warnings[0].message.contains(KNOBS[2]));
     }
 
