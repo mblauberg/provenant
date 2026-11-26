@@ -4230,96 +4230,24 @@ impl BoundGraphOwner<'_> {
                     attempt_ref: reference,
                     outcome: if result_warning.is_some() {
                         AttemptOutcome::OtherFailure
-                    } else if !launched
-                        && outcome == Outcome::Rejected
-                        && attempt.preparation_failure.is_none_or(|failure| {
-                            failure == provenant_records::run::PreparationFailure::AdapterUnavailable
+                    } else if outcome == Outcome::Succeeded
+                        && effective_delivery.is_some_and(|delivery| {
+                            matches!(
+                                delivery.state,
+                                provenant_records::run::WriterDeliveryState::Failed { .. }
+                                    | provenant_records::run::WriterDeliveryState::NotAttempted { .. }
+                            )
                         })
-                        && let Some(cause) = preparation_cause
-                        && cause != provenant_records::run::TerminalCause::CommandUnavailable
                     {
-                        // The fallback classification describes route policy,
-                        // not the cause (for example an unregistered account).
-                        AttemptOutcome::PreparationRefused(cause)
-                    } else if let Some(failure) = attempt.preparation_failure {
-                        match failure {
-                            provenant_records::run::PreparationFailure::AuthRequired => {
-                                AttemptOutcome::AuthRequired
-                            }
-                            provenant_records::run::PreparationFailure::UsageLimited => {
-                                AttemptOutcome::UsageLimited
-                            }
-                            provenant_records::run::PreparationFailure::AdapterUnavailable => {
-                                AttemptOutcome::AdapterUnavailable
-                            }
-                            provenant_records::run::PreparationFailure::GitSetup => {
-                                AttemptOutcome::PreparationRefused(
-                                    preparation_cause.unwrap_or(
-                                        provenant_records::run::TerminalCause::PreparationRefused,
-                                    ),
-                                )
-                            }
-                        }
+                        AttemptOutcome::OtherFailure
+                    } else if outcome == Outcome::TimedOut
+                        && deadline_seconds.is_some()
+                        && preparation_cause != Some(provenant_records::run::TerminalCause::TokenBudget)
+                    {
+                        AttemptOutcome::DeadlineExceeded
                     } else {
-                        match outcome {
-                            Outcome::Succeeded
-                                if effective_delivery.is_some_and(|delivery| {
-                                    matches!(
-                                    delivery.state,
-                                    provenant_records::run::WriterDeliveryState::Failed { .. }
-                                        | provenant_records::run::WriterDeliveryState::NotAttempted { .. }
-                                )
-                                }) =>
-                            {
-                                AttemptOutcome::OtherFailure
-                            }
-                            Outcome::Succeeded => AttemptOutcome::Succeeded,
-                            Outcome::AuthRequired => AttemptOutcome::AuthRequired,
-                            Outcome::RateLimited | Outcome::QuotaLimited => {
-                                AttemptOutcome::UsageLimited
-                            }
-                            Outcome::TimedOut if attempt.state.terminal_cause()
-                                == Some(provenant_records::run::TerminalCause::TokenBudget)
-                                => AttemptOutcome::OtherFailure,
-                            Outcome::TimedOut if deadline_seconds.is_some() => {
-                                AttemptOutcome::DeadlineExceeded
-                            }
-                            Outcome::TimedOut => AttemptOutcome::OtherFailure,
-                            Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
-                            Outcome::Unclassified => AttemptOutcome::Unclassified,
-                            Outcome::Rejected if !launched => preparation_cause
-                                .or(Some(provenant_records::run::TerminalCause::Unrecorded))
-                                .map_or(AttemptOutcome::OtherFailure, AttemptOutcome::PreparationRefused),
-                            Outcome::ReviewRequired if matches!(
-                                &attempt.state,
-                                AttemptState::Terminal { terminal_cause: Some(provenant_records::run::TerminalCause::StoppedNoWork), .. }
-                            ) => AttemptOutcome::StoppedNoWork,
-                            // A declared stop is one fact whether or not the
-                            // writer left uncommitted edits; the graph restarts
-                            // it on the retained worktree.
-                            Outcome::ReviewRequired | Outcome::Uncommitted
-                                if attempt.partial_signals.contains(&provenant_records::run::PartialSignal::DeclaredStop)
-                                    && attempt.partial_signals.iter().all(|signal| matches!(
-                                        signal,
-                                        provenant_records::run::PartialSignal::DeclaredStop
-                                            | provenant_records::run::PartialSignal::UncommittedWork
-                                    )) =>
-                            {
-                                AttemptOutcome::DeclaredStop
-                            }
-                            Outcome::Failed
-                                if attempt.state.terminal_cause()
-                                    == Some(provenant_records::run::TerminalCause::ProviderStalledRetry) =>
-                            {
-                                AttemptOutcome::ProviderStalledRetry
-                            }
-                            Outcome::Failed => AttemptOutcome::TaskFailed,
-                            Outcome::ReviewRequired => AttemptOutcome::ReviewRequired,
-                            // Uncommitted edits without a declared stop need the
-                            // chair, so the node fails without fallback.
-                            Outcome::Uncommitted => AttemptOutcome::OtherFailure,
-                            _ => AttemptOutcome::OtherFailure,
-                        }
+                        provenant_records::settlement::project::graph_outcome(&attempt)
+                            .unwrap_or(AttemptOutcome::OtherFailure)
                     },
                     result,
                     result_warning,
