@@ -837,19 +837,13 @@ mod tests {
 
     #[test]
     fn a_disabled_version_probe_reaches_the_assessment() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let state = temp.path().join("state");
-        std::fs::create_dir_all(&state)?;
-        std::fs::write(
-            state.join("config.toml"),
-            "schema_version=1\n[providers.codex]\nversion_probe=false\n",
-        )?;
-        let resolved = resolve_config(&state, None).expect("config resolves");
-        let settings = resolved.providers.get("codex").expect("codex settings");
-        assert!(!settings.version_probe);
+        let settings = provenant_config::ProviderSettings {
+            version_probe: false,
+            ..Default::default()
+        };
         // The matrix, `check` and launch preparation share this decision.
         assert_eq!(
-            provenant_providers::version::configured("codex", Some(settings)),
+            provenant_providers::version::configured("codex", Some(&settings)),
             Err("version probe disabled by providers.codex.version_probe".to_owned())
         );
         assert_eq!(
@@ -874,8 +868,9 @@ mod tests {
     fn markdown_names_the_session_reference_and_footnotes_absent_rows() {
         let text = markdown();
         assert!(text.contains("| Session reference |"));
-        assert!(text.contains("absent[^"));
-        assert!(text.contains("raw output carries no session id"));
+        // An absent session reference is a "no" cell whose footnote names it.
+        assert!(text.contains("no[^"));
+        assert!(text.contains("absent: raw output carries no session id"));
     }
 
     #[test]

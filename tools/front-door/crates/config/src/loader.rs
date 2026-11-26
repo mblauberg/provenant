@@ -781,6 +781,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
             "clean_config",
             "profile",
             "out_of_scope_pin",
+            "version_probe",
+            "version_probe_timeout_seconds",
         ] {
             origins.insert(format!("providers.{provider}.{field}"), compiled.clone());
         }

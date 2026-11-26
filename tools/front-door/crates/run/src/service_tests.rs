@@ -844,9 +844,9 @@ fn the_task_is_checked_before_a_writer_is_prepared() -> TestResult {
     // The writer path cannot resolve, so reaching its preparation would fail
     // with a different error than the route check.
     input.task.worktree = Some(temp.path().join("no-such-writer"));
-    // A model or effort gap is a degrade, so use a field command refuses. The
-    // fallback question belongs to routing; preflight only blocks refusals.
-    input.task.profile.require_skill_location = true;
+    // The worktree makes this a writer task, and command declares no write
+    // support: a refuse-only field, so preflight blocks it. A model or effort
+    // gap would only degrade and leave the fallback question to routing.
     input.task.route = RequestedRoute::Adapter {
         required_family: None,
         extra: Default::default(),
@@ -859,7 +859,7 @@ fn the_task_is_checked_before_a_writer_is_prepared() -> TestResult {
     assert!(
         error
             .to_string()
-            .starts_with("command does not support skill location: ")
+            .starts_with("command does not support write: ")
     );
     assert_eq!(
         store

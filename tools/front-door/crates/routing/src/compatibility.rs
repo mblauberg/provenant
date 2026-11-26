@@ -218,7 +218,7 @@ fn decode_entry(
             warnings.push(OverlayWarning::new(
                 source.layer,
                 key,
-                format!("invalid provenant constraint: {constraint}"),
+                format!("invalid provenant_range: {constraint}"),
             ));
             return None;
         };

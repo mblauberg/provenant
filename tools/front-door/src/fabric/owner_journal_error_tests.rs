@@ -632,10 +632,10 @@ fn graph_refusal_replays_before_preparation_and_rejects_changed_intent()
         )
         .unwrap_err();
     assert_eq!(missing.code(), "state_corrupt");
-    // Exercise RunService's saved preflight result too. Cursor accepts
-    // model and effort at this boundary, so an unknown Cursor model reaches
-    // route resolution instead. The command adapter declares no model
-    // support, which must be refused before a provider launch.
+    // Exercise RunService's saved preflight result too. A model or effort
+    // gap only degrades and reaches route resolution, so the node requires a
+    // skill location, which command lacks: a refuse-only field that must be
+    // refused before a provider launch.
     let service_key = graph::AttemptKey {
         route_index: 1,
         attempt: 2,
@@ -648,6 +648,7 @@ fn graph_refusal_replays_before_preparation_and_rejects_changed_intent()
     let service_node = |prompt| {
         let mut input = node(prompt);
         input.context.attempt = Some(2);
+        input.require_skill_location = true;
         input
     };
     let service_scope = GraphRefusalScope::new(
