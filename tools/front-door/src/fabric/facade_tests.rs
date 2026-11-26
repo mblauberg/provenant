@@ -891,12 +891,17 @@ fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
     Ok(())
 }
 
-#[cfg(test)]
-#[allow(dead_code)] // The worktree driver includes these helpers without libtest.
+#[cfg(any(test, feature = "fixture"))]
+#[allow(dead_code)] // The fixture-gated worktree harness uses only some helpers.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test harness linked into the library; clippy's allow-in-tests only applies under cfg(test)"
+)]
 pub(crate) mod peer_tests {
     use super::*;
     #[allow(unused_imports)]
-    // The worktree driver includes this module without libtest functions.
+    // The fixture-gated worktree harness uses this module without libtest.
     use provenant_confinement::worktrees;
     use provenant_core::AttemptId;
     use provenant_run::{AttemptState, Outcome, RunStore};

@@ -5263,6 +5263,24 @@ impl BoundGraphOwner<'_> {
         Ok(grants)
     }
 
+    /// The commit that proves a writer left new work. A pushed delivery receipt
+    /// carries the published head even when the sealed writer head is absent or
+    /// still names the launch commit, so both are settlement evidence (#4065).
+    fn observed_writer_commit(
+        writer_head: Option<provenant_core::GitOid>,
+        delivery: Option<&provenant_records::run::WriterDeliveryReceipt>,
+        access: provenant_fabric_runtime::graph::AccessMode,
+        source_commit: Option<&str>,
+    ) -> Option<String> {
+        if access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+            return source_commit.map(str::to_owned);
+        }
+        delivery
+            .and_then(|receipt| receipt.head)
+            .or(writer_head)
+            .map(|head| head.to_string())
+    }
+
     /// Report a terminal attempt as its graph observation.
     fn observe_terminal(
         &self,
@@ -5533,12 +5551,12 @@ impl BoundGraphOwner<'_> {
                             })
                     }),
                     branch: effective_delivery.map(|receipt| receipt.branch.clone()),
-                    commit: if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
-                    {
-                        attempt.head.map(|head| head.to_string())
-                    } else {
-                        source_commit.map(str::to_owned)
-                    },
+                    commit: Self::observed_writer_commit(
+                        attempt.head,
+                        effective_delivery,
+                        access,
+                        source_commit,
+                    ),
                     stop,
                     settlement_reason: attempt.settlement_reason,
                 })
@@ -5666,6 +5684,64 @@ fn retry_prior_model_uses_the_stored_full_id() {
     );
     assert_eq!(prior_model(None), None);
     assert_eq!(prior_model(Some("claude-sonnet-5-5")), None);
+}
+
+// A pushed delivery head is settlement evidence even when the writer sealed no
+// head of its own (#4065). Without this the inline implement writer's done
+// handoff and pushed commit cannot clear commits_ahead, so a successful attempt
+// settles other_failure and its dependants stay closed.
+#[test]
+fn pushed_delivery_head_proves_writer_commit_when_sealed_head_is_absent() {
+    use provenant_fabric_runtime::graph::AccessMode;
+    let base = "1".repeat(40);
+    let pushed = "2".repeat(40);
+    let receipt = provenant_records::run::WriterDeliveryReceipt {
+        extra: Default::default(),
+        schema_version: 1,
+        remote: "origin".into(),
+        branch: "fix/4065".into(),
+        head: Some(provenant_core::GitOid::parse(&pushed).unwrap()),
+        review_acceptance: None,
+        state: provenant_records::run::WriterDeliveryState::Delivered {
+            extra: Default::default(),
+            pull_request: None,
+        },
+        integration: None,
+    };
+    // The published head stands in for a missing sealed writer head.
+    assert_eq!(
+        BoundGraphOwner::observed_writer_commit(
+            None,
+            Some(&receipt),
+            AccessMode::WorktreeWrite,
+            Some(&base),
+        )
+        .as_deref(),
+        Some(pushed.as_str())
+    );
+    // The sealed writer head still works when nothing was pushed.
+    let sealed = provenant_core::GitOid::parse(&pushed).unwrap();
+    assert_eq!(
+        BoundGraphOwner::observed_writer_commit(
+            Some(sealed),
+            None,
+            AccessMode::WorktreeWrite,
+            Some(&base),
+        )
+        .as_deref(),
+        Some(pushed.as_str())
+    );
+    // Read-only nodes keep their source commit as before.
+    assert_eq!(
+        BoundGraphOwner::observed_writer_commit(
+            Some(sealed),
+            Some(&receipt),
+            AccessMode::ReadOnly,
+            Some(&base),
+        )
+        .as_deref(),
+        Some(base.as_str())
+    );
 }
 
 /// Whether required family separation refuses an exact route before launch.

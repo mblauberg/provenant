@@ -76,6 +76,19 @@ fn start_chair_session(rig: &TestRig, session: &str) -> Result {
     Ok(())
 }
 
+/// Every stored ingest row, one JSON line each, across the dated segments.
+fn stored(rig: &TestRig) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    let mut names: Vec<_> = fs::read_dir(rig.state.join("ingest"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::result::Result<_, _>>()?;
+    names.sort();
+    let mut text = String::new();
+    for name in names {
+        text.push_str(&fs::read_to_string(name)?);
+    }
+    Ok(text)
+}
+
 fn fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
     install_fake_claude_auth(&mut rig)?;
@@ -127,30 +140,45 @@ fn fixture() -> Result<TestRig> {
     .join("\n");
     fs::write(&session, format!("{transcript}\n"))?;
     start_chair_session(&rig, "s1")?;
-    // Chair start queues a detached incremental ingest worker and returns. The
-    // fixture must wait for that worker's rows instead of starting a second
-    // ingest against the same store, which races the child on a fast runner.
-    let rows = provenant_test_support::wait_for(
+    // Chair start queues a detached incremental ingest worker and returns.
+    // Wait for its verified rows instead of starting a second ingest against
+    // the same store, which races the child on a fast runner. This is the
+    // production path, where mileage reads usage the hook already recorded.
+    provenant_test_support::wait_for(
         "detached chair ingest rows",
         Duration::from_secs(30),
         || {
-            let mut text = String::new();
-            if let Ok(entries) = fs::read_dir(rig.state.join("ingest")) {
-                for entry in entries.flatten() {
-                    if let Ok(part) = fs::read_to_string(entry.path()) {
-                        text.push_str(&part);
-                    }
-                }
-            }
-            text
+            stored(&rig)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>()
         },
-        |text| !text.trim().is_empty(),
+        |rows| {
+            rows.len() >= 2
+                && rows.iter().all(|row| {
+                    row["identity"]["identity"]["state"] == "known"
+                        && row["identity"]["identity"]["account_key"] == identity_key
+                })
+        },
     )?;
-    assert!(
-        !rows.is_empty(),
-        "chair start did not ingest the fixture transcript"
-    );
     Ok(rig)
+}
+
+#[test]
+fn chair_start_ingest_is_recorded_before_mileage_reads_it() -> Result {
+    let rig = fixture()?;
+    let rows: Vec<Value> = stored(&rig)?
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    // The hook's detached worker, not a competing explicit ingest, recorded
+    // both transcript messages with the chair's verified identity.
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| {
+        row["source"] == "chair" && row["identity"]["identity"]["state"] == "known"
+    }));
+    Ok(())
 }
 
 #[test]

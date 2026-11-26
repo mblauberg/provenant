@@ -312,10 +312,15 @@ otherwise a declared route not yet launched is used, and an alias route may reso
 
 A lane's graph outcome is classified from evidence, not from the stop path that reported it:
 commits ahead of the node's input head count whether or not they were pushed, and a sealed `done`
-handoff closes the brief. Neither a terminal cause nor a partial signal may call a lane with new
+handoff closes the brief. For a writer the verified pushed delivery head is itself that evidence:
+a published commit proves new work even when the sealed writer head is absent or still names the
+input commit (#4065). Neither a terminal cause nor a partial signal may call a lane with new
 commits `stopped_no_work`; with a done handoff and a moved head the node succeeds even when a stop
-was recorded. The same observed refs decide the advance code: `writer_declared_stop` when a stop
-left new commits, `stopped_no_work` only when it left none.
+or a provisional `failed` settlement reason was recorded. The same observed refs decide the advance
+code: `writer_declared_stop` when a stop left new commits, `stopped_no_work` only when it left none.
+A real precondition failure on a successful-looking attempt is reported with its settlement reason
+as a named cause, never bare `other_failure`. Findings counts are not a writer success criterion:
+a writer without a findings contract is not failed for absent findings.
 
 With no different route, a stop that can continue on its own route (`stopped_early`,
 `lane_token_lost`, `context_handoff`) takes the same route with a fresh session on the
