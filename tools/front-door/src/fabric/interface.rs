@@ -3049,7 +3049,11 @@ impl Factory {
         nodes: &[provenant_fabric_runtime::graph::GraphNode],
     ) -> Vec<Value> {
         use provenant_fabric_runtime::graph::{GraphRoute, GraphRouteSelector};
-        let listed = provenant_cli::route::provider_check_routes(&self.context.roots).ok();
+        // The provider check returns the route list together with the account
+        // settings; this preview only needs the list's named routes and pools.
+        let listed = provenant_cli::route::provider_check_routes(&self.context.roots)
+            .ok()
+            .map(|(routes, _accounts)| routes);
         let optional = |value: Option<String>| value.map_or(Value::Null, Value::String);
         let adapter_of = |model: &str| model.split_once('/').map(|(adapter, _)| adapter.to_owned());
         let mut rows = Vec::new();
