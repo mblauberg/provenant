@@ -1747,8 +1747,8 @@ fn empty_committed_writer_requires_review_and_controls_fail()
                     finished
                         .settlement_class
                         .unwrap()
-                        .node_outcome(Some(stop.cause())),
-                    provenant_records::run::SettlementNodeOutcome::Failed
+                        .release(Some(stop.cause())),
+                    provenant_records::run::DependantRelease::Hold
                 );
                 assert_eq!(
                     read_sealed(&attempt, "result.md", RESULT_LIMIT)?.as_deref(),

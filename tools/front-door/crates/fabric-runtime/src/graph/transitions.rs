@@ -604,14 +604,14 @@ pub(super) fn apply_attempt_observation(
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
-                let node_outcome = settlement_class
-                    .map(|reason| reason.node_outcome(attempt.stop))
-                    .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed);
+                let release = settlement_class
+                    .map(|reason| reason.release(attempt.stop))
+                    .unwrap_or(provenant_records::run::DependantRelease::Hold);
                 let outcome = if matches!(
                     outcome,
                     AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired
-                ) && node_outcome
-                    == provenant_records::run::SettlementNodeOutcome::Failed
+                ) && release
+                    == provenant_records::run::DependantRelease::Hold
                 {
                     AttemptOutcome::OtherFailure
                 } else {

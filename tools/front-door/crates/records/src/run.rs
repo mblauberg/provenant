@@ -2223,9 +2223,9 @@ pub enum CauseSource {
 /// Whether a settled attempt may release its graph dependants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SettlementNodeOutcome {
-    Succeeded,
-    Failed,
+pub enum DependantRelease {
+    Release,
+    Hold,
 }
 
 /// The source and graph result for one settlement reason.
@@ -2233,7 +2233,7 @@ pub enum SettlementNodeOutcome {
 pub struct SettlementRule {
     pub class: SettlementClass,
     pub source: CauseSource,
-    pub node_outcome: SettlementNodeOutcome,
+    pub release: DependantRelease,
     pub terminal_outcome: SettlementTerminalOutcome,
     pub stop_cause: Option<crate::stop::StopCause>,
 }
@@ -2267,7 +2267,7 @@ impl SettlementTerminalOutcome {
 /// One declaration owns the durable reasons and their cross-cutting policy.
 /// Generated enum, ALL and table cannot drift apart.
 macro_rules! settlement_classes {
-    ($($(#[$meta:meta])* $reason:ident { source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
+    ($($(#[$meta:meta])* $reason:ident { source: $source:ident, release: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum SettlementClass {
@@ -2282,7 +2282,7 @@ macro_rules! settlement_classes {
                     $(Self::$reason => SettlementRule {
                         class: Self::$reason,
                         source: CauseSource::$source,
-                        node_outcome: SettlementNodeOutcome::$node,
+                        release: DependantRelease::$node,
                         terminal_outcome: SettlementTerminalOutcome::$outcome,
                         stop_cause: $stop,
                     }),+
@@ -2294,7 +2294,7 @@ macro_rules! settlement_classes {
             $(SettlementRule {
                 class: SettlementClass::$reason,
                 source: CauseSource::$source,
-                node_outcome: SettlementNodeOutcome::$node,
+                release: DependantRelease::$node,
                 terminal_outcome: SettlementTerminalOutcome::$outcome,
                 stop_cause: $stop,
             }),+
@@ -2304,49 +2304,49 @@ macro_rules! settlement_classes {
 
 settlement_classes! {
     /// The provider finished and reported its results.
-    Completed { source: Provider, node: Succeeded, outcome: Preserve, stop: None },
+    Completed { source: Provider, release: Release, outcome: Preserve, stop: None },
     /// A complete handoff preceded the host token-budget stop.
-    CompletedBeforeBudget { source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
+    CompletedBeforeBudget { source: Host, release: Release, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
     /// The provider finished without a final handoff, so nothing was reported.
-    HandoffMissing { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
+    HandoffMissing { source: Provider, release: Hold, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
     /// A final handoff was present but malformed; retain its field diagnostics.
-    HandoffMalformed { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
+    HandoffMalformed { source: Provider, release: Hold, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
     /// The writer exited without a final message.
-    EmptyResult { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
+    EmptyResult { source: Provider, release: Hold, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
     /// The lane declared that work remains.
-    DeclaredStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
+    DeclaredStop { source: Provider, release: Hold, outcome: ReviewRequired, stop: None },
     /// The provider stopped for a reason other than a finished turn.
-    ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
+    ProviderStop { source: Provider, release: Hold, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
     /// A writer left edits it did not commit.
-    UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    UncommittedWork { source: Provider, release: Hold, outcome: Uncommitted, stop: None },
     /// The bound branch stayed at base while the primary checkout moved with
     /// unaccounted work: the lane's work went to the wrong checkout (#3611).
-    StrayWork { source: Host, node: Failed, outcome: ReviewRequired, stop: None },
+    StrayWork { source: Host, release: Hold, outcome: ReviewRequired, stop: None },
     /// Refused before any process started.
-    PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
-    Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
+    PreLaunchRefusal { source: Host, release: Hold, outcome: Preserve, stop: None },
+    Cancelled { source: Owner, release: Hold, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
     /// The host interrupted a run to deliver its queued continuation turn.
-    Steered { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
-    Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
-    Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
+    Steered { source: Host, release: Hold, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
+    Lost { source: Host, release: Hold, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
+    Unsettled { source: Host, release: Hold, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
     /// The provider reported an unclassified error.
-    Unclassified { source: Provider, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
+    Unclassified { source: Provider, release: Hold, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
     /// The provider ran and ended in a non-success outcome.
-    Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
+    Failed { source: Provider, release: Hold, outcome: Preserve, stop: None },
 }
 impl SettlementClass {
     /// A completed budget boundary retains its host stop without closing
     /// dependants. Other typed stops keep dependants closed.
-    pub const fn node_outcome(self, stop: Option<crate::stop::StopCause>) -> SettlementNodeOutcome {
+    pub const fn release(self, stop: Option<crate::stop::StopCause>) -> DependantRelease {
         if stop.is_some()
             && !matches!(
                 self.rule().terminal_outcome,
                 SettlementTerminalOutcome::Succeeded
             )
         {
-            SettlementNodeOutcome::Failed
+            DependantRelease::Hold
         } else {
-            self.rule().node_outcome
+            self.rule().release
         }
     }
 }

@@ -576,8 +576,8 @@ fn handoff_missing_off_records_the_signal_but_releases_dependants() {
     assert_eq!(fact.outcome, Outcome::Succeeded);
     assert_eq!(fact.settlement_class, SettlementClass::Completed);
     assert_eq!(
-        fact.node,
-        provenant_records::run::SettlementNodeOutcome::Succeeded
+        fact.release,
+        provenant_records::run::DependantRelease::Release
     );
     assert!(fact.signals.contains(&SettlementSignal::HandoffMissing));
     assert_eq!(fact.applied.len(), 1);

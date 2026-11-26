@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::declaration::{DeclarationCounts, DeclarationEvidence};
 use crate::handoff::Handoff;
 use crate::run::{
-    CauseSource, Outcome, SettlementSignal, SettlementNodeOutcome, SettlementClass, CauseKind,
+    CauseSource, Outcome, SettlementSignal, DependantRelease, SettlementClass, CauseKind,
     TerminalBasis,
 };
 use crate::settlement::policy::{AppliedPolicy, SettlementPolicy};
@@ -147,7 +147,7 @@ pub struct OutcomeFact {
     pub settlement_class: SettlementClass,
     pub stop: Option<Stop>,
     pub source: CauseSource,
-    pub node: SettlementNodeOutcome,
+    pub release: DependantRelease,
     pub terminal_basis: TerminalBasis,
     pub signals: Vec<SettlementSignal>,
     pub progress: Option<Progress>,

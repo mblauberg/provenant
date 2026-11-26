@@ -11,7 +11,7 @@ use crate::declaration::DeclarationEvidence;
 use crate::handoff::{HandoffResult, HandoffStatus};
 use crate::provenance::Sourced;
 use crate::run::{
-    Outcome, SettlementSignal, SettlementNodeOutcome, SettlementClass, CauseKind,
+    Outcome, SettlementSignal, DependantRelease, SettlementClass, CauseKind,
     TerminalBasis,
 };
 use crate::settlement::policy::{AppliedPolicy, NoWork, SettlementPolicy, SignalAction};
@@ -580,7 +580,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     };
     let stop_cause = stop.as_ref().map(Stop::cause);
     let source = stop_cause.map_or(settlement_class.rule().source, StopCause::source);
-    let node: SettlementNodeOutcome = settlement_class.node_outcome(stop_cause);
+    let release: DependantRelease = settlement_class.release(stop_cause);
 
     // 15. Progress is the sealed head against the sealed launch pin only.
     let progress = evidence.git.as_ref().map(|git| git.progress());
@@ -605,7 +605,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         settlement_class,
         stop,
         source,
-        node,
+        release,
         terminal_basis,
         signals,
         progress,
