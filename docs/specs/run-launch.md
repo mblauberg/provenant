@@ -230,8 +230,9 @@ have seen, and the source view materialiser refuses an absent commit rather than
 nearby ref. The peer's HEAD first parent supplies its review base; when Git evidence is missing,
 the launch warns and falls back to the sender's pins. A bundled smoke review runs after the write
 node and reads the commit the writer produced in its scratch worktree, so its diff is the writer's
-own scratch commit and needs no delivered pr or push; its base is the commit the writer branched
-from unless `--set diff_base=BASE` pins another one, with the chosen source shown in the warnings.
+own smoke change and needs no delivered pr or push; its base is the commit the writer branched
+from, or the existing linked checkout's HEAD immediately before the write, unless
+`--set diff_base=BASE` pins another one. The chosen source is shown in the warnings.
 A manual smoke launch with no writer has no scratch commit to review, so review is skipped with a
 reason and the other eligible nodes continue. A node may name a small project-relative fixture;
 the host stages its bytes with the task, so a peer places the same file in its own candidate

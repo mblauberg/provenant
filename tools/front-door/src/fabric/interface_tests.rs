@@ -1916,6 +1916,62 @@ fn smoke_review_is_bounded_to_the_writer_scratch_commit() -> Result {
 }
 
 #[test]
+fn smoke_review_uses_existing_branch_checkout_head_as_its_base() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let factory = factory(&rig)?;
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let cancel = CancelToken::new();
+    let branch = "smoke/existing";
+    let worktree = ".worktrees/smoke/existing";
+    std::fs::create_dir_all(rig.project.join(".worktrees/smoke"))?;
+    git(&rig, &["worktree", "add", "-qb", branch, worktree])?;
+    git(
+        &rig,
+        &[
+            "-C",
+            worktree,
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "prior change one",
+        ],
+    )?;
+    git(
+        &rig,
+        &[
+            "-C",
+            worktree,
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "prior change two",
+        ],
+    )?;
+    let pre_write_head = git(&rig, &["-C", worktree, "rev-parse", "HEAD"])?;
+
+    let preview = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "branch":branch, "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    assert!(
+        serde_json::to_string(&preview["document"])?.contains(&pre_write_head),
+        "the smoke review base must be the existing writer checkout HEAD before the write: {preview}"
+    );
+    assert!(
+        preview["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning.as_str().is_some_and(|warning| {
+                    warning.contains("source: existing smoke writer checkout HEAD")
+                })
+            })
+        }),
+        "the selected existing-checkout base source must be shown: {preview}"
+    );
+    Ok(())
+}
+
+#[test]
 fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
     let rig = TestRig::new()?;
     let remote_host = provenant_core::HostId::from_bytes([2; 16]);

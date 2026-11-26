@@ -2993,6 +2993,38 @@ impl Factory {
                     .get("branch")
                     .and_then(Value::as_str)
                     .is_some_and(|branch| !branch.is_empty());
+                let resolve = |reference: &str, cwd: &Path| {
+                    provenant_os::git::git_executable()
+                        .and_then(|git| provenant_run::resolve_git_base(&git, cwd, reference).ok())
+                };
+                // A named branch may already have a linked checkout. In that
+                // case the writer continues from that checkout's accumulated
+                // history, so anchor review at its HEAD immediately before the
+                // write instead of the caller's default branch.
+                let existing_branch_head = if branch_named
+                    && !is_remote
+                    && parameters
+                        .get("write_attempt")
+                        .and_then(|attempt| attempt.get("new_worktree"))
+                        .is_none()
+                {
+                    parameters
+                        .get("worktree")
+                        .and_then(Value::as_str)
+                        .filter(|path| !path.is_empty())
+                        .and_then(|path| {
+                            let path = Path::new(path);
+                            let path = if path.is_absolute() {
+                                path.to_owned()
+                            } else {
+                                self.context.project_root.join(path)
+                            };
+                            resolve("HEAD", &path)
+                        })
+                } else {
+                    None
+                };
+                let uses_existing_branch_head = existing_branch_head.is_some();
                 let provisioned_base = parameters
                     .get("write_attempt")
                     .and_then(|attempt| attempt.get("new_worktree"))
@@ -3003,13 +3035,11 @@ impl Factory {
                     .map(str::to_owned)
                     .or_else(|| branch_named.then(|| DEFAULT_WRITER_BASE.to_owned()))
                     .or_else(|| provisioned_base.map(str::to_owned));
-                let resolve = |reference: &str, cwd: &Path| {
-                    provenant_os::git::git_executable()
-                        .and_then(|git| provenant_run::resolve_git_base(&git, cwd, reference).ok())
-                };
-                let based = base_ref
-                    .as_deref()
-                    .and_then(|reference| resolve(reference, &self.cwd));
+                let based = existing_branch_head.or_else(|| {
+                    base_ref
+                        .as_deref()
+                        .and_then(|reference| resolve(reference, &self.cwd))
+                });
                 let worktree = parameters
                     .get("worktree")
                     .and_then(Value::as_str)
@@ -3028,7 +3058,12 @@ impl Factory {
                 if let Some(base) = base {
                     parameters["diff_base"] = json!(base);
                     input_warnings.push(format!(
-                        "smoke review uses base {base} (source: smoke writer base); pass --set diff_base=BASE to override"
+                        "smoke review uses base {base} (source: {}); pass --set diff_base=BASE to override",
+                        if uses_existing_branch_head {
+                            "existing smoke writer checkout HEAD"
+                        } else {
+                            "smoke writer base"
+                        }
                     ));
                 } else {
                     parameters["smoke-review"] = json!(false);
