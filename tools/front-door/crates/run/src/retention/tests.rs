@@ -3121,3 +3121,69 @@ fn evicted_payload_keeps_records_tails_and_refuses_resume() -> TestResult {
     assert_eq!(totals.1, report.reclaimed_bytes);
     Ok(())
 }
+
+#[test]
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
+fn settled_scratch_without_custody_proof_is_collected_after_grace() -> TestResult {
+    use provenant_core::Clock;
+    let (_temp, context, store, input, attempt) = seeded()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    withdraw(&store, &input, &call)?;
+    let scratch = scratch_root_of(&attempt).join("tmp");
+    fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+    fs::write(scratch.join("payload"), vec![1; 8_192])?;
+    // A private-Git marker with no import proof makes custody unavailable.
+    // The record is terminal and released, so this is a settled attempt whose
+    // scratch must not be kept forever.
+    fs::write(attempt.join("writer-objects.json"), b"{}")?;
+    let now = provenant_os::clock::SystemClock.wall_now()?;
+    let old = std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_micros(
+            u64::try_from(now.as_micros())?
+                .saturating_sub(u64::try_from(DAY_MICROS)?.saturating_mul(3)),
+        ))
+        .ok_or("fixture time")?;
+    for path in [
+        &scratch,
+        &scratch.join("payload"),
+        &attempt.join("writer-objects.json"),
+    ] {
+        std::fs::File::open(path)?.set_times(std::fs::FileTimes::new().set_modified(old))?;
+    }
+    let unowned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Unowned;
+    let root = Directory::open_anchor(context.state_root.as_path())?;
+    let within = ScratchPolicy {
+        grace_seconds: 7 * 86_400,
+        owner: Some(&unowned),
+        ..ScratchPolicy::new(0)
+    };
+    let kept = store.gc_temporary(&root, &within, now, false, &call, &RetentionScan::default())?;
+    assert!(kept.attempt_tmp.is_empty(), "{kept:?}");
+    assert!(scratch.join("payload").is_file());
+    assert!(
+        kept.kept
+            .iter()
+            .any(|issue| issue.reason.contains("scratch grace")),
+        "{:?}",
+        kept.kept
+    );
+    let elapsed = ScratchPolicy {
+        grace_seconds: 86_400,
+        owner: Some(&unowned),
+        ..ScratchPolicy::new(0)
+    };
+    let collected = store.gc_temporary(
+        &root,
+        &elapsed,
+        now,
+        false,
+        &call,
+        &RetentionScan::default(),
+    )?;
+    assert!(collected.errors.is_empty(), "{collected:?}");
+    assert_eq!(collected.attempt_tmp.len(), 1, "{collected:?}");
+    assert_eq!(collected.attempt_tmp[0].path, scratch);
+    assert!(!scratch.exists());
+    Ok(())
+}

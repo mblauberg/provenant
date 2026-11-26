@@ -76,6 +76,18 @@ attempts are never collected by a cap.
 - Why: a single large settled attempt must not hold the volume hostage until
   its idle age passes, while uncertain measurement must never authorise removal.
 
+A settled attempt whose run record cannot be read or cannot prove custody is
+not kept forever. `gc.scratch_grace` (default `1d`, overridable, with its source
+reported by `provenant gc`) bounds how long such scratch is retained. The grace
+runs from the newest observed write in the scratch tree and its private-Git
+marker, so a live writer restarts it; when the grace has passed, collection
+still needs free publication and writer locks and no continuation. Settlement
+uses the same grace release, so an attempt that never produced a custody proof
+is reclaimed at settlement or by the next sweep. A preview that cannot observe
+the whole tree keeps it and reports the reason.
+- Why: a crashed attempt with a missing receipt or an unreadable record would
+  otherwise keep gigabytes of scratch on a full host indefinitely.
+
 Lanes do not build. Cargo targets here belong to the chair's warm check, CI or
 a person's worktree; the host never allocates one per lane. A warm slot target
 is keyed by `build.target` (default `toolchain,worktree`): `toolchain` uses the
@@ -159,7 +171,18 @@ trigger and scope keeps its own bounded restart record, so unfinished scopes
 resume independently without growing the lease record, and an ambiguous cursor
 restarts its scope from the beginning rather than skipping work. Attempt
 scratch collection precedes the broader provider-state and payload-cap scans so
-they cannot consume its first pass budget. The advisory dweller census runs
+they cannot consume its first pass budget. Within each resume page, scratch
+candidates are ranked largest first by a bounded best-effort census; the
+sequence cursor still advances past the whole page, so a stop resumes without
+repeating work. A preview observes the overridable `gc.preview_budget` (default
+`1s`, with its source reported), distinct from `gc.sweep_budget` which bounds
+applied collection. When either budget stops a pass, exit 3 names the budget,
+its value and source and how to raise it. The report carries reclaimed bytes
+for every retention class it measured, naming unmeasured classes rather than
+reporting them as zero. `check` warns with `ATTEMPT_SCRATCH_HIGH` when measured
+attempt scratch exceeds the configured `gc.scratch_warning_share` of free space;
+zero disables the warning and positive shares retain their configured precision.
+The advisory dweller census runs
 after the collection classes: one bounded observation is cached for the whole
 pass and reused for every settled attempt
 and terminal worktree instead of re-walking the process table per candidate.
