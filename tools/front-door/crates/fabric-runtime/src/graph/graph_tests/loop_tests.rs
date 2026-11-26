@@ -3856,6 +3856,9 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
                 pass,
                 &new_finding,
                 &checked_new_finding,
+                // A split between the correctness and security lenses now
+                // gets one read-only adjudication before the design fallback.
+                &checked_new_finding,
                 "principal options",
             ])
         } else {
@@ -3866,6 +3869,8 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
                 pass,
                 &new_finding,
                 &checked_new_finding,
+                // The adjudicator upholds the finding, so round two repairs it.
+                &checked_new_finding,
                 "fix two",
                 pass,
                 pass,
@@ -3874,7 +3879,7 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
             ])
         };
         owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
-        for (index, oid) in [(1, 'a'), (6, 'b')] {
+        for (index, oid) in [(1, 'a'), (7, 'b')] {
             if let Some(AttemptObservation::Terminal { commit, .. }) =
                 owner.observations.get_mut(index)
             {
@@ -4426,6 +4431,8 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
         pass,
         &security,
         &checked_security,
+        // The split panel is adjudicated before the second repair writer runs.
+        &checked_security,
         "fix two",
         pass,
         pass,
@@ -4434,7 +4441,7 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
         pass,
     ]);
     owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
-    for (index, oid) in [(1, 'a'), (7, 'b')] {
+    for (index, oid) in [(1, 'a'), (8, 'b')] {
         if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[index] {
             *commit = Some(oid.to_string().repeat(40));
         }
