@@ -289,12 +289,19 @@ fn custody_path_remedy(reason: &str) -> Option<&'static str> {
 /// cause, and `--abandon` releases retained work that cannot be corrected.
 /// A reason already carrying the commands (a stalled lock wait) is left alone.
 fn with_reconcile_commands(detail: String) -> String {
-    if detail.contains("provenant reconcile <lane>") {
+    let mut missing = Vec::new();
+    if !detail.contains("provenant reconcile <lane>") {
+        missing.push("run `provenant reconcile <lane>` to retry once the cause is corrected");
+    }
+    if !detail.contains("provenant reconcile --abandon <lane> --reason <text>") {
+        missing.push(
+            "run `provenant reconcile --abandon <lane> --reason <text>` to release the retained work",
+        );
+    }
+    if missing.is_empty() {
         return detail;
     }
-    format!(
-        "{detail}; run `provenant reconcile <lane>` to retry once the cause is corrected, or `provenant reconcile --abandon <lane> --reason <text>` to release the retained work"
-    )
+    format!("{detail}; {}", missing.join(", or "))
 }
 
 fn diagnostic(journal: &Journal, now_ms: Option<u64>) -> Option<String> {
@@ -2960,6 +2967,11 @@ mod tests {
             assert!(status.contains("retry stalled"), "{status}");
             assert!(status.contains(cause), "{status}");
             assert!(status.contains(remedy), "{status}");
+            assert!(status.contains("provenant reconcile <lane>"), "{status}");
+            assert!(
+                status.contains("provenant reconcile --abandon <lane> --reason <text>"),
+                "{status}"
+            );
         }
         journal.record_blocking("custody reattach failed".to_owned(), 0);
         let status = diagnostic(&journal, Some(1 + STALLED_RETRY_MS)).expect("stalled reason");
