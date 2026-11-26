@@ -408,7 +408,7 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
             provenant_core::RelativePath::parse(".provenant/config.toml").map_err(|source| {
                 ConfigError::PathEncoding {
                     path: ".provenant/config.toml".into(),
-                    source,
+                    source: source.into(),
                 }
             })?;
         findings.push(Finding {

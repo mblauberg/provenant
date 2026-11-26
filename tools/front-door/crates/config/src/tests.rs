@@ -1470,6 +1470,31 @@ fn inspect_config_returns_all_findings_and_binds_bytes_and_presence() {
 }
 
 #[test]
+fn inspect_config_reports_repository_checkout_read_source_with_repository_path() {
+    let files = Files::new();
+    let repository_config = files.roots.checkout().join(".provenant/config.toml");
+    std::fs::create_dir_all(repository_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &repository_config,
+        "schema_version=1\n[knobs]\nlanes.read_source='checkout'\n",
+    )
+    .unwrap();
+
+    let inspection = inspect_config(&files.roots, &domains::NO_DOMAINS).unwrap();
+    let finding = inspection
+        .check
+        .findings
+        .iter()
+        .find(|finding| finding.rule == "read_source_value_renamed")
+        .expect("repository checkout read-source setting has a typed finding");
+
+    assert_eq!(
+        finding.path.to_relative_path().unwrap().as_path(),
+        Path::new(".provenant/config.toml")
+    );
+}
+
+#[test]
 fn inspect_config_preserves_malformed_input_digest_without_rereading() {
     let files = Files::new();
 
