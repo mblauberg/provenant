@@ -98,6 +98,12 @@ and every other 405 cause are never bypassed. The receipt records the grant
 and its source. This changes how the owner's authority is exercised, not who
 holds it.
 
+An admin merge under the CI-bypass grant is not an exemption from deferred
+coverage: before exercising it, run the deferred groups for every touched crate
+with `ci:full` (or `dispatch tier=full`) and wait for that run. The grant answers
+a review-requirement refusal only; it never answers a red check or a missing
+full-tier run for a code delta.
+
 `ci-status` is the single required check: the aggregate job at the end of
 [`ci.yml`](../../.github/workflows/ci.yml). `Protect main` does not require
 heads up to date with `main`, so land each pull request on its own green head and

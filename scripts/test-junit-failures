@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Exercise JUnit failure extraction and its nextest filterset."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+script = Path(__file__).with_name('junit-failures')
+JUNIT = '''<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="provenant">
+    <testcase classname="provenant-os" name="a::passes" time="0.1"/>
+    <testcase classname="provenant" name="b::flaky">
+      <failure message="timed out"/>
+    </testcase>
+    <testcase classname="provenant-supervisor" name="c::broken">
+      <error message="panicked"/>
+    </testcase>
+  </testsuite>
+</testsuites>
+'''
+with tempfile.TemporaryDirectory() as tmp:
+    directory = Path(tmp) / 'junit'
+    directory.mkdir()
+    (directory / 'one.xml').write_text(JUNIT)
+    runner = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+    out = subprocess.run([script, '--dir', str(directory)], env=runner, check=True, capture_output=True, text=True)
+    rows = json.loads(out.stdout)
+    assert [(row['package'], row['name'], row['failed']) for row in rows] == [
+        ('provenant', 'b::flaky', True),
+        ('provenant-os', 'a::passes', False),
+        ('provenant-supervisor', 'c::broken', True),
+    ], rows
+    filtered = subprocess.run([script, '--dir', str(directory), '--filter'], env=runner, check=True, capture_output=True, text=True).stdout.strip()
+    assert filtered == '(package(=provenant) & test(=b::flaky)) | (package(=provenant-supervisor) & test(=c::broken))', filtered
+    empty = subprocess.run([script, '--dir', str(Path(tmp) / 'missing'), '--filter'], env=runner, check=True, capture_output=True, text=True).stdout.strip()
+    assert empty == '', empty
+    (directory / 'bad.xml').write_text('<testsuites')
+    assert subprocess.run([script, '--dir', str(directory)], env=runner, capture_output=True).returncode != 0
+print('JUnit failure fixtures passed.')

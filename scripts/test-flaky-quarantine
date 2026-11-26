@@ -122,4 +122,35 @@ if "$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantin
   exit 1
 fi
 
+# Issue-backed entries use the same validation, filter and cap as TOML entries.
+: > "$scratch/empty.toml"
+cat > "$scratch/issues.json" <<'JSON'
+[[{"number":42,"body":"<!-- provenant-flaky:v1 -->\n- package: provenant-cli\n- name: network::flaky_case\n- owner: chair\n- expires: 2030-01-20"}]]
+JSON
+filter=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/empty.toml" --issue-list "$scratch/issues.json" --test-list "$scratch/tests.json" --today 2030-01-01)
+test "$filter" = '(package(=provenant-cli) & test(=network::flaky_case))'
+cat > "$scratch/issues.json" <<'JSON'
+[[{"number":43,"body":"network::stable_case is sometimes slow"}]]
+JSON
+filter=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/empty.toml" --issue-list "$scratch/issues.json" --filter-only --today 2030-01-01)
+test -z "$filter"
+"$python3" - "$scratch/many.json" <<'PY'
+import json, sys
+issues = [
+    {"number": n, "body": (
+        "<!-- provenant-flaky:v1 -->\n"
+        f"- package: provenant-cli\n- name: network::case_{n}\n"
+        "- owner: chair\n- expires: 2030-01-20"
+    )}
+    for n in range(100, 111)
+]
+with open(sys.argv[1], "w", encoding="utf-8") as out:
+    json.dump([issues], out)
+PY
+if "$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/empty.toml" --issue-list "$scratch/many.json" --filter-only --today 2030-01-01 >"$scratch/output" 2>&1; then
+  echo 'Expected the quarantine cap to fail' >&2
+  exit 1
+fi
+grep -F 'over the cap of 10' "$scratch/output" >/dev/null
+
 echo 'Flaky quarantine checks passed.'

@@ -11,7 +11,9 @@ schema_version = 1
 # jobs run after ci-status and never gate it.
 [jobs]
 always = ["scope"]
-ungated = ["main-health"]
+# `rerun-failed` produces re-run evidence for main-health before ci-status but
+# never gates it: a skipped re-run on a green main must not stall the gate.
+ungated = ["main-health", "rerun-failed"]
 
 [evidence]
 # Green ci-status push runs of this workflow on this branch are evidence.

@@ -14,7 +14,13 @@ with tempfile.TemporaryDirectory() as tmp:
 import json, os, sys
 with open(os.environ['LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1] == 'api':
-    print(os.environ['JOBS'] if '/jobs?' in sys.argv[-1] else os.environ['ISSUES'])
+    arg = sys.argv[-1]
+    if '/jobs?' in arg:
+        print(os.environ['JOBS'])
+    elif 'ci%3Aflaky' in arg:
+        print(os.environ.get('FLAKY_ISSUES', '[]'))
+    else:
+        print(os.environ['ISSUES'])
 ''')
     fake.chmod(0o755)
     log = Path(tmp) / 'log'
@@ -34,6 +40,50 @@ if sys.argv[1] == 'api':
     assert len(run('success', [])) == 1
     env['SELECTION_JSON'] = '{}'
     assert 'No green main found' in run('failure', [])[-1][-1]
+
+    # Spec: docs/specs/ci.md#red-main-is-visible — a known flake opens no issue.
+    junit = Path(tmp) / 'main-junit'
+    junit.mkdir()
+    (junit / 'partition.xml').write_text(
+        '<testsuites><testsuite><testcase classname="provenant" name="b::flaky">'
+        '<failure message="timed out"/></testcase></testsuite></testsuites>'
+    )
+    env['JUNIT_DIR'] = str(junit)
+    env['RERUN_JUNIT_DIR'] = str(Path(tmp) / 'no-rerun')
+    flaky_body = ('<!-- provenant-flaky:v1 -->\n- package: provenant\n'
+                  '- name: b::flaky\n- owner: chair\n- expires: 2030-12-31')
+    env['FLAKY_ISSUES'] = json.dumps([[{'number': 99, 'body': flaky_body}]])
+    calls = run('failure', [])
+    assert not [call for call in calls if call[:2] in (['issue', 'create'], ['issue', 'comment'])], calls
+
+    # A failure that passes on re-run is quarantined with an issue per test.
+    env['FLAKY_ISSUES'] = '[]'
+    rerun = Path(tmp) / 'rerun-junit'
+    rerun.mkdir()
+    (rerun / 'again.xml').write_text(
+        '<testsuites><testsuite><testcase classname="provenant" name="b::flaky"/>'
+        '</testsuite></testsuites>'
+    )
+    env['RERUN_JUNIT_DIR'] = str(rerun)
+    calls = run('failure', [])
+    creates = [call for call in calls if call[:2] == ['issue', 'create']]
+    assert len(creates) == 1, calls
+    assert 'ci:flaky' in creates[0] and 'b::flaky' in creates[0][-1], creates
+    assert 'ci:red-main' not in creates[0], creates
+
+    # The cap keeps a full quarantine from silently disabling more tests.
+    full = [
+        {'number': n, 'body': (
+            '<!-- provenant-flaky:v1 -->\n- package: provenant\n'
+            f'- name: tracked::{n}\n- owner: chair\n- expires: 2030-12-31'
+        )}
+        for n in range(200, 210)
+    ]
+    env['FLAKY_ISSUES'] = json.dumps([full])
+    calls = run('failure', [])
+    creates = [call for call in calls if call[:2] == ['issue', 'create']]
+    assert len(creates) == 1 and 'ci:red-main' in creates[0], calls
+
     fake.write_text('#!/bin/sh\nexit 1\n')
     assert subprocess.run([script], env=dict(env, CI_RESULT='failure'), capture_output=True).returncode != 0
 print('Main-health fixtures passed.')

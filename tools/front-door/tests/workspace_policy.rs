@@ -500,7 +500,151 @@ fn is_test_source(name: &str) -> bool {
 
 // Method-level bans (including direct sleep) live in clippy.toml. The remaining
 // scanners express contextual rules: Git arguments/environment, reserved OS
-// namespaces, and adapter identity comparisons; Clippy cannot model those.
+// namespaces, adapter identity comparisons and fixed waits in tests; Clippy
+// cannot model those.
+//
+// Fixed waits in tests hide ordering bugs: they pass on an idle host and flake
+// under load. This rule warns first, so existing fixtures are not broken by a
+// policy change. `PROVENANT_STRICT_TEST_WAITS=1` turns the warning into a
+// refusal once the named waits have moved to `wait_until` or an event. A scope
+// that names `disallowed_methods` is an explicit real-time boundary and is
+// exempt: the wait primitives themselves must still be allowed to sleep.
+fn fixed_wait_violations(source: &str, test_file: bool) -> Vec<String> {
+    test_scopes(source, test_file)
+        .into_iter()
+        .filter_map(|scope| {
+            let tokens = rust_tokens(scope);
+            // A crate-wide `#![allow]` is a blanket suppression, not a named
+            // boundary; it cannot exempt every test in the file.
+            let blanket = tokens.starts_with(&["#", "!", "["]);
+            if !blanket && tokens.iter().any(|token| *token == "disallowed_methods") {
+                return None;
+            }
+            // A fixed `Duration` is a wait only when the statement also names
+            // a sleep or timeout primitive. A deadline passed to a bounded
+            // helper such as `wait_until` or `fixture_accept` is not a fixed
+            // wait: its owner decides when it expires.
+            let is_wait_statement = |index: usize| {
+                let start = (0..index)
+                    .rev()
+                    .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                    .map_or(0, |position| position + 1);
+                let end = (index..tokens.len())
+                    .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                    .unwrap_or(tokens.len());
+                tokens[start..end].iter().any(|token| {
+                    matches!(
+                        *token,
+                        "sleep" | "park_timeout" | "recv_timeout" | "wait_timeout"
+                    )
+                })
+            };
+            let mut violations = Vec::new();
+            for (index, token) in tokens.iter().enumerate() {
+                if matches!(*token, "sleep" | "park_timeout") && tokens.get(index + 1) == Some(&"(")
+                {
+                    violations.push(format!("{token}, fixed wait in a test"));
+                }
+                if *token == "Duration"
+                    && tokens.get(index + 1) == Some(&"::")
+                    && matches!(
+                        tokens.get(index + 2).copied(),
+                        Some("from_secs" | "from_millis" | "from_micros" | "from_nanos")
+                    )
+                    && is_wait_statement(index)
+                {
+                    violations.push(format!(
+                        "Duration::{}, fixed wait in a test",
+                        tokens[index + 2]
+                    ));
+                }
+            }
+            (!violations.is_empty()).then_some(violations.join(", "))
+        })
+        .collect()
+}
+
+#[test]
+fn fixed_wait_rule_distinguishes_explicit_boundaries_from_test_waits() {
+    let direct = r#"
+        #[test]
+        fn flaky() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    "#;
+    let found = fixed_wait_violations(direct, false);
+    assert!(found.iter().any(|item| item.contains("sleep")), "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|item| item.contains("Duration::from_millis")),
+        "{found:?}"
+    );
+    let allowed = r#"
+        #[allow(clippy::disallowed_methods)]
+        #[test]
+        fn bounded() {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    "#;
+    assert!(fixed_wait_violations(allowed, true).is_empty());
+    let blanket = r#"
+        #![allow(clippy::disallowed_methods)]
+        #[test]
+        fn flaky() {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    "#;
+    assert!(!fixed_wait_violations(blanket, true).is_empty());
+    let bounded = r#"
+        #[test]
+        fn patient() {
+            wait_until("ready", deadline, observe, reached);
+            wait_for("ready", Duration::from_secs(1), observe, reached);
+        }
+    "#;
+    assert!(fixed_wait_violations(bounded, false).is_empty());
+    let production = "fn busy() { std::thread::sleep(Duration::from_millis(50)); }";
+    assert!(fixed_wait_violations(production, false).is_empty());
+}
+
+#[test]
+#[allow(
+    clippy::print_stderr,
+    reason = "warn-first policy reports fixed waits on stderr"
+)]
+fn test_waits_warn_before_refusal() -> Result<(), Box<dyn Error>> {
+    let strict = std::env::var("PROVENANT_STRICT_TEST_WAITS").is_ok_and(|value| value == "1");
+    let mut violations = Vec::new();
+    for path in source_roots() {
+        let mut sources = Vec::new();
+        rust_sources(&path, &mut sources)?;
+        for source_path in sources {
+            let source = fs::read_to_string(&source_path)?;
+            let test_file = is_test_source(&source_path.to_string_lossy());
+            for violation in fixed_wait_violations(&source, test_file) {
+                violations.push(format!("{}: {violation}", source_path.display()));
+            }
+        }
+    }
+    if !violations.is_empty() {
+        eprintln!(
+            "fixed waits in tests (warn first; set PROVENANT_STRICT_TEST_WAITS=1 to refuse):"
+        );
+        for violation in violations.iter().take(20) {
+            eprintln!("  {violation}");
+        }
+        if violations.len() > 20 {
+            eprintln!("  ... and {} more", violations.len() - 20);
+        }
+    }
+    assert!(
+        violations.is_empty() || !strict,
+        "fixed waits in tests under PROVENANT_STRICT_TEST_WAITS=1:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
 
 // Counts for the tokens owned by one function body (innermost function wins).
 #[derive(Default)]

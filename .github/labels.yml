@@ -37,3 +37,7 @@
 - name: ci:red-main
   color: "b60205"
   description: CI failed on main; fix forward
+
+- name: ci:flaky
+  color: "fbca04"
+  description: Test quarantined after passing on re-run; fix and close to end quarantine
