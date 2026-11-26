@@ -29,6 +29,7 @@
     "exit_code": 0,
     "family": "unknown",
     "finished_at": "2026-11-02T02:05:00.000000Z",
+    "first_output_at": null,
     "git_grants_digest": null,
     "graph": "output-receipt",
     "head": null,
