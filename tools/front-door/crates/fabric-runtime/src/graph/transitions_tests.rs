@@ -688,10 +688,11 @@ fn writer_stop_code_follows_the_projected_outcome() {
     }
 }
 
-/// #4065: an inline implement writer with a successful attempt, a done handoff
-/// and a pushed delivery head settles succeeded whatever provisional settlement
-/// reason was recorded, and its dependant is unblocked. No findings block is
-/// present: findings are not a writer success criterion.
+/// #4065: an inline implement writer whose sealed settlement completed, with a
+/// done handoff and a pushed delivery head, settles succeeded and unblocks its
+/// dependant. No findings block is present: findings are not a writer success
+/// criterion. The sealed class decides: refs and a done handoff never promote
+/// a sealed failure, and an attempt with no sealed class releases nothing.
 #[test]
 fn inline_implement_pushed_head_and_done_handoff_unblock_dependants() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
@@ -710,18 +711,24 @@ fn inline_implement_pushed_head_and_done_handoff_unblock_dependants() {
     let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
     let base = "1111111111111111111111111111111111111111";
     let pushed = "2222222222222222222222222222222222222222";
-    let text = format!(
-        "```handoff\n{}\n```",
-        serde_json::json!({
-            "schema_version": 2, "status": "done", "note": "brief complete",
-            "remaining": [], "decisions": [], "verify": []
-        })
-    );
+    // The handoff arrives by declaration, never from the result text.
+    let declared = serde_json::json!({
+        "schema_version": 2, "status": "done", "note": "brief complete",
+        "remaining": [], "decisions": [], "verify": []
+    });
     let mut capture = crate::result_capture::ResultCapture::new(None);
-    capture.push(text.as_bytes());
+    capture.push(b"brief complete");
     let mut result = capture.finish();
-    result.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
-    for settlement_class in [Some(provenant_records::run::SettlementClass::Failed), None] {
+    result.handoff =
+        provenant_records::handoff::Handoff::from_json(declared.to_string().as_bytes()).map(Some);
+    for (settlement_class, releases) in [
+        (
+            Some(provenant_records::run::SettlementClass::Completed),
+            true,
+        ),
+        (Some(provenant_records::run::SettlementClass::Failed), false),
+        (None, false),
+    ] {
         let mut checkpoint =
             initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
         let _ = start(&plan, &positions, &mut checkpoint, &limits);
@@ -744,6 +751,7 @@ fn inline_implement_pushed_head_and_done_handoff_unblock_dependants() {
                 commit: Some(pushed.into()),
                 stop: None,
                 settlement_class,
+                cause: None,
             },
             ObservationFacts {
                 route_index: 0,
@@ -757,21 +765,21 @@ fn inline_implement_pushed_head_and_done_handoff_unblock_dependants() {
             },
         )
         .unwrap();
+        let dependant = dependency_state(
+            &plan.nodes[positions["after"]],
+            &plan,
+            &checkpoint,
+            &positions,
+        );
         assert_eq!(
-            checkpoint.nodes[0].attempts[0].outcome,
-            Some(GraphAttemptOutcome::Succeeded),
+            checkpoint.nodes[0].state == NodeState::Succeeded,
+            releases,
             "settlement_class={settlement_class:?}"
         );
-        assert_eq!(checkpoint.nodes[0].state, NodeState::Succeeded);
         assert_eq!(
-            dependency_state(
-                &plan.nodes[positions["after"]],
-                &plan,
-                &checkpoint,
-                &positions
-            ),
-            None,
-            "dependant must be unblocked; settlement_class={settlement_class:?}"
+            dependant.is_none(),
+            releases,
+            "dependant release follows the sealed class; settlement_class={settlement_class:?}"
         );
     }
 }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub use provenant_records::route_selection::Workload;
 /// The route layer of settlement policy, declared here as model policy.
-pub use provenant_records::settlement::policy::RouteSettlement as LaneSettlement;
+pub use provenant_records::settlement::policy::RouteSettlement;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -83,7 +83,7 @@ pub struct LanePolicy {
     /// Settlement signal actions that override host and project knobs for
     /// routes matching this model policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settlement: Option<LaneSettlement>,
+    pub settlement: Option<RouteSettlement>,
     #[serde(skip)]
     pub access_key: Option<String>,
 }
