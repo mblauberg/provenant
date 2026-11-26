@@ -4134,13 +4134,14 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(offer_mismatch_skip(&route, mismatch));
             continue;
         }
+        let offer_catalogue_revision = route.catalogue_revision.clone();
         let offer_policy = provenant_routing::OfferEvidencePolicy {
             accounts: &diagnostic_records,
             freshness: &freshness,
             quota_policies: &quota_policies,
             // Judge the availability the route was resolved against, not a
             // later catalogue revision discovered after the decision.
-            catalogue_revision: &route.catalogue_revision,
+            catalogue_revision: &offer_catalogue_revision,
             now_seconds: clock.unix_seconds(),
         };
         if let Some((offered, age_seconds)) =
