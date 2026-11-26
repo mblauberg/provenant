@@ -207,7 +207,6 @@ fn local_status_parts<'a>(
     target: &provenant_cli::Target,
     edge: &provenant_cli::run::Edge<'_>,
     session: &'a mut Option<Context>,
-    cancel: &CancelToken,
     peer_budget: impl FnOnce(&SystemClock) -> Result<WaitBudget, FacadeError>,
 ) -> Result<
     (
@@ -252,8 +251,7 @@ fn local_status_rows(
     cancel: &CancelToken,
     peer_budget: impl FnOnce(&SystemClock) -> Result<WaitBudget, FacadeError>,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    let (run, target, context, budget) =
-        local_status_parts(target, edge, session, cancel, peer_budget)?;
+    let (run, target, context, budget) = local_status_parts(target, edge, session, peer_budget)?;
     let mut rows = status_rows(&run, &target);
     let clock = SystemClock::new();
     enrich_status_rows_within(&mut rows, context, &clock, cancel, budget)?;
@@ -325,16 +323,15 @@ pub(crate) fn read_status_rows_with_recovery(
     if provenant_cli::fabric::in_lane() {
         return read_status_rows(target, edge, session, deadline, cancel);
     }
-    let (run, resolved, context, budget) =
-        local_status_parts(target, edge, session, cancel, |clock| {
-            let left = wait_remaining(deadline, cancel)?;
-            Ok(WaitBudget::up_to(
-                clock.mono_now(),
-                provenant_core::DurationMicros::from_micros(
-                    u64::try_from(left.as_micros()).unwrap_or(u64::MAX),
-                ),
-            ))
-        })?;
+    let (run, resolved, context, budget) = local_status_parts(target, edge, session, |clock| {
+        let left = wait_remaining(deadline, cancel)?;
+        Ok(WaitBudget::up_to(
+            clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(
+                u64::try_from(left.as_micros()).unwrap_or(u64::MAX),
+            ),
+        ))
+    })?;
     let clock = SystemClock::new();
     let mut rows = status_rows(&run, &resolved);
     // Peer failures stay in the reading as a pending observation; the recovery

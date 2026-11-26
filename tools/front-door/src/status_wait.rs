@@ -2900,8 +2900,10 @@ mod tests {
                 )
                 .unwrap_err(),
                 crate::fabric::unsettled_graphs(&edge, deadline, &cancel).unwrap_err(),
-                crate::fabric::read_status_rows(&target, &edge, &mut None, deadline, &cancel)
-                    .unwrap_err(),
+                crate::fabric::unified::read_status_rows(
+                    &target, &edge, &mut None, deadline, &cancel,
+                )
+                .unwrap_err(),
             ] {
                 assert!(matches!(
                     (cancelled, error.downcast_ref::<FacadeError>()),

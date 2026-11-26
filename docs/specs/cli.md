@@ -225,7 +225,10 @@ input errors keep their generic message.
 
 ### Waits are readers
 
-Waiting observes work; a timeout or cancellation does not stop it. `wait`
+Waiting observes work; a timeout or cancellation does not stop it. The one
+exception is graph terminal-remote recovery below: a successful terminal remote
+reading re-drives the journal-locked advance, but the wait never claims a
+settlement it has not observed. `wait`
 defaults to `--all` (worst final result of every target); `--any` and
 `--fail-fast` return early, and output names the mode. A target settles by its
 own state, so an older settlement cannot satisfy a wait for new work.

@@ -685,7 +685,7 @@ mod graph_writer_admission_tests {
         }
 
         let advances = Cell::new(0);
-        let recovered = super::recover_after_remote_terminal(
+        let recovered = super::unified::recover_after_remote_terminal(
             &pending,
             &target,
             &mut rows,
@@ -707,7 +707,7 @@ mod graph_writer_admission_tests {
         // No terminal remote attempt: the reader stays a reader and never
         // takes the journal-locked advance path.
         let mut local_rows = super::unified::status_rows(&pending, &target);
-        let untouched = super::recover_after_remote_terminal(
+        let untouched = super::unified::recover_after_remote_terminal(
             &pending,
             &target,
             &mut local_rows,

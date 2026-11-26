@@ -18,8 +18,12 @@ mod graph_wait;
 use graph_wait::missing_graph_context;
 pub(crate) use graph_wait::{
     check_targets, final_status_rows, read_lane_graph, read_status_rows,
-    read_status_rows_with_recovery, recover_after_remote_terminal, unsettled_graphs,
+    read_status_rows_with_recovery, unsettled_graphs,
 };
+// The recovery decision is exercised by the graph wait test; production callers
+// reach it through `read_status_rows_with_recovery` in the same module.
+#[cfg(test)]
+pub(crate) use graph_wait::recover_after_remote_terminal;
 
 #[derive(Clone, Debug)]
 pub(crate) struct GraphTarget {
