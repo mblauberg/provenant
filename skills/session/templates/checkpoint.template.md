@@ -1,7 +1,28 @@
+---
+provenant_standing:
+  schema_version: 1
+  goal: ""
+  grants: []
+  obligations: []
+  waiting_on_owner: []
+---
 # Session checkpoint
 
-Open with the standing record from the [continuity contract](../references/continuity.md),
-then these headings.
+Open with the typed standing record above, from the
+[continuity contract](../references/continuity.md). Every top-level field is
+required: an empty `waiting_on_owner` is explicit, never an omitted one. Each
+grant carries one `source` token and an `expires` instant (or `none`). The
+chair's live grants — maintainer ownership, release, admin-merge, no local
+builds and the CI cap — belong in this record with their source and expiry,
+not in memory prose. A hook restores only sourced, unexpired grants.
+
+`provenant workflow session save SESSION --file FILE --from-template`
+scaffolds this shape: every section below is present, filled from the previous
+revision where the new `--file` does not supply it (`-` reads stdin). Sections
+from `--file` win; the standing record carries forward unless the input
+replaces it. The first save has no previous revision and starts from the empty
+record above. A save warns, without refusing, when the record or `## Intent`
+is missing or the body passes 2 KiB after frontmatter.
 
 ## Goal
 Outcome, done-criteria and the tracker or project document that owns them.

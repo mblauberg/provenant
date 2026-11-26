@@ -12,11 +12,13 @@ mod hooks;
 mod standing;
 mod state;
 mod summary;
+mod template;
 pub use discovery::*;
 pub use hooks::*;
 pub use standing::*;
 pub use state::*;
 pub use summary::*;
+pub use template::*;
 
 /// The most a checkpoint may hold: the size of the largest workflow input the CLI
 /// reads, so a saved file never fits the reader but not the store. Readers that

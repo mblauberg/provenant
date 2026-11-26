@@ -5,9 +5,38 @@ Anchor: tools/front-door/crates/workflow/src/session.rs
 
 Save UTF-8 Markdown with
 `provenant workflow session save SESSION --file FILE` and read it with
-`provenant workflow session show SESSION`. The `session` skill owns checkpoint
-content and goal continuation; this page owns identity and recovery. The
-invariants are in the [workflow spec](../specs/workflow.md#sessions).
+`provenant workflow session show SESSION`. `show` prints the whole checkpoint
+by default; `--json` is a separate transport and `--full` asks for the same
+complete text explicitly. The `session` skill owns checkpoint content and goal
+continuation; this page owns identity and recovery. The invariants are in the
+[workflow spec](../specs/workflow.md#sessions).
+
+### Template conformance and scaffolding
+
+A save validates against the `session` skill's
+[checkpoint template](../../skills/session/templates/checkpoint.template.md)
+and warns, without refusing, when the checkpoint has no
+`provenant_standing` frontmatter, no `## Intent` section, or a body over 2 KiB
+after frontmatter. Each warning names the gap and is a typed `SESSION_ADVISORY`
+in the JSON `warnings` array. The body budget is separate from the configured
+soft budget floored at 8 KiB, so a small body produces neither size warning.
+
+`--from-template` scaffolds the template's sections from the current revision
+and overlays the sections in `--file` (`-` reads stdin): sections in the file
+win, missing ones are filled from the previous revision, and unknown sections
+are appended. Missing template sections are scaffolded empty and the typed
+standing record carries forward; the first save starts from an empty record.
+For example:
+
+```sh
+provenant workflow session save SESSION --file notes.md --from-template
+```
+
+The chair's standing grants — maintainer ownership, release, admin-merge, no
+local builds and the CI cap — belong in `provenant_standing` with their source
+and expiry, not in memory prose; see the
+[continuity contract](../../skills/session/references/continuity.md). Hooks
+restore only sourced, unexpired grants.
 
 ## Identity
 

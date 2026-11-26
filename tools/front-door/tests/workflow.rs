@@ -1679,3 +1679,180 @@ fn substantial_acceptance_is_refused_until_reviews_cover_it() -> Result {
     assert_eq!(report["data"]["required"], 1);
     Ok(())
 }
+
+/// The reviewed rev-5 shape: prose headings, no typed standing record, no
+/// Intent section and a short body. A save names exactly those two gaps; it
+/// never refuses and the small body keeps the size advisories quiet.
+#[test]
+fn rev5_checkpoint_save_names_the_standing_and_intent_gaps() -> Result {
+    let rig = TestRig::new()?;
+    let text = "# Session checkpoint\n\n## Goal\nLand the review fixes.\n\n## Done\n- Shipped the fleet lanes.\n\n## Plan\nResume on the next slice.\n";
+    let file = rig.root.join("rev5.md");
+    std::fs::write(&file, text)?;
+    let saved = call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "rev5",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    let warnings = saved["warnings"].as_array().ok_or("warnings envelope")?;
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(
+        warnings[0]
+            .as_str()
+            .is_some_and(|w| w.contains("provenant_standing")),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings[1]
+            .as_str()
+            .is_some_and(|w| w.contains("## Intent")),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|w| !w.as_str().is_some_and(|text| text.contains("bytes")))
+    );
+    let shown = call(&rig, &["workflow", "session", "show", "rev5"], 0)?;
+    assert_eq!(shown["data"]["markdown"], text);
+    Ok(())
+}
+
+/// A first template save has no previous revision and scaffolds an empty
+/// standing record; a later save fills the template from the previous
+/// revision, lets the input win per section, and keeps the typed grants.
+#[test]
+fn session_save_from_template_scaffolds_and_prefills_the_previous_revision() -> Result {
+    let rig = TestRig::new()?;
+    let file = rig.root.join("checkpoint.md");
+    std::fs::write(&file, "## Goal\nLand the checkpoint work.\n")?;
+    let first = call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "templated-first",
+            "--file",
+            &file.to_string_lossy(),
+            "--from-template",
+        ],
+        0,
+    )?;
+    assert!(
+        first["warnings"].as_array().ok_or("warnings")?.is_empty(),
+        "{first}"
+    );
+    let shown = call(&rig, &["workflow", "session", "show", "templated-first"], 0)?;
+    let scaffold = shown["data"]["markdown"]
+        .as_str()
+        .ok_or("scaffold markdown")?;
+    assert!(scaffold.starts_with("---\nprovenant_standing:"));
+    assert!(scaffold.contains("waiting_on_owner: []"));
+    for heading in [
+        "## Goal",
+        "## Direction",
+        "## Intent",
+        "## Process",
+        "## Plan",
+    ] {
+        assert!(scaffold.contains(heading), "{scaffold}");
+    }
+
+    let previous = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"Land the review\"\n  grants:\n    - scope: \"Land lane pull requests after green CI\"\n      source: \"rule:GLOBAL-AGENTS.md#git\"\n      expires: none\n  obligations: []\n  waiting_on_owner: []\n---\n# Session checkpoint\n\n## Goal\nOld goal.\n\n## Intent\nOld reading, kept.\n\n## Plan\nOld next action.\n\n## Background\nKeep this section.\n";
+    std::fs::write(&file, previous)?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "templated-next",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    std::fs::write(
+        &file,
+        "## Goal\nNew goal.\n\n## Direction\nA fresh ruling.\n",
+    )?;
+    let saved = call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "templated-next",
+            "--file",
+            &file.to_string_lossy(),
+            "--from-template",
+        ],
+        0,
+    )?;
+    assert!(
+        saved["warnings"].as_array().ok_or("warnings")?.is_empty(),
+        "{saved}"
+    );
+    let shown = call(&rig, &["workflow", "session", "show", "templated-next"], 0)?;
+    let merged = shown["data"]["markdown"]
+        .as_str()
+        .ok_or("merged markdown")?;
+    assert!(merged.contains("Land lane pull requests after green CI"));
+    assert!(merged.contains("New goal."));
+    assert!(!merged.contains("Old goal."));
+    assert!(merged.contains("Old reading, kept."));
+    assert!(merged.contains("Old next action."));
+    assert!(merged.contains("A fresh ruling."));
+    assert!(merged.contains("Keep this section."));
+    Ok(())
+}
+
+/// The chair reads the whole checkpoint by default: the compact fallback's
+/// bounded rows must not hide the tail of a longer checkpoint. JSON is a
+/// separate transport and is unchanged.
+#[test]
+fn session_show_defaults_to_full_human_output() -> Result {
+    let rig = TestRig::new()?;
+    let file = rig.root.join("checkpoint.md");
+    let lines: Vec<String> = (1..=12).map(|n| format!("body line {n:02}")).collect();
+    std::fs::write(&file, format!("{}\n", lines.join("\n")))?;
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "full-show",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("production binary path")?;
+    let state = rig.state.to_string_lossy().into_owned();
+    let output = rig.execute(
+        std::path::Path::new(binary),
+        &[
+            "--state-dir",
+            &state,
+            "workflow",
+            "session",
+            "show",
+            "full-show",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&output), 0);
+    let text = String::from_utf8_lossy(&output.stdout.bytes);
+    assert!(text.contains("body line 12"), "{text}");
+    assert!(!text.contains("use --full for all detail"), "{text}");
+    Ok(())
+}
