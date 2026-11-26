@@ -9,10 +9,14 @@ use std::{cmp::Ordering, path::Path};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityStatus {
+    /// An explicit range declares this version supported.
     Supported,
     Unsupported,
     Broken,
+    /// No version could be read from the executable.
     VersionUnread,
+    /// No entry covers this adapter, or no range matches: compatibility is not tracked.
+    Unlisted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -307,7 +311,8 @@ impl CompatibilityTable {
     }
 
     /// Resolve one adapter's version against the first matching range. An
-    /// unreadable version is VersionUnread; a row with no matching range is Supported.
+    /// unreadable version is VersionUnread; no entry or no matching range is
+    /// Unlisted; only an explicit `supported` range reports Supported.
     pub fn assess(&self, adapter: &str, version: Option<&str>) -> CompatibilityAssessment {
         let parsed = version.and_then(HarnessVersion::extract);
         let recorded = parsed
@@ -334,7 +339,7 @@ impl CompatibilityTable {
             return assessment;
         };
         let Some(entry) = entry else {
-            assessment.status = CompatibilityStatus::Supported;
+            assessment.status = CompatibilityStatus::Unlisted;
             return assessment;
         };
         for row in &entry.ranges {
@@ -345,17 +350,19 @@ impl CompatibilityTable {
                 return assessment;
             }
         }
-        assessment.status = CompatibilityStatus::Supported;
+        assessment.status = CompatibilityStatus::Unlisted;
         assessment
     }
 }
 
-/// The policy code for a status; None for Supported and VersionUnread.
+/// The policy code for a status; None for Supported, VersionUnread and Unlisted.
 pub fn policy_code(status: CompatibilityStatus) -> Option<&'static str> {
     match status {
         CompatibilityStatus::Unsupported => Some("HARNESS_VERSION_UNSUPPORTED"),
         CompatibilityStatus::Broken => Some("HARNESS_VERSION_BROKEN"),
-        CompatibilityStatus::Supported | CompatibilityStatus::VersionUnread => None,
+        CompatibilityStatus::Supported
+        | CompatibilityStatus::VersionUnread
+        | CompatibilityStatus::Unlisted => None,
     }
 }
 
@@ -452,7 +459,7 @@ ranges = [{ range = "about 0.5", status = "broken" }]
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(warnings[0].source, Layer::Host);
         let assessment = table.assess("claude", Some("1.2.3"));
-        assert_eq!(assessment.status, CompatibilityStatus::Supported);
+        assert_eq!(assessment.status, CompatibilityStatus::Unlisted);
         assert_eq!(assessment.source.layer, Layer::Default);
     }
 
@@ -489,7 +496,7 @@ ranges = [{ range = ">=0.1", status = "broken", reason = "project", issue = 42 }
     }
 
     #[test]
-    fn unreadable_version_assesses_unknown() {
+    fn an_empty_bundled_table_reports_unlisted_and_an_unread_version_is_version_unread() {
         let table = CompatibilityTable::bundled();
         assert_eq!(
             table.assess("codex", None).status,
@@ -499,10 +506,26 @@ ranges = [{ range = ">=0.1", status = "broken", reason = "project", issue = 42 }
             table.assess("codex", Some("no digits here")).status,
             CompatibilityStatus::VersionUnread
         );
-        assert_eq!(
-            table.assess("codex", Some("codex 0.61.0")).status,
-            CompatibilityStatus::Supported
-        );
+        let assessment = table.assess("codex", Some("codex 0.61.0"));
+        assert_eq!(assessment.status, CompatibilityStatus::Unlisted);
+        assert_eq!(assessment.version.as_deref(), Some("0.61.0"));
+        assert_eq!(assessment.source.layer, Layer::Default);
+        assert_eq!(assessment.source.origin, None);
+    }
+
+    #[test]
+    fn an_explicit_supported_range_assesses_supported() {
+        let text = r#"
+[[harness_compatibility]]
+adapter = "codex"
+ranges = [{ range = ">=0.50", status = "supported" }]
+"#;
+        let (_temp, state) = state_with(text);
+        let (table, warnings) = CompatibilityTable::effective(&state, None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let assessment = table.assess("codex", Some("codex 0.61.0"));
+        assert_eq!(assessment.status, CompatibilityStatus::Supported);
+        assert_eq!(assessment.source.layer, Layer::Host);
     }
 
     #[test]
@@ -518,7 +541,7 @@ ranges = [{ range = ">=0.1", status = "broken" }]
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
             table.assess("codex", Some("0.61.0")).status,
-            CompatibilityStatus::Supported
+            CompatibilityStatus::Unlisted
         );
     }
 
@@ -526,6 +549,7 @@ ranges = [{ range = ">=0.1", status = "broken" }]
     fn status_maps_to_a_policy_code() {
         assert_eq!(policy_code(CompatibilityStatus::Supported), None);
         assert_eq!(policy_code(CompatibilityStatus::VersionUnread), None);
+        assert_eq!(policy_code(CompatibilityStatus::Unlisted), None);
         assert_eq!(
             policy_code(CompatibilityStatus::Unsupported),
             Some("HARNESS_VERSION_UNSUPPORTED")

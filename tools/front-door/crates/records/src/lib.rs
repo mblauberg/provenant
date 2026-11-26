@@ -6,12 +6,12 @@ pub use adapters::{
     ADAPTER_ROW_REASON, ADAPTER_ROW_SOURCE, ADAPTER_SPECS, AccountIdentityProbe, AccountModelPlan,
     AccountQuota, AdapterAccounts, AdapterFact, AdapterIdentity, AdapterLaunch, AdapterLogin,
     AdapterQuota, AdapterSpec, AnsweringModelSource, COMMAND_OUTPUT_TAIL_BYTES, Capabilities,
-    ClientEnvMarkers, GithubAuth, HarnessInstall, HookAction, HookEvent, HookProtocol,
+    Caveat, ClientEnvMarkers, GithubAuth, HarnessInstall, HookAction, HookEvent, HookProtocol,
     HookTimeoutUnit, INSTRUCTION_ASSET, LaunchAction, LaunchCapabilities, LaunchCheck, LaunchField,
     LaunchGap, LaunchRequest, LoginObservation, LoginReprobe, ModelListingFormat, NamedEntry,
-    NativeAuthWarning, NativeCapabilities, QuotaProbeKind, RetainedArtifact, Retention, SetupRoot,
-    SkillLocation, StreamFraming, TerminalEventStrength, UpdateCommand, UsageAttribution,
-    normalise_model_id,
+    NativeAuthWarning, NativeCapabilities, QuotaProbeKind, RetainedArtifact, Retention,
+    SessionReference, SetupRoot, SkillLocation, StreamFraming, TerminalEventStrength,
+    UpdateCommand, UsageAttribution, normalise_model_id,
 };
 
 /// The instruction content bound into this product build and projected into
