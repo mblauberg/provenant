@@ -419,6 +419,9 @@ eligible candidate in the same tier as `usage_limited` does, with the rung,
 target and tier of the hand-off recorded on the restart. An exact model pinned
 without a pool still has a tier: the first tier in `depletion.tiers` whose pool
 serves the stopped model's family stands in, so a capacity stop can hand off.
-Only a pinned exact model with no fallback allowed refuses; that refusal names
-the setting that allows one — another entry in `node.routes` or an explicit
-`on_stop.model_unavailable = new_route`.
+Only a pinned exact model with no fallback allowed refuses. A pinned-route
+refusal names cause-neutral options: another eligible entry in `node.routes`,
+an applicable depletion ladder configured through `depletion.rungs` and
+`depletion.tiers`, or removing the route's account/model pin. The per-cause
+`on_stop` setting does not add a fallback when the cause already defaults to
+`new_route`.

@@ -967,7 +967,7 @@ pub(super) fn settlement_fallback_decision(
         {
             advance_code = Some("fallback_route_pinned");
             advance_note = Some(
-                "The selected route is pinned and has no fallback; declare another eligible route in `node.routes` or set `on_stop.model_unavailable` to `new_route` to allow one."
+                "The selected route is pinned and has no fallback; declare another eligible route in `node.routes`, configure an applicable depletion fallback with `depletion.rungs` and `depletion.tiers`, or remove the route's account/model pin."
                     .into(),
             );
         }
