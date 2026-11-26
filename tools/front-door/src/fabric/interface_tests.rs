@@ -1213,6 +1213,10 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
     git(&["add", "later.txt"])?;
     git(&["commit", "-m", "later main"])?;
     let base = git(&["rev-parse", "HEAD"])?;
+    // The head is behind the base: the review starts at their merge base, so
+    // the later base commit never reads as a revert in the review diff.
+    let merge_base = git(&["merge-base", &head, &base])?;
+    assert_ne!(merge_base, base);
     let metadata = rig.root.join("pull.json");
     std::fs::write(
         &metadata,
@@ -1275,7 +1279,7 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
             let request =
                 json!({"op":"run","template":template,"brief":"Review","pr":7,"explain":true});
             let response = factory.graph_document(request.clone(), budget, &cancel)?;
-            assert_eq!(response["document"]["review_base"], base);
+            assert_eq!(response["document"]["review_base"], merge_base);
             let frame = factory.relay_document(&request, budget, &cancel)?;
             assert_eq!(frame["op"], "run");
             assert_eq!(frame["input"]["pr"], 7);
@@ -1306,7 +1310,7 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
                 &Workers,
             )
             .map_err(|error| format!("host preparation: {error:?}"))?;
-            assert_eq!(prepared["launch"]["node"]["review_base"], base);
+            assert_eq!(prepared["launch"]["node"]["review_base"], merge_base);
             if checkout == "main" && template == "review.correctness" {
                 let repeated = super::super::read_lane_graph(
                     &holder,
@@ -1338,7 +1342,7 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
                 launch["explain"] = json!(false);
                 launch["name"] = json!("review-receipt-pin");
                 let receipt = factory.graph_document(launch, budget, &cancel)?;
-                assert_eq!(receipt["review_subject"]["base"], base);
+                assert_eq!(receipt["review_subject"]["base"], merge_base);
                 assert_eq!(receipt["review_subject"]["head"], head);
             }
             let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
@@ -1355,10 +1359,10 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
             assert_ne!(child.id, another.id);
             assert_ne!(child.idempotency_key, another.idempotency_key);
             let child_node = child.launch.ok_or("missing launch")?.node;
-            assert_eq!(child_node["review_base"], base);
+            assert_eq!(child_node["review_base"], merge_base);
             let git_path = provenant_os::git::git_executable().ok_or("Git unavailable")?;
             let context =
-                provenant_run::review_diff_context_at(&git_path, &rig.project, &base, &head)?;
+                provenant_run::review_diff_context_at(&git_path, &rig.project, &merge_base, &head)?;
             assert_eq!(context.paths, ["feature.txt"]);
         }
         // `--pr` against a template with no review range is advisory
@@ -1403,41 +1407,52 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
 }
 
 #[test]
-fn review_ref_binds_tip_until_launch() -> Result {
+fn review_ref_binds_its_merge_base_until_launch() -> Result {
     if super::super::peer_tests::host_test(
-        "fabric::interface::tests::review_ref_binds_tip_until_launch",
+        "fabric::interface::tests::review_ref_binds_its_merge_base_until_launch",
     )? {
         return Ok(());
     }
     let rig = crate::worktree_tests::repository()?;
-    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    crate::worktree_tests::git(&rig, &["checkout", "-b", "review-subject"])?;
-    crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "subject"])?;
-    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    crate::worktree_tests::git(&rig, &["checkout", "-b", "review-target", &base])?;
-    crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "target advanced"])?;
-    let tip = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    let git = |args: &[&str]| crate::worktree_tests::git(&rig, args);
+    let base = git(&["rev-parse", "HEAD"])?;
+    git(&["checkout", "-b", "review-subject"])?;
+    git(&["commit", "--allow-empty", "-m", "first subject commit"])?;
+    let first = git(&["rev-parse", "HEAD"])?;
+    git(&["commit", "--allow-empty", "-m", "subject"])?;
+    let head = git(&["rev-parse", "HEAD"])?;
+    git(&["checkout", "-b", "review-target", &base])?;
+    git(&["commit", "--allow-empty", "-m", "target advanced"])?;
+    let tip = git(&["rev-parse", "HEAD"])?;
     let factory = factory(&rig)?;
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let input = json!({"op":"run","name":"pinned-ref","template":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true});
     let result = factory.graph_document(input.clone(), budget, &cancel)?;
     let child = factory.child_request(&input)?;
-    assert_eq!(result["document"]["review_base"], tip);
-    crate::worktree_tests::git(
-        &rig,
-        &["commit", "--allow-empty", "-m", "target advanced again"],
-    )?;
-    let advanced = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    // The head is behind the target tip, so the range starts at their merge
+    // base; the newer target commit is not part of the review.
+    assert_eq!(result["document"]["review_base"], base);
+    assert_ne!(result["document"]["review_base"], tip);
+    // The ref is resolved again at each admission: once the target merges
+    // the first subject commit, the merge base moves to it.
+    git(&[
+        "merge",
+        "--no-ff",
+        &first,
+        "-m",
+        "target merges the first commit",
+    ])?;
     let changed = factory.graph_document(input.clone(), budget, &cancel)?;
     let changed_child = factory.child_request(&input)?;
-    assert_eq!(changed["document"]["review_base"], advanced);
+    assert_eq!(changed["document"]["review_base"], first);
     assert_ne!(
         result["document"]["replay_digest"],
         changed["document"]["replay_digest"]
     );
     assert_ne!(child.idempotency_key, changed_child.idempotency_key);
-    assert_eq!(child.launch.ok_or("child")?.node["review_base"], tip);
+    // A request prepared before the move keeps the range it admitted.
+    assert_eq!(child.launch.ok_or("child")?.node["review_base"], base);
     Ok(())
 }
 
