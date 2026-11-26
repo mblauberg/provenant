@@ -102,14 +102,34 @@ impl ProjectBinding {
     /// than treated as an inventory error. An entry that exists but cannot be
     /// read is present: callers protect it rather than skipping it.
     pub fn common_dir_present(&self) -> bool {
-        match std::fs::metadata(&self.canonical_common_dir) {
-            Ok(_) => true,
-            Err(error) => !matches!(
+        !absent(&self.canonical_common_dir)
+    }
+
+    /// Whether the verified primary checkout still exists. A temporary
+    /// checkout can vanish while its separate Git common directory survives;
+    /// the binding then has no project root to settle or poll. A binding with
+    /// no checkout hint (a bare or common-only project) has no checkout to
+    /// have vanished and is always present by this check. An entry that exists
+    /// but cannot be read is present: callers protect it rather than skipping.
+    pub fn primary_checkout_present(&self) -> bool {
+        self.canonical_primary_checkout_hint
+            .as_deref()
+            .is_none_or(|root| !absent(root))
+    }
+}
+
+/// A path is absent only when the filesystem proves it is gone. A permission
+/// or I/O failure leaves presence unknown, so callers protect the entry rather
+/// than treating it as vanished.
+fn absent(path: &Path) -> bool {
+    matches!(
+        std::fs::metadata(path),
+        Err(error)
+            if matches!(
                 error.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ),
-        }
-    }
+            )
+    )
 }
 
 impl PartialEq for ProjectBinding {
@@ -276,9 +296,10 @@ pub fn registered_gc_projects(roots: &Roots) -> Result<Vec<ProjectBinding>, Conf
 pub enum GcProjectStatus {
     Git(ProjectBinding),
     Transient(PathBuf),
-    /// The binding's common directory is gone. `record_modified_ns` dates the
+    /// The binding's project root is gone: either its common directory or its
+    /// verified primary checkout has vanished. `record_modified_ns` dates the
     /// last host record of the project, the only age evidence left once the
-    /// directory itself is unavailable.
+    /// root itself is unavailable.
     Vanished {
         binding: ProjectBinding,
         record_modified_ns: i128,
@@ -311,7 +332,7 @@ pub fn lookup_gc_project(
         return Err(ConfigError::InvalidProjectBinding);
     }
     let binding = binding_from_record(record)?;
-    if !binding.common_dir_present() {
+    if !binding.common_dir_present() || !binding.primary_checkout_present() {
         Ok(GcProjectStatus::Vanished {
             binding,
             record_modified_ns: metadata.modified_ns,
@@ -325,8 +346,8 @@ pub fn lookup_gc_project(
     }
 }
 
-/// Retirement of bindings whose common directory is gone. A preview names
-/// what apply would retire. Per-binding read or removal failures are warnings:
+/// Retirement of bindings whose project root is gone. A preview names what
+/// apply would retire. Per-binding read or removal failures are warnings:
 /// one unreadable registration never aborts the pass, which fails only when the
 /// registry itself cannot be enumerated.
 #[derive(Debug, Default)]
@@ -335,9 +356,10 @@ pub struct Retirement {
     pub warnings: Vec<String>,
 }
 
-/// Retire bindings whose common directory is gone and whose record has not
-/// changed for `idle_seconds`. A vanished directory leaves the record's last
-/// modification as the only age evidence; preview reports without removing.
+/// Retire bindings whose common directory or verified primary checkout is
+/// gone and whose record has not changed for `idle_seconds`. A vanished root
+/// leaves the record's last modification as the only age evidence; preview
+/// reports without removing.
 pub fn retire_vanished_projects(
     roots: &Roots,
     idle_seconds: u64,
@@ -369,7 +391,9 @@ pub fn retire_vanished_projects(
         else {
             continue;
         };
-        if now_ns.saturating_sub(record_modified_ns) < idle_ns || binding.common_dir_present() {
+        if now_ns.saturating_sub(record_modified_ns) < idle_ns
+            || (binding.common_dir_present() && binding.primary_checkout_present())
+        {
             continue;
         }
         if !dry_run {
@@ -1598,6 +1622,81 @@ mod tests {
             vec![binding]
         );
         assert!(registered_projects(&roots).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_vanished_primary_checkout_is_absent_but_a_common_only_binding_is_present() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let base = canonical_base(&temp);
+        let common = base.join("external.git");
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let checkout = base.join("checkout");
+        fs::create_dir_all(&checkout).unwrap();
+        let binding = bind_project(
+            &roots,
+            ProjectLocation::from_verified_primary_checkout(&common, &checkout).unwrap(),
+        )
+        .unwrap();
+        assert!(binding.common_dir_present());
+        assert!(binding.primary_checkout_present());
+
+        fs::remove_dir_all(&checkout).unwrap();
+        assert!(
+            binding.common_dir_present(),
+            "the separate common dir survives"
+        );
+        assert!(!binding.primary_checkout_present());
+
+        let bare = base.join("bare.git");
+        fs::create_dir_all(bare.join("objects")).unwrap();
+        fs::write(bare.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let common_only = bind_project(&roots, ProjectLocation::new(&bare).unwrap()).unwrap();
+        assert_eq!(common_only.primary_checkout_hint(), None);
+        assert!(
+            common_only.primary_checkout_present(),
+            "a binding with no checkout hint has no checkout to have vanished"
+        );
+    }
+
+    #[test]
+    fn gc_retires_a_binding_whose_primary_checkout_vanished_while_its_common_dir_survives() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let base = canonical_base(&temp);
+        let common = base.join("external.git");
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let checkout = base.join("checkout");
+        fs::create_dir_all(&checkout).unwrap();
+        let binding = bind_project(
+            &roots,
+            ProjectLocation::from_verified_primary_checkout(&common, &checkout).unwrap(),
+        )
+        .unwrap();
+        fs::remove_dir_all(&checkout).unwrap();
+        assert!(binding.common_dir_present());
+        assert!(!binding.primary_checkout_present());
+        assert!(matches!(
+            lookup_gc_project(&roots, binding.project_id()).unwrap(),
+            GcProjectStatus::Vanished { .. }
+        ));
+
+        let record = project_binding_dir(roots.state.as_path(), binding.project_id()).join(RECORD);
+        fs::File::open(&record)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(
+            retire_vanished_projects(&roots, 3600, false)
+                .unwrap()
+                .retired,
+            vec![binding],
+            "the unregister command retires a vanished checkout with a surviving common dir"
+        );
+        assert!(registered_projects(&roots).unwrap().is_empty());
+        assert!(common.exists());
     }
 
     #[test]

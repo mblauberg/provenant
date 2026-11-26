@@ -111,8 +111,11 @@ Silence remains distinct from the guardian's existing supervisor-signal stop rea
 
 `provenant tick` queues recovery for settling and unattended attempts in every
 registered project from one bounded process census per pass; a binding whose
-common directory is gone is skipped, and a failed project never blocks the
-others. A sealed exit stays settlement evidence when the census
+common directory or verified primary checkout is gone is reported once with
+`PROJECT_ROOT_VANISHED` and the `provenant gc --apply` unregister command, then
+skipped, and a failed project never blocks the others. A temporary checkout can
+vanish while its separate Git common directory survives: that project has no
+root to settle and is skipped without failing the task. A sealed exit stays settlement evidence when the census
 is unavailable. Unknown attempts get proof-only recovery: the original guardian,
 custody and attempt holder locks and a fresh empty worktree census must prove
 absence before same-boot settlement, and unknown evidence never clears custody.
@@ -338,8 +341,12 @@ standalone tools stay under the lane profile. The client needs loopback access.
 Host confinement inventories registered projects, worktree allocations, owned
 worktrees and writer custody. A binding whose common directory is gone protects
 nothing and is skipped by launch confinement, settlement and forge polling. A
-present project whose layout cannot be read warns through launch preparation and
-protects that project's root, so it never refuses an unrelated launch. An
+binding whose verified primary checkout has vanished while its common directory
+survives is skipped by settlement and forge polling, which report it once with
+`PROJECT_ROOT_VANISHED`, the `provenant gc --apply` unregister command, and no
+per-tick task failure. A present project whose layout cannot be read warns
+through launch preparation and protects that project's root, so it never refuses
+an unrelated launch. An
 unusable sibling entry is protected as a denied root and reported through the
 host warning channel with its path and reason; it never refuses an unrelated
 launch. If the entry's directory cannot be named, inventory refuses with that
