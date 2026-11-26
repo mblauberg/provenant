@@ -14,3 +14,7 @@ pub(crate) mod provider;
 #[allow(dead_code)]
 #[path = "process_os/provider_unsupported.rs"]
 mod provider_unsupported_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "process_os/test_support.rs"]
+pub(crate) mod test_support;

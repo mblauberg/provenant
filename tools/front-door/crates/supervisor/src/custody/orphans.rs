@@ -1025,23 +1025,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn system_probe_finds_attempt_mark_after_process_changes_session() -> TestResult {
-        use std::os::unix::process::CommandExt;
         let scope = scope();
-        let mut command = std::process::Command::new("/bin/sleep");
-        command
-            .arg("30")
-            .env(crate::custody::ATTEMPT_MARK_ENV, scope.attempt.to_string());
-        // SAFETY: setsid is async-signal-safe and affects only the spawned child.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    Err(std::io::Error::last_os_error())
-                } else {
-                    Ok(())
-                }
-            });
-        }
-        let mut child = command.spawn()?;
+        let mut child = crate::process_os::test_support::spawn_setsid_with_attempt_mark(
+            &scope.attempt.to_string(),
+        )?;
         let attributed = SystemProbe.in_attempt_attribution(i64::from(child.id()), &scope);
         let _ = child.kill();
         let _ = child.wait();
