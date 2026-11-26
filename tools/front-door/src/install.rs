@@ -2453,53 +2453,22 @@ fn verify_smoke_with(
     // canonical common directory, and the scratch may not survive the run. An
     // unresolved binding is reported by cleanup, never hidden.
     let binding = smoke_project_binding(state_dir, project.path());
-    let program = program.as_os_str().to_owned();
+    let owned_program = program.as_os_str().to_owned();
     let graph = verify_graph_name();
-    let mut run = vec![
-        program.clone(),
-        "--project".into(),
-        project.path().as_os_str().to_owned(),
-        "--state-dir".into(),
-        state_dir.as_os_str().to_owned(),
-        "--json".into(),
-        "run".into(),
-        "smoke".into(),
-        "--name".into(),
-        graph.clone().into(),
-    ];
-    // The writer node needs a linked worktree. Locally the launch creates one
-    // on a branch of the fixture; on a peer the branch and base are carried
-    // across as peer-owned provisioning intent, so the peer creates its own
-    // worktree instead of inheriting this host's scratch path.
-    run.extend([
-        "--branch".into(),
-        format!("smoke/{graph}").into(),
-        "--base".into(),
-        "HEAD".into(),
-    ]);
-    if let Some(host) = &args.host {
-        run.extend(["--host".into(), host.into()]);
-    }
-    if let Some(route) = &args.route {
-        run.extend(["--route".into(), route.into()]);
-    }
-    for setting in &args.set {
-        if setting.starts_with("worktree=") || setting.starts_with("diff_base=") {
-            continue;
-        }
-        run.extend(["--set".into(), setting.into()]);
-    }
-    // The review nodes inspect the fixture's change; give them the base the
-    // fixture committed before it, not the writer's start point.
-    run.extend([
-        "--set".into(),
-        format!("diff_base={}", project.base()).into(),
-    ]);
+    let run = smoke_run_argv(
+        program,
+        project.path(),
+        state_dir,
+        args,
+        &graph,
+        project.base(),
+        false,
+    );
     let outcome = match runner.execute(&run, None, 1_048_576, 3600) {
         Ok(launched) => {
             let wait = runner.execute(
                 &[
-                    program.clone(),
+                    owned_program.clone(),
                     "--project".into(),
                     project.path().as_os_str().to_owned(),
                     "--state-dir".into(),
@@ -2516,7 +2485,7 @@ fn verify_smoke_with(
             );
             let status = runner.execute(
                 &[
-                    program,
+                    owned_program,
                     "--project".into(),
                     project.path().as_os_str().to_owned(),
                     "--state-dir".into(),
@@ -2584,6 +2553,64 @@ fn report_smoke_cleanup<T>(
     }
 }
 
+/// The `run smoke` arguments shared by the real verify and its dry-run
+/// preview. The preview omits `--name` and asks for `--explain`, but it must
+/// otherwise place the writer exactly as the launch does: a branch and a base
+/// are the writer's start point, and without them the launch falls back to the
+/// caller checkout (#4103).
+fn smoke_run_argv(
+    program: &Path,
+    project: &Path,
+    state_dir: &Path,
+    args: &cli::Upgrade,
+    graph: &str,
+    base: &str,
+    explain: bool,
+) -> Vec<std::ffi::OsString> {
+    let mut argv = vec![
+        program.as_os_str().to_owned(),
+        "--project".into(),
+        project.as_os_str().to_owned(),
+        "--state-dir".into(),
+        state_dir.as_os_str().to_owned(),
+        "--json".into(),
+        "run".into(),
+        "smoke".into(),
+    ];
+    if explain {
+        argv.push("--explain".into());
+    } else {
+        argv.extend(["--name".into(), graph.into()]);
+    }
+    // The writer node needs a linked worktree. Locally the launch creates one
+    // on a branch of the fixture; on a peer the branch and base are carried
+    // across as peer-owned provisioning intent, so the peer creates its own
+    // worktree instead of inheriting this host's scratch path.
+    argv.extend([
+        "--branch".into(),
+        format!("smoke/{graph}").into(),
+        "--base".into(),
+        "HEAD".into(),
+    ]);
+    if let Some(host) = &args.host {
+        argv.extend(["--host".into(), host.into()]);
+    }
+    if let Some(route) = &args.route {
+        argv.extend(["--route".into(), route.into()]);
+    }
+    for setting in &args.set {
+        if setting.starts_with("worktree=") || setting.starts_with("diff_base=") {
+            continue;
+        }
+        argv.extend(["--set".into(), setting.into()]);
+    }
+    // The review nodes inspect the fixture's change; give them the base the
+    // fixture committed before it, not the writer's start point. The host owns
+    // this binding, so a caller-supplied diff_base never reaches the launch.
+    argv.extend(["--set".into(), format!("diff_base={base}").into()]);
+    argv
+}
+
 fn preview_smoke(
     runner: &UpgradeRunner,
     program: &Path,
@@ -2592,33 +2619,16 @@ fn preview_smoke(
 ) -> Result<Vec<u8>, String> {
     let project = smoke_project(runner, &std::env::temp_dir())?;
     let binding = smoke_project_binding(state_dir, project.path());
-    let mut argv = vec![
-        program.as_os_str().to_owned(),
-        "--project".into(),
-        project.path().as_os_str().to_owned(),
-        "--state-dir".into(),
-        state_dir.as_os_str().to_owned(),
-        "--json".into(),
-        "run".into(),
-        "smoke".into(),
-        "--explain".into(),
-    ];
-    if let Some(host) = &args.host {
-        argv.extend(["--host".into(), host.into()]);
-    }
-    if let Some(route) = &args.route {
-        argv.extend(["--route".into(), route.into()]);
-    }
-    for setting in &args.set {
-        if setting.starts_with("diff_base=") {
-            continue;
-        }
-        argv.extend(["--set".into(), setting.into()]);
-    }
-    argv.extend([
-        "--set".into(),
-        format!("diff_base={}", project.base()).into(),
-    ]);
+    let graph = verify_graph_name();
+    let argv = smoke_run_argv(
+        program,
+        project.path(),
+        state_dir,
+        args,
+        &graph,
+        project.base(),
+        true,
+    );
     let outcome = runner.execute(&argv, None, 1_048_576, 60);
     report_smoke_cleanup(
         outcome,

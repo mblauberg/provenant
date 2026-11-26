@@ -154,7 +154,10 @@ once and applied to every smoke node. Adding `--dry-run` previews it without
 upgrading.
 The preview runs the currently installed binary's own `run smoke --explain`, not
 the candidate, so it shows the graph shape and route resolution that binary
-would launch; the candidate's graph is exercised only after it installs. The
+would launch; the candidate's graph is exercised only after it installs. It
+passes the same writer branch and base as the real verify, so the previewed
+writer starts from the fixture rather than falling back to the caller checkout.
+The
 scratch fixture commits a base and a fixture change, and both verification modes
 bind that commit as the review nodes' `diff_base`, so the review nodes have a
 non-empty range; its write node runs in a worktree the verification creates on a
