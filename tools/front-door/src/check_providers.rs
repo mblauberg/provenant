@@ -1,6 +1,7 @@
 //! Provider checks compose routing inventory and the ordinary graph/run owner.
 use crate::fabric;
 use provenant_cli::{Globals, check::Providers};
+use provenant_config::overlays::OverlayWarning;
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, Pause};
 use provenant_fabric_runtime::{
@@ -585,14 +586,45 @@ fn status_text(status: CompatibilityStatus) -> &'static str {
     }
 }
 
+/// An active `[[adapter_capabilities]]` entry, printed as an info line.
+#[derive(Clone, Debug, Serialize)]
+struct OverlayLine {
+    adapter: String,
+    disabled: Vec<String>,
+    reason: Option<String>,
+    layer: String,
+    origin: Option<String>,
+}
+
+/// A declared limitation, printed for every adapter that carries one.
+#[derive(Clone, Debug, Serialize)]
+struct CaveatLine {
+    adapter: String,
+    code: String,
+    note: String,
+    source: String,
+}
+
+/// The version findings and the owner data that explains them.
+#[derive(Serialize)]
+struct CompatibilityReport {
+    findings: Vec<Finding>,
+    warnings: Vec<OverlayWarning>,
+    overlays: Vec<OverlayLine>,
+    caveats: Vec<CaveatLine>,
+}
+
 /// One finding per installed adapter whose declared compatibility status is
 /// unsupported or broken, resolved through the shared policy table.
 fn compatibility_findings(
     state: &Path,
     project: &Path,
     providers: &BTreeMap<String, provenant_config::ProviderSettings>,
-) -> Result<Vec<Finding>, Box<dyn std::error::Error>> {
-    let (table, _warnings) = compatibility::CompatibilityTable::effective(state, Some(project));
+) -> Result<CompatibilityReport, Box<dyn std::error::Error>> {
+    let (table, mut warnings) = compatibility::CompatibilityTable::effective(state, Some(project));
+    let (overlay, overlay_warnings) =
+        provenant_config::adapter_capabilities::effective(state, Some(project));
+    warnings.extend(overlay_warnings);
     let project_key = provenant_config::ports::project_key_for(project).unwrap_or_default();
     let policy: Policy = provenant_config::policy::read(state, &project_key, &BTreeMap::new());
     let Ok(executor) = SystemExecutor::new(1) else {
@@ -658,7 +690,37 @@ fn compatibility_findings(
             blocks,
         });
     }
-    Ok(findings)
+    let mut overlays = Vec::new();
+    let mut caveats = Vec::new();
+    for spec in provenant_records::ADAPTER_SPECS {
+        if let Some(entry) = overlay.entry(spec.identity.name) {
+            overlays.push(OverlayLine {
+                adapter: spec.identity.name.to_owned(),
+                disabled: entry
+                    .disable
+                    .iter()
+                    .map(|item| item.key().to_owned())
+                    .collect(),
+                reason: entry.reason.clone(),
+                layer: entry.source.layer.as_str().to_owned(),
+                origin: entry.source.origin.clone(),
+            });
+        }
+        for caveat in spec.capabilities.caveats {
+            caveats.push(CaveatLine {
+                adapter: spec.identity.name.to_owned(),
+                code: caveat.code.to_owned(),
+                note: caveat.note.to_owned(),
+                source: caveat.source.to_owned(),
+            });
+        }
+    }
+    Ok(CompatibilityReport {
+        findings,
+        warnings,
+        overlays,
+        caveats,
+    })
 }
 
 #[derive(Serialize)]
@@ -667,6 +729,9 @@ struct Report {
     settings: Settings,
     rows: Vec<Row>,
     findings: Vec<Finding>,
+    overlay_warnings: Vec<OverlayWarning>,
+    overlays: Vec<OverlayLine>,
+    caveats: Vec<CaveatLine>,
 }
 impl Report {
     fn exit(&self) -> u8 {
@@ -687,7 +752,7 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
         )?;
         let mut rows = select(inventory(&resolved.roots)?, &args.routes)?;
         let config = provenant_cli::config_reads::read_for(&resolved.roots, "check providers")?;
-        let findings = compatibility_findings(
+        let compatibility = compatibility_findings(
             resolved.roots.state.as_ref(),
             &resolved.project,
             &config.providers,
@@ -725,7 +790,10 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
             live: args.live,
             settings,
             rows,
-            findings,
+            findings: compatibility.findings,
+            overlay_warnings: compatibility.warnings,
+            overlays: compatibility.overlays,
+            caveats: compatibility.caveats,
         })
     })();
     match result {
@@ -773,6 +841,25 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
                     row.quota.source,
                     row.pools.join(","),
                     row.observation.as_deref().unwrap_or("-")
+                );
+            }
+            for warning in &report.overlay_warnings {
+                human += &format!("warning: {warning}\n");
+            }
+            for overlay in &report.overlays {
+                human += &format!(
+                    "info: adapter capabilities entry adapter={} disabled={} reason={} layer={} origin={}\n",
+                    overlay.adapter,
+                    overlay.disabled.join(","),
+                    overlay.reason.as_deref().unwrap_or("-"),
+                    overlay.layer,
+                    overlay.origin.as_deref().unwrap_or("-")
+                );
+            }
+            for caveat in &report.caveats {
+                human += &format!(
+                    "info: caveat adapter={} code={} note={} source={}\n",
+                    caveat.adapter, caveat.code, caveat.note, caveat.source
                 );
             }
             for finding in &report.findings {

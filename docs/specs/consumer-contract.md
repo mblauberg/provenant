@@ -50,7 +50,9 @@ evolving, and so is human output, including printed next-step command lines:
 scripts read `--json`. `provenant adapter capabilities --json` projects the
 declared capability matrix, harness compatibility and measured latency in the
 result envelope's `data`; every capability declaration carries a reason and a
-source.
+source. The effective overlay, per-field gap actions and sourced settings are
+projected with it. Repeatable `--adapter ID` narrows the rows (an unknown id
+warns and is skipped) and `--no-probe` leaves compatibility `version_unread`.
 
 - Why: a script that drives Provenant needs a fixed grammar and one parseable form.
 - Owner: `crates/cli/src/grammar.rs`
