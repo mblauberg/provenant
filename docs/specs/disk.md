@@ -197,7 +197,8 @@ The lease record does not carry a holder name, so neither does the failure.
 
 Every gc report lists the candidates it deliberately kept: path, class,
 observed bytes (or an explicit unknown), and the reason — live holder,
-uncertain custody, retained evidence, unmerged work, held Cargo lock, recent
+uncertain custody, an undecodable attempt record awaiting liveness disproof,
+retained evidence, unmerged work, held Cargo lock, recent
 write and similar. Bytes already measured for attempt scratch and Cargo
 targets are carried into those rows; where only a class total was measured,
 the row reports that total. A measurement that cannot report bytes says so

@@ -235,6 +235,20 @@ settlement checks still apply.
   lock must remain an exclusion boundary during concurrent release (#3844).
 - Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`
 
+A record that no longer decodes is classified as unreadable, not as proof that custody is held.
+Reconciliation acquires writer exclusion and releases the lease only when the reservation
+classifies as absent and supervisor evidence proves quiescence. A completed exit with no unresolved
+cleanup or retained custody proves same-boot quiescence; an exit still settling does not. Without a
+completed exit, a recorded holder must be proved gone (or no holder record may exist). The raw bytes
+and their typed source (path, schema, error) are sealed under
+`quarantine/` before the reservation is cleared; the database row keeps its original bytes and is
+never deleted. Both reconciliation and `release attempt:ID` emit the same host-side typed warning
+carrying that source. An unknown holder keeps the fence, so a decode failure alone never releases
+custody (#3829).
+- Why: format drift must not turn a dead attempt into a permanent fence, but custody remains a real
+  boundary, so only positive absence evidence may clear it.
+- Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`, `crates/cli/src/run/reconcile.rs`
+
 The lane declares its result with `provenant declare --file <path>|--stdin`, exactly one of which is
 required. The command reads `PROVENANT_PARENT_ATTEMPT_ID`, validates the schema v2 JSON through
 `Handoff::from_json`, and sends one declaration over the attempt's relay socket. A field error comes
@@ -243,7 +257,8 @@ carries a sequence and a `request_id`: replaying the same id with the same bytes
 receipt, while the same id with different bytes is a conflict. Declarations close at settlement and
 the last accepted declaration wins; rejected submissions are journalled but never displace an
 accepted one. Prose, fenced blocks and an assistant-written `handoff.json` are never read: none can
-settle a lane or change its sealed snapshot.
+settle a lane or change its sealed snapshot. This replaces the prior output-fence parsing and ordering
+tolerances: when no declaration is accepted, output prose is not a fallback result (#4020).
 - Why: one command and one journal give the host a single auditable declaration channel instead of
   parsing tolerances over model prose; immediate field errors let a lane correct itself in turn.
 - Owner: `crates/cli/src/declaration.rs`, `crates/run/src/declaration.rs`,

@@ -20,7 +20,12 @@ read-only review: it holds no Git work, so a reservation left by its guardian is
 and reconciliation settles it with a typed warning ([outcome before release](run-settlement.md#outcome-before-release)).
 Reconciliation reports released custody only after exclusion and native
 absence evidence prove it safe; an unknown or live holder retains custody, and uncertain custody
-and unreadable reservations warn while reconciliation continues. Writer-bind refusals identify
+and unreadable reservations warn while reconciliation continues. An attempt whose stored record no
+longer decodes is not held merely because the decode failed: once writer exclusion is acquired and
+the recorded holder is proved gone with no settling exit, reconciliation preserves the bytes under
+`quarantine/` and releases the lease with a typed warning naming the source; `release attempt:ID`
+offers the same safety valve. Admission refusals keep fixed text and never carry a record path.
+Writer-bind refusals identify
 the durable lease holder, branch, worktree, reservation age (from its last durable update) and
 observed liveness.
 - Why: shared work must remain possible without holding coordination locks across external work.
