@@ -78,7 +78,10 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         ],
     );
     let narrow = AdapterSpec {
-        skills: None,
+        launch: provenant_records::AdapterLaunch {
+            skill_location: None,
+            ..ADAPTER_SPECS[2].launch
+        },
         capabilities: provenant_records::Capabilities {
             launch: LaunchCapabilities {
                 write: provenant_records::AdapterFact::unsupported(

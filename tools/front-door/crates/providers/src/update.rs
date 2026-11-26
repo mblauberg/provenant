@@ -248,7 +248,9 @@ fn command(provider: &str, executable: &Path, setting: &ProviderUpdate) -> Optio
         }
         ProviderUpdate::Enabled(true) => {}
     }
-    let update = provenant_records::AdapterSpec::get(provider)?.update;
+    let update = provenant_records::AdapterSpec::get(provider)?
+        .identity
+        .update;
     match update {
         provenant_records::UpdateCommand::None => None,
         provenant_records::UpdateCommand::Subcommand(subcommand) => {
@@ -1224,6 +1226,19 @@ mod tests {
             )
             .ok_or("override")?,
             vec![OsString::from("custom"), "update".into()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn declared_update_subcommand_comes_from_the_identity_group()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // With no explicit override, the updater comes from the adapter's
+        // `identity` group, where the spec refactor moved the declared command.
+        let binary = Path::new("/usr/local/bin/claude");
+        assert_eq!(
+            command("claude", binary, &ProviderUpdate::Enabled(true)).ok_or("no updater")?,
+            vec![binary.as_os_str().to_os_string(), OsString::from("update")]
         );
         Ok(())
     }

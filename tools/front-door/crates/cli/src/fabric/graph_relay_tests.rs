@@ -2675,9 +2675,11 @@ mod panel_tests {
         let config = RoutingConfig::default();
         let family = provenant_records::AdapterSpec::get("codex")
             .ok_or("adapter")?
+            .identity
             .family;
         let named_family = provenant_records::AdapterSpec::get("claude")
             .ok_or("adapter")?
+            .identity
             .family;
         let availability: Vec<_> = ["codex", "claude"]
             .into_iter()
@@ -2757,6 +2759,7 @@ mod panel_tests {
                 .map_err(|error| error.to_string())?;
                 Ok(provenant_records::AdapterSpec::get(&result.adapter)
                     .unwrap()
+                    .identity
                     .family
                     .to_owned())
             },

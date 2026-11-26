@@ -2298,8 +2298,10 @@ mod tests {
         assert!(
             !provenant_records::AdapterSpec::get("command")
                 .expect("command")
+                .capabilities
                 .launch
                 .write
+                .value
         );
     }
 
@@ -2497,8 +2499,10 @@ mod tests {
                 assert!(
                     !provenant_records::AdapterSpec::get(id)
                         .expect("registered adapter spec")
+                        .capabilities
                         .launch
                         .write
+                        .value
                 );
                 continue;
             }

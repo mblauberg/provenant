@@ -1138,8 +1138,10 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
             assert!(
                 !provenant_records::AdapterSpec::get(entry.adapter.id())
                     .unwrap()
+                    .capabilities
                     .launch
                     .model
+                    .value
             );
         }
     }

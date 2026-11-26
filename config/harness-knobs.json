@@ -164,6 +164,18 @@
       "values": ["report", "steer", "retry", "fail"],
       "default": "report",
       "effect": "Opt-in action after the stall is reported: report warns only; steer queues a steering turn; retry stops the provider and advances to the next route within the retry budget; fail stops it with a typed provider_stalled cause. All actions warn first."
+    },
+    "version_probe": {
+      "type": "bool",
+      "default": true,
+      "effect": "Probe the installed provider version from local executable metadata, cached by path, mtime and length with a bounded timeout; false skips the probe and leaves the version unknown."
+    },
+    "version_probe_timeout_seconds": {
+      "type": "int",
+      "min": 1,
+      "max": 60,
+      "default": 4,
+      "effect": "Time allowed for a local version probe before it is abandoned. Out-of-range values warn and use the compiled four-second default; the effective value and source appear in the warning."
     }
   },
   "host_run_settings": {
