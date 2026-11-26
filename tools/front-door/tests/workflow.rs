@@ -1031,7 +1031,10 @@ fn session_save_discovery_restart() -> Result {
         let hook_session = format!("{client}-hook-first");
         let identity = call(&rig, &["fabric", "identity"], 0)?["data"].clone();
         let file = rig.root.join("checkpoint.md");
-        std::fs::write(&file, "# Goal\nExact chair identity.\n")?;
+        // A template-conformant fixture keeps the rebind assertion about the
+        // rebind itself: the new schema advisories stay out of its warnings.
+        let checkpoint = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"Exact chair identity\"\n  grants: []\n  obligations: []\n  waiting_on_owner: []\n---\n# Goal\nExact chair identity.\n\n## Intent\nConfirm the chair identity across both clients.\n";
+        std::fs::write(&file, checkpoint)?;
         call(
             &rig,
             &[
@@ -1103,7 +1106,7 @@ fn session_save_discovery_restart() -> Result {
         // Each CLI call is a fresh process. Reads leave every state file unchanged.
         let before = state_snapshot(&rig.state)?;
         let shown = call(&rig, &["workflow", "session", "show", session.as_str()], 0)?;
-        assert_eq!(shown["data"]["markdown"], "# Goal\nExact chair identity.\n");
+        assert_eq!(shown["data"]["markdown"], checkpoint);
         call(
             &rig,
             &[
@@ -1295,9 +1298,18 @@ fn checkpoint_warning_tracks_the_project_soft_budget() -> Result {
     };
     let check = |bytes: usize, warns: bool| -> Result<Value> {
         let saved = save(bytes)?;
+        // Issue #4029 adds standing, Intent and template-body advisories on
+        // every non-conformant save; this test pins the configured soft
+        // budget, so predicate on that advisory instead of all warnings.
         // Spec: docs/specs/cli.md#warnings-are-typed-values
         let warnings = saved["warnings"].as_array().ok_or("envelope warnings")?;
-        assert_eq!(warnings.is_empty(), !warns);
+        let over_soft_budget = warnings.iter().any(|warning| {
+            warning["code"].as_str() == Some(provenant_records::warning::SESSION_ADVISORY.as_str())
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("the soft budget is"))
+        });
+        assert_eq!(over_soft_budget, warns, "{warnings:?}");
         Ok(saved)
     };
 
@@ -1383,7 +1395,10 @@ fn session_save_reads_stdin_and_never_rewrites_its_source() -> Result {
 fn session_save_warns_once_only_when_disk_is_low() -> Result {
     let rig = TestRig::new()?;
     let file = rig.root.join("checkpoint.md");
-    std::fs::write(&file, "# Goal\nship it\n")?;
+    // The disk advisory is the only warning this test counts, so the fixture
+    // carries the standing record and Intent that issue #4029 requires.
+    let checkpoint = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"Ship it\"\n  grants: []\n  obligations: []\n  waiting_on_owner: []\n---\n# Goal\nship it\n\n## Intent\nShip it because the review is done.\n";
+    std::fs::write(&file, checkpoint)?;
     let file = file.to_string_lossy().into_owned();
     // Explicit critical threshold keeps the ready case independent of the
     // host's default 2 GiB threshold; the maximum floor forces pressure.
@@ -1701,24 +1716,30 @@ fn rev5_checkpoint_save_names_the_standing_and_intent_gaps() -> Result {
         ],
         0,
     )?;
+    // Spec: docs/specs/cli.md#warnings-are-typed-values: advisories travel as
+    // typed values in the envelope, not as bare strings in the data payload.
     let warnings = saved["warnings"].as_array().ok_or("warnings envelope")?;
     assert_eq!(warnings.len(), 2, "{warnings:?}");
     assert!(
-        warnings[0]
+        warnings[0]["message"]
             .as_str()
             .is_some_and(|w| w.contains("provenant_standing")),
         "{warnings:?}"
     );
     assert!(
-        warnings[1]
+        warnings[1]["message"]
             .as_str()
             .is_some_and(|w| w.contains("## Intent")),
         "{warnings:?}"
     );
     assert!(
-        warnings
-            .iter()
-            .all(|w| !w.as_str().is_some_and(|text| text.contains("bytes")))
+        warnings.iter().all(|w| {
+            w["code"].as_str() == Some(provenant_records::warning::SESSION_ADVISORY.as_str())
+                && !w["message"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("bytes"))
+        }),
+        "{warnings:?}"
     );
     let shown = call(&rig, &["workflow", "session", "show", "rev5"], 0)?;
     assert_eq!(shown["data"]["markdown"], text);
