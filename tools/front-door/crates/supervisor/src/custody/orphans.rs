@@ -10,7 +10,9 @@
 //! sandbox. Process group, session, ancestry and working directory grant
 //! nothing. A PID that is gone, or now names an unrelated process, needs
 //! nothing. A named PID that cannot be proven is left alone and named in the
-//! settled exit.
+//! settled exit. The attempt's durable group/session attribution can name a
+//! process that left the recorded tree, but grants no signal authority: it is
+//! reported for the chair, never signalled.
 use super::*;
 
 /// What recovery did with each process the unresolved exit named.
@@ -24,17 +26,26 @@ pub struct OrphanReport {
     /// Proven processes that outlived TERM and KILL. While any remain the
     /// exit stays unresolved and the fence holds.
     pub survivors: Vec<ProcessIdentity>,
+    /// Live processes found only through the attempt's durable group/session
+    /// attribution. They are named for the chair but never signalled: neither
+    /// a recorded identity nor an OS mark proves they belong to this attempt.
+    pub reported: Vec<i64>,
 }
 
 /// The two platform facts recovery needs beyond observation.
 pub(crate) trait OrphanProbe {
     /// Whether this live PID carries the attempt's own sandbox mark.
     fn in_attempt_sandbox(&self, pid: i64, scope: &Scope) -> bool;
+    /// Whether this live PID carries the attempt's inherited attribution mark.
+    /// Unlike a group or session, the mark survives a double-fork and setsid,
+    /// but it still grants no signal authority on its own.
+    fn in_attempt_attribution(&self, pid: i64, scope: &Scope) -> bool;
     /// Deliver TERM (or KILL) to exactly this identity; false when nothing was sent.
     fn signal(&self, identity: &ProcessIdentity, escalation: bool) -> bool;
 }
 
 pub(super) struct SystemProbe;
+
 impl OrphanProbe for SystemProbe {
     #[cfg(target_os = "macos")]
     fn in_attempt_sandbox(&self, pid: i64, scope: &Scope) -> bool {
@@ -51,6 +62,25 @@ impl OrphanProbe for SystemProbe {
     #[cfg(not(target_os = "macos"))]
     fn in_attempt_sandbox(&self, _: i64, _: &Scope) -> bool {
         false
+    }
+    fn in_attempt_attribution(&self, pid: i64, scope: &Scope) -> bool {
+        #[cfg(target_os = "linux")]
+        let bytes = std::fs::read(format!("/proc/{pid}/environ")).ok();
+        #[cfg(target_os = "macos")]
+        let bytes = crate::process_os::census::darwin_process_environment(pid);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let bytes: Option<Vec<u8>> = {
+            let _ = pid;
+            None
+        };
+        let Some(bytes) = bytes else {
+            return false;
+        };
+        let needle =
+            format!("{}={}\0", crate::custody::ATTEMPT_MARK_ENV, scope.attempt).into_bytes();
+        bytes
+            .windows(needle.len())
+            .any(|window| window == needle.as_slice())
     }
     fn signal(&self, identity: &ProcessIdentity, escalation: bool) -> bool {
         crate::process_os::provider::signal_identity(identity, escalation)
@@ -133,7 +163,13 @@ impl Recovery {
         )?)?;
         self.reservation = resolved;
 
-        let evidence = if report.unproven.is_empty() {
+        // A report-only process is named in the exit just like an unproven
+        // PID, so status keeps a handle on it after the guardian is gone.
+        let mut leftovers = report.unproven.clone();
+        leftovers.extend(report.reported.iter().copied());
+        leftovers.sort_unstable();
+        leftovers.dedup();
+        let evidence = if leftovers.is_empty() {
             SettlementEvidence::OrphansEnded
         } else {
             SettlementEvidence::LeftoverNotProven
@@ -142,7 +178,7 @@ impl Recovery {
             .as_object_mut()
             .ok_or(CustodyError::InvalidRecord)?;
         fields.insert("unresolved_cleanup".into(), false.into());
-        fields.insert("unresolved_pids".into(), report.unproven.clone().into());
+        fields.insert("unresolved_pids".into(), leftovers.into());
         fields.insert("unresolved_identities".into(), Vec::<u8>::new().into());
         fields.insert(
             "settlement_evidence".into(),
@@ -236,6 +272,51 @@ impl Recovery {
         proven.retain(|identity| !live.contains(identity));
         report.stopped = proven;
         report.survivors = live;
+        // Durable attribution names processes that left the recorded tree
+        // without proving them: group/session for a lane with no OS mark, and
+        // the mark inherited across fork, exec and setsid. Neither grants
+        // signal authority, so these are report-only; a contained lane's
+        // sandbox-marked escapees are reaped by the scan above instead.
+        let reportable = if same_boot {
+            self.reservation.attribution.as_ref()
+        } else {
+            None
+        };
+        if let Some(attribution) = reportable {
+            let accounted: std::collections::BTreeSet<i64> = report
+                .stopped
+                .iter()
+                .chain(report.survivors.iter())
+                .map(|identity| identity.pid)
+                .chain(report.unproven.iter().copied())
+                .chain(
+                    self.reservation
+                        .guardian
+                        .iter()
+                        .map(|identity| identity.pid),
+                )
+                .collect();
+            if let Ok(census) = observer.census(crate::census::MAX_CENSUS_ENTRIES) {
+                for fact in census.facts() {
+                    if fact.zombie || accounted.contains(&fact.identity.pid) {
+                        continue;
+                    }
+                    if fact.identity.boot != attribution.boot {
+                        continue;
+                    }
+                    let by_group = !attribution.contained
+                        && fact.identity.group_id == attribution.group_id
+                        && fact.identity.session_id == attribution.session_id;
+                    let by_mark =
+                        probe.in_attempt_attribution(fact.identity.pid, &self.reservation.scope);
+                    if by_group || by_mark {
+                        report.reported.push(fact.identity.pid);
+                    }
+                }
+            }
+            report.reported.sort_unstable();
+            report.reported.dedup();
+        }
         Ok(report)
     }
 
@@ -419,6 +500,7 @@ mod tests {
     struct World {
         live: RefCell<BTreeMap<i64, ProcessIdentity>>,
         sandboxed: Vec<i64>,
+        attributed: Vec<i64>,
         continuing: Vec<i64>,
         in_worktree: Vec<i64>,
         stubborn: Vec<i64>,
@@ -470,6 +552,9 @@ mod tests {
             }
             *asked == scope() && self.sandboxed.contains(&pid)
         }
+        fn in_attempt_attribution(&self, pid: i64, asked: &Scope) -> bool {
+            *asked == scope() && self.attributed.contains(&pid)
+        }
         fn signal(&self, target: &ProcessIdentity, escalation: bool) -> bool {
             if self.live.borrow().get(&target.pid) != Some(target) {
                 return false;
@@ -517,6 +602,12 @@ mod tests {
         reservation.unresolved_cleanup = true;
         reservation.census_incomplete = true;
         reservation.descendants = recorded.to_vec();
+        reservation.attribution = Some(ProcessAttribution {
+            boot: BOOT.into(),
+            group_id: 101,
+            session_id: 100,
+            contained: false,
+        });
         let scope = reservation.scope;
         let exit = serde_json::json!({
             "schema_version": 1,
@@ -564,6 +655,12 @@ mod tests {
         });
         reservation.census_incomplete = false;
         reservation.descendants = recorded.to_vec();
+        reservation.attribution = Some(ProcessAttribution {
+            boot: BOOT.into(),
+            group_id: 101,
+            session_id: 100,
+            contained: false,
+        });
         let path = root.path().to_path_buf();
         let attempt = Directory::open_anchor(root.path())?;
         Ok(Fixture {
@@ -684,6 +781,9 @@ mod tests {
             fn in_attempt_sandbox(&self, _: i64, _: &Scope) -> bool {
                 false
             }
+            fn in_attempt_attribution(&self, _: i64, _: &Scope) -> bool {
+                false
+            }
             fn signal(&self, _: &ProcessIdentity, _: bool) -> bool {
                 true
             }
@@ -745,7 +845,8 @@ mod tests {
     fn an_unrecorded_process_in_the_worktree_is_untouched() -> TestResult {
         let mut f = fixture(&[], &[])?;
         // Same group and session as the provider, cwd in the worktree: none of
-        // it grants signal authority.
+        // it grants signal authority. The durable attempt tag still names the
+        // process for the chair, so it is reported and never signalled.
         let shell = ProcessIdentity {
             group_id: 101,
             session_id: 100,
@@ -757,9 +858,13 @@ mod tests {
         };
         world.live.borrow_mut().insert(6000, shell);
         assert!(world.in_worktree.contains(&6000));
-        assert_eq!(run(&mut f, &world)?, OrphanReport::default());
+        let report = run(&mut f, &world)?;
+        assert!(report.stopped.is_empty() && report.survivors.is_empty());
+        assert_eq!(report.reported, vec![6000]);
         assert!(world.signals.borrow().is_empty());
-        assert_eq!(settled(&f)?["settlement_evidence"], "orphans_ended");
+        let exit = settled(&f)?;
+        assert_eq!(exit["unresolved_pids"], serde_json::json!([6000]));
+        assert_eq!(exit["settlement_evidence"], "leftover_not_proven");
         Ok(())
     }
 
@@ -852,6 +957,89 @@ mod tests {
     }
 
     #[test]
+    fn a_detached_unsandboxed_process_is_reported_but_never_signalled() -> TestResult {
+        let mut f = recorded_fixture(&[])?;
+        let world = World::default();
+        // A service the guardian never recorded, still in the lane's group
+        // and session: the durable attribution finds it, but grants no
+        // authority to signal it.
+        let detached = ProcessIdentity {
+            group_id: 101,
+            session_id: 100,
+            ..identity(9400, 3)
+        };
+        world.live.borrow_mut().insert(9400, detached);
+        let report = f
+            .recovery
+            .end_recorded_orphans_with(&world, &world, Duration::ZERO)?;
+        assert_eq!(report.reported, vec![9400]);
+        assert!(
+            report.stopped.is_empty() && report.survivors.is_empty() && report.unproven.is_empty()
+        );
+        assert!(world.signals.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn an_attributed_detached_process_is_named_in_the_settled_exit() -> TestResult {
+        let mut f = fixture(&[], &[])?;
+        let world = World::default();
+        let detached = ProcessIdentity {
+            group_id: 101,
+            session_id: 100,
+            ..identity(9401, 3)
+        };
+        world.live.borrow_mut().insert(9401, detached);
+        let report = run(&mut f, &world)?;
+        assert_eq!(report.reported, vec![9401]);
+        assert!(world.signals.borrow().is_empty());
+        let exit = settled(&f)?;
+        assert_eq!(exit["unresolved_pids"], serde_json::json!([9401]));
+        assert_eq!(exit["settlement_evidence"], "leftover_not_proven");
+        Ok(())
+    }
+
+    #[test]
+    fn a_setsid_service_with_the_attempt_mark_is_only_reported() -> TestResult {
+        let mut f = recorded_fixture(&[])?;
+        // A double-forked daemon that called setsid: it matches no recorded
+        // PID, group or session and carries no sandbox mark. The internal
+        // mark inherited across exec is the only handle, and it grants no
+        // authority to signal the process.
+        let world = World {
+            attributed: vec![9500],
+            ..World::default()
+        };
+        world.live.borrow_mut().insert(9500, identity(9500, 3));
+        let report = f
+            .recovery
+            .end_recorded_orphans_with(&world, &world, Duration::ZERO)?;
+        assert_eq!(report.reported, vec![9500]);
+        assert!(
+            report.stopped.is_empty() && report.survivors.is_empty() && report.unproven.is_empty()
+        );
+        assert!(world.signals.borrow().is_empty());
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_probe_finds_attempt_mark_after_process_changes_session() -> TestResult {
+        let scope = scope();
+        let mut child = crate::process_os::test_support::spawn_setsid_with_attempt_mark(
+            &scope.attempt.to_string(),
+        )?;
+        let attributed = SystemProbe.in_attempt_attribution(i64::from(child.id()), &scope);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            attributed,
+            "macOS process inspection must find inherited marks after setsid"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_live_guardian_fences_reaping_without_an_exit() -> TestResult {
         let tail = identity(9, 3);
         let mut f = recorded_fixture(std::slice::from_ref(&tail))?;
@@ -889,6 +1077,9 @@ mod tests {
         }
         impl OrphanProbe for Survives {
             fn in_attempt_sandbox(&self, _: i64, _: &Scope) -> bool {
+                false
+            }
+            fn in_attempt_attribution(&self, _: i64, _: &Scope) -> bool {
                 false
             }
             fn signal(&self, _: &ProcessIdentity, _: bool) -> bool {

@@ -283,16 +283,39 @@ fn custody_path_remedy(reason: &str) -> Option<&'static str> {
     }
 }
 
+/// A recorded reason is past evidence, not a promise that automatic recovery
+/// will resume. Every status that still leaves work pending therefore names
+/// both ways an owner can clear it: an explicit reconcile retries a corrected
+/// cause, and `--abandon` releases retained work that cannot be corrected.
+/// A reason already carrying the commands (a stalled lock wait) is left alone.
+fn with_reconcile_commands(detail: String) -> String {
+    let mut missing = Vec::new();
+    if !detail.contains("provenant reconcile <lane>") {
+        missing.push("run `provenant reconcile <lane>` to retry once the cause is corrected");
+    }
+    if !detail.contains("provenant reconcile --abandon <lane> --reason <text>") {
+        missing.push(
+            "run `provenant reconcile --abandon <lane> --reason <text>` to release the retained work",
+        );
+    }
+    if missing.is_empty() {
+        return detail;
+    }
+    format!("{detail}; {}", missing.join(", or "))
+}
+
 fn diagnostic(journal: &Journal, now_ms: Option<u64>) -> Option<String> {
     let reason = journal.blocking_reason.as_deref()?;
     if journal.recovery_failures >= LIMIT {
         // A lock escalated by `record_lock_wait` is blocked without failures.
         if journal.lock_wait_since_ms > 0 {
-            return Some(format!("settlement blocked: {reason}"));
+            return Some(with_reconcile_commands(format!(
+                "settlement blocked: {reason}"
+            )));
         }
-        return Some(format!(
-            "settlement blocked after {LIMIT} failures: {reason}; correct the cause and reconcile explicitly"
-        ));
+        return Some(with_reconcile_commands(format!(
+            "settlement blocked after {LIMIT} failures: {reason}"
+        )));
     }
     // A retry deadline exists even when custody failed before a driver could
     // claim an owner. Age overdue work from that deadline, not provider runtime
@@ -305,12 +328,14 @@ fn diagnostic(journal: &Journal, now_ms: Option<u64>) -> Option<String> {
             Some(remedy) => format!("{reason}; {remedy}"),
             None => reason.to_owned(),
         };
-        return Some(format!(
+        return Some(with_reconcile_commands(format!(
             "settlement retry stalled for {}s: {reason}",
             elapsed / 1000
-        ));
+        )));
     }
-    Some(format!("settlement retry pending: {reason}"))
+    Some(with_reconcile_commands(format!(
+        "settlement retry pending: {reason}"
+    )))
 }
 
 pub(crate) fn clear_blocked(attempt: &Directory, scope: Scope) -> Result<()> {
@@ -2808,6 +2833,13 @@ mod tests {
         let status = diagnostic(&journal, Some(now_ms(&clock)?)).ok_or("status reason")?;
         assert!(status.contains("settlement blocked"));
         assert!(status.contains("preimport step failed"));
+        // An exhausted recovery never resumes on its own, so the status must
+        // name both commands an owner can use to clear the block.
+        assert!(status.contains("provenant reconcile <lane>"), "{status}");
+        assert!(
+            status.contains("provenant reconcile --abandon <lane> --reason <text>"),
+            "{status}"
+        );
         resume_reconcile(&attempt, scope(), &clock, || {
             panic!("exhausted worker retried")
         })?;
@@ -2935,6 +2967,11 @@ mod tests {
             assert!(status.contains("retry stalled"), "{status}");
             assert!(status.contains(cause), "{status}");
             assert!(status.contains(remedy), "{status}");
+            assert!(status.contains("provenant reconcile <lane>"), "{status}");
+            assert!(
+                status.contains("provenant reconcile --abandon <lane> --reason <text>"),
+                "{status}"
+            );
         }
         journal.record_blocking("custody reattach failed".to_owned(), 0);
         let status = diagnostic(&journal, Some(1 + STALLED_RETRY_MS)).expect("stalled reason");

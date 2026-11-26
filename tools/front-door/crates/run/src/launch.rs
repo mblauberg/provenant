@@ -181,6 +181,28 @@ impl PreparedLaunch {
             }
         }
         if !confinement.sandbox.effective {
+            // No OS mark survives a double-fork and setsid on this lane. The
+            // guardian still records the spawned group and session as an
+            // attempt tag, so reconcile can name a detached process after
+            // guardian loss, but cannot prove it enough to signal it. Warn
+            // once per change, naming where the access/sandbox mode came from
+            // and letting the chair turn the notice off.
+            let source = self
+                .route
+                .lane_access
+                .as_ref()
+                .map_or("default", |receipt| receipt.source.as_str());
+            let detail = format!(
+                "no OS process containment for this lane (lanes.access=host, source: {source}); a detached process is attributed by its recorded group and session and can only be reported"
+            );
+            if let provenant_records::policy::Effect::Warn(warning) = policy.check(
+                "LAUNCH_PROCESS_ATTRIBUTION_NONE",
+                provenant_records::policy::Facts::violation(detail),
+            ) {
+                use provenant_records::warning::warn;
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(warning.once_per_change());
+            }
             return Ok(());
         }
         let mode = &confinement.sandbox;

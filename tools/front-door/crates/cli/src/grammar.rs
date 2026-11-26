@@ -1456,6 +1456,9 @@ pub struct Status {
     /// paged with --all, --limit and --cursor like the graph listing.
     #[arg(long, hide = true, conflicts_with = "targets")]
     pub session_stream: bool,
+    /// Stream custody rows for the session collector.
+    #[arg(long, hide = true, requires = "mine")]
+    pub custody_stream: bool,
     /// Graphs, nodes or attempts to show (NAME[/NODE[#N]]); every graph when omitted
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub targets: Vec<Target>,
