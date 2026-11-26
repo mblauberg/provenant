@@ -5053,7 +5053,7 @@ impl RunStore {
         };
         let directory = match fence
             .custody_directory()
-            .map(|path| provenant_os::fs::Directory::open_anchor(&path))
+            .map(provenant_os::fs::Directory::open_anchor)
             .transpose()
         {
             Ok(Some(directory)) => directory,
@@ -5157,7 +5157,7 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         let record = match self.recovery_record(id, call)? {
-            crate::reader::AttemptRecordRead::Decoded(record) => record,
+            crate::reader::AttemptRecordRead::Decoded(record) => *record,
             crate::reader::AttemptRecordRead::Unreadable(unreadable) => {
                 return Ok(Some(self.reconcile_unreadable(&unreadable, observer, call)));
             }

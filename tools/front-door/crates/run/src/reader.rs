@@ -341,7 +341,9 @@ enum RecordRead {
 
 /// The two outcomes of a recovery read of an attempt record.
 pub(crate) enum AttemptRecordRead {
-    Decoded(AttemptRecord),
+    // Boxed to keep the enum small: AttemptRecord is large while the unreadable
+    // outcome is small (clippy::large_enum_variant).
+    Decoded(Box<AttemptRecord>),
     Unreadable(UnreadableAttempt),
 }
 
@@ -720,7 +722,9 @@ impl RunStore {
             .optional()?
             .ok_or(RunError::NotFound)?;
         match crate::db::decode_attempt(&raw) {
-            Ok(_) => self.record(id, call).map(AttemptRecordRead::Decoded),
+            Ok(_) => self
+                .record(id, call)
+                .map(|record| AttemptRecordRead::Decoded(Box::new(record))),
             Err(error) => {
                 let (schema_version, message) = match error {
                     RunError::Decode(error) => {
