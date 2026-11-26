@@ -379,7 +379,7 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
     let delivered = WriterDeliveryReceipt {
         extra: Default::default(),
         schema_version: 1,
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "lane".into(),
         head: None,
         review_acceptance: None,
@@ -398,7 +398,7 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
     ] {
         let state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome,
@@ -411,7 +411,7 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
     }
     let succeeded = AttemptState::Terminal {
         extra: Default::default(),
-        terminal_cause: None,
+        cause: None,
         terminal_note: None,
         stop: None,
         outcome: Outcome::Succeeded,

@@ -473,58 +473,36 @@ fn resolve_commit(project: &Path, name: &str) -> Option<String> {
 }
 
 /// Resolve a target branch name to the commit history is bounded by: a
-/// tracking ref when present, otherwise a local ref of that name.
-fn resolve_base(project: &Path, name: &str) -> Option<String> {
+/// tracking ref on the one resolved forge remote when present, otherwise a
+/// local ref of that name.
+///
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn resolve_base(project: &Path, state: &Path, name: &str) -> Option<String> {
     if !git::plain_ref(name) {
         return None;
     }
-    let tracking = format!("refs/remotes/{}/{name}", candidate_remote(project));
-    resolve_commit(project, &tracking).or_else(|| resolve_commit(project, name))
+    if let Some(remote) = candidate_remote(project, state) {
+        let tracking = format!("refs/remotes/{remote}/{name}");
+        if let Some(commit) = resolve_commit(project, &tracking) {
+            return Some(commit);
+        }
+    }
+    resolve_commit(project, name)
 }
 
-/// The remote a landing candidate is published to, defaulting as landing does.
-fn candidate_remote(project: &Path) -> String {
-    let context = provenant_os::git_config::ConfigContext {
-        operation: "read candidate branch remote",
-        file: project.join(".git/config"),
-        key: Some("branch tracking key"),
-    };
-    provenant_os::git_config::read(
-        context,
-        provenant_os::git_config::Read::Get("branch..remote"),
-        |command| {
-            let git = provenant_os::git::git_executable()
-                .ok_or_else(|| "Git executable is unavailable".to_owned())?;
-            let mut argv = vec![
-                git.to_str()
-                    .ok_or_else(|| "Git executable path is not UTF-8".to_owned())?
-                    .to_owned(),
-            ];
-            argv.extend(
-                command
-                    .iter()
-                    .map(|arg| {
-                        arg.to_str()
-                            .map(str::to_owned)
-                            .ok_or_else(|| "Git config argument is not UTF-8".to_owned())
-                    })
-                    .collect::<std::result::Result<Vec<_>, _>>()?,
-            );
-            execute_for(
-                project,
-                &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-                GIT_TIMEOUT,
-                false,
-            )
-            .map_err(|error| error.to_string())
-        },
-    )
-    .ok()
-    .and_then(|out| successful(out).ok())
-    .and_then(|bytes| String::from_utf8(bytes).ok())
-    .map(|name| name.trim().to_owned())
-    .filter(|name| git::plain_ref(name) && name != ".")
-    .unwrap_or_else(|| "origin".to_owned())
+/// The remote a landing candidate is published to: the one resolved forge
+/// remote, never a compiled-in `origin`. An absent or unreadable context is a
+/// missing observation, not a guess.
+///
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn candidate_remote(project: &Path, state: &Path) -> Option<String> {
+    let ports = provenant_config::PortTable::read_for(Some(project), state).ok()?;
+    let policy = provenant_config::operation_policy(state, project, &ports);
+    let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+    let git = provenant_config::ForgeGit::new(project).ok()?;
+    provenant_config::ForgeContext::remote(&config, &git)
+        .ok()
+        .map(|remote| remote.value)
 }
 
 /// The member a candidate ref was built for: `<prefix><number>-...`.
@@ -566,7 +544,7 @@ fn recorded_containers(state: &Path, project: &Path, repository: Option<&str>) -
                 label: attempt.candidate.ref_name,
                 head: attempt.candidate.commit,
                 ci: String::new(),
-                base: resolve_base(project, &attempt.candidate.base),
+                base: resolve_base(project, state, &attempt.candidate.base),
             })
         })
         .collect()
@@ -588,7 +566,9 @@ fn candidate_containers(
     if !git::plain_ref(&prefix) {
         return found;
     }
-    let remote = candidate_remote(project);
+    let Some(remote) = candidate_remote(project, state) else {
+        return found;
+    };
     let pattern = format!("refs/heads/{prefix}*");
     let bytes = execute_for(
         project,
@@ -614,7 +594,7 @@ fn candidate_containers(
         let base = ref_member(label, &prefix)
             .and_then(|number| pulls.iter().find(|pull| pull.number == number))
             .and_then(|pull| pull.base.as_deref())
-            .and_then(|name| resolve_base(project, name));
+            .and_then(|name| resolve_base(project, state, name));
         found.push(Container {
             label: label.to_owned(),
             head: head.to_owned(),
@@ -737,7 +717,7 @@ pub(crate) fn annotate(project: &Path, state: &Path, lines: &mut [status::Line])
             base: pull
                 .base
                 .as_deref()
-                .and_then(|name| resolve_base(project, name)),
+                .and_then(|name| resolve_base(project, state, name)),
         })
         .collect();
     containers.extend(candidate_containers(
@@ -1147,5 +1127,28 @@ mod tests {
         assert_eq!(ref_member(name, "land/"), Some(7));
         assert_eq!(ref_member("queue-42-abc", "queue-"), Some(42));
         assert_eq!(ref_member("land/revert/7", "land/"), None);
+    }
+
+    /// Batch membership reads candidate refs from the declared remote, not a
+    /// compiled-in `origin`.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn candidate_remote_follows_the_declared_forge_remote() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        std::fs::write(project.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            r#"{"git":{"remote":"upstream"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            candidate_remote(&project, &state).as_deref(),
+            Some("upstream")
+        );
     }
 }

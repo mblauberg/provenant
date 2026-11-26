@@ -40,13 +40,13 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
 
 fn launch_error_node(data: &Value, outcome: Outcome) -> Option<&Value> {
     data["checkpoint"]["nodes"].as_array()?.iter().find(|node| {
-        node["advance_error"].is_string()
+        node["advance_note"].is_string()
             && node["attempts"].as_array().is_some_and(Vec::is_empty)
             && (matches!(outcome, Outcome::Failed | Outcome::Refused)
                 || node["state"] == "failed"
                 || (node["state"] == "blocked"
                     && matches!(
-                        node["advance_error_code"].as_str(),
+                        node["advance_code"].as_str(),
                         Some("launch_refused" | "launch_retry_exhausted")
                     )))
     })
@@ -186,9 +186,9 @@ fn refusal_lines(checkpoint: &Value) -> String {
         .as_array()
         .map_or(&[][..], Vec::as_slice)
         .iter()
-        .filter(|node| node["advance_error_code"] == "preparation_refused")
+        .filter(|node| node["advance_code"] == "preparation_refused")
         .filter_map(|node| {
-            let message = node["advance_error"].as_str()?;
+            let message = node["advance_note"].as_str()?;
             let line = format!(
                 "refused {}: {}",
                 node["id"].as_str().unwrap_or_default(),
@@ -368,7 +368,7 @@ fn invoke(
                 .is_some_and(|nodes| {
                     nodes.iter().any(|node| {
                         node["state"] == "failed"
-                            && node["advance_error_code"] == "writer_binding_unavailable"
+                            && node["advance_code"] == "writer_binding_unavailable"
                             && node["advance_owner_code"] != "writer_lock_busy"
                     })
                 })
@@ -441,9 +441,9 @@ fn invoke(
                 result.error = Some(provenant_records::CommandError::new(
                     node["advance_owner_code"]
                         .as_str()
-                        .or_else(|| node["advance_error_code"].as_str())
+                        .or_else(|| node["advance_code"].as_str())
                         .unwrap_or("launch_failed"),
-                    node["advance_error"].as_str().unwrap_or("launch failed"),
+                    node["advance_note"].as_str().unwrap_or("launch failed"),
                     None,
                     "correct the reported launch failure and rerun `provenant run`",
                 ));
@@ -1360,8 +1360,8 @@ mod tests {
     #[test]
     fn pending_graph_projects_failed_pre_attempt_node() {
         let data = json!({"status":"pending", "checkpoint":{"nodes":[
-            {"id":"retry", "state":"blocked", "attempts":[], "advance_error":"retrying"},
-            {"id":"writer", "state":"failed", "attempts":[], "advance_error":"binding failed"},
+            {"id":"retry", "state":"blocked", "attempts":[], "advance_note":"retrying"},
+            {"id":"writer", "state":"failed", "attempts":[], "advance_note":"binding failed"},
             {"id":"other", "state":"running", "attempts":[{}]}
         ]}});
         assert_eq!(response_outcome("run", &data), Outcome::Waiting);
@@ -1384,7 +1384,7 @@ mod tests {
             let data = json!({"status":"pending", "timed_out":true, "checkpoint":{"nodes":[
                 {"id":"slow", "state":"running", "attempts":[{}]},
                 {"id":"writer", "state":"blocked", "attempts":[],
-                 "advance_error":"bounded launch refused", "advance_error_code":code,
+                 "advance_note":"bounded launch refused", "advance_code":code,
                  "advance_owner_code":"writer_lock_busy"}
             ]}});
             assert_eq!(response_outcome("run", &data), Outcome::Waiting);
@@ -1392,7 +1392,7 @@ mod tests {
             assert_eq!(node["id"], "writer");
             assert_eq!(node["advance_owner_code"], "writer_lock_busy");
             let mut retrying = data.clone();
-            retrying["checkpoint"]["nodes"][1]["advance_error_code"] = json!("retrying");
+            retrying["checkpoint"]["nodes"][1]["advance_code"] = json!("retrying");
             assert!(launch_error_node(&retrying, Outcome::Waiting).is_none());
             let mut launched = data.clone();
             launched["checkpoint"]["nodes"][1]["attempts"] = json!([{}]);
@@ -1403,8 +1403,10 @@ mod tests {
     #[test]
     fn run_receipt_is_bounded_and_ends_in_one_next_command() {
         let nodes: Vec<_> = (0..40)
-            .map(|n| json!({"id":format!("n{n}"), "state":"failed", "advance_error_code":"preparation_refused",
-                "advance_error":"x".repeat(1000), "attempts":[]}))
+            .map(|n| {
+                json!({"id":format!("n{n}"), "state":"failed", "advance_code":"preparation_refused",
+                "advance_note":"x".repeat(1000), "attempts":[]})
+            })
             .collect();
         for (status, command, why) in [
             (
@@ -1552,7 +1554,7 @@ mod tests {
     #[test]
     fn failed_attempt_does_not_project_launch_error() {
         let data = json!({"checkpoint":{"nodes":[
-            {"id":"task", "state":"failed", "attempts":[{}], "advance_error":"fallback_route_pinned"}
+            {"id":"task", "state":"failed", "attempts":[{}], "advance_note":"fallback_route_pinned"}
         ]}});
         assert!(launch_error_node(&data, Outcome::Failed).is_none());
     }

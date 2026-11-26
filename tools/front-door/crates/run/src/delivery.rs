@@ -242,7 +242,9 @@ pub(crate) fn recovery_refused(error: &RunError) -> bool {
     )
 }
 
-/// The destination the host bound before the lane ran.
+/// The destination the host bound before the lane ran. The destination is
+/// typed: a binding written before `Destination` existed that carries an empty
+/// remote fails strict decode rather than being silently read as local.
 #[derive(Serialize, Deserialize)]
 struct LaunchBinding {
     #[serde(flatten)]
@@ -618,10 +620,10 @@ impl HostDeliveryContext {
     #[cfg(test)]
     pub(crate) fn with_bound_remotes_for_test(
         mut self,
-        delivery_remote: &str,
-        stop_publish_remote: Option<&str>,
+        delivery: crate::Destination,
+        stop_publish: Option<crate::Destination>,
     ) -> Self {
-        let bound = |remote: &str, mode: crate::DeliveryMode| BoundDelivery {
+        let bound = |remote: crate::Destination, mode: crate::DeliveryMode| BoundDelivery {
             base_head: GitOid::parse(&"1".repeat(40)).expect("a valid stand-in head"),
             push_url: "https://example.invalid/lane.git".to_owned(),
             lane_branch: "lane".to_owned(),
@@ -632,22 +634,20 @@ impl HostDeliveryContext {
             destination: WriterDeliveryRequest {
                 extra: Default::default(),
                 mode,
-                remote: remote.to_owned(),
+                remote,
                 branch: "lane".to_owned(),
                 open_pr: false,
                 fast_forward_only: false,
             },
         };
-        self.bound = Some(bound(
-            delivery_remote,
-            if delivery_remote.is_empty() {
-                crate::DeliveryMode::Integrate("main".into())
-            } else {
-                crate::DeliveryMode::Push
-            },
-        ));
+        let mode = if delivery.is_local() {
+            crate::DeliveryMode::Integrate("main".into())
+        } else {
+            crate::DeliveryMode::Push
+        };
+        self.bound = Some(bound(delivery, mode));
         self.stop_publish_bound =
-            stop_publish_remote.map(|remote| bound(remote, crate::DeliveryMode::Push));
+            stop_publish.map(|remote| bound(remote, crate::DeliveryMode::Push));
         self
     }
     fn attach_stop_publish(&mut self, prepared: Self) {
@@ -822,28 +822,18 @@ impl HostDeliveryContext {
         self.forge = Some(forge.clone());
         self
     }
-    /// A validated sealed remote: a malformed record refuses, naming its value.
-    /// An empty recorded remote is the deliberate local-integration sentinel,
-    /// not a corrupt name: it maps to the same absence as an unbound remote.
-    fn sealed_remote(name: Option<&str>) -> Result<Option<provenant_config::RemoteName>> {
-        name.filter(|name| !name.is_empty())
-            .map(|name| {
-                provenant_config::RemoteName::new(name)
-                    .map_err(|_| RunError::InvalidSealedRemote(name.to_owned()))
-            })
-            .transpose()
-    }
-    /// The remote named by the sealed launch destination.
-    pub(crate) fn delivery_remote(&self) -> Result<Option<provenant_config::RemoteName>> {
-        Self::sealed_remote(self.bound.as_ref().map(|b| b.destination.remote.as_str()))
+    /// The remote named by the sealed launch destination. The destination was
+    /// parsed once on decode, so this is a pure projection of the typed binding.
+    pub(crate) fn delivery_remote(&self) -> Option<provenant_config::RemoteName> {
+        self.bound
+            .as_ref()
+            .and_then(|bound| bound.destination.remote.remote_name().cloned())
     }
     /// The remote named by the sealed stop-publication destination.
-    pub(crate) fn stop_publish_remote(&self) -> Result<Option<provenant_config::RemoteName>> {
-        Self::sealed_remote(
-            self.stop_publish_bound
-                .as_ref()
-                .map(|b| b.destination.remote.as_str()),
-        )
+    pub(crate) fn stop_publish_remote(&self) -> Option<provenant_config::RemoteName> {
+        self.stop_publish_bound
+            .as_ref()
+            .and_then(|bound| bound.destination.remote.remote_name().cloned())
     }
     /// The explicit state root, else the captured PROVENANT_STATE_DIR, else
     /// the default root under the captured HOME.
@@ -1683,33 +1673,47 @@ impl HostDeliveryContext {
         branch: &str,
         forge: &provenant_config::ForgeContext,
     ) -> Result<Option<WriterDeliveryRequest>> {
-        Self::destination_for_remote(mode, branch, &forge.remote.value)
+        Self::destination_for_remote(mode, branch, Some(forge.remote_name()?))
     }
 
-    /// Resolve a destination from an already-known remote name. Callers that
-    /// carry the resolved remote but have no full context (a sealed request, a
+    /// Resolve a destination from an already-known remote. Callers that carry
+    /// the resolved remote but have no full context (a sealed request, a
     /// stop-publication recovery) use this instead of rebuilding a context.
-    /// An absent remote is represented by the caller, never invented here.
+    /// Absence is a typed `None`, never an empty name invented here.
     pub fn destination_for_remote(
         mode: crate::DeliveryMode,
         branch: &str,
-        remote: &str,
+        remote: Option<provenant_config::RemoteName>,
     ) -> Result<Option<WriterDeliveryRequest>> {
-        let qualified = format!("{remote}/");
-        let (remote, destination, open_pr) = match &mode {
+        let (destination, target, open_pr) = match &mode {
             crate::DeliveryMode::None => return Ok(None),
-            crate::DeliveryMode::Push => (remote.to_owned(), branch.to_owned(), false),
-            crate::DeliveryMode::Pr => (remote.to_owned(), branch.to_owned(), true),
-            crate::DeliveryMode::Integrate(target) => match target.strip_prefix(&qualified) {
-                Some(branch) => (remote.to_owned(), branch.to_owned(), false),
-                None => (String::new(), target.clone(), false),
+            crate::DeliveryMode::Integrate(integration) => {
+                if let Some(name) = &remote
+                    && let Some(unqualified) = integration.strip_prefix(&format!("{name}/"))
+                {
+                    (
+                        crate::Destination::Remote(name.clone()),
+                        unqualified.to_owned(),
+                        false,
+                    )
+                } else {
+                    (crate::Destination::Local, integration.clone(), false)
+                }
+            }
+            other => match remote {
+                Some(name) => (
+                    crate::Destination::Remote(name),
+                    branch.to_owned(),
+                    matches!(other, crate::DeliveryMode::Pr),
+                ),
+                None => (crate::Destination::Local, branch.to_owned(), false),
             },
         };
         let request = WriterDeliveryRequest {
             extra: Default::default(),
             mode,
-            remote,
-            branch: destination,
+            remote: destination,
+            branch: target,
             open_pr,
             fast_forward_only: false,
         };
@@ -1889,7 +1893,7 @@ impl HostDeliveryContext {
             self.forge = resolved;
         }
         self.refuse_protected_target(writer, &request.branch, stage, self.forge.as_ref())?;
-        if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
+        if request.remote.is_local() {
             let branch = self.command(
                 &writer.worktree,
                 "git",
@@ -1916,10 +1920,15 @@ impl HostDeliveryContext {
             });
             return Ok(self);
         }
+        // `validate` has already refused a local destination for push/PR, so
+        // the bound remote exists and carries the one validated grammar.
+        let remote_name = request.remote.remote_name().ok_or(RunError::Validation(
+            "delivery needs a configured remote name",
+        ))?;
         let urls = self.command(
             &writer.worktree,
             "git",
-            &["remote", "get-url", "--push", "--all", &request.remote],
+            &["remote", "get-url", "--push", "--all", remote_name.as_str()],
             stage,
         )?;
         let mut urls = urls.lines();
@@ -2012,7 +2021,7 @@ impl HostDeliveryContext {
                 &common,
                 &requested,
                 self.cancellation.as_ref().unwrap_or(&cancel),
-                || self.refresh_remote(writer, &[], &request.remote),
+                || self.refresh_remote(writer, &[], remote_name.as_str()),
             )?;
         }
         Ok(self)
@@ -3210,12 +3219,13 @@ impl HostDeliveryContext {
             ));
         }
         let destination = format!("refs/heads/{}", request.branch);
-        let remote = !request.remote.is_empty();
-        let resolved_remote = forge.is_some_and(|forge| request.remote == forge.remote.value);
-        let remote_name =
-            Self::sealed_remote((!request.remote.is_empty()).then_some(request.remote.as_str()))?;
-        let target = if remote {
-            let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
+        let remote_name = request.remote.remote_name();
+        let remote = remote_name.is_some();
+        let resolved_remote = forge.is_some_and(|forge| {
+            remote_name.is_some_and(|name| name.as_str() == forge.remote.value)
+        });
+        let target = if let Some(name) = remote_name {
+            let tracking = format!("refs/remotes/{}/{}", name, request.branch);
             if !resolved_remote {
                 self.refuse_symref_destination(&writer.worktree, &tracking, Stage::Fetch)?;
                 self.command(
@@ -3236,7 +3246,7 @@ impl HostDeliveryContext {
         } else {
             destination.clone()
         };
-        let expected = if let Some(remote) = remote_name.as_ref().filter(|_| resolved_remote) {
+        let expected = if let Some(remote) = remote_name.filter(|_| resolved_remote) {
             self.refresh_target_and_resolve(writer, &request.branch, stage, remote)?
         } else {
             self.command(
@@ -3405,7 +3415,7 @@ impl HostDeliveryContext {
                 ],
                 stage,
             )?;
-            let verified = if let Some(remote) = remote_name.as_ref().filter(|_| resolved_remote) {
+            let verified = if let Some(remote) = remote_name.filter(|_| resolved_remote) {
                 self.refresh_target_and_resolve(writer, &request.branch, Stage::Verify, remote)?
             } else {
                 self.refuse_symref_destination(&writer.worktree, &target, Stage::Verify)?;
@@ -3683,6 +3693,10 @@ impl HostDeliveryContext {
                 integration: Some(self.integrate(writer, request, head, forge.as_ref())?),
             });
         }
+        // Local destinations were integrated above; every push path is remote.
+        let remote_name = request.remote.remote_name().ok_or(RunError::Validation(
+            "delivery needs a configured remote name",
+        ))?;
         let bound = self.bound.as_ref().ok_or_else(|| {
             delivery_refusal(Stage::Prepare, "delivery launch binding was not sealed")
         })?;
@@ -3744,7 +3758,7 @@ impl HostDeliveryContext {
                 Stage::Push,
             )?;
         }
-        let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
+        let tracking = format!("refs/remotes/{remote_name}/{}", request.branch);
         let fetchspec = format!("+{destination}:{tracking}");
         self.refuse_symref_destination(cwd, &tracking, Stage::Fetch)?;
         self.command(
@@ -3785,9 +3799,9 @@ impl HostDeliveryContext {
             integrated: head,
         });
         for (field, value) in [
-            (BranchField::Remote, request.remote.as_str()),
+            (BranchField::Remote, remote_name.as_str()),
             (BranchField::Merge, destination.as_str()),
-            (BranchField::PushRemote, request.remote.as_str()),
+            (BranchField::PushRemote, remote_name.as_str()),
         ] {
             let context = provenant_os::git_config::ConfigContext::new(
                 "set branch upstream configuration",
@@ -3817,9 +3831,9 @@ impl HostDeliveryContext {
         // only resolve when the remote's fetch refspec covers the branch, and a
         // narrowed clone (for example main only) is legitimate.
         for (key, value) in [
-            ("remote", request.remote.as_str()),
+            ("remote", remote_name.as_str()),
             ("merge", destination.as_str()),
-            ("pushRemote", request.remote.as_str()),
+            ("pushRemote", remote_name.as_str()),
         ] {
             let config_key = format!("branch.{}.{key}", bound.lane_branch);
             let stored = provenant_os::git_config::read(
@@ -4355,29 +4369,25 @@ pub(crate) fn validate(request: &WriterDeliveryRequest) -> Result<()> {
             "none delivery must omit the destination",
         ));
     }
-    if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
-        GitRefName::branch(&request.branch)
-            .map_err(|_| RunError::Validation("integration branch"))?;
-        if request.open_pr {
-            return Err(RunError::Validation(
-                "integration cannot also open a lane PR",
-            ));
-        }
-        return Ok(());
-    }
-    if request.remote.is_empty()
-        || request.remote.len() > 64
-        || request.remote.starts_with('-')
-        || !request
-            .remote
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-    {
+    // The remote grammar is enforced once by `RemoteName` on decode; there is
+    // no second alphabet here. Only the destination/mode combination is local
+    // policy: a local destination belongs to integration alone.
+    if request.remote.is_local() && !matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
         return Err(RunError::Validation(
             "delivery needs a configured remote name",
         ));
     }
-    GitRefName::branch(&request.branch).map_err(|_| RunError::Validation("delivery branch"))?;
+    if request.remote.is_local() && request.open_pr {
+        return Err(RunError::Validation(
+            "integration cannot also open a lane PR",
+        ));
+    }
+    let label = if request.remote.is_local() {
+        "integration branch"
+    } else {
+        "delivery branch"
+    };
+    GitRefName::branch(&request.branch).map_err(|_| RunError::Validation(label))?;
     Ok(())
 }
 
@@ -4407,6 +4417,9 @@ impl crate::RunStore {
         let Some(push_url) = integration.push_url.as_ref() else {
             return;
         };
+        let Some(remote) = integration.remote.remote_name() else {
+            return;
+        };
         let operation_id = match self.attempt_operation(record.attempt_id, call) {
             Ok(operation) => Some(operation.operation_id),
             Err(error) => {
@@ -4427,7 +4440,7 @@ impl crate::RunStore {
             RefLedger::open(&self.writer_registry, record.project_id)?.record(
                 RefObservation {
                     endpoint: RefEndpoint::Remote {
-                        remote: integration.remote.clone(),
+                        remote: remote.as_str().to_owned(),
                         push_url: push_url.clone(),
                     },
                     reference,

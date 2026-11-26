@@ -69,6 +69,8 @@ pub enum Command {
     /// Share append-only observations with project lanes
     #[command(subcommand)]
     Notes(crate::notes::Notes),
+    /// Declare this lane's result to the host-bound journal
+    Declare(crate::declaration::DeclareArgs),
     /// Answer a request using the revision you saw
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts
@@ -754,7 +756,7 @@ pub struct GraphRunArgs {
     /// keep their higher precedence
     #[arg(long)]
     pub no_sandbox: bool,
-    /// Explain the compiled graph without starting work
+    /// Explain the compiled graph and each node's route without starting work
     #[arg(long)]
     pub explain: bool,
 }

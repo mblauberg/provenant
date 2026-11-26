@@ -298,7 +298,7 @@ pub(super) fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
             return Ok(());
         }
         let evidence = checkpoint.nodes[node_index]
-            .advance_error
+            .advance_note
             .iter()
             .cloned()
             .collect::<Vec<_>>();
@@ -379,8 +379,8 @@ pub(super) fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
         provenant_records::graph::HygieneOutcomeKind::Clean => {
             let progress = &mut checkpoint.nodes[node_index];
             progress.state = NodeState::Succeeded;
-            progress.advance_error = None;
-            progress.advance_error_code = None;
+            progress.advance_note = None;
+            progress.advance_code = None;
             journal.save(checkpoint).map_err(GraphError::Journal)?;
         }
         kind @ (provenant_records::graph::HygieneOutcomeKind::NoCommit
@@ -405,8 +405,8 @@ pub(super) fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
             {
                 let progress = &mut checkpoint.nodes[node_index];
                 progress.state = NodeState::Failed;
-                progress.advance_error_code = Some(error_code.into());
-                progress.advance_error = Some(error_message.into());
+                progress.advance_code = Some(error_code.into());
+                progress.advance_note = Some(error_message.into());
             }
             let escalation =
                 transitions::advance_delivery_escalation(node_index, plan, checkpoint, cause);
@@ -438,13 +438,13 @@ pub(super) fn advance_hygiene<R: AttemptOwner, J: GraphJournal>(
             let evidence = {
                 let progress = &mut checkpoint.nodes[node_index];
                 progress.state = NodeState::Running;
-                progress.advance_error_code = Some("hygiene_operation_error".into());
-                progress.advance_error = execution
+                progress.advance_code = Some("hygiene_operation_error".into());
+                progress.advance_note = execution
                     .diagnostic
                     .as_deref()
                     .map(|diagnostic| delivery_text(diagnostic, 1024))
                     .or_else(|| Some("formatter or formatter commit failed".into()));
-                progress.advance_error.iter().cloned().collect::<Vec<_>>()
+                progress.advance_note.iter().cloned().collect::<Vec<_>>()
             };
             journal.save(checkpoint).map_err(GraphError::Journal)?;
             park_delivery_transition(
@@ -1095,8 +1095,8 @@ pub(super) fn advance_publish<R: AttemptOwner, J: GraphJournal>(
             ..Default::default()
         });
         progress.state = NodeState::Succeeded;
-        progress.advance_error = None;
-        progress.advance_error_code = None;
+        progress.advance_note = None;
+        progress.advance_code = None;
         progress.wait_reason = None;
         if checkpoint.delivered
             && checkpoint.pull_request.as_deref() != Some(receipt.pull_request.as_str())
@@ -1118,8 +1118,8 @@ pub(super) fn advance_publish<R: AttemptOwner, J: GraphJournal>(
         intent.error = Some(failure.clone());
     }
     checkpoint.nodes[node_index].state = NodeState::Running;
-    checkpoint.nodes[node_index].advance_error_code = Some("publication_operation_error".into());
-    checkpoint.nodes[node_index].advance_error = Some(failure);
+    checkpoint.nodes[node_index].advance_code = Some("publication_operation_error".into());
+    checkpoint.nodes[node_index].advance_note = Some(failure);
     journal.save(checkpoint).map_err(GraphError::Journal)?;
     park_delivery_transition(
         document,
@@ -1241,9 +1241,8 @@ fn advance_adopted_publish<R: AttemptOwner, J: GraphJournal>(
         adoption.error = Some(evidence[0].clone());
         checkpoint.nodes[node_index].set_delivery_adoption(&adoption);
         checkpoint.nodes[node_index].state = NodeState::Running;
-        checkpoint.nodes[node_index].advance_error_code =
-            Some("publication_adoption_unavailable".into());
-        checkpoint.nodes[node_index].advance_error = Some(evidence[0].clone());
+        checkpoint.nodes[node_index].advance_code = Some("publication_adoption_unavailable".into());
+        checkpoint.nodes[node_index].advance_note = Some(evidence[0].clone());
         journal.save(checkpoint).map_err(GraphError::Journal)?;
         return park_delivery_transition(
             document,
@@ -1332,8 +1331,8 @@ fn advance_adopted_publish<R: AttemptOwner, J: GraphJournal>(
         ..Default::default()
     });
     progress.state = NodeState::Succeeded;
-    progress.advance_error_code = None;
-    progress.advance_error = None;
+    progress.advance_code = None;
+    progress.advance_note = None;
     progress.wait_reason = None;
     transitions::record_delivery(checkpoint, receipt.pull_request.clone())
         .map_err(GraphError::Refused)?;

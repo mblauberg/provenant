@@ -81,10 +81,9 @@ another patch.
 
 Write one findings block, then exactly one standalone verdict line outside all
 fenced blocks: `VERDICT: PASS`, `VERDICT: FAIL` or `VERDICT: INCONCLUSIVE`.
-Put the final fenced handoff after the verdict and leave no text after it. Do
-not repeat a findings block, handoff block or verdict line. The host also
-accepts one standalone verdict as the only content after a closed handoff and
-records that ordering; any other trailing text is malformed.
+End with the verdict line and leave no text after it. A reviewer owes no
+declaration. Do not repeat a findings block or verdict line; any trailing text
+after the verdict is malformed.
 
 ## What not to report
 

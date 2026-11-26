@@ -363,6 +363,37 @@ fn config_detection_and_project_path_are_inspectable() -> Result {
     Ok(())
 }
 
+/// Spec: docs/specs/consumer-contract.md#the-git-context-is-declared-not-compiled-in
+#[test]
+fn config_ports_command_reports_effective_git_values_and_sources() -> Result {
+    let rig = TestRig::new()?;
+    let config = rig.project.join(".provenant");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(
+        config.join("ports.json"),
+        r#"{"git":{"remote":"pinned","default_branch":"trunk","protected":["release"]}}"#,
+    )?;
+
+    let out = rig.command(&["config", "ports", "--json"])?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let response: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let git = &response["data"]["git"];
+    assert!(git.get("warning").is_none(), "{git}");
+    for (key, expected) in [
+        ("remote", serde_json::json!("pinned")),
+        ("default_branch", serde_json::json!("trunk")),
+        ("protected", serde_json::json!(["release", "trunk"])),
+    ] {
+        assert_eq!(git[key]["value"], expected);
+        assert_eq!(git[key]["layer"], "project");
+        assert_eq!(
+            git[key]["origin"],
+            format!(".provenant/ports.json#git.{key}")
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn config_show_names_verify_port_layers_and_survives_a_malformed_project_layer() -> Result {
     let rig = TestRig::new()?;

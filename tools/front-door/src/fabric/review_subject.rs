@@ -321,6 +321,7 @@ impl Factory {
                     stale_head_warning(
                         &git,
                         &self.cwd,
+                        self.context.roots.state.as_path(),
                         pull_subject.head_ref_name.as_deref(),
                         pull_subject.head_ref_oid,
                     )
@@ -431,6 +432,7 @@ fn local_config_get(git: &Path, cwd: &Path, key: &str) -> Option<String> {
 fn stale_head_warning(
     git: &Path,
     cwd: &Path,
+    state: &std::path::Path,
     head_ref_name: Option<&str>,
     forge_head: provenant_core::GitOid,
 ) -> Option<String> {
@@ -440,7 +442,21 @@ fn stale_head_warning(
         local_config_get(git, cwd, &format!("branch.{branch}.remote")).filter(|name| {
             !name.is_empty() && provenant_confinement::repo::GitRefName::branch(name).is_ok()
         });
-    let remote = configured.unwrap_or_else(|| "origin".to_owned());
+    // A branch without tracking configuration follows the one resolved forge
+    // remote; `origin` is only the shown default when no remote can be named at
+    // all, never a value that overrides a declaration.
+    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    let remote = configured
+        .or_else(|| {
+            let ports = provenant_config::PortTable::read_for(Some(cwd), state).ok()?;
+            let policy = provenant_config::operation_policy(state, cwd, &ports);
+            let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+            let git = provenant_config::ForgeGit::new(cwd).ok()?;
+            provenant_config::ForgeContext::remote(&config, &git)
+                .ok()
+                .map(|remote| remote.value)
+        })
+        .unwrap_or_else(|| "origin".to_owned());
     let reference = format!("refs/remotes/{remote}/{branch}");
     let tip = local_git(
         git,

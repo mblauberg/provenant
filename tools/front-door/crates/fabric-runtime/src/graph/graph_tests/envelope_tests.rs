@@ -229,7 +229,7 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
                 u64::MAX,
                 None,
                 asks::WORST_DECIDE_TIMEOUT,
-                Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+                Some(&worst(MAX_ADVANCE_NOTE_BYTES)),
             );
             // A node raised again after a retry carries the generation.
             ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
@@ -242,7 +242,7 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
             u64::MAX,
             session,
             &worst(PAUSE_REASON_BYTES),
-            Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+            Some(&worst(MAX_ADVANCE_NOTE_BYTES)),
         )));
     }
     asks
@@ -260,7 +260,7 @@ fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
             ask_id: format!("{}.ask-{}", "l".repeat(64), u64::MAX),
         }),
         pull_request: Some(u64::MAX),
-        note: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+        note: Some(worst(MAX_ADVANCE_NOTE_BYTES)),
         wake_at: Some(envelope::latest()),
         pending_observations: u64::MAX,
     }
@@ -356,7 +356,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 extra: Default::default(),
                 review_verdict_correction_refused: (template::review_behaviour(node)
                     == Some(template::ReviewBehaviour::Lens))
-                .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
+                .then(|| worst(MAX_ADVANCE_NOTE_BYTES)),
                 warnings: Vec::new(),
                 children: node.composite_members.clone(),
                 source_binding: node.source.clone(),
@@ -382,13 +382,13 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     Vec::new()
                 },
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
-                    .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
+                    .then(|| worst(MAX_ADVANCE_NOTE_BYTES)),
                 expansion_cause: (node.plan.is_some() || plans::writer(node)).then_some(NodeDecisionCause::PlanExpansionPaused { active: false, fallback: false, structural_limit: Some(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX }), fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX })) }),
                 loop_pause: node.loop_body.as_ref().map(|_| {
                     format!(
                         "loop {0} exhausted; decision cannot be applied: {1}; use graph resume --extend loop.{0}.rounds=N or --extend loop.{0}.decision=stop|accept",
                         node.id,
-                        worst(MAX_ADVANCE_ERROR_BYTES)
+                        worst(MAX_ADVANCE_NOTE_BYTES)
                     )
                 }),
                 loop_cause: node.loop_body.as_ref().map(|_| NodeDecisionCause::InvalidLoopDecision),
@@ -441,8 +441,8 @@ new_worktree_base: None,
                 wait_reason: None,
                 cancelled_from: Some(NodeState::Running),
                 skip_reason: Some("graph cancelled".into()),
-                advance_error: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
-                advance_error_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
+                advance_note: Some(worst(MAX_ADVANCE_NOTE_BYTES)),
+                advance_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 advance_owner_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 launch_retry: None,
                 last_launch_retry: (!boundary
@@ -455,7 +455,7 @@ new_worktree_base: None,
                     failures: u8::MAX,
                     deadline: Some(envelope::latest()),
                     wake_at: Some(envelope::latest()),
-                    reason: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+                    reason: Some(worst(MAX_ADVANCE_NOTE_BYTES)),
                 }),
                 loop_pause_code: node.loop_body.as_ref().map(|_| "c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 outputs: Some(if boundary {
@@ -489,7 +489,7 @@ host_refused_before_acceptance: false,
                         state: AttemptState::Unresolved,
                         stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
                         attempt_ref: Some(worst(HOST_ID_BYTES)),
-                        outcome: Some(AttemptOutcome::AdapterUnavailable),
+                        outcome: Some(GraphAttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
                         input_cap: Some(usize::MAX),
                         input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
@@ -520,6 +520,7 @@ host_refused_before_acceptance: false,
                             cost_partial: true,
                             cost_unknown_reason: Some(worst(NOTE_BYTES)),
                         }),
+                    cause: None,
                     })
                     .collect(),
             }
@@ -549,6 +550,7 @@ host_refused_before_acceptance: false,
         pull_request: Some(worst(OUTPUT_FIELD_BYTES)),
         integration_pin: Some("1".repeat(64)),
         cancelled: true,
+        on_stop_defaults: envelope::worst_case_on_stop_defaults(),
         delivery_ci_superseded: Vec::new(),
         cancel_reason: Some(worst(MAX_CANCEL_REASON_BYTES)),
         pause: Some(
@@ -619,6 +621,22 @@ fn worst_case_land_checkpoint_fits_its_bound() {
 
 fn assert_fits(document: GraphDocument) {
     assert_fits_with_repair_metadata(document, "substantial", false);
+}
+
+#[test]
+fn envelope_reserves_every_configured_on_stop_default() {
+    // Configured graph-wide defaults are sealed in every checkpoint. Reserving
+    // one entry per cause at the longest wire step keeps the admission bound an
+    // upper bound for any admitted graph, so a later config cannot overflow it.
+    let defaults = envelope::worst_case_on_stop_defaults();
+    let longest = provenant_records::NextStep::SameRoute {
+        continuation: provenant_records::Continuation::Fresh,
+    };
+    assert_eq!(
+        defaults.iter().count(),
+        provenant_records::StopCause::ALL.len()
+    );
+    assert!(defaults.iter().all(|(_, step)| step == longest));
 }
 
 #[test]
@@ -799,7 +817,7 @@ fn a_loop_extension_past_the_envelope_refuses_without_saving() {
     .unwrap();
     let mut owner = FakeOwner {
         observations: (0..18)
-            .map(|_| terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"))
+            .map(|_| terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"))
             .collect(),
         ..Default::default()
     };
@@ -986,8 +1004,8 @@ fn usage_warnings_keep_the_most_recently_settled_attempts() {
     ]);
     let mut owner = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
@@ -1046,13 +1064,13 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
         node("one", route("first")),
         node("two", route("first")),
     ]);
-    let mut failed = terminal(AttemptOutcome::OtherFailure);
+    let mut failed = terminal(GraphAttemptOutcome::OtherFailure);
     if let AttemptObservation::Terminal { attempt_ref, .. } = &mut failed {
         *attempt_ref = Some(format!("host/{attempt}"));
     }
     // One settles first and fails delivery; two settles after it.
     let mut owner = FakeOwner {
-        observations: [failed, terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [failed, terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let limits = crate::config::GraphLimits::default();
@@ -1095,7 +1113,7 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
     let mut journal =
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let run = advance_with_budget(

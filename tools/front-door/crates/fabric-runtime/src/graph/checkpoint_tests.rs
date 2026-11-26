@@ -70,9 +70,17 @@ fn deployed_2_0_5_checkpoint_and_external_prompts_still_read() {
         "fixture checkpoint contains credential-shaped text"
     );
 
+    // The fixture is deliberately a deployed v2 envelope; the reader migrates
+    // it to the current v3 layout. Keep both pins: the on-disk record stays v2
+    // and the decoded value is v3.
+    assert_eq!(value["schema_version"].as_u64(), Some(2));
     let directory = Directory::open_anchor(temp.path()).unwrap();
     let stored = decode_checkpoint_in(&directory, CHECKPOINT, graph_id).unwrap();
-    assert_eq!(stored.schema_version, 2);
+    assert_eq!(
+        stored.schema_version,
+        super::journal::CHECKPOINT_SCHEMA_VERSION
+    );
+    assert_eq!(stored.schema_version, 3);
     assert_eq!(stored.execution.document.graph_id, graph_id);
     let (plan, _) = validate_plan_with_limits(&stored.execution.document, &Default::default())
         .expect("deployed document remains valid");
@@ -114,6 +122,11 @@ fn review_schema_versions_and_stored_digests() {
 }
 
 fn sealed(mut record: StoredCheckpoint) -> Vec<u8> {
+    // The fixture is a v2 envelope, but `decode_checkpoint` is the current
+    // reader and only accepts the post-migration v3 envelope. Seal test
+    // records in the layout production writes; the v2 fixture is still pinned
+    // by the deployed-checkpoint and serde round-trip tests above.
+    record.schema_version = super::journal::CHECKPOINT_SCHEMA_VERSION;
     if let Ok((base, _)) = validate_replay_plan(&record.execution.document, &plans::generous())
         && let Ok(plan_digest) = plan_digest(&base)
     {
@@ -205,8 +218,8 @@ fn admission_recovery_capability() {
         }))
     ));
 
-    let mut bad_digest = seed();
-    bad_digest.digest = "sha256:bad".into();
+    let mut bad_digest: Value = serde_json::from_slice(&sealed(seed())).unwrap();
+    bad_digest["digest"] = json!("sha256:bad");
     assert!(matches!(
         decode_checkpoint(&serde_json::to_vec(&bad_digest).unwrap(), "g-test"),
         Err(JournalError::BadDigest)

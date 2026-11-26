@@ -106,7 +106,7 @@ pub fn full_reset(slot: &SlotPaths, _custody: &SlotCustody) -> Result<(), BuildE
             .and_then(OsStr::to_str)
             .and_then(|n| n.parse::<u64>().ok())
             .is_none()
-        || slot.target != slot.root.join("target")
+        || !slot.target.starts_with(slot.root.join("target"))
         || slot.repo != slot.root.join("repo")
     {
         return Err(BuildError::Config(

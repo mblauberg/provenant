@@ -40,15 +40,16 @@ impl AttemptOwner for Provider {
             assert_eq!(replay.stored_ref, Some("fixture/accepted-child"));
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: replay.stored_ref.map(str::to_owned),
-                outcome: graph::AttemptOutcome::Succeeded,
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: None,
                 result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
+                cause: None,
             })
         } else {
             assert!(replay.stored_ref.is_none());

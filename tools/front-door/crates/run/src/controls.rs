@@ -736,7 +736,7 @@ pub enum Reconciled {
     /// The supervisor is resuming durable settlement in the background.
     Settling {
         phase: String,
-        blocking_reason: Option<String>,
+        held_reason: Option<String>,
     },
     /// A chair explicitly released settlement while retaining its evidence.
     Abandoned { reason: String },
@@ -847,12 +847,9 @@ impl std::fmt::Display for Reconciled {
             Self::Held => f.write_str("held"),
             Self::DeadlineStop => f.write_str("deadline_stop"),
             Self::StallStop { policy } => write!(f, "stall_stop ({})", policy.as_str()),
-            Self::Settling {
-                phase,
-                blocking_reason,
-            } => {
+            Self::Settling { phase, held_reason } => {
                 write!(f, "settling ({phase})")?;
-                if let Some(reason) = blocking_reason {
+                if let Some(reason) = held_reason {
                     write!(f, ": {reason}")?;
                 }
                 Ok(())
@@ -3885,7 +3882,7 @@ impl RunStore {
             let mut destination = HostDeliveryContext::destination_for_remote(
                 prior.mode.clone(),
                 branch,
-                &prior.remote,
+                prior.remote.remote_name().cloned(),
             )?
             .ok_or(RunError::Validation("fresh fallback delivery destination"))?;
             destination.remote = prior.remote.clone();
@@ -4541,15 +4538,18 @@ impl RunStore {
                     *holder_live,
                     call.clock,
                 ),
-                Reconciled::Uncertain { reason } => {
-                    crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
-                }
+                Reconciled::Uncertain { reason } => crate::settlement::record_recovery_failure(
+                    &directory,
+                    scope,
+                    &reason.to_string(),
+                    call.clock,
+                ),
                 Reconciled::Settling {
-                    blocking_reason: Some(_),
+                    held_reason: Some(_),
                     ..
                 }
                 | Reconciled::Abandoned { .. } => Ok(()),
-                _ => crate::settlement::clear_blocked(&directory, scope),
+                _ => crate::settlement::clear_held(&directory, scope),
             }
         })();
         if let Err(error) = progress {
@@ -4687,10 +4687,10 @@ impl RunStore {
                         },
                         finished_at: now,
                         failure: None,
-                        terminal_cause: if cancelled {
+                        cause: if cancelled {
                             None
                         } else {
-                            Some(TerminalCause::HandoffRefused)
+                            Some(CauseKind::LaunchHandoffRefused)
                         },
                         terminal_note: None,
                     },
@@ -4761,10 +4761,10 @@ impl RunStore {
                 },
                 finished_at: now,
                 failure: None,
-                terminal_cause: if cancelled {
+                cause: if cancelled {
                     None
                 } else {
-                    Some(TerminalCause::HandoffRefused)
+                    Some(CauseKind::LaunchHandoffRefused)
                 },
                 terminal_note: None,
             },
@@ -4985,13 +4985,50 @@ impl RunStore {
             // Release does not finish the work. A follow-up may still need scratch.
             return Ok(None);
         }
+        let in_use = self.scratch_in_use(id)?;
+        let released = self.custody_released(record, call)?;
+        if !released && !in_use {
+            // Settlement releases scratch for a settled attempt whose custody
+            // proof never arrived once it has been idle past `gc.scratch_grace`.
+            // GC applies the same rule, so neither path alone strands it.
+            let grace = provenant_config::GcSettings::read(self.context.state_root.as_path())
+                .ok()
+                .and_then(|settings| settings.scratch_grace_seconds().ok())
+                .unwrap_or(86_400);
+            let policy = ScratchPolicy {
+                grace_seconds: grace,
+                ..ScratchPolicy::new(0)
+            };
+            let mut sizes = provenant_os::disk::DiskReport::with_walk_budget(
+                self.context.state_root.as_path().into(),
+                0,
+                10_000,
+                std::time::Duration::from_millis(500),
+            );
+            let mut grace_report = ProviderStateGc::default();
+            self.collect_grace_scratch(
+                &id.to_string(),
+                call.clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?,
+                false,
+                &policy,
+                call,
+                &RetentionScan::default(),
+                &mut sizes,
+                &mut grace_report,
+            )?;
+            if !grace_report.attempt_tmp.is_empty() {
+                return Ok(Some(Reconciled::TemporaryRemoved));
+            }
+        }
+        if !released || in_use {
+            return Ok(None);
+        }
         let _publication = attempt.try_lock_existing(
             std::ffi::OsStr::new("publication.lock"),
             provenant_os::fs::LockMode::Exclusive,
         )?;
-        if !self.custody_released(record, call)? || self.scratch_in_use(id)? {
-            return Ok(None);
-        }
         let remove = || -> Result<()> {
             match scratch.metadata_at(std::ffi::OsStr::new("tmp"), false) {
                 Err(error) if error.is_not_found() => return Ok(()),

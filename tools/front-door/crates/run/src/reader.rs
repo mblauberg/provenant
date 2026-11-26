@@ -170,7 +170,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
     let cause_source = match stop {
         Some(stop) => stop.cause().source(),
         None => r
-            .settlement_reason
+            .settlement_class
             .map(|reason| reason.rule().source)
             .unwrap_or(provenant_records::run::CauseSource::Unavailable),
     };
@@ -184,9 +184,9 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         key: r.key,
         attempt_number: r.attempt_number,
         project_id: r.project_id,
-        terminal_state: outcome.into(),
+        terminal_state: outcome,
         cause_source,
-        settlement_reason: r.settlement_reason,
+        settlement_class: r.settlement_class,
         account_identity,
         exit_code,
         queued_at: r.queued_at,
@@ -1633,23 +1633,23 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
     } = r.state
     {
         if r.schema_version == 2 {
-            match (&r.terminal_evidence, outcome) {
-                (Some(TerminalEvidence::Unsettled { reason: evidence }), Outcome::Unsettled)
+            match (&r.terminal_basis, outcome) {
+                (Some(TerminalBasis::Unsettled { reason: evidence }), Outcome::Unsettled)
                     if !evidence.is_empty()
                         && evidence.len() <= 4096
                         && reason.as_ref() == Some(evidence) => {}
-                (Some(TerminalEvidence::ProcessExit), outcome)
+                (Some(TerminalBasis::ProcessExit), outcome)
                     if outcome != Outcome::Unsettled && r.exit_evidence.is_some() => {}
                 (
-                    Some(TerminalEvidence::PreLaunchRefusal),
+                    Some(TerminalBasis::PreLaunchRefusal),
                     Outcome::Rejected | Outcome::Cancelled | Outcome::AuthRequired,
                 ) if r.provider_launched == Some(false) => {}
-                (Some(TerminalEvidence::EffectiveCancellation), Outcome::Cancelled) => {}
-                (Some(TerminalEvidence::ImportCancellation), Outcome::Cancelled)
+                (Some(TerminalBasis::EffectiveCancellation), Outcome::Cancelled) => {}
+                (Some(TerminalBasis::ImportCancellation), Outcome::Cancelled)
                     if r.exit_evidence.is_some()
                         && r.cancellation_disposition
                             == Some(CancellationDisposition::ImportEffective) => {}
-                (Some(TerminalEvidence::Lost { reason: evidence }), Outcome::Lost)
+                (Some(TerminalBasis::Lost { reason: evidence }), Outcome::Lost)
                     if !evidence.is_empty() && reason.as_ref() == Some(evidence) => {}
                 _ => return Err(RunError::Validation("terminal decision evidence")),
             }
@@ -1692,7 +1692,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                 .as_ref()
                 .is_none_or(|result| !result.complete || result.bytes == 0)
                 || (exit_code != Some(0)
-                    && !r.settlement_reason.is_some_and(|reason| {
+                    && !r.settlement_class.is_some_and(|reason| {
                         matches!(
                             reason.rule().terminal_outcome,
                             provenant_records::run::SettlementTerminalOutcome::Succeeded
@@ -1703,7 +1703,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                     r.applied_route.as_ref(),
                     r.observed_route.as_ref(),
                 )
-                .permits_success(&r.partial_signals))
+                .permits_success(&r.signals))
         {
             return Err(RunError::Validation("invalid stored success"));
         }
@@ -1719,10 +1719,10 @@ pub(crate) enum RouteIdentity {
     Mismatch,
 }
 impl RouteIdentity {
-    pub(crate) fn permits_success(self, signals: &[PartialSignal]) -> bool {
+    pub(crate) fn permits_success(self, signals: &[SettlementSignal]) -> bool {
         match self {
             Self::Observed => true,
-            Self::Unobserved => signals.contains(&PartialSignal::IdentityUnobserved),
+            Self::Unobserved => signals.contains(&SettlementSignal::IdentityUnobserved),
             Self::Mismatch => false,
         }
     }

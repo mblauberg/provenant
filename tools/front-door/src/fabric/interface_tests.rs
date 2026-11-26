@@ -2278,15 +2278,16 @@ fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
             self.0 += 1;
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: Some("fixture/review".into()),
-                outcome: graph::AttemptOutcome::Succeeded,
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: None,
                 result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }
@@ -4515,15 +4516,16 @@ fn writer_sourced_template_review_selects_shape_and_pins_every_stage() -> Result
                 .push(b"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n");
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: Some(format!("fixture/{}", key.node_id)),
-                outcome: graph::AttemptOutcome::Succeeded,
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(result.finish())),
                 result_warning: None,
                 result_path: None,
                 branch: writer.then(|| "slice".into()),
                 commit: writer.then(|| self.commit.clone()),
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }
@@ -5018,5 +5020,21 @@ fn review_child_refuses_unknown_tier_under_advisory_default() -> Result {
     );
     assert!(reason.contains("valid tiers: "), "{reason}");
     assert!(!reason.contains("not both"), "{reason}");
+    Ok(())
+}
+
+#[test]
+fn explain_uses_the_declared_adapter_for_an_uncanonicalised_model() -> Result {
+    use provenant_fabric_runtime::graph::GraphNode;
+    let rig = TestRig::new()?;
+    let factory = factory(&rig)?;
+    let node: GraphNode = serde_json::from_value(json!({
+        "id":"exact", "access":"read_only", "prompt":"inspect",
+        "route":{"adapter":"codex","model":"unprefixed-model"}
+    }))?;
+    let rows = factory.explain_node_routes(&[node]);
+    assert_eq!(rows[0]["adapter"], "codex");
+    assert_eq!(rows[0]["model"], "unprefixed-model");
+    assert_eq!(rows[0]["sources"]["adapter"], "node field");
     Ok(())
 }

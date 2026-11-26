@@ -1854,6 +1854,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 
+    fn graph_on_stop_defaults(&self) -> provenant_records::OnStop {
+        resolve_on_stop_defaults(
+            &self.factory.context.roots,
+            &self.factory.context.identity.project.to_string(),
+        )
+    }
+
     fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
         let mut policy = provenant_fabric_runtime::graph::LaunchRetryPolicy::default();
         let config = match provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
@@ -2138,7 +2145,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 && matches!(
                     &record.state,
                     provenant_records::run::AttemptState::Terminal {
-                        terminal_cause: Some(provenant_records::run::TerminalCause::SpawnFailure),
+                        cause: Some(provenant_records::run::CauseKind::SpawnFailure),
                         ..
                     }
                 ))
@@ -4081,7 +4088,7 @@ impl BoundGraphOwner<'_> {
         replay: provenant_fabric_runtime::graph::Replay<'_>,
         refusal: Option<&GraphRefusalScope>,
     ) -> Result<StartedAttempt, FacadeError> {
-        use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
+        use provenant_fabric_runtime::graph::{AttemptObservation, GraphAttemptOutcome};
         let operation_id = graph_operation("graph-attempt-operation", key)?;
         let cancel = self.cancel;
         let blocked = |owner: &BinaryRunOwner<'_>| -> Result<Option<String>, FacadeError> {
@@ -4443,7 +4450,7 @@ impl BoundGraphOwner<'_> {
         {
             return Ok(StartedAttempt::Refused(AttemptObservation::Terminal {
                 attempt_ref: None,
-                outcome: AttemptOutcome::AdapterUnavailable,
+                outcome: GraphAttemptOutcome::AdapterUnavailable,
                 launched: false,
                 result: None,
                 result_warning: None,
@@ -4451,7 +4458,8 @@ impl BoundGraphOwner<'_> {
                 branch: None,
                 commit: None,
                 stop: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::PreLaunchRefusal),
+                settlement_class: Some(provenant_records::run::SettlementClass::PreLaunchRefusal),
+                cause: None,
             }));
         }
         // A shared writer was authorised and directory-bound by its
@@ -5337,7 +5345,7 @@ impl BoundGraphOwner<'_> {
         expected_origin: provenant_records::WorkKey,
         facts: TerminalFacts<'_>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, FacadeError> {
-        use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
+        use provenant_fabric_runtime::graph::{AttemptObservation, GraphAttemptOutcome};
         let TerminalFacts {
             required_verdict,
             deadline_seconds,
@@ -5395,7 +5403,7 @@ impl BoundGraphOwner<'_> {
                     .map(|(_, receipt)| receipt)
                     .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
-                let preparation_cause = attempt.state.terminal_cause();
+                let preparation_cause = attempt.state.cause();
                 // The sealed stop, else the cause the outcome names.
                 let stop = attempt
                     .state
@@ -5485,98 +5493,25 @@ impl BoundGraphOwner<'_> {
                 Ok(AttemptObservation::Terminal {
                     launched,
                     attempt_ref: reference,
-                    outcome: if result_warning.is_some() {
-                        AttemptOutcome::OtherFailure
-                    } else if !launched
-                        && outcome == Outcome::Rejected
-                        && attempt.preparation_failure.is_none_or(|failure| {
-                            failure == provenant_records::run::PreparationFailure::AdapterUnavailable
-                        })
-                        && let Some(cause) = preparation_cause
-                        && cause != provenant_records::run::TerminalCause::CommandUnavailable
-                    {
-                        // The fallback classification describes route policy,
-                        // not the cause (for example an unregistered account).
-                        AttemptOutcome::PreparationRefused(cause)
-                    } else if let Some(failure) = attempt.preparation_failure {
-                        match failure {
-                            provenant_records::run::PreparationFailure::AuthRequired => {
-                                AttemptOutcome::AuthRequired
-                            }
-                            provenant_records::run::PreparationFailure::UsageLimited => {
-                                AttemptOutcome::UsageLimited
-                            }
-                            provenant_records::run::PreparationFailure::AdapterUnavailable => {
-                                AttemptOutcome::AdapterUnavailable
-                            }
-                            provenant_records::run::PreparationFailure::GitSetup => {
-                                AttemptOutcome::PreparationRefused(
-                                    preparation_cause.unwrap_or(
-                                        provenant_records::run::TerminalCause::PreparationRefused,
-                                    ),
-                                )
-                            }
-                        }
-                    } else {
-                        match outcome {
-                            Outcome::Succeeded
-                                if effective_delivery.is_some_and(|delivery| {
-                                    matches!(
+                    outcome: if result_warning.is_some()
+                        || (outcome == Outcome::Succeeded
+                            && effective_delivery.is_some_and(|delivery| {
+                                matches!(
                                     delivery.state,
                                     provenant_records::run::WriterDeliveryState::Failed { .. }
                                         | provenant_records::run::WriterDeliveryState::NotAttempted { .. }
                                 )
-                                }) =>
-                            {
-                                AttemptOutcome::OtherFailure
-                            }
-                            Outcome::Succeeded => AttemptOutcome::Succeeded,
-                            Outcome::AuthRequired => AttemptOutcome::AuthRequired,
-                            Outcome::RateLimited | Outcome::QuotaLimited => {
-                                AttemptOutcome::UsageLimited
-                            }
-                            Outcome::TimedOut if attempt.state.terminal_cause()
-                                == Some(provenant_records::run::TerminalCause::TokenBudget)
-                                => AttemptOutcome::OtherFailure,
-                            Outcome::TimedOut if deadline_seconds.is_some() => {
-                                AttemptOutcome::DeadlineExceeded
-                            }
-                            Outcome::TimedOut => AttemptOutcome::OtherFailure,
-                            Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
-                            Outcome::Unclassified => AttemptOutcome::Unclassified,
-                            Outcome::Rejected if !launched => preparation_cause
-                                .or(Some(provenant_records::run::TerminalCause::Unrecorded))
-                                .map_or(AttemptOutcome::OtherFailure, AttemptOutcome::PreparationRefused),
-                            Outcome::ReviewRequired if matches!(
-                                &attempt.state,
-                                AttemptState::Terminal { terminal_cause: Some(provenant_records::run::TerminalCause::StoppedNoWork), .. }
-                            ) => AttemptOutcome::StoppedNoWork,
-                            // A declared stop is one fact whether or not the
-                            // writer left uncommitted edits; the graph restarts
-                            // it on the retained worktree.
-                            Outcome::ReviewRequired | Outcome::Uncommitted
-                                if attempt.partial_signals.contains(&provenant_records::run::PartialSignal::DeclaredStop)
-                                    && attempt.partial_signals.iter().all(|signal| matches!(
-                                        signal,
-                                        provenant_records::run::PartialSignal::DeclaredStop
-                                            | provenant_records::run::PartialSignal::UncommittedWork
-                                    )) =>
-                            {
-                                AttemptOutcome::DeclaredStop
-                            }
-                            Outcome::Failed
-                                if attempt.state.terminal_cause()
-                                    == Some(provenant_records::run::TerminalCause::ProviderStalledRetry) =>
-                            {
-                                AttemptOutcome::ProviderStalledRetry
-                            }
-                            Outcome::Failed => AttemptOutcome::TaskFailed,
-                            Outcome::ReviewRequired => AttemptOutcome::ReviewRequired,
-                            // Uncommitted edits without a declared stop need the
-                            // chair, so the node fails without fallback.
-                            Outcome::Uncommitted => AttemptOutcome::OtherFailure,
-                            _ => AttemptOutcome::OtherFailure,
-                        }
+                            }))
+                    {
+                        GraphAttemptOutcome::OtherFailure
+                    } else if outcome == Outcome::TimedOut
+                        && deadline_seconds.is_some()
+                        && preparation_cause != Some(provenant_records::run::CauseKind::TokenBudget)
+                    {
+                        GraphAttemptOutcome::DeadlineExceeded
+                    } else {
+                        provenant_records::settlement::project::graph_outcome(&attempt)
+                            .unwrap_or(GraphAttemptOutcome::OtherFailure)
                     },
                     result,
                     result_warning,
@@ -5604,7 +5539,8 @@ impl BoundGraphOwner<'_> {
                         source_commit,
                     ),
                     stop,
-                    settlement_reason: attempt.settlement_reason,
+                    settlement_class: attempt.settlement_class,
+                    cause: attempt.state.cause().map(Box::new),
                 })
             }
             _ => Ok(AttemptObservation::Pending {
@@ -5612,6 +5548,78 @@ impl BoundGraphOwner<'_> {
             }),
         }
     }
+}
+
+/// Resolve the host/project `on_stop` defaults once, before the graph is
+/// admitted. Configured keys are sealed in the checkpoint; a pinned cause is
+/// reported with its source and keeps its table row.
+fn resolve_on_stop_defaults(
+    roots: &provenant_core::Roots,
+    project: &str,
+) -> provenant_records::OnStop {
+    let config = match provenant_cli::config_reads::read_for(roots, "fabric") {
+        Ok(config) => config,
+        Err(error) => {
+            let error = provenant_records::diagnostic::safe_text(&error.to_string());
+            warn(Warning::new(
+                provenant_records::warning::CONFIG_UNAVAILABLE,
+                format!("graph on_stop defaults unavailable ({error}); using the stop table"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                ),
+            ));
+            return provenant_records::OnStop::default();
+        }
+    };
+    // A project entry overrides the host entry for the same cause; both are
+    // typed domain settings, so an unknown cause or step is refused where
+    // the configuration is read, with its file and line.
+    let graph = &config.domains.fabric.graph;
+    // The layer is the scope of the entry; the origin names where it was set.
+    let source = |layer: provenant_records::Layer, key: String| provenant_records::Source {
+        layer,
+        origin: provenant_cli::config_reads::origin_source(config.origins.get(&key), &key)
+            .origin
+            .or(Some(key)),
+    };
+    let host = graph.on_stop.iter().map(|(cause, step)| {
+        (
+            cause,
+            step,
+            source(
+                provenant_records::Layer::Host,
+                format!("domains.fabric.graph.on_stop.{cause}"),
+            ),
+        )
+    });
+    let scoped = graph
+        .projects
+        .get(project)
+        .into_iter()
+        .flat_map(|scoped| scoped.on_stop.iter())
+        .map(|(cause, step)| {
+            (
+                cause,
+                step,
+                source(
+                    provenant_records::Layer::Project,
+                    format!("domains.fabric.graph.projects.{project}.on_stop.{cause}"),
+                ),
+            )
+        });
+    let mut steps = std::collections::BTreeMap::new();
+    for (cause, step, source) in host.chain(scoped) {
+        if cause.rule().pinned {
+            warn(Warning::new(
+                provenant_records::warning::ON_STOP_PINNED_IGNORED,
+                format!("on_stop.{cause} is pinned; the table default is kept"),
+                source,
+            ));
+            continue;
+        }
+        steps.insert(cause, step);
+    }
+    provenant_records::OnStop::new(steps)
 }
 
 /// How a new graph attempt was admitted.
@@ -5744,7 +5752,7 @@ fn pushed_delivery_head_proves_writer_commit_when_sealed_head_is_absent() {
     let receipt = provenant_records::run::WriterDeliveryReceipt {
         extra: Default::default(),
         schema_version: 1,
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "fix/4065".into(),
         head: Some(provenant_core::GitOid::parse(&pushed).unwrap()),
         review_acceptance: None,
@@ -5943,3 +5951,41 @@ mod peer_handoff_tests;
 #[cfg(test)]
 #[path = "owner_recovery_rebuild_tests.rs"]
 mod recovery_rebuild_tests;
+
+#[cfg(test)]
+mod on_stop_defaults_tests {
+    #[test]
+    fn host_defaults_are_read_and_a_pinned_cause_is_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+        let state = temp.path().join("state");
+        for dir in [&home, &project, &state] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version = 1\n[domains.fabric.graph.on_stop]\n\
+             stopped_no_work = \"chair\"\n\
+             blocked = \"new_route\"\n\
+             [domains.fabric.graph.projects.other.on_stop]\n\
+             stopped_no_work = \"new_route\"\n",
+        )
+        .unwrap();
+        let roots = crate::roots::child(&home, &project, state).unwrap();
+        let defaults = super::resolve_on_stop_defaults(&roots, "project");
+        assert_eq!(
+            defaults.get(provenant_records::StopCause::StoppedNoWork),
+            Some(provenant_records::NextStep::Chair)
+        );
+        // `blocked` is pinned, so its configured default is ignored with
+        // ON_STOP_PINNED_IGNORED and the table row stands.
+        assert_eq!(defaults.get(provenant_records::StopCause::Blocked), None);
+        // A project entry overrides the host entry for its own project only.
+        let scoped = super::resolve_on_stop_defaults(&roots, "other");
+        assert_eq!(
+            scoped.get(provenant_records::StopCause::StoppedNoWork),
+            Some(provenant_records::NextStep::NewRoute)
+        );
+    }
+}

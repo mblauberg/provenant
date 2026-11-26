@@ -1436,9 +1436,9 @@ fn recover_provisioning(
                     .find(|progress| progress.id == node)
                     .ok_or(ServiceError::Facade(FacadeError::StateCorrupt))?;
                 progress.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-                progress.advance_error_code = Some("launch_refused".into());
+                progress.advance_code = Some("launch_refused".into());
                 progress.advance_owner_code = Some(error.code().into());
-                progress.advance_error = Some(format!(
+                progress.advance_note = Some(format!(
                     "writer provisioning refused [{}]: {}; correct the cause, then retry with `provenant retry {}/{node}`",
                     error.code(),
                     error.to_string().chars().take(512).collect::<String>(),

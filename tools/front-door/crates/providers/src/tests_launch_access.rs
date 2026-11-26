@@ -1639,7 +1639,11 @@ fn sandboxed_private_git_config_includes_host_config() -> Result<(), Box<dyn std
 #[test]
 fn ssh_agent_follows_lane_access() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_records::LaneAccess;
-    let temp = tempfile::tempdir()?;
+    // The agent socket must stay inside macOS's sun_path limit even when the
+    // host TMPDIR is a long sandbox alias.
+    let temp = provenant_os::fixture::short_tempdir("agent.sock", |root| {
+        tempfile::tempdir_in(root)
+    })?;
     let socket = temp.path().join("agent.sock");
     let _listener = std::os::unix::net::UnixListener::bind(&socket)?;
     let canonical = socket.canonicalize()?;

@@ -1,5 +1,6 @@
 //! Fast manifest and source policy checks. No Cargo subprocess required.
 use std::{
+    collections::HashMap,
     error::Error,
     fs,
     path::{Path, PathBuf},
@@ -500,7 +501,260 @@ fn is_test_source(name: &str) -> bool {
 
 // Method-level bans (including direct sleep) live in clippy.toml. The remaining
 // scanners express contextual rules: Git arguments/environment, reserved OS
-// namespaces, and adapter identity comparisons; Clippy cannot model those.
+// namespaces, adapter identity comparisons and fixed waits in tests; Clippy
+// cannot model those.
+//
+// Fixed waits in tests hide ordering bugs: they pass on an idle host and flake
+// under load. This rule warns first, so existing fixtures are not broken by a
+// policy change. `PROVENANT_STRICT_TEST_WAITS=1` turns the warning into a
+// refusal once the named waits have moved to `wait_until` or an event. A scope
+// that names `disallowed_methods` is an explicit real-time boundary and is
+// exempt: the wait primitives themselves must still be allowed to sleep.
+fn fixed_wait_violations(source: &str, test_file: bool) -> Vec<String> {
+    test_scopes(source, test_file)
+        .into_iter()
+        .filter_map(|scope| {
+            let tokens = rust_tokens(scope);
+            // A crate-wide `#![allow]` is a blanket suppression, not a named
+            // boundary; it cannot exempt every test in the file.
+            let blanket = tokens.starts_with(&["#", "!", "["]);
+            if !blanket && tokens.contains(&"disallowed_methods") {
+                return None;
+            }
+            // A fixed `Duration` is a wait only when the statement also names
+            // a sleep or timeout primitive. A deadline passed to a bounded
+            // helper such as `wait_until` or `fixture_accept` is not a fixed
+            // wait: its owner decides when it expires.
+            let is_wait_statement = |index: usize| {
+                let start = (0..index)
+                    .rev()
+                    .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                    .map_or(0, |position| position + 1);
+                let end = (index..tokens.len())
+                    .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                    .unwrap_or(tokens.len());
+                tokens[start..end].iter().any(|token| {
+                    matches!(
+                        *token,
+                        "sleep" | "park_timeout" | "recv_timeout" | "wait_timeout"
+                    )
+                })
+            };
+            let mut violations = Vec::new();
+            // Track local bindings by lexical block, including aliases and reassignment.
+            // A shadowing binding replaces the outer value until its block ends.
+            let mut bindings: Vec<HashMap<&str, bool>> = vec![HashMap::new()];
+            let is_fixed = |expression: &[&str], bindings: &[HashMap<&str, bool>]| {
+                expression.windows(3).any(|window| {
+                    window[0] == "Duration"
+                        && window[1] == "::"
+                        && matches!(
+                            window[2],
+                            "from_secs" | "from_millis" | "from_micros" | "from_nanos"
+                        )
+                }) || expression.iter().any(|name| {
+                    bindings
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name))
+                        .copied()
+                        .unwrap_or(false)
+                })
+            };
+            for (index, token) in tokens.iter().enumerate() {
+                match *token {
+                    "{" => bindings.push(HashMap::new()),
+                    "}" if bindings.len() > 1 => {
+                        bindings.pop();
+                    }
+                    _ => {}
+                }
+                let declaration = *token == "let";
+                let name_index = index + 1 + usize::from(tokens.get(index + 1) == Some(&"mut"));
+                let assignment = !declaration
+                    && tokens.get(index + 1) == Some(&"=")
+                    && (index == 0 || matches!(tokens[index - 1], ";" | "{" | "}"));
+                if declaration || assignment {
+                    let name_index = if declaration { name_index } else { index };
+                    if let Some(name) = tokens.get(name_index).copied() {
+                        let end = (name_index + 1..tokens.len())
+                            .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                            .unwrap_or(tokens.len());
+                        if let Some(equal) =
+                            (name_index + 1..end).find(|position| tokens[*position] == "=")
+                        {
+                            let fixed = is_fixed(&tokens[equal + 1..end], &bindings);
+                            if declaration {
+                                bindings.last_mut().expect("root scope").insert(name, fixed);
+                            } else if let Some(scope) = bindings
+                                .iter_mut()
+                                .rev()
+                                .find(|scope| scope.contains_key(name))
+                            {
+                                scope.insert(name, fixed);
+                            }
+                        }
+                    }
+                }
+                if matches!(*token, "recv_timeout" | "wait_timeout")
+                    && tokens.get(index + 1) == Some(&"(")
+                {
+                    let mut depth = 0usize;
+                    let end = (index + 1..tokens.len()).find(|position| {
+                        match tokens[*position] {
+                            "(" => depth += 1,
+                            ")" => depth = depth.saturating_sub(1),
+                            _ => {}
+                        }
+                        depth == 0
+                    });
+                    if end.is_some_and(|end| is_fixed(&tokens[index + 2..end], &bindings)) {
+                        violations.push(format!("{token}, fixed duration wait in a test"));
+                    }
+                }
+                if matches!(*token, "sleep" | "park_timeout") && tokens.get(index + 1) == Some(&"(")
+                {
+                    violations.push(format!("{token}, fixed wait in a test"));
+                }
+                if *token == "Duration"
+                    && tokens.get(index + 1) == Some(&"::")
+                    && matches!(
+                        tokens.get(index + 2).copied(),
+                        Some("from_secs" | "from_millis" | "from_micros" | "from_nanos")
+                    )
+                    && is_wait_statement(index)
+                {
+                    violations.push(format!(
+                        "Duration::{}, fixed wait in a test",
+                        tokens[index + 2]
+                    ));
+                }
+            }
+            (!violations.is_empty()).then_some(violations.join(", "))
+        })
+        .collect()
+}
+
+#[test]
+fn fixed_wait_rule_distinguishes_explicit_boundaries_from_test_waits() {
+    let direct = r#"
+        #[test]
+        fn flaky() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    "#;
+    let found = fixed_wait_violations(direct, false);
+    assert!(found.iter().any(|item| item.contains("sleep")), "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|item| item.contains("Duration::from_millis")),
+        "{found:?}"
+    );
+    let allowed = r#"
+        #[allow(clippy::disallowed_methods)]
+        #[test]
+        fn bounded() {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    "#;
+    assert!(fixed_wait_violations(allowed, true).is_empty());
+    let blanket = r#"
+        #![allow(clippy::disallowed_methods)]
+        #[test]
+        fn flaky() {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    "#;
+    assert!(!fixed_wait_violations(blanket, true).is_empty());
+    let bounded = r#"
+        #[test]
+        fn patient() {
+            wait_until("ready", deadline, observe, reached);
+            wait_for("ready", Duration::from_secs(1), observe, reached);
+        }
+    "#;
+    assert!(fixed_wait_violations(bounded, false).is_empty());
+    let production = "fn busy() { std::thread::sleep(Duration::from_millis(50)); }";
+    assert!(fixed_wait_violations(production, false).is_empty());
+}
+
+#[test]
+fn fixed_duration_bindings_to_timeouts_warn_and_refuse_in_strict_mode() {
+    let split = r#"
+        #[test]
+        fn flaky() {
+            let timeout = Duration::from_millis(50);
+            receiver.recv_timeout(timeout);
+        }
+    "#;
+    let found = fixed_wait_violations(split, false);
+    assert!(!found.is_empty(), "split fixed duration must be reported");
+    assert!(!fixed_waits_refused(&found, false));
+    assert!(fixed_waits_refused(&found, true));
+    let aliases_and_shadowing = r#"
+        #[test]
+        fn waits() {
+            let mut timeout = deadline;
+            timeout = Duration::from_secs(1);
+            let alias = timeout;
+            { let alias = deadline; receiver.recv_timeout(alias); }
+            receiver.recv_timeout(alias);
+        }
+    "#;
+    assert!(!fixed_wait_violations(aliases_and_shadowing, false).is_empty());
+    let shadowed = r#"
+        #[test]
+        fn bounded() {
+            let timeout = Duration::from_secs(1);
+            { let timeout = deadline; receiver.recv_timeout(timeout); }
+            wait_for("ready", timeout, observe, reached);
+        }
+    "#;
+    assert!(fixed_wait_violations(shadowed, false).is_empty());
+}
+
+fn fixed_waits_refused(violations: &[String], strict: bool) -> bool {
+    strict && !violations.is_empty()
+}
+
+#[test]
+#[allow(
+    clippy::print_stderr,
+    reason = "warn-first policy reports fixed waits on stderr"
+)]
+fn test_waits_warn_before_refusal() -> Result<(), Box<dyn Error>> {
+    let strict = std::env::var("PROVENANT_STRICT_TEST_WAITS").is_ok_and(|value| value == "1");
+    let mut violations = Vec::new();
+    for path in source_roots() {
+        let mut sources = Vec::new();
+        rust_sources(&path, &mut sources)?;
+        for source_path in sources {
+            let source = fs::read_to_string(&source_path)?;
+            let test_file = is_test_source(&source_path.to_string_lossy());
+            for violation in fixed_wait_violations(&source, test_file) {
+                violations.push(format!("{}: {violation}", source_path.display()));
+            }
+        }
+    }
+    if !violations.is_empty() {
+        eprintln!(
+            "fixed waits in tests (warn first; set PROVENANT_STRICT_TEST_WAITS=1 to refuse):"
+        );
+        for violation in violations.iter().take(20) {
+            eprintln!("  {violation}");
+        }
+        if violations.len() > 20 {
+            eprintln!("  ... and {} more", violations.len() - 20);
+        }
+    }
+    assert!(
+        !fixed_waits_refused(&violations, strict),
+        "fixed waits in tests under PROVENANT_STRICT_TEST_WAITS=1:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
 
 // Counts for the tokens owned by one function body (innermost function wins).
 #[derive(Default)]
@@ -1704,6 +1958,10 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "console search",
         "console sessions",
         "console tree",
+        // #4020 replaces the handoff prose channel with a typed declaration.
+        // `declare` is the new persisted top-level verb: the unit string is a
+        // contract, so record its spelling alongside the other verbs.
+        "declare",
         "disk report",
         // #4028 adds a real top-level doctor beside `hosts doctor`; the unit
         // string is part of the persisted verb set, so declare the new spelling.
@@ -1892,14 +2150,16 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/run/src/controls.rs", 5500),
         ("crates/run/src/delivery.rs", 4750),
         ("crates/run/src/git_context.rs", 3000),
-        // The #3941 end-to-end settlement test for trailing prose.
-        ("crates/run/src/holder.rs", 9500),
+        // One host phase and one sealed settlement assembly (#4020, #4024).
+        ("crates/run/src/holder.rs", 5750),
         ("crates/run/src/launch.rs", 4250),
         // Scratch-root pruning and its pinned-Git invariants (#3947).
         ("crates/run/src/retention.rs", 5250),
         // The #3906 abandoned-lane registration prune and its pinned test.
         ("crates/run/src/settlement.rs", 4750),
         ("crates/run/src/store.rs", 2750),
+        // The pushed tip sealed at the cut joined the writer terminal record
+        // (#4020): 4255 lines. Next 250-band above size + 100.
         ("crates/run/src/writer.rs", 4250),
         ("crates/supervisor/src/custody.rs", 4000),
         ("crates/supervisor/src/guardian.rs", 3250),
@@ -1907,16 +2167,16 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/ci.rs", 2500),
         ("src/fabric/graph_execution.rs", 2750),
         // The #4064 reused-worktree review-base binding, typed writer-base
-        // report and node-sourced panel helpers grew this owner deliberately:
-        // 4327 lines on the CI head. Next 250-band above size + 100, with
-        // headroom for routine growth.
+        // report and node-sourced panel helpers, plus #4066's authored repair
+        // writer resolution and per-node route preview, grew this owner. The
+        // 4500 ceiling is the next 250-band above size + 100, with headroom.
         ("src/fabric/interface.rs", 4500),
         // Peer fixture transport and writer boundary coverage (#3979).
         ("src/fabric/owner.rs", 6000),
         ("src/fabric/peer.rs", 2500),
         ("src/fabric/run_owner.rs", 3000),
         ("src/fabric/unified.rs", 4500),
-        ("src/handoff.rs", 1750),
+        ("src/session_handoff.rs", 1750),
         // The #4028 hook budget, overrun warning and diagnostic reader grew this
         // owner deliberately: 2770 lines on the CI merge base. Next 250-band
         // above size + 100, with headroom for routine growth.
@@ -2200,6 +2460,195 @@ fn warning_prefix_is_written_only_by_the_emitter() -> Result<(), Box<dyn Error>>
     assert!(
         violations.is_empty(),
         "route warnings through provenant_records::warning::warn; only the edge writes the prefix:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/run-settlement.md#outcome-before-release
+// One pure `settle` is the only writer of a launched attempt's outcome fact. The
+// patterns use the slice 12 spellings (`CauseKind`, `SettlementClass`); old names
+// are refused so a compatibility alias cannot silently reintroduce a decider.
+#[test]
+#[allow(
+    clippy::print_stderr,
+    reason = "Preserve the warn-only architecture growth advisory in this developer test."
+)]
+fn settlement_outcome_has_one_writer() -> Result<(), Box<dyn Error>> {
+    const SETTLE_OWNER: &str = "crates/records/src/settlement/classify.rs";
+    const EVIDENCE_OWNER: &str = "crates/records/src/settlement/mod.rs";
+    const HOLDER: &str = "crates/run/src/holder.rs";
+    const TRANSITIONS: &str = "crates/fabric-runtime/src/graph/transitions.rs";
+    const HOLDER_CEILING: usize = 5750;
+
+    // Blank test-only items without moving line numbers, so an assertion can
+    // name both the file and the line. Whole test files are blanked as well:
+    // stale parser call sites in tests are not production deciders.
+    let production = |source: &str, test_file: bool| -> String {
+        let base = source.as_ptr() as usize;
+        let mut spans: Vec<(usize, usize)> = test_scopes(source, test_file)
+            .iter()
+            .map(|scope| {
+                let start = scope.as_ptr() as usize - base;
+                (start, start + scope.len())
+            })
+            .collect();
+        spans.sort_unstable();
+        let mut out = String::with_capacity(source.len());
+        let mut cursor = 0;
+        for (start, end) in spans {
+            let start = start.max(cursor).min(source.len());
+            let end = end.min(source.len());
+            // A nested test item can lie wholly inside an enclosing `#[cfg(test)]`
+            // module scope: after the outer span the cursor is already past the
+            // inner end. That span is blanked already; skip it rather than slice
+            // a reversed byte range.
+            if start >= end {
+                continue;
+            }
+            out.push_str(&source[cursor..start]);
+            for ch in source[start..end].chars() {
+                out.push(if ch == '\n' { '\n' } else { ' ' });
+            }
+            cursor = end;
+        }
+        if cursor < source.len() {
+            out.push_str(&source[cursor..]);
+        }
+        out
+    };
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    for path in source_roots() {
+        rust_sources(&path, &mut sources)?;
+    }
+    let mut violations = Vec::new();
+    let mut holder_lines = 0usize;
+
+    for path in sources {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = fs::read_to_string(&path)?;
+        if relative == HOLDER {
+            holder_lines = source.lines().count();
+        }
+        // `*_invariants.rs` modules are registered under `#[cfg(test)]` in this
+        // workspace, so they are test sources too even though their stem does
+        // not carry a test suffix.
+        let test_file = is_test_source(&relative) || relative.ends_with("_invariants.rs");
+        let scanned = production(&source, test_file);
+        let lines: Vec<&str> = scanned.lines().collect();
+
+        for (index, line) in lines.iter().enumerate() {
+            let where_ = format!("{relative}:{}", index + 1);
+            if line.contains("OutcomeFact {")
+                && !line.contains("struct OutcomeFact")
+                && !line.trim_start().starts_with("->")
+                && relative != SETTLE_OWNER
+            {
+                violations.push(format!("{where_}: outcome fact built outside settle"));
+            }
+            if line.contains("AppliedPolicy {")
+                && !line.contains("struct AppliedPolicy")
+                && relative != SETTLE_OWNER
+            {
+                violations.push(format!("{where_}: applied policy built outside settle"));
+            }
+            // The holder builds a launched lane's evidence; every host-decided
+            // terminal goes through `SettlementEvidence::host_decided`.
+            if line.contains("SettlementEvidence {")
+                && !line.contains("struct SettlementEvidence")
+                && !line.contains("enum SettlementEvidence")
+                && !line.contains("impl SettlementEvidence")
+                && relative != EVIDENCE_OWNER
+                && relative != HOLDER
+            {
+                violations.push(format!(
+                    "{where_}: settlement evidence built outside host_decided and the holder"
+                ));
+            }
+            if line.contains("settlement_class = Some(SettlementClass::") {
+                violations.push(format!("{where_}: settlement class written without settle"));
+            }
+            if relative == SETTLE_OWNER
+                && (line.contains(".pushed_head") || line.contains(".uncommitted_paths"))
+            {
+                violations.push(format!("{where_}: settle reads display-only Git evidence"));
+            }
+            if relative != TRANSITIONS
+                && line.contains("advance_code = Some(")
+                && line.contains("\"stopped_no_work\"")
+            {
+                violations.push(format!(
+                    "{where_}: no-work advance code written outside transitions"
+                ));
+            }
+            for retired in [
+                "from_turns",
+                "json_fence_fallback",
+                "SettlementReason::derive",
+                "DECLARED_STOP_CODES",
+                "TerminalCause",
+                "PartialSignal",
+                "SettlementReason",
+            ] {
+                if line.contains(retired) {
+                    violations.push(format!("{where_}: retired settlement name `{retired}`"));
+                }
+            }
+        }
+
+        let settle_line = if relative == HOLDER {
+            lines
+                .iter()
+                .position(|line| line.contains("classify::settle("))
+        } else {
+            None
+        };
+        if let Some(settle_line) = settle_line {
+            for (index, line) in lines.iter().enumerate().skip(settle_line + 1) {
+                if line.contains("decoded.outcome =") || line.contains("decoded.cause =") {
+                    violations.push(format!(
+                        "{relative}:{}: host outcome mutated after settle",
+                        index + 1
+                    ));
+                }
+                // The settled decision is one record: a later field write
+                // would leave the class, release and delivery disagreeing.
+                for field in [
+                    "fact.outcome = ",
+                    "fact.cause = ",
+                    "fact.complete = ",
+                    "fact.settlement_class = ",
+                    "fact.release = ",
+                    "fact.delivery_eligible = ",
+                    "fact.signals.push(",
+                ] {
+                    if line.contains(field) {
+                        violations.push(format!(
+                            "{relative}:{}: settled fact mutated after settle (`{field}`)",
+                            index + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if holder_lines > HOLDER_CEILING {
+        eprintln!(
+            "settlement host phase grew to {holder_lines} lines (ceiling {HOLDER_CEILING}); \
+             split the host-phase record from the sealed assembly step before raising the ceiling"
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "settlement outcome has more than one writer:\n{}",
         violations.join("\n")
     );
     Ok(())

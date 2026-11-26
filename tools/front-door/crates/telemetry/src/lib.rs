@@ -22,6 +22,7 @@ pub mod signals;
 pub mod suggest;
 mod trace;
 pub mod usage;
+pub mod value;
 pub use chair::{ChairModelUsage, Unread, attach_usage as attach_chair_usage};
 pub use prices::{
     BillingKind, Categories, ConfiguredModel, ConfiguredPrices, Freshness, PriceError,

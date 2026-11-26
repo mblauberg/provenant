@@ -1115,7 +1115,7 @@ fn prepare_nested(
             child
                 .prompt
                 .push_str(&format!(
-                    "Advisory write-scope paths: {}. The whole worktree remains writable; list out-of-scope edits in the handoff.\n",
+                    "Advisory write-scope paths: {}. The whole worktree remains writable; list out-of-scope edits in your declaration.\n",
                     child.write_scope.join(", ")
                 ));
         }
@@ -1842,7 +1842,7 @@ pub(super) fn settle(
                         "node {} fallback expansion paused: {safe_fallback_error}",
                         node.id
                     ),
-                    MAX_ADVANCE_ERROR_BYTES,
+                    MAX_ADVANCE_NOTE_BYTES,
                 );
                 set_expansion_pause(checkpoint, index, reason, true, None, fallback_limit);
                 return None;
@@ -2090,7 +2090,7 @@ pub(super) fn settle(
                         set_expansion_pause(
                             checkpoint,
                             index,
-                            bounded(&display_reason, MAX_ADVANCE_ERROR_BYTES),
+                            bounded(&display_reason, MAX_ADVANCE_NOTE_BYTES),
                             false,
                             Some(fragment_error),
                             fallback_limit,
@@ -2101,7 +2101,7 @@ pub(super) fn settle(
             }
             let reason = bounded(
                 &format!("node {} expansion paused: {safe_reason}: {reason}", node.id),
-                MAX_ADVANCE_ERROR_BYTES,
+                MAX_ADVANCE_NOTE_BYTES,
             );
             let structural_limit = match safe_reason {
                 PlanFailureFact::Structural(limit) => Some(limit),
@@ -2219,7 +2219,7 @@ fn fallback_reason(progress: &NodeProgress) -> String {
         );
     // A result excerpt is captured output, not an approved diagnostic fact.
     let detail = progress
-        .advance_error
+        .advance_note
         .as_deref()
         .filter(|detail| !detail.trim().is_empty());
     let reason = detail.map_or_else(

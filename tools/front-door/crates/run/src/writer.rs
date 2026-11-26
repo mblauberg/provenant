@@ -352,19 +352,19 @@ pub(crate) struct StopWorkPolicy<'a> {
 }
 
 /// The remote bound for stop publication wins over the launch destination: a
-/// local-integration launch deliberately records no remote, while its
-/// stop-publication binding names the real remote the stopped head must use.
-/// The launch binding is read only when the stop binding has no remote, and an
-/// empty recorded launch remote is an absence, not a corrupt name.
+/// local-integration launch has no remote, while its stop-publication binding
+/// names the real remote the stopped head must use. The launch binding is read
+/// only when the stop binding has no remote. Both destinations were typed on
+/// decode, so neither can carry an empty name.
 pub(super) fn bound_stop_remote(
     publish: Option<&crate::HostDeliveryContext>,
 ) -> Result<Option<provenant_config::RemoteName>> {
     let Some(host) = publish else {
         return Ok(None);
     };
-    match host.stop_publish_remote()? {
+    match host.stop_publish_remote() {
         Some(remote) => Ok(Some(remote)),
-        None => host.delivery_remote(),
+        None => Ok(host.delivery_remote()),
     }
 }
 
@@ -718,6 +718,18 @@ impl WriterLaunch {
             None,
         )?;
         status_paths(&output)
+    }
+
+    /// The remote-tracking tip of the bound branch, when the remote has one.
+    /// Read where `ahead_of_remote` reads it, so both describe the same ref.
+    pub(super) fn remote_tip(
+        &self,
+        git: &Path,
+        remote: Option<&provenant_config::RemoteName>,
+    ) -> Option<GitOid> {
+        let branch = self.branch.as_str().strip_prefix("refs/heads/")?;
+        let upstream = format!("refs/remotes/{}/{branch}", remote?);
+        crate::objects::resolve_ref(git, self.worktree.repo(), &upstream).ok()
     }
 
     pub(super) fn ahead_of_remote(
@@ -1369,6 +1381,22 @@ struct GitPins {
     schema_version: u64,
     scope: provenant_records::custody::Scope,
     base: GitOid,
+}
+
+/// The launch-pinned Git base, read from the sealed writer pins. This is the
+/// only progress pin settlement uses; remote-tracking refs and pushes are not
+/// evidence. Absent pins mean progress is unknown, never no-work.
+pub(crate) fn launch_pin(attempt: &Directory) -> Result<Option<GitOid>> {
+    let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "writer-git-pins.json", crate::RECORD_LIMIT)?
+    else {
+        return Ok(None);
+    };
+    let pins: GitPins = crate::db::decode(&raw)?;
+    if pins.schema_version != 1 {
+        return Err(RunError::Validation("writer Git pins version mismatch"));
+    }
+    Ok(Some(pins.base))
 }
 
 /// The primary checkout as launch found it, sealed beside the attempt: the
@@ -3650,7 +3678,7 @@ impl WriterLaunch {
                         let request = crate::HostDeliveryContext::destination_for_remote(
                             crate::DeliveryMode::Push,
                             branch,
-                            remote.as_str(),
+                            Some(remote.clone()),
                         )?
                         .ok_or(RunError::Validation("stop publication destination missing"))?;
                         crate::HostDeliveryContext::capture()
@@ -3740,6 +3768,9 @@ impl WriterLaunch {
                 push,
             }
         });
+        // The remote-tracking tip at the cut, after any stop push. Sealed
+        // with the head so a re-drive reads the same value; diagnostic only.
+        let pushed_head = self.remote_tip(&git_executable, stop_remote.as_ref());
         crate::artifacts::seal(
             attempt,
             "writer-terminal.json",
@@ -3748,6 +3779,7 @@ impl WriterLaunch {
                 // Replay may observe a later writer's descendant on the branch.
                 // Attribute only the head pinned for this attempt's settlement.
                 head: verified_tip,
+                pushed_head,
                 stop_work,
                 warnings,
             })?,
@@ -4044,7 +4076,7 @@ impl WriterLaunch {
         state: &Path,
         custody: &provenant_supervisor::custody::Recovery,
         cancel: &CancelToken,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<UncommittedWork>> {
         let base = custody
             .writer_base(
                 self.worktree.repo().root_dir(),
@@ -4069,18 +4101,18 @@ impl WriterLaunch {
             "read writer uncommitted changes",
             Some(self.worktree.path()),
         ))?;
-        Ok(uncommitted_reason(&paths).map(|work| work.render()))
+        Ok(uncommitted_reason(&paths))
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct UncommittedWork {
-    paths: Vec<String>,
-    omitted: usize,
+pub(crate) struct UncommittedWork {
+    pub(crate) paths: Vec<String>,
+    pub(crate) omitted: usize,
 }
 
 impl UncommittedWork {
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let mut reason = format!(
             "writer left uncommitted edits and no new commit: {}",
             self.paths.join(", ")
@@ -4107,19 +4139,12 @@ fn uncommitted_reason(paths: &[Vec<u8>]) -> Option<UncommittedWork> {
         paths: listed,
     })
 }
+#[path = "writer_terminal.rs"]
+mod terminal;
 #[cfg(test)]
 #[path = "writer_uncommitted_tests.rs"]
 mod uncommitted_tests;
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct WriterTerminal {
-    pub schema_version: u64,
-    pub head: GitOid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop_work: Option<provenant_records::run::StopWorkSummary>,
-    /// Settlement warnings recorded once, so a resume does not re-emit them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
-}
+pub(crate) use terminal::{WriterTerminal, pushed_head, terminal_head};
 #[derive(serde::Serialize)]
 struct WriterManifest {
     #[serde(flatten)]

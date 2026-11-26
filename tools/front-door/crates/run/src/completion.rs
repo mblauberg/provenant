@@ -6,8 +6,8 @@ use crate::{
 use provenant_os::fs::Directory;
 use provenant_records::{
     AttemptFile, Layer, Source,
+    declaration::DeclarationEvidence,
     handoff::{HANDOFF_BYTES, Handoff, HandoffError, HandoffResult},
-    run::{PathScope, WriteSource},
     warning::{
         CONFIG_MALFORMED, CONFIG_UNAVAILABLE, PORT_LANE_CHECK_INVALID, PORT_STATIC_CHECK_INVALID,
         Warning, warn,
@@ -15,7 +15,7 @@ use provenant_records::{
 };
 use std::{
     ffi::OsStr,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 use toml_edit::Item;
 
@@ -37,9 +37,9 @@ pub(crate) fn guidance() -> &'static str {
     static GUIDANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     GUIDANCE.get_or_init(|| {
         [
-            "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). When a criterion is wrong, add spec_concerns entries with criterion, claim, evidence, proposed_change and status (as_written, diverged or stopped); disclose any divergence. A write scope names the expected files, not a fence: when the fix needs another file, edit it minimally and list each such path in decisions; only a strict WRITE_SCOPE lane policy refuses those paths at settlement.",
+            "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. Declare your result with `provenant declare --stdin` (schema v2 JSON; see STATUS_GUIDANCE). Field errors come back at once; fix and call again. The last accepted declaration settles the lane; prose and fenced blocks are not read. To stop early, declare `stopped_early` or `blocked`. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). When a criterion is wrong, add spec_concerns entries with criterion, claim, evidence, proposed_change and status (as_written, diverged or stopped); disclose any divergence. A write scope names the expected files, not a fence: when the fix needs another file, edit it minimally and list each such path in decisions; only a strict WRITE_SCOPE lane policy refuses those paths at settlement.",
             provenant_records::handoff::STATUS_GUIDANCE,
-            "The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
+            "The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings."
         ]
         .join(" ")
     })
@@ -55,63 +55,23 @@ impl RunStore {
         }
     }
 
-    pub(crate) fn capture_handoff(
+    /// Close the attempt's declaration journal and seal the accepted handoff.
+    /// Prose, fenced blocks and later tool calls are never read: the last
+    /// accepted declaration is the only settlement input.
+    pub(crate) fn capture_declaration(
         &self,
         attempt: &Directory,
         record: &AttemptRecord,
-        decoded: &Decoded,
-    ) -> Result<provenant_records::handoff::HandoffParse> {
+    ) -> Result<DeclarationEvidence> {
         // Settlement owns the snapshot slot. A provider that finds its scratch
         // inside the attempt directory can write there before it exits; bytes
         // that are not a settled envelope are evidence, never a result (#3844).
         set_aside_foreign_snapshot(attempt, record)?;
-        let parsed = decoded.handoff_report();
-        if let Some(repeated) =
-            provenant_records::handoff::Handoff::repeated_blocks(&decoded.result)
-            && parsed.handoff.as_ref().is_ok_and(Option::is_some)
-        {
-            // Accepted either way: the lane did its work and declared it.
-            handoff_advisory(record.attempt_id, repeated.warning());
-        }
-        if let Some(fallback) = provenant_records::handoff::Handoff::json_fence_fallback(
-            &decoded.result,
-            &decoded.turns,
-        ) {
-            // Accepted: the answer ended in a handoff-shaped json block.
-            handoff_advisory(record.attempt_id, fallback.warning());
-        }
-        if let Ok(Some(handoff)) = &parsed.handoff
-            && let Some(warning) = handoff.blocked_on_warning()
-        {
-            // Accepted: the field is additive, so the handoff stands without it.
-            handoff_advisory(record.attempt_id, warning);
-        }
-        if let Some(handoff) = read_snapshot(attempt)? {
-            let handoff = with_scope_report(attempt, handoff)?;
-            return Ok(provenant_records::handoff::HandoffParse {
-                trailing_verdict_tolerated: parsed.trailing_verdict_tolerated
-                    && handoff.as_ref().is_ok_and(Option::is_some),
-                trailing_prose_tolerated: parsed.trailing_prose_tolerated
-                    && handoff.as_ref().is_ok_and(Option::is_some),
-                handoff,
-            });
-        }
-        let interrupted = !decoded.complete
-            || matches!(
-                decoded.outcome,
-                Outcome::QuotaLimited
-                    | Outcome::ModelUnavailable
-                    | Outcome::Failed
-                    | Outcome::TimedOut
-                    | Outcome::Lost
-            );
-        let handoff = match parsed.handoff {
-            Ok(None) if interrupted => self
-                .progress_handoff(attempt, record)
-                .unwrap_or_else(|_| Err(HandoffError::new("$", "progress handoff unreadable"))),
-            // A malformed final declaration is evidence even on interruption.
-            // Never substitute an older progress declaration for it.
-            handoff => handoff,
+        let (declared, _counts) = self.close_declarations(attempt)?;
+        let handoff: HandoffResult = match &declared {
+            DeclarationEvidence::Accepted(sealed) => Ok(Some(sealed.handoff.clone())),
+            DeclarationEvidence::Rejected { error } => Err(error.clone()),
+            DeclarationEvidence::Missing => Ok(None),
         };
         if handoff != Ok(None) {
             seal_snapshot(
@@ -120,67 +80,7 @@ impl RunStore {
                     .map_err(|_| RunError::Validation("handoff encoding"))?,
             )?;
         }
-        let settled = handoff.as_ref().is_ok_and(Option::is_some);
-        let trailing_verdict_tolerated = parsed.trailing_verdict_tolerated && settled;
-        let trailing_prose_tolerated = parsed.trailing_prose_tolerated && settled;
-        Ok(provenant_records::handoff::HandoffParse {
-            handoff,
-            trailing_verdict_tolerated,
-            trailing_prose_tolerated,
-        })
-    }
-
-    fn progress_handoff(
-        &self,
-        attempt: &Directory,
-        record: &AttemptRecord,
-    ) -> Result<HandoffResult> {
-        let expected = self
-            .context
-            .state_root
-            .as_path()
-            .join("attempts")
-            .join(record.attempt_id.to_string())
-            .join("provider-state");
-        let mut grants = record
-            .write_grants
-            .iter()
-            .filter(|grant| grant.source == WriteSource::PrivateState);
-        let Some(grant) = grants.next() else {
-            return Ok(Ok(None));
-        };
-        if grants.next().is_some() || grant.scope != PathScope::Subtree {
-            return Ok(Ok(None));
-        }
-        // The applied grant pins the launched candidate. Never scan other
-        // candidates, follow paths from model text or open provider credentials.
-        let granted = grant.path.to_path_buf()?;
-        let relative = match granted.strip_prefix(&expected) {
-            Ok(relative) => relative,
-            Err(_) => return Ok(Ok(None)),
-        };
-        let mut parts = relative.components();
-        let Some(Component::Normal(candidate)) = parts.next() else {
-            return Ok(Ok(None));
-        };
-        if parts.next().is_some() {
-            return Ok(Ok(None));
-        }
-        let state = match attempt.open_verified_directory(OsStr::new("provider-state")) {
-            Ok(state) => state,
-            Err(error) if error.is_not_found() => return Ok(Ok(None)),
-            Err(error) => return Err(error.into()),
-        };
-        let candidate = match state.open_verified_directory(candidate) {
-            Ok(candidate) => candidate,
-            Err(error) if error.is_not_found() => return Ok(Ok(None)),
-            Err(error) => return Err(error.into()),
-        };
-        let Some(bytes) = read_settled(&candidate, AttemptFile::Handoff, HANDOFF_BYTES as u64)?
-        else {
-            return Ok(Ok(None));
-        };
-        Ok(Handoff::from_json(&bytes).map(Some))
+        Ok(declared)
     }
 }
 
@@ -745,7 +645,7 @@ impl BriefPreamble {
             .collect::<Vec<_>>()
             .join("; ");
         format!(
-            "Static checks: before pushing, run the project's no-build checks (source: {source}): {checks}. Report any failure in the handoff; a failure does not refuse the push and CI still gates the merge.\n"
+            "Static checks: before pushing, run the project's no-build checks (source: {source}): {checks}. Report any failure in your declaration; a failure does not refuse the push and CI still gates the merge.\n"
         )
     }
 
@@ -932,18 +832,19 @@ pub const READING_GUIDANCE: &str = "Reading: locate before you read. Search with
 
 /// The text placed before a lane's task: model policy, then for writers
 /// (`ci_scope` is `Some`) the build-slot rule, the CI scope, the gh budget and
-/// the pull-request policy, then the handoff file and the reading rule.
+/// the pull-request policy, then the reading rule. The retained `handoff` path
+/// is host-owned state; the declaration command carries the result.
 pub fn lane_preamble(
     model_guidance: &str,
     limits: &provenant_records::LaneLimits,
     ci_scope: Option<crate::ResolvedCiScope>,
-    handoff: Option<&Path>,
+    _handoff: Option<&Path>,
 ) -> String {
     lane_preamble_with(
         model_guidance,
         limits,
         ci_scope,
-        handoff,
+        _handoff,
         &PreambleExtras::default(),
     )
 }
@@ -952,7 +853,7 @@ pub fn lane_preamble_with(
     model_guidance: &str,
     limits: &provenant_records::LaneLimits,
     ci_scope: Option<crate::ResolvedCiScope>,
-    handoff: Option<&Path>,
+    _handoff: Option<&Path>,
     extras: &PreambleExtras,
 ) -> String {
     let is_writer = ci_scope.is_some();
@@ -1002,21 +903,13 @@ pub fn lane_preamble_with(
         })
         .unwrap_or_default();
     format!(
-        "{model_guidance}\n{brief}{}{writer}{}{}{READING_GUIDANCE}Shared notes: `provenant notes add [--tag T] [--scope GRAPH/NODE] -- TEXT`; `provenant notes read` reads new observations; use `--replay` to replay. Notes are unverified claims by default.\n",
+        "{model_guidance}\n{brief}{}{writer}{}{READING_GUIDANCE}Shared notes: `provenant notes add [--tag T] [--scope GRAPH/NODE] -- TEXT`; `provenant notes read` reads new observations; use `--replay` to replay. Notes are unverified claims by default.\n",
         limits.preamble(),
         extras
             .route
             .as_ref()
             .map(route_preamble)
             .unwrap_or_default(),
-        handoff.map(handoff_progress_guidance).unwrap_or_default()
-    )
-}
-
-pub fn handoff_progress_guidance(path: &Path) -> String {
-    format!(
-        "Progress handoff JSON: {}. Update this file throughout the task by writing a temporary file beside it and renaming it into place (hard links are denied), and repeat its current value in the final handoff fence. A failed update never blocks the work: carry on and report the value in the fence. It is lane state, never a repository file or a commit.\n",
-        path.display()
     )
 }
 
@@ -1024,7 +917,7 @@ pub fn handoff_progress_guidance(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::tests::{call, clock, context, exit, input, publication, seal_observation};
-    use provenant_records::AbsolutePath;
+    use provenant_records::declaration::DeclarationInput;
     use std::os::unix::fs::PermissionsExt;
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -1065,13 +958,13 @@ mod tests {
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("CI scope:"));
         assert!(writer.contains("git commit -- <paths>"));
-        assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));
+        assert!(!writer.contains("Progress handoff JSON:"));
         let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(!reader.contains("CI scope:"));
         assert!(!reader.contains("repository's formatter"));
         assert!(!reader.contains("Cargo target"));
-        assert!(reader.contains("Progress handoff JSON:"));
+        assert!(!reader.contains("Progress handoff JSON:"));
         assert!(
             !lane_preamble("Model policy.", &Default::default(), None, None)
                 .contains("handoff.json")
@@ -1655,28 +1548,26 @@ mod tests {
     fn snapshot(status: &str) -> Vec<u8> {
         serde_json::json!({"schema_version":2,"status":status,"note":"Parser committed; renderer remains.","remaining":["Finish renderer"],"decisions":["Keep the parser API"],"verify":["Parser tests passed"]}).to_string().into_bytes()
     }
-    fn decoded() -> Decoded {
-        Decoded {
-            terminal_cause: None,
-            outcome: Outcome::QuotaLimited,
-            result: String::new(),
-            complete: false,
-            observed_route: None,
-            usage: Default::default(),
-            session: None,
-            reason: None,
-            partial_signals: vec![],
-            turns: Vec::new(),
-        }
-    }
-    fn grant(record: &mut AttemptRecord, candidate: &Path) -> TestResult {
-        record.write_grants = vec![WriteGrantRecord {
-            extra: Default::default(),
-            source: WriteSource::PrivateState,
-            path: AbsolutePath::new(candidate)?,
-            scope: PathScope::Subtree,
-        }];
+
+    fn declare(
+        store: &RunStore,
+        id: provenant_core::AttemptId,
+        request_id: &str,
+        payload: serde_json::Value,
+    ) -> TestResult {
+        store.declare(
+            id,
+            &DeclarationInput {
+                request_id: request_id.into(),
+                payload,
+            },
+            &provenant_records::declaration::DeclarationLimit::shipped(),
+        )?;
         Ok(())
+    }
+
+    fn declared_payload(status: &str) -> std::result::Result<serde_json::Value, serde_json::Error> {
+        serde_json::from_slice(&snapshot(status))
     }
 
     #[test]
@@ -1738,121 +1629,6 @@ mod tests {
     }
 
     #[test]
-    fn read_only_plan_progress_is_collected_at_settlement() -> TestResult {
-        use provenant_confinement::{
-            ConfinedPlan, PlanRequest,
-            permissions::{AccessMode, NetworkAccess, PathGrant, PlanPermissions, ProviderProfile},
-            plan::{CodexPolicy, ExtensionPolicy},
-        };
-        let temp = tempfile::tempdir()?;
-        let clock = clock();
-        let cancel = provenant_core::CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
-        let input = input();
-        store.create(&input, &call)?;
-        let mut record = store.record(input.attempt_id, &call)?;
-        assert!(input.request.task.access.write_roots.is_empty());
-        let attempt = store.attempt_dir(record.attempt_id, false)?;
-        let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
-        let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-        let base = store
-            .context
-            .state_root
-            .as_path()
-            .join(format!("attempts/{}", record.attempt_id));
-        let subtree = |path| PathGrant {
-            path,
-            scope: PathScope::Subtree,
-        };
-        let plan = ConfinedPlan::new(PlanRequest {
-            scope: provenant_core::WorkScope::Project(store.context.project_id),
-            codex: CodexPolicy::Clean,
-            extensions: ExtensionPolicy::Deny,
-            agy_state: None,
-            permissions: PlanPermissions {
-                credential_roots: provenant_core::CredentialRoots::for_home(
-                    &temp.path().join("home"),
-                ),
-                policy: None,
-                read_only: None,
-                mode: AccessMode::ReadOnly,
-                scratch: subtree(base.join("tmp/candidate-0")),
-                private_state: Some(subtree(base.join("provider-state/candidate-0"))),
-                read_roots: vec![],
-                protected_roots: vec![],
-                secret_roots: vec![],
-                selected_authentication: None,
-                include_continuation: false,
-                write_roots: vec![],
-                network: NetworkAccess::Provider,
-                nested_confinement: false,
-            },
-        })?;
-        let profile = ProviderProfile {
-            spec: Default::default(),
-            observations: Default::default(),
-        };
-        record.write_grants = provenant_confinement::write_grants(plan.permissions(), &profile)
-            .into_iter()
-            .map(|grant| {
-                Ok(WriteGrantRecord {
-                    extra: Default::default(),
-                    source: grant.source,
-                    path: AbsolutePath::new(&grant.path)?,
-                    scope: grant.scope,
-                })
-            })
-            .collect::<std::result::Result<Vec<_>, Box<dyn std::error::Error>>>()?;
-        let bytes = snapshot("stopped_early");
-        seal(&candidate, "handoff.json", &bytes, HANDOFF_BYTES as u64)?;
-        let expected = Handoff::from_json(&bytes)?;
-        assert_eq!(
-            store.progress_handoff(&attempt, &record)??,
-            Some(expected.clone())
-        );
-        assert_eq!(
-            store
-                .capture_handoff(&attempt, &record, &decoded())?
-                .handoff?,
-            Some(expected.clone())
-        );
-        // The provider's progress handoff is a settlement input too, so the
-        // same class rule repairs a broad mode instead of stalling recovery.
-        std::fs::set_permissions(
-            candidate.current_path()?.join(AttemptFile::Handoff.name()),
-            std::fs::Permissions::from_mode(0o644),
-        )?;
-        crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow_mut().clear());
-        assert_eq!(
-            store.progress_handoff(&attempt, &record)??,
-            Some(expected.clone())
-        );
-        let warnings =
-            crate::artifacts::PRIVATE_MODE_REPAIRS.with(|warnings| warnings.borrow().clone());
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(
-            warnings[0].contains(
-                &candidate
-                    .anchored_path()
-                    .join(AttemptFile::Handoff.name())
-                    .display()
-                    .to_string()
-            ),
-            "warning must name the repaired progress handoff: {warnings:?}"
-        );
-        assert_eq!(
-            candidate
-                .metadata_at(OsStr::new(AttemptFile::Handoff.name()), false)?
-                .mode
-                & 0o077,
-            0
-        );
-        assert_eq!(store.handoff(&record)??, Some(expected));
-        Ok(())
-    }
-
-    #[test]
     fn settlement_repairs_a_broad_handoff_snapshot_and_warns() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = clock();
@@ -1898,70 +1674,6 @@ mod tests {
     /// and seals from output rather than looping on a decode that cannot change.
     // Spec: docs/specs/run-settlement.md#outcome-before-release
     #[test]
-    fn an_undecodable_owned_snapshot_settles_malformed_and_keeps_the_raw_file() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let clock = clock();
-        let cancel = provenant_core::CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
-        let input = input();
-        store.create(&input, &call)?;
-        let record = store.record(input.attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.attempt_id, false)?;
-
-        let raw = b"{ not a settlement handoff envelope";
-        seal_snapshot(&attempt, raw)?;
-
-        let observed = store.handoff(&record)?;
-        let Err(malformed) = observed else {
-            return Err("undecodable owned bytes must settle malformed".into());
-        };
-        assert!(
-            malformed
-                .to_string()
-                .contains("handoff snapshot unreadable"),
-            "{malformed:?}"
-        );
-        assert_eq!(
-            provenant_records::run::SettlementReason::derive(
-                Outcome::Succeeded,
-                None,
-                &[],
-                None,
-                Err(&malformed),
-            ),
-            provenant_records::run::SettlementReason::HandoffMalformed
-        );
-        assert_eq!(
-            read_settled(&attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)?,
-            Some(raw.to_vec()),
-            "the undecodable bytes stay as evidence"
-        );
-
-        // Capture treats undecodable bytes as foreign evidence: one move aside
-        // clears the slot and seals from output. A repeat sees the settled
-        // snapshot, so capture never loops on a decode that cannot change.
-        let answer = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"from output\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
-        let mut settled = decoded();
-        settled.result = answer.to_owned();
-        settled.complete = true;
-        settled.outcome = Outcome::Succeeded;
-        let first = store
-            .capture_handoff(&attempt, &record, &settled)?
-            .handoff?;
-        assert_eq!(first.as_ref().map(|h| h.note.as_str()), Some("from output"));
-        let record = store.record(record.attempt_id, &call)?;
-        let second = store
-            .capture_handoff(&attempt, &record, &settled)?
-            .handoff?;
-        assert_eq!(second, first, "a settled snapshot is stable on retry");
-        Ok(())
-    }
-
-    /// #3844: an envelope sealed by the previous build has no tag and must
-    /// still read as settlement's snapshot, with no migration.
-    // Spec: docs/specs/run-settlement.md#outcome-before-release
-    #[test]
     fn a_snapshot_sealed_without_a_tag_still_reads_as_sealed() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = clock();
@@ -1994,6 +1706,66 @@ mod tests {
     /// relabel the host's record as provider-written. This is the crash window
     /// the old two-file tag publish left behind.
     // Spec: docs/specs/run-settlement.md#outcome-before-release
+    /// #3844: undecodable bytes in the slot are a malformed settlement
+    /// snapshot, not a retriable read error. Capture moves them aside once and
+    /// seals from the declaration journal rather than looping on a decode that
+    /// cannot change.
+    #[test]
+    fn an_undecodable_owned_snapshot_settles_malformed_and_keeps_the_raw_file() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let id = input.attempt_id;
+        let record = store.record(id, &call)?;
+        let attempt = store.attempt_dir(id, false)?;
+
+        let raw = b"{ not a settlement handoff envelope";
+        seal_snapshot(&attempt, raw)?;
+        let observed = store.handoff(&record)?;
+        let Err(malformed) = observed else {
+            return Err("undecodable owned bytes must settle malformed".into());
+        };
+        assert!(
+            malformed
+                .to_string()
+                .contains("handoff snapshot unreadable")
+        );
+        assert_eq!(
+            read_settled(&attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)?,
+            Some(raw.to_vec()),
+            "the undecodable bytes stay as evidence"
+        );
+
+        declare(&store, id, "one", declared_payload("done")?)?;
+        let evidence = store.capture_declaration(&attempt, &record)?;
+        assert!(matches!(evidence, DeclarationEvidence::Accepted(_)));
+        let first = store.handoff(&record)??.ok_or("no sealed snapshot")?;
+        assert_eq!(first.note, "Parser committed; renderer remains.");
+        let record = store.record(id, &call)?;
+        let second = store.capture_declaration(&attempt, &record)?;
+        assert!(matches!(second, DeclarationEvidence::Accepted(_)));
+        assert_eq!(store.handoff(&record)??, Some(first));
+        assert!(
+            read_settled(
+                &attempt,
+                AttemptFile::HandoffProviderWritten,
+                HANDOFF_RECORD_BYTES as u64
+            )?
+            .is_some(),
+            "the undecodable bytes were moved aside"
+        );
+        Ok(())
+    }
+
+    /// #3844: an envelope sealed by the previous build has no tag and must
+    /// still read as settlement's snapshot, with no migration.
+    /// #3844: a settlement retry against its own snapshot must keep it, not
+    /// relabel the host's record as provider-written. This is the crash window
+    /// the old two-file tag publish left behind.
     #[test]
     fn a_second_capture_keeps_an_existing_settlement_snapshot() -> TestResult {
         let temp = tempfile::tempdir()?;
@@ -2003,20 +1775,22 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let record = store.record(input.attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.attempt_id, false)?;
-        let first = Handoff::from_json(&snapshot("done"))?;
-        let bytes = serde_json::to_vec(&Ok::<_, HandoffError>(Some(first.clone())))?;
-        seal(
-            &attempt,
-            AttemptFile::Handoff.name(),
-            &bytes,
-            HANDOFF_RECORD_BYTES as u64,
-        )?;
-        let captured = store
-            .capture_handoff(&attempt, &record, &decoded())?
-            .handoff?;
-        assert_eq!(captured, Some(first), "the sealed snapshot wins on retry");
+        let id = input.attempt_id;
+        let record = store.record(id, &call)?;
+        let attempt = store.attempt_dir(id, false)?;
+        declare(&store, id, "one", declared_payload("done")?)?;
+        store.capture_declaration(&attempt, &record)?;
+        let bytes = read_settled(&attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)?
+            .ok_or("sealed snapshot")?;
+        let captured = store.handoff(&record)??.ok_or("sealed handoff")?;
+        let record = store.record(id, &call)?;
+        let second = store.capture_declaration(&attempt, &record)?;
+        assert!(matches!(second, DeclarationEvidence::Accepted(_)));
+        assert_eq!(
+            store.handoff(&record)??,
+            Some(captured),
+            "the sealed snapshot wins on retry"
+        );
         assert_eq!(
             read_settled(&attempt, AttemptFile::Handoff, HANDOFF_RECORD_BYTES as u64)?,
             Some(bytes),
@@ -2035,7 +1809,6 @@ mod tests {
     /// #3844: only the `HandoffResult` envelope is settlement's snapshot. A
     /// pre-#3078 bare `Handoff` has no compatibility path: it is provider
     /// evidence, moved aside at capture and never read as a sealed handoff.
-    // Spec: docs/specs/run-settlement.md#outcome-before-release
     #[test]
     fn a_bare_handoff_slot_is_moved_aside_as_provider_written_evidence() -> TestResult {
         let temp = tempfile::tempdir()?;
@@ -2045,25 +1818,21 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let record = store.record(input.attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.attempt_id, false)?;
+        let id = input.attempt_id;
+        let record = store.record(id, &call)?;
+        let attempt = store.attempt_dir(id, false)?;
         let expected = Handoff::from_json(&snapshot("done"))?;
         let bare = serde_json::to_vec(&expected)?;
-        // The pre-#3078 slot held the bare Handoff, not an envelope.
         seal(
             &attempt,
             AttemptFile::Handoff.name(),
             &bare,
             HANDOFF_RECORD_BYTES as u64,
         )?;
-
-        let captured = store.capture_handoff(&attempt, &record, &decoded())?;
-        assert_eq!(captured.handoff?, None, "a bare snapshot is never trusted");
-        assert_eq!(
-            store.handoff(&record)??,
-            None,
-            "the slot was cleared for settlement"
-        );
+        declare(&store, id, "one", declared_payload("done")?)?;
+        let evidence = store.capture_declaration(&attempt, &record)?;
+        assert!(matches!(evidence, DeclarationEvidence::Accepted(_)));
+        assert_eq!(store.handoff(&record)??, Some(expected));
         assert_eq!(
             read_settled(
                 &attempt,
@@ -2078,8 +1847,7 @@ mod tests {
 
     /// #3844: a lane-created directory at the evidence destination must not
     /// strand capture. The foreign slot entry moves to the declared unsafe
-    /// evidence name and the complete answer still settles.
-    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    /// evidence name and the declaration still settles.
     #[test]
     fn an_occupied_evidence_destination_does_not_strand_capture() -> TestResult {
         use crate::dispatch_tests::{Fake, seal_exit};
@@ -2104,13 +1872,12 @@ mod tests {
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let attempt = store.attempt_dir(id, false)?;
         let root = attempt.current_path()?;
-        // A lane scratch directory occupies the normal evidence destination.
         std::fs::create_dir(root.join(AttemptFile::HandoffProviderWritten.name()))?;
-        // A regular, non-envelope slot entry.
+        // A regular, non-envelope slot entry, plus trailing prose in the answer.
         let foreign = b"provider-written handoff";
         std::fs::write(root.join(AttemptFile::Handoff.name()), foreign)?;
-
-        let answer = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"sealed from output\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+        declare(&store, id, "one", declared_payload("done")?)?;
+        let answer = "Report.\n```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"fake\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```\nThe wait was redundant.";
         let mut observed = exit();
         observed.scope = RunStore::scope(&store.record(id, &call)?);
         seal_exit(&store, &observed)?;
@@ -2125,11 +1892,11 @@ mod tests {
                     ..
                 }
             ),
-            "a complete answer must settle: {:?}",
+            "a complete declaration must settle: {:?}",
             finished.state
         );
         let handoff = store.handoff(&finished)??.ok_or("sealed snapshot")?;
-        assert_eq!(handoff.note, "sealed from output");
+        assert_eq!(handoff.note, "Parser committed; renderer remains.");
         assert!(
             root.join(AttemptFile::HandoffProviderWritten.name())
                 .is_dir(),
@@ -2144,9 +1911,8 @@ mod tests {
     }
 
     /// An unsafe slot entry cannot change once the provider is gone, so capture
-    /// must move it aside by name and settle from output rather than retry a
-    /// typed read failure forever (#3844). The read accessor still refuses the
-    /// entry before capture; only the settlement act clears it.
+    /// must move it aside by name and settle from the declaration rather than
+    /// retry a typed read failure forever (#3844).
     fn assert_unsafe_snapshot_slot_settles(
         plant: impl FnOnce(&std::path::Path) -> std::result::Result<(), Box<dyn std::error::Error>>,
         evidence: &str,
@@ -2177,13 +1943,12 @@ mod tests {
         store
             .handoff(&store.record(id, &call)?)
             .expect_err("an unsafe slot must refuse a read before capture");
-
-        let answer = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"sealed from output\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+        declare(&store, id, "one", declared_payload("done")?)?;
         let mut observed = exit();
         observed.scope = RunStore::scope(&store.record(id, &call)?);
         seal_exit(&store, &observed)?;
         let fake = Fake::with_observed(Some(route()), Some(Outcome::Succeeded))
-            .with_answer(Some(answer.to_owned()), Some(true));
+            .with_answer(Some("Report.".to_owned()), Some(true));
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
         assert!(
             matches!(
@@ -2193,13 +1958,13 @@ mod tests {
                     ..
                 }
             ),
-            "a complete answer must still settle: {:?}",
+            "a complete declaration must still settle: {:?}",
             finished.state
         );
         let handoff = store.handoff(&finished)??.ok_or("sealed snapshot")?;
         assert_eq!(
-            handoff.note, "sealed from output",
-            "the unsafe entry left the slot and the snapshot was sealed from output"
+            handoff.note, "Parser committed; renderer remains.",
+            "the unsafe entry left the slot and the declaration was sealed"
         );
         assert!(
             std::fs::symlink_metadata(attempt.current_path()?.join(evidence)).is_ok(),
@@ -2209,8 +1974,6 @@ mod tests {
     }
 
     /// #3844: a hard link in the slot is an unsafe entry, not a retriable read.
-    /// Capture keeps it as provider evidence and seals from output.
-    // Spec: docs/specs/run-settlement.md#outcome-before-release
     #[test]
     fn a_hard_linked_snapshot_slot_is_moved_aside_and_settles() -> TestResult {
         assert_unsafe_snapshot_slot_settles(
@@ -2226,7 +1989,6 @@ mod tests {
 
     /// #3844: an oversize slot entry cannot be read under the bound and the
     /// provider is gone, so capture keeps it as evidence and still settles.
-    // Spec: docs/specs/run-settlement.md#outcome-before-release
     #[test]
     fn an_oversize_snapshot_slot_is_moved_aside_and_settles() -> TestResult {
         assert_unsafe_snapshot_slot_settles(
@@ -2240,7 +2002,6 @@ mod tests {
 
     /// #3844: a symlink slot must never be followed; capture renames the link
     /// itself aside under a non-regular evidence name and settles.
-    // Spec: docs/specs/run-settlement.md#outcome-before-release
     #[test]
     fn a_symlinked_snapshot_slot_is_moved_aside_and_settles() -> TestResult {
         assert_unsafe_snapshot_slot_settles(
@@ -2252,146 +2013,133 @@ mod tests {
         )
     }
 
-    /// Provider boundary for exercising holder recovery when this host cannot
-    /// launch nested confinement. No launch or Git settlement is simulated.
-    struct RecoveringAccounts;
-    impl Providers for RecoveringAccounts {
-        fn prepare(
-            &self,
-            _: &TaskRequest,
-            _: &str,
-            _: &LaunchPaths,
-            _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
-            Err(crate::fixture_refusal(
-                "holder-only fixture does not launch",
-            ))
-        }
-        fn decode(
-            &self,
-            route: &RouteRecord,
-            _: &[u8],
-            _: &provenant_supervisor::custody::ExitObservation,
-            _: &Path,
-        ) -> std::result::Result<Decoded, String> {
-            let mut result = decoded();
-            match route.account_key.as_deref() {
-                // The provider died before declaring anything: an absent final
-                // declaration, so settlement falls back to granted progress. A
-                // truncated fence is malformed evidence instead.
-                Some("fixture-one") => result.result = "Working on the renderer".into(),
-                Some("fixture-two") => {
-                    result.outcome = Outcome::Succeeded;
-                    result.complete = true;
-                    result.result = "Recovered progress and completed the renderer\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"finished\"}\n```".into();
-                    result.observed_route = Some(route.clone());
-                }
-                _ => return Err("unexpected fixture account".into()),
-            }
-            Ok(result)
-        }
-    }
-
-    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
+    /// The declaration is the only settlement input: trailing prose, a fenced
+    /// example and a later tool call in the answer cannot change the snapshot.
     #[test]
-    fn provider_death_retains_raw_progress() -> TestResult {
+    fn a_declaration_settles_despite_trailing_prose_and_later_tool_calls() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = clock();
         let cancel = provenant_core::CancelToken::new();
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
-        let mut input = input();
-        let worktree = temp.path().join("retained-worktree");
-        std::fs::create_dir(&worktree)?;
-        std::fs::write(
-            worktree.join("partial.txt"),
-            "parser implementation survives",
-        )?;
-        input.request.task.access.write_roots.push(worktree.clone());
+        let input = input();
         store.create(&input, &call)?;
-        seal_observation(&store, &input, &exit())?;
         let id = input.attempt_id;
-        let mut old = store.record(id, &call)?;
+        let record = store.record(id, &call)?;
         let attempt = store.attempt_dir(id, false)?;
-        let root = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
-        let candidate = crate::artifacts::subdir(&root, OsStr::new("candidate-1"), true)?;
-        let secret_shape = "sk-abcdefghijklmnopqrstuvwx";
-        let mut progress: serde_json::Value = serde_json::from_slice(&snapshot("stopped_early"))?;
-        progress["note"] = serde_json::json!(format!(
-            "Parser committed; renderer remains.\n{secret_shape}"
-        ));
-        for field in ["remaining", "decisions", "verify"] {
-            progress[field]
-                .as_array_mut()
-                .ok_or("progress array")?
-                .extend([
-                    serde_json::json!(format!("\n{secret_shape}")),
-                    serde_json::json!(format!("\t{secret_shape}")),
-                ]);
-        }
-        progress["future"] = serde_json::json!({"nested":[format!("\n{secret_shape}"), {"token":format!("\t{secret_shape}")} ]});
-        seal(
-            &candidate,
-            "handoff.json",
-            &serde_json::to_vec(&progress)?,
-            HANDOFF_BYTES as u64,
-        )?;
-        let candidate_path = store
-            .context
-            .state_root
-            .as_path()
-            .join(format!("attempts/{id}/provider-state/candidate-1"));
-        grant(&mut old, &candidate_path)?;
-        let route = RouteRecord {
-            account_label: Some("one".into()),
-            account_key: Some("fixture-one".into()),
-            ..crate::tests::route()
-        };
-        old.resolved_route = Some(route.clone());
-        old.applied_route = Some(route);
-        old.provider_launched = Some(true);
-        old.state = AttemptState::Running {
-            extra: Default::default(),
-            child_wait: None,
-        };
-        store.db.execute(
-            "UPDATE attempts SET record=?1 WHERE id=?2",
-            rusqlite::params![crate::db::bytes(&old)?, id.to_string()],
-        )?;
-        let terminal = store.finish(id, &attempt, &exit(), &RecoveringAccounts, &call)?;
-        assert!(matches!(
-            terminal.state,
-            AttemptState::Terminal {
-                outcome: Outcome::QuotaLimited,
-                ..
-            }
-        ));
-        let handoff = store.handoff(&terminal)??.ok_or("missing snapshot")?;
+        declare(&store, id, "one", declared_payload("done")?)?;
+        let sealed = store.handoff(&record)??;
+        assert_eq!(sealed, None, "the journal is not read until capture");
+
+        // A different, fenced handoff with prose and a later tool call is only
+        // answer text: capture closes the journal and seals the declaration.
+        let mut answer = b"Report.\n```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"fake\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```\nThe wait was redundant.\nVERDICT: PASS\nPushed a fix.\n".to_vec();
+        answer.extend_from_slice(&snapshot("done"));
+        seal(&attempt, "stdout.log", &answer, CAPTURE_LIMIT)?;
+        let evidence = store.capture_declaration(&attempt, &record)?;
+        assert!(matches!(evidence, DeclarationEvidence::Accepted(_)));
+        let first = store.handoff(&record)??.ok_or("sealed declaration")?;
+        assert_eq!(first.note, "Parser committed; renderer remains.");
         assert_eq!(
-            handoff.remaining,
-            [
-                "Finish renderer",
-                &format!("\n{secret_shape}"),
-                &format!("\t{secret_shape}")
-            ]
+            first.status,
+            provenant_records::handoff::HandoffStatus::Done
         );
+
+        // Re-driving over the same prose cannot move the sealed snapshot.
+        let record = store.record(id, &call)?;
+        store.capture_declaration(&attempt, &record)?;
+        assert_eq!(store.handoff(&record)??, Some(first));
+        Ok(())
+    }
+
+    /// A rejected field error is returned at once; a corrected declaration
+    /// settles. The rejected line still counts in the journal sequence.
+    #[test]
+    fn invalid_declaration_then_valid_settles_the_valid_one() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let id = input.attempt_id;
+        let attempt = store.attempt_dir(id, false)?;
+        let mut bad = declared_payload("done")?;
+        bad["verify"] = serde_json::json!([false]);
+        let error = store
+            .declare(
+                id,
+                &DeclarationInput {
+                    request_id: "bad".into(),
+                    payload: bad,
+                },
+                &provenant_records::declaration::DeclarationLimit::shipped(),
+            )
+            .expect_err("invalid fields must be refused");
+        let provenant_records::declaration::DeclarationError::Invalid(invalid) = error else {
+            return Err("expected a field error".into());
+        };
+        assert_eq!(invalid.dropped[0].field, "verify[0]");
+        let receipt = store.declare(
+            id,
+            &DeclarationInput {
+                request_id: "good".into(),
+                payload: declared_payload("done")?,
+            },
+            &provenant_records::declaration::DeclarationLimit::shipped(),
+        )?;
+        assert_eq!(receipt.sequence, 2, "the rejected line counts");
+        let record = store.record(id, &call)?;
+        let evidence = store.capture_declaration(&attempt, &record)?;
+        assert!(matches!(evidence, DeclarationEvidence::Accepted(_)));
         assert_eq!(
-            handoff.extra["future"]["nested"][1]["token"],
-            format!("\t{secret_shape}")
-        );
-        assert!(handoff.fenced().contains(secret_shape));
-        // Progress survives temporary cleanup and provider history expiry.
-        crate::artifacts::remove_entry_tree(&attempt, OsStr::new("provider-state"))?;
-        assert_eq!(store.handoff(&old)??, Some(handoff.clone()));
-        assert_eq!(
-            std::fs::read_to_string(worktree.join("partial.txt"))?,
-            "parser implementation survives"
+            store.handoff(&record)??.ok_or("sealed declaration")?.note,
+            "Parser committed; renderer remains."
         );
         Ok(())
     }
-    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
+
+    /// Declarations were submitted and none was accepted: the sealed snapshot
+    /// is the typed error, not an absent handoff.
     #[test]
-    fn final_handoff_preserves_decoded_strings_and_validates_bounds() -> TestResult {
+    fn rejected_only_declaration_seals_a_typed_error() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let id = input.attempt_id;
+        let record = store.record(id, &call)?;
+        let attempt = store.attempt_dir(id, false)?;
+        let mut bad = declared_payload("done")?;
+        bad["verify"] = serde_json::json!([false]);
+        assert!(matches!(
+            store.declare(
+                id,
+                &DeclarationInput {
+                    request_id: "bad".into(),
+                    payload: bad
+                },
+                &provenant_records::declaration::DeclarationLimit::shipped(),
+            ),
+            Err(provenant_records::declaration::DeclarationError::Invalid(_))
+        ));
+        let evidence = store.capture_declaration(&attempt, &record)?;
+        assert!(matches!(evidence, DeclarationEvidence::Rejected { .. }));
+        let Err(error) = store.handoff(&record)? else {
+            return Err("a rejected-only journal must seal an error".into());
+        };
+        assert_eq!(error.dropped[0].field, "verify[0]");
+        Ok(())
+    }
+
+    /// A declaration is the only evidence: the retained text keeps its bytes
+    /// verbatim, and bounds are still validated on decode.
+    #[test]
+    fn final_declaration_preserves_payload_strings_and_validates_bounds() -> TestResult {
         for prefix in ["\n", "\t"] {
             for field in ["note", "remaining", "decisions", "verify", "future"] {
                 let temp = tempfile::tempdir()?;
@@ -2401,10 +2149,11 @@ mod tests {
                 let store = RunStore::open(&context(temp.path())?, &call)?;
                 let input = input();
                 store.create(&input, &call)?;
-                let record = store.record(input.attempt_id, &call)?;
-                let attempt = store.attempt_dir(record.attempt_id, false)?;
+                let id = input.attempt_id;
+                let record = store.record(id, &call)?;
+                let attempt = store.attempt_dir(id, false)?;
                 let secret = format!("{prefix}sk-abcdefghijklmnopqrstuvwx");
-                let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
+                let mut value = declared_payload("done")?;
                 value[field] = match field {
                     "note" => serde_json::json!(secret),
                     "future" => {
@@ -2412,15 +2161,10 @@ mod tests {
                     }
                     _ => serde_json::json!([secret]),
                 };
-                let mut result = decoded();
-                result.complete = true;
-                result.outcome = Outcome::Succeeded;
-                result.result = Handoff::from_json(&serde_json::to_vec(&value)?)?.fenced();
-                let safe = store
-                    .capture_handoff(&attempt, &record, &result)?
-                    .handoff?
-                    .ok_or("final snapshot")?;
-                assert!(safe.fenced().contains("sk-abcdefghijklmnopqrstuvwx"));
+                declare(&store, id, "one", value)?;
+                store.capture_declaration(&attempt, &record)?;
+                let safe = store.handoff(&record)??.ok_or("final snapshot")?;
+                assert!(serde_json::to_string(&safe)?.contains("sk-abcdefghijklmnopqrstuvwx"));
                 assert_eq!(store.handoff(&record)??, Some(safe));
             }
         }
@@ -2433,62 +2177,8 @@ mod tests {
         Ok(())
     }
 
-    // Spec: docs/specs/run-settlement.md#settlement
-    #[test]
-    fn final_handoff_records_the_single_trailing_verdict_tolerance() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let clock = clock();
-        let cancel = provenant_core::CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
-        let input = input();
-        store.create(&input, &call)?;
-        let record = store.record(input.attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.attempt_id, false)?;
-        let mut result = decoded();
-        result.complete = true;
-        result.outcome = Outcome::Succeeded;
-        result.result = format!(
-            "{}\nVERDICT: PASS\n",
-            Handoff::from_json(&snapshot("done"))?.fenced()
-        );
-
-        let captured = store.capture_handoff(&attempt, &record, &result)?;
-        assert!(captured.trailing_verdict_tolerated);
-        assert!(!captured.trailing_prose_tolerated);
-        assert!(captured.handoff.as_ref().is_ok_and(Option::is_some));
-        assert_eq!(store.handoff(&record)?, captured.handoff);
-        Ok(())
-    }
-
-    // Spec: docs/specs/run-settlement.md#settlement
-    #[test]
-    fn final_handoff_records_the_trailing_prose_tolerance() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let clock = clock();
-        let cancel = provenant_core::CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
-        let input = input();
-        store.create(&input, &call)?;
-        let record = store.record(input.attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.attempt_id, false)?;
-        let mut result = decoded();
-        result.complete = true;
-        result.outcome = Outcome::Succeeded;
-        result.result = format!(
-            "{}\nCommit pushed. Now updating the PR body ...\n",
-            Handoff::from_json(&snapshot("done"))?.fenced()
-        );
-
-        let captured = store.capture_handoff(&attempt, &record, &result)?;
-        assert!(captured.trailing_prose_tolerated);
-        assert!(!captured.trailing_verdict_tolerated);
-        assert!(captured.handoff.as_ref().is_ok_and(Option::is_some));
-        assert_eq!(store.handoff(&record)?, captured.handoff);
-        Ok(())
-    }
-
+    /// A large brief still settles from a declaration; the sealed snapshot is
+    /// bounded independently of the prompt.
     #[test]
     fn oversized_handoff_brief_does_not_block_settlement() -> TestResult {
         let temp = tempfile::tempdir()?;
@@ -2505,14 +2195,19 @@ mod tests {
         let id = input.attempt_id;
         let old = store.record(id, &call)?;
         let attempt = store.attempt_dir(id, false)?;
-        let mut result = decoded();
-        result.result = Handoff::from_json(&snapshot("stopped_early"))?.fenced();
-        store.capture_handoff(&attempt, &old, &result)?.handoff?;
+        declare(&store, id, "one", declared_payload("stopped_early")?)?;
+        store.capture_declaration(&attempt, &old)?;
         store
             .db
             .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
         let mut publication = publication();
-        publication.outcome = Outcome::QuotaLimited;
+        publication.fact = provenant_records::settlement::classify::settle(
+            &provenant_records::settlement::SettlementEvidence::fixture(
+                provenant_records::settlement::LaneRole::Reader,
+                Outcome::QuotaLimited,
+                None,
+            ),
+        );
         let terminal = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
         assert!(matches!(
             terminal.state,
@@ -2524,169 +2219,61 @@ mod tests {
         Ok(())
     }
 
+    /// #retention-and-disclosure: declared secrets survive scratch cleanup and
+    /// provider-history expiry because the sealed snapshot is the durable copy.
     #[test]
-    fn final_answer_precedes_progress_and_bad_progress_never_guesses_completion() -> TestResult {
+    fn declared_progress_survives_scratch_and_history_expiry() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = clock();
         let cancel = provenant_core::CancelToken::new();
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
-        let input = input();
-        store.create(&input, &call)?;
-        let mut record = store.record(input.attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.attempt_id, false)?;
-        let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
-        let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-        let base = store
-            .context
-            .state_root
-            .as_path()
-            .join(format!("attempts/{}/provider-state", record.attempt_id));
-        grant(&mut record, &base.join("candidate-0"))?;
-        assert!(
-            store
-                .capture_handoff(&attempt, &record, &decoded())?
-                .handoff?
-                .is_none()
-        );
-        seal(
-            &candidate,
-            "handoff.json",
-            &snapshot("stopped_early"),
-            HANDOFF_BYTES as u64,
+        let mut input = input();
+        let worktree = temp.path().join("retained-worktree");
+        std::fs::create_dir(&worktree)?;
+        std::fs::write(
+            worktree.join("partial.txt"),
+            "parser implementation survives",
         )?;
-        // Another candidate's progress is not the applied candidate's evidence.
-        grant(&mut record, &base.join("candidate-1"))?;
-        assert!(
-            store
-                .capture_handoff(&attempt, &record, &decoded())?
-                .handoff?
-                .is_none()
-        );
-        grant(&mut record, &base.join("candidate-0"))?;
-        let mut result = decoded();
-        result.outcome = Outcome::Succeeded;
-        result.complete = true;
-        result.result = "Completed prose without a declaration".into();
-        assert!(
-            store
-                .capture_handoff(&attempt, &record, &result)?
-                .handoff?
-                .is_none()
-        );
-        let done = Handoff::from_json(&snapshot("done"))?.fenced();
-        let example = format!("````markdown\n{done}\n````");
-        result.result = example.clone();
-        assert!(
-            store
-                .capture_handoff(&attempt, &record, &result)?
-                .handoff?
-                .is_none()
-        );
-        result.result = format!("{example}\n{done}");
-        assert!(
-            !store
-                .capture_handoff(&attempt, &record, &result)?
-                .handoff?
-                .ok_or("missing final")?
-                .unfinished()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn unsafe_or_oversize_progress_is_a_typed_error_without_following_links() -> TestResult {
-        use std::os::unix::fs::symlink;
-        for link in [true, false] {
-            let temp = tempfile::tempdir()?;
-            let clock = clock();
-            let cancel = provenant_core::CancelToken::new();
-            let call = call(&clock, &cancel);
-            let store = RunStore::open(&context(temp.path())?, &call)?;
-            let input = input();
-            store.create(&input, &call)?;
-            let mut record = store.record(input.attempt_id, &call)?;
-            let attempt = store.attempt_dir(record.attempt_id, false)?;
-            let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
-            let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-            let base = store
-                .context
-                .state_root
-                .as_path()
-                .join(format!("attempts/{}/provider-state", record.attempt_id));
-            // An ungranted location is absent evidence, even if it has a file.
-            grant(&mut record, temp.path())?;
-            assert_eq!(
-                store
-                    .capture_handoff(&attempt, &record, &decoded())?
-                    .handoff,
-                Ok(None)
-            );
-            grant(&mut record, &base.join("candidate-0"))?;
-            if link {
-                let outside = temp.path().join("outside.json");
-                std::fs::write(&outside, snapshot("stopped_early"))?;
-                symlink(&outside, base.join("candidate-0/handoff.json"))?;
-            } else {
-                seal(
-                    &candidate,
-                    "handoff.json",
-                    &vec![b'x'; HANDOFF_BYTES + 1],
-                    (HANDOFF_BYTES + 1) as u64,
-                )?;
-            }
-            let result = store.capture_handoff(&attempt, &record, &decoded())?;
-            assert!(result.handoff.is_err());
-            assert_eq!(store.handoff(&record)?, result.handoff);
+        input.request.task.access.write_roots.push(worktree.clone());
+        store.create(&input, &call)?;
+        seal_observation(&store, &input, &exit())?;
+        let id = input.attempt_id;
+        let old = store.record(id, &call)?;
+        let attempt = store.attempt_dir(id, false)?;
+        let secret_shape = "sk-abcdefghijklmnopqrstuvwx";
+        let mut value = declared_payload("stopped_early")?;
+        value["note"] = serde_json::json!(format!("Parser committed.\n{secret_shape}"));
+        for field in ["remaining", "decisions", "verify"] {
+            value[field].as_array_mut().ok_or("array")?.extend([
+                serde_json::json!(format!("\n{secret_shape}")),
+                serde_json::json!(format!("\t{secret_shape}")),
+            ]);
         }
-        Ok(())
-    }
-
-    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
-    #[test]
-    fn malformed_final_retains_fields_and_never_uses_stale_progress() -> TestResult {
-        for complete in [true, false] {
-            let temp = tempfile::tempdir()?;
-            let clock = clock();
-            let cancel = provenant_core::CancelToken::new();
-            let call = call(&clock, &cancel);
-            let store = RunStore::open(&context(temp.path())?, &call)?;
-            let input = input();
-            store.create(&input, &call)?;
-            let mut record = store.record(input.attempt_id, &call)?;
-            let attempt = store.attempt_dir(record.attempt_id, false)?;
-            let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
-            let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-            let base = store
-                .context
-                .state_root
-                .as_path()
-                .join(format!("attempts/{}/provider-state", record.attempt_id));
-            grant(&mut record, &base.join("candidate-0"))?;
-            seal(
-                &candidate,
-                "handoff.json",
-                &snapshot("done"),
-                HANDOFF_BYTES as u64,
-            )?;
-            let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-            let value = serde_json::json!({"schema_version":2,"status":"done","note":format!("New note {secret}"),"remaining":["Unfinished work"],"decisions":[],"verify":[false]});
-            let mut result = decoded();
-            result.complete = complete;
-            result.outcome = Outcome::Succeeded;
-            result.result = format!("```handoff\n{value}\n```");
-            let captured = store.capture_handoff(&attempt, &record, &result)?;
-            let error = captured.handoff.as_ref().unwrap_err();
-            assert_eq!(error.dropped[0].field, "verify[0]");
-            assert_eq!(
-                error.retained["remaining"],
-                serde_json::json!(["Unfinished work"])
-            );
-            assert!(serde_json::to_string(error)?.contains(secret));
-            assert_eq!(store.handoff(&record)?, captured.handoff);
-            result.result = Handoff::from_json(&snapshot("done"))?.fenced();
-            assert_eq!(store.capture_handoff(&attempt, &record, &result)?, captured);
-        }
+        value["future"] = serde_json::json!({"nested":[format!("\n{secret_shape}"), {"token":format!("\t{secret_shape}")} ]});
+        declare(&store, id, "one", value)?;
+        let evidence = store.capture_declaration(&attempt, &old)?;
+        assert!(matches!(evidence, DeclarationEvidence::Accepted(_)));
+        let handoff = store.handoff(&old)??.ok_or("missing snapshot")?;
+        assert_eq!(
+            handoff.remaining,
+            [
+                "Finish renderer",
+                &format!("\n{secret_shape}"),
+                &format!("\t{secret_shape}")
+            ]
+        );
+        assert_eq!(
+            handoff.extra["future"]["nested"][1]["token"],
+            format!("\t{secret_shape}")
+        );
+        assert!(serde_json::to_string(&handoff)?.contains(secret_shape));
+        crate::artifacts::remove_entry_tree(&attempt, OsStr::new("provider-state"))?;
+        assert_eq!(store.handoff(&old)??, Some(handoff));
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("partial.txt"))?,
+            "parser implementation survives"
+        );
         Ok(())
     }
 }

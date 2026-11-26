@@ -87,6 +87,17 @@ index, refs, worktree files and mtimes are never written. Nothing in a slot is c
 and a nonzero `slot_changes` count is reported on stderr. Stream output maps slot paths to
 the worktree; no `--message-format` flag is injected.
 
+The slot's Cargo target uses `build.target` (default `toolchain,worktree`).
+`toolchain` is derived from the compiler selected by Cargo, including an
+explicit `+toolchain` argument, so a warm cache built by another compiler
+cannot be reused by a pinned build. `worktree` sets a checkout-specific
+workspace-only rustc wrapper, giving workspace members separate fingerprints
+while dependencies stay in the shared target. An empty key (`shared`) restores
+the legacy shared target. `rustc -vV` release of
+the last warm job is kept in `slot.json`; `check config` reports the configured
+source layer and warns when that release differs from the repository's
+`rust-toolchain.toml` pin.
+
 A job runs locally, with its `exception` recorded and a warning, when it is sandboxed, not
 eligible, offload is off, staging or the pool is unavailable or quarantined, or no snapshot
 exists. A pool problem warns and runs locally; it never fails the chair's check.
@@ -302,25 +313,27 @@ chair, and no successor writer starts while custody is uncertain. A restart pres
 worktree and archives prior attempts. See [routing](routing.md) for route selection.
 - Why: one decision keeps stop handling consistent and protects writer custody.
 
-A writer's declared stop settles as `stopped_early`, or, when its final handoff is blocked,
+A writer's declared stop settles as `stopped_early`, or, when its final declaration is blocked,
 as `blocked_environment` or `blocked_dependency` per its `blocked_on`, else `blocked` (an owner
-decision, a missing capability or no kind given). The node's advance code records whether the
-stop left committed work: `writer_declared_stop` when the head moved past its source commit,
-`stopped_no_work` otherwise. Both take the `stopped_early` row unless the node overrides it:
-a new route in a fresh session on the retained worktree. A junior route escalates to senior;
-otherwise a declared route not yet launched is used, and an alias route may resolve again.
+decision, a missing capability or no kind given). Both take the `stopped_early` row unless the node
+overrides it: a new route in a fresh session on the retained worktree. A junior route escalates to
+senior; otherwise a declared route not yet launched is used, and an alias route may resolve again.
 
-A lane's graph outcome is classified from evidence, not from the stop path that reported it:
-commits ahead of the node's input head count whether or not they were pushed, and a sealed `done`
-handoff closes the brief. For a writer the verified pushed delivery head is itself that evidence:
-a published commit proves new work even when the sealed writer head is absent or still names the
-input commit (#4065). Neither a terminal cause nor a partial signal may call a lane with new
-commits `stopped_no_work`; with a done handoff and a moved head the node succeeds even when a stop
-or a provisional `failed` settlement reason was recorded. The same observed refs decide the advance
-code: `writer_declared_stop` when a stop left new commits, `stopped_no_work` only when it left none.
-A real precondition failure on a successful-looking attempt is reported with its settlement reason
-as a named cause, never bare `other_failure`. Findings counts are not a writer success criterion:
-a writer without a findings contract is not failed for absent findings.
+A lane's outcome is projected from its sealed settlement class and the verified delivery evidence.
+No-work requires a known, unchanged head: the head must equal the launch pin, and the cause must be
+`StoppedNoWork`. A `Moved` or `Unknown` head never produces no-work, so a lane that committed and
+pushed before declaring `blocked` stays `blocked`. A verified pushed head with a moved input head
+and a sealed `done` handoff closes the writer brief, even when a provisional failed settlement
+reason was recorded (#4065). These facts are part of the terminal observation; no remote ref is
+re-read during graph projection. Graph-owned overrides — a result warning, failed or not-attempted
+delivery, and a configured deadline — apply above the projection, and the sealed stop agrees with
+the projected cause.
+
+The settlement-derived advance codes are `declared_stop` and `stopped_no_work`, owned by
+`records::graph::GraphAttemptOutcome::advance_code`. Every other advance code comes from the owner or a
+launch refusal. A real precondition failure on a successful-looking attempt is reported with its
+settlement class as a named cause, never bare `other_failure`. Findings counts are not a writer
+success criterion: a writer without a findings contract is not failed for absent findings.
 
 With no different route, a stop that can continue on its own route (`stopped_early`,
 `lane_token_lost`, `context_handoff`) takes the same route with a fresh session on the
@@ -342,6 +355,7 @@ chair as an environment problem; `blocked_dependency` pauses as a wait. Neither 
 | Cause | Default | Pinned | Retries |
 | --- | --- | --- | --- |
 | `stopped_early` | `new_route` | no | 0 |
+| `stopped_no_work` | `new_route` | no | 0 |
 | `blocked` | `chair` | yes | 0 |
 | `blocked_environment` | `chair` | no | 1 |
 | `blocked_dependency` | `chair` | no | 0 |

@@ -470,7 +470,7 @@ fn wait_reports_latest_peer_failure_after_unknown_status_projection()
         attempt: None,
     };
     let mut pending = graph_snapshot(checkpoint("g"));
-    pending.advance_error = Some("earlier settlement error".into());
+    pending.advance_note = Some("earlier settlement error".into());
     let local_host = context.identity.host;
     let remote_host = if local_host == provenant_core::HostId::from_bytes([1; 16]) {
         provenant_core::HostId::from_bytes([2; 16])
@@ -521,7 +521,7 @@ fn wait_reports_latest_peer_failure_after_unknown_status_projection()
     )?;
     assert!(reads.get() >= 2);
     assert_eq!(
-        waited.advance_error.as_deref(),
+        waited.advance_note.as_deref(),
         Some("run execution owner is unavailable")
     );
     Ok(())
@@ -647,8 +647,8 @@ fn graph_peer_status_preserves_typed_wait_facts() -> Result<(), Box<dyn std::err
     let decoded: RunResult = serde_json::from_value(serde_json::to_value(response)?)?;
     let RunResult::Status {
         attempt: peer_attempt,
-        lane_waits: peer_waits,
         presence,
+        lane_waits: peer_waits,
         ..
     } = decoded
     else {
@@ -1869,11 +1869,11 @@ fn remote_status_failure_downgrades_the_current_running_node_to_unknown() {
 fn graph_status_full_reading_keeps_the_reason_and_compact_bounds_it() {
     let mut checkpoint = checkpoint("g");
     checkpoint.nodes[0].state = NodeState::Failed;
-    checkpoint.nodes[0].advance_error_code = Some("AUTH_REQUIRED".into());
+    checkpoint.nodes[0].advance_code = Some("AUTH_REQUIRED".into());
     // Far past the old 1024-character row cap: a row builder must keep the
     // reason whole so --full can print it, and only the compact renderer clips.
     let long_reason = format!("credentials unavailable {}", "界".repeat(4096));
-    checkpoint.nodes[0].advance_error = Some(long_reason.clone());
+    checkpoint.nodes[0].advance_note = Some(long_reason.clone());
     let target = GraphTarget {
         graph: "g".into(),
         node: None,
@@ -1981,7 +1981,7 @@ fn compact_row_keeps_the_reason_leading_clause_with_a_long_path()
     let path = format!("/private/var/folders/xy/{}", "long-segment/".repeat(5));
     let first_clause = format!("node parent--child: local worktree {path} does not exist");
     let reason = format!("{first_clause}; create it with `provenant worktree create`");
-    node.advance_error = Some(reason.clone());
+    node.advance_note = Some(reason.clone());
     let target = GraphTarget {
         graph: "g".into(),
         node: None,
@@ -2034,7 +2034,7 @@ fn compact_row_keeps_the_reason_leading_clause_with_a_long_path()
 fn graph_failure_rows_prefer_owner_code_and_fall_back_for_old_checkpoints() {
     let mut checkpoint = checkpoint("g");
     checkpoint.nodes[0].state = NodeState::Blocked;
-    checkpoint.nodes[0].advance_error_code = Some("launch_refused".into());
+    checkpoint.nodes[0].advance_code = Some("launch_refused".into());
     checkpoint.nodes[0].advance_owner_code = Some("invalid_input".into());
     let target = GraphTarget {
         graph: "g".into(),
@@ -2057,9 +2057,9 @@ fn graph_failure_rows_prefer_owner_code_and_fall_back_for_old_checkpoints() {
 fn graph_failure_rows_preserve_the_owner_cause_and_action() {
     let mut checkpoint = checkpoint("g");
     checkpoint.nodes[0].state = NodeState::Blocked;
-    checkpoint.nodes[0].advance_error_code = Some("launch_retry_exhausted".into());
+    checkpoint.nodes[0].advance_code = Some("launch_retry_exhausted".into());
     checkpoint.nodes[0].advance_owner_code = Some("LAUNCH_UNKNOWN".into());
-    checkpoint.nodes[0].advance_error = Some("[LAUNCH_UNKNOWN] inspect the receipt for operation op-123 before retrying with the same operation ID".into());
+    checkpoint.nodes[0].advance_note = Some("[LAUNCH_UNKNOWN] inspect the receipt for operation op-123 before retrying with the same operation ID".into());
     let target = GraphTarget {
         graph: "g".into(),
         node: None,
@@ -2116,7 +2116,7 @@ fn graph_failure_rows_preserve_the_owner_cause_and_action() {
     ] {
         let mut rows = vec![
             json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null, "cause_code":"adapter_unavailable"}),
-            json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "terminal_cause":cause, "reason":reason}),
+            json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "cause":cause, "reason":reason}),
         ];
         project_attempt_failure(&mut rows[1]);
         assert_eq!(rows[1]["cause_code"], code);
@@ -2146,7 +2146,7 @@ fn graph_failure_rows_preserve_the_owner_cause_and_action() {
 fn launch_refusal_propagates_cause_and_retry_to_node() {
     let mut rows = vec![
         json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null}),
-        json!({"kind":"attempt", "id":"g/a#1", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "terminal_cause":"handoff_refused", "reason":"repository lock busy"}),
+        json!({"kind":"attempt", "id":"g/a#1", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "cause":"launch_handoff_refused", "reason":"repository lock busy"}),
     ];
     project_attempt_failure(&mut rows[1]);
     project_node_failures(&mut rows);

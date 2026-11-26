@@ -6,8 +6,6 @@
 use super::*;
 use provenant_records::{Continuation, NextStep, StopCause, StopFacts};
 
-const DECLARED_STOP_CODES: &[&str] = &["stopped_no_work", "writer_declared_stop"];
-
 /// A cancelled node keeps its failure: no restart follows a fenced stop.
 pub(super) fn fence_stopped(progress: &mut NodeProgress) {
     if progress.state == NodeState::Failed {
@@ -19,13 +17,20 @@ fn fenced(progress: &NodeProgress) -> bool {
     progress.stop_fence
 }
 
-/// A writer that declared its stop: settlement owes a restart or a chair
-/// pause, because a declared stop saved alone reads as settled work.
+/// A writer whose last attempt projected a declared stop: settlement owes a
+/// restart or a chair pause, because a declared stop saved alone reads as
+/// settled work. The projected outcome is the one fact, not the display code.
 fn declared(progress: &NodeProgress) -> bool {
     progress
-        .advance_error_code
-        .as_deref()
-        .is_some_and(|code| DECLARED_STOP_CODES.contains(&code))
+        .attempts
+        .last()
+        .and_then(|attempt| attempt.outcome)
+        .is_some_and(|outcome| {
+            matches!(
+                outcome,
+                GraphAttemptOutcome::DeclaredStop | GraphAttemptOutcome::StoppedNoWork
+            )
+        })
 }
 
 /// The stop a failed node's last launched attempt settled with. The owner's
@@ -57,12 +62,12 @@ pub(super) fn stop_cause(
         });
     }
     match attempt.outcome? {
-        AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
-        AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        AttemptOutcome::AdapterUnavailable => Some(StopCause::AdapterUnavailable),
-        AttemptOutcome::PreparationRefused(cause) => Some(cause.into()),
-        AttemptOutcome::DeadlineExceeded => Some(StopCause::Deadline),
-        AttemptOutcome::Unclassified => Some(StopCause::Unclassified),
+        GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
+        GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        GraphAttemptOutcome::AdapterUnavailable => Some(StopCause::AdapterUnavailable),
+        GraphAttemptOutcome::PreparationRefused(cause) => Some(cause.into()),
+        GraphAttemptOutcome::DeadlineExceeded => Some(StopCause::Deadline),
+        GraphAttemptOutcome::Unclassified => Some(StopCause::Unclassified),
         _ => None,
     }
 }
@@ -413,7 +418,7 @@ fn blocked_reason(
 ) -> Option<String> {
     use provenant_records::handoff::BlockedOn;
     let note = progress
-        .advance_error
+        .advance_note
         .as_deref()
         .unwrap_or("inspect its handoff");
     let id = &node.id;
@@ -469,7 +474,18 @@ fn decide(
         return None;
     }
     let pause = |reason: String| declared(progress).then_some(Settle::Pause(reason));
-    let mut step = cause.next_step(&node.on_stop, facts(&node.id, cause, checkpoint));
+    // Host/project defaults are resolved once at admission and pinned in the
+    // checkpoint; the node's own entry wins where both name the same cause.
+    let effective = if checkpoint.on_stop_defaults.is_empty() {
+        None
+    } else {
+        let mut steps: std::collections::BTreeMap<_, _> =
+            checkpoint.on_stop_defaults.iter().collect();
+        steps.extend(node.on_stop.iter());
+        Some(provenant_records::OnStop::new(steps))
+    };
+    let on_stop = effective.as_ref().unwrap_or(&node.on_stop);
+    let mut step = cause.next_step(on_stop, facts(&node.id, cause, checkpoint));
     let mut ladder = None;
     let mut fallback = false;
     let routes = match step {
@@ -506,11 +522,12 @@ fn decide(
         }
         NextStep::NewRoute => {
             let routes = restart_routes(node, progress);
-            // An explicit `on_stop` entry for the cause is the node's own
-            // choice of a new route, so it never falls back to the same one.
+            // An explicit `on_stop` entry for the cause names a new route, so
+            // it never falls back to the same one. Defaults count too: they
+            // were resolved at admission and are pinned in the checkpoint.
             if !routes.is_empty()
                 || !cause.continues_on_same_route()
-                || node.on_stop.get(cause).is_some()
+                || on_stop.get(cause).is_some()
             {
                 routes
             } else {
@@ -731,7 +748,7 @@ fn unblock_dependants(plan: &PlannedGraph, checkpoint: &mut GraphCheckpoint, id:
         for (node, progress) in plan.nodes.iter().zip(&mut checkpoint.nodes) {
             if progress.state == NodeState::Blocked
                 && matches!(
-                    progress.advance_error_code.as_deref(),
+                    progress.advance_code.as_deref(),
                     None | Some("upstream_blocked" | "required_input_unavailable")
                 )
                 && node
@@ -741,8 +758,8 @@ fn unblock_dependants(plan: &PlannedGraph, checkpoint: &mut GraphCheckpoint, id:
                     .any(|parent| restarted.contains(parent))
             {
                 progress.state = NodeState::Pending;
-                progress.advance_error = None;
-                progress.advance_error_code = None;
+                progress.advance_note = None;
+                progress.advance_code = None;
                 restarted.insert(node.id.clone());
             }
         }
@@ -828,7 +845,7 @@ pub(super) struct FallbackEvidence<'a> {
 pub(super) fn settlement_fallback_decision(
     node: &PlannedNode,
     route_index: usize,
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     launched: bool,
     evidence: FallbackEvidence<'_>,
 ) -> SettlementFallback {
@@ -842,7 +859,7 @@ pub(super) fn settlement_fallback_decision(
     // The run-side `retry` stall policy is an explicit, persisted request to
     // consume the next route after custody has stopped the provider. It is the
     // sole launched-attempt exception to fallback's normal safety gate.
-    if outcome == AttemptOutcome::ProviderStalledRetry {
+    if outcome == GraphAttemptOutcome::ProviderStalledRetry {
         return if launched && route_index + 1 < node.routes.len() && !review_limit_reached {
             SettlementFallback::Continue
         } else {
@@ -860,18 +877,18 @@ pub(super) fn settlement_fallback_decision(
     // still controls the next step. Launched stops use the retry-aware rule
     // in decide(); there is no same-route retry to spend before launch.
     let cause = match outcome {
-        AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
-        AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
-            Some(StopCause::SpawnFailure)
-        }
-        AttemptOutcome::PreparationRefused(
-            provenant_records::run::TerminalCause::PreparationRefused,
+        GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
+        GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        GraphAttemptOutcome::PreparationRefused(
+            provenant_records::run::CauseKind::SpawnFailure,
+        ) => Some(StopCause::SpawnFailure),
+        GraphAttemptOutcome::PreparationRefused(
+            provenant_records::run::CauseKind::PreparationRefused,
         ) => Some(StopCause::PreparationRefused),
-        AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
+        GraphAttemptOutcome::AdapterUnavailable | GraphAttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)
         }
-        AttemptOutcome::Unclassified => Some(StopCause::Unclassified),
+        GraphAttemptOutcome::Unclassified => Some(StopCause::Unclassified),
         _ => None,
     };
     let custody_released = live_fallback_allowed(outcome, launched, fallback_evidence);
@@ -894,33 +911,33 @@ pub(super) fn settlement_fallback_decision(
     }
     let allowed = step == Some(NextStep::NewRoute);
     if !allowed || route_index + 1 == node.routes.len() || review_limit_reached {
-        let (mut advance_error_code, mut advance_error) = match outcome {
-            AttemptOutcome::PreparationRefused(cause) => (
+        let (mut advance_code, mut advance_note) = match outcome {
+            GraphAttemptOutcome::PreparationRefused(cause) => (
                 Some("preparation_refused"),
-                Some(bounded(cause.detail(), MAX_ADVANCE_ERROR_BYTES)),
+                Some(bounded(cause.detail(), MAX_ADVANCE_NOTE_BYTES)),
             ),
-            AttemptOutcome::AuthRequired => (
+            GraphAttemptOutcome::AuthRequired => (
                 Some("auth_required"),
                 Some("The lane requires authentication.".into()),
             ),
-            AttemptOutcome::AdapterUnavailable => (
+            GraphAttemptOutcome::AdapterUnavailable => (
                 Some("adapter_unavailable"),
                 Some("The lane's adapter is unavailable.".into()),
             ),
-            AttemptOutcome::Unclassified => (
+            GraphAttemptOutcome::Unclassified => (
                 Some("unclassified"),
                 Some("The provider reported an unclassified error.".into()),
             ),
             _ => (None, None),
         };
-        if outcome == AttemptOutcome::UsageLimited {
-            advance_error_code = Some("usage_limited");
+        if outcome == GraphAttemptOutcome::UsageLimited {
+            advance_code = Some("usage_limited");
             let pool = route
                 .and_then(|r| r.alias.as_deref())
                 .map_or_else(String::new, |alias| format!(" for pool {alias}"));
             // A refusal before launch names each account it passed over: a
             // stale failure or a login is not a spent allowance.
-            advance_error = Some(bounded(
+            advance_note = Some(bounded(
                 &if !launched && !skipped_accounts.is_empty() {
                     format!(
                         "No account could take the route{pool}: {}; repair or refresh an account (`provenant quota tick`) or choose an eligible route.",
@@ -931,7 +948,7 @@ pub(super) fn settlement_fallback_decision(
                         "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
                     )
                 },
-                MAX_ADVANCE_ERROR_BYTES,
+                MAX_ADVANCE_NOTE_BYTES,
             ));
         }
         if route_index + 1 == node.routes.len()
@@ -939,8 +956,8 @@ pub(super) fn settlement_fallback_decision(
             && node.access == AccessMode::ReadOnly
             && route.is_some_and(|r| r.account.is_some() || r.model.is_some())
         {
-            advance_error_code = Some("fallback_route_pinned");
-            advance_error = Some("The selected route is pinned and has no fallback.".into());
+            advance_code = Some("fallback_route_pinned");
+            advance_note = Some("The selected route is pinned and has no fallback.".into());
         }
         if !allowed && route_index + 1 < node.routes.len() {
             let (code, message) = fallback_denial(
@@ -950,16 +967,16 @@ pub(super) fn settlement_fallback_decision(
                 outcome,
                 fallback_cause,
             );
-            advance_error_code = Some(code);
-            advance_error = Some(message);
+            advance_code = Some(code);
+            advance_note = Some(message);
         }
         if review_limit_reached && route_index + 1 < node.routes.len() && allowed {
-            advance_error_code = Some("review_substitution_limit");
-            advance_error = Some("review substitution limit reached".into());
+            advance_code = Some("review_substitution_limit");
+            advance_note = Some("review substitution limit reached".into());
         }
         SettlementFallback::Fail {
-            code: advance_error_code,
-            message: advance_error,
+            code: advance_code,
+            message: advance_note,
         }
     } else {
         SettlementFallback::Continue

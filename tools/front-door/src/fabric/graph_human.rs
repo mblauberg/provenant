@@ -57,7 +57,7 @@ pub(super) fn graph_summary(
                     (
                         text(node, "id").unwrap_or_default(),
                         text(node, "state").unwrap_or_else(|| "unknown".into()),
-                        text(node, "advance_error").or_else(|| {
+                        text(node, "advance_note").or_else(|| {
                             if text(node, "state").as_deref() == Some("failed")
                                 && let Some(outcome) = node
                                     .get("attempts")
@@ -123,7 +123,7 @@ pub(super) fn graph_summary(
     {
         rows.push(format!("paused: {}", bounded_reason(&reason)));
     }
-    if let Some(error) = text(run, "advance_error") {
+    if let Some(error) = text(run, "advance_note") {
         rows.push(format!("advance error: {error}"));
     }
     rows.extend(action.iter().map(|(node, state, error)| match error {
@@ -359,7 +359,7 @@ mod test_presentation {
             }
             if !full
                 && node.state == provenant_fabric_runtime::graph::NodeState::Blocked
-                && let Some(error) = &node.advance_error
+                && let Some(error) = &node.advance_note
             {
                 human.push_str(&format!(" ({})", bounded_reason(error)));
             }
@@ -394,7 +394,7 @@ mod test_presentation {
                 } else {
                     human.push_str(" route=none attempt=none");
                 }
-                if let Some(error) = &node.advance_error {
+                if let Some(error) = &node.advance_note {
                     human.push_str(&format!(" error={error}"));
                 }
             }
@@ -506,7 +506,7 @@ mod test_presentation {
                 }
             }
         }
-        if let Some(error) = &run.advance_error {
+        if let Some(error) = &run.advance_note {
             human.push_str(&format!("Advance error: {error}\n"));
         }
         human

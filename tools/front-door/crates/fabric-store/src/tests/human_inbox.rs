@@ -666,7 +666,7 @@ fn a_fresh_store_matches_its_schema_and_other_versions_are_refused_unchanged() {
             "{name}"
         );
         drop(db);
-        for version in [crate::db::SCHEMA.version - 1, crate::db::SCHEMA.version + 1] {
+        for version in [crate::db::SCHEMA.version - 2, crate::db::SCHEMA.version + 1] {
             let db = rusqlite::Connection::open(&path).unwrap();
             db.execute_batch(&format!(
                 "PRAGMA journal_mode=DELETE; PRAGMA user_version={version}"
@@ -856,4 +856,35 @@ fn request_correlation_expiry_filter_precedes_page_limit() {
     let bounded = store.pending_human_requests(1, 1_048_576, &call).unwrap();
     assert!(bounded.items.is_empty());
     assert!(bounded.truncated);
+}
+
+#[test]
+fn version_18_embedded_run_causes_are_migrated() {
+    let f = Fixture::new();
+    drop(f.open());
+    let path = f.root.as_path().join("fabric/fabric.sqlite3");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let detail = serde_json::json!({"event":{"change":{"state":"terminal","terminal_cause":"handoff_refused"}}}).to_string();
+    let record = serde_json::json!({"detail": detail});
+    db.execute(
+        "INSERT INTO events(project, dedup, record) VALUES (?1, ?2, ?3)",
+        rusqlite::params!["fixture", "migration", serde_json::to_vec(&record).unwrap()],
+    )
+    .unwrap();
+    db.pragma_update(None, "user_version", 18).unwrap();
+    drop(db);
+    drop(f.open());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let bytes: Vec<u8> = db
+        .query_row(
+            "SELECT record FROM events WHERE dedup='migration'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let detail: serde_json::Value =
+        serde_json::from_str(record["detail"].as_str().unwrap()).unwrap();
+    assert_eq!(detail["event"]["change"]["cause"], "launch_handoff_refused");
+    assert!(detail["event"]["change"].get("terminal_cause").is_none());
 }

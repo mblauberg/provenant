@@ -8,7 +8,7 @@ fn unclassified_alias_failure_reroutes_once() {
     alias.model = None;
     alias.alias = Some("junior".into());
     let document = graph(vec![node("lane", alias.clone())]);
-    let mut first = terminal(AttemptOutcome::Unclassified);
+    let mut first = terminal(GraphAttemptOutcome::Unclassified);
     if let AttemptObservation::Terminal {
         attempt_ref,
         launched,
@@ -21,7 +21,7 @@ fn unclassified_alias_failure_reroutes_once() {
     let mut owner = FakeOwner {
         quota_redraw: true,
         retry_limit: Some(1),
-        observations: [first, terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [first, terminal(GraphAttemptOutcome::Succeeded)].into(),
         models: [("host/first".into(), "codex/one".into())].into(),
         ..Default::default()
     };
@@ -50,7 +50,7 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
             }
             let document = graph(vec![task]);
             let quota = |reference: &str| {
-                let mut observation = terminal(AttemptOutcome::UsageLimited);
+                let mut observation = terminal(GraphAttemptOutcome::UsageLimited);
                 if let AttemptObservation::Terminal {
                     attempt_ref,
                     launched: did_launch,
@@ -148,7 +148,7 @@ fn quota_alias_redraw_retains_partial_writer_work_and_predecessor() {
     document.schema_version = 2;
     let head = "1".repeat(40);
     let partial_commit = "2".repeat(40);
-    let mut quota = terminal_with_result(AttemptOutcome::UsageLimited, "Partial implementation");
+    let mut quota = terminal_with_result(GraphAttemptOutcome::UsageLimited, "Partial implementation");
     if let AttemptObservation::Terminal {
         attempt_ref,
         commit,
@@ -162,7 +162,7 @@ fn quota_alias_redraw_retains_partial_writer_work_and_predecessor() {
         implicit_head: Some(head.clone()),
         quota_redraw: true,
         retry_limit: Some(1),
-        observations: [quota, terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [quota, terminal(GraphAttemptOutcome::Succeeded)].into(),
         models: [("host/partial".into(), "codex/one".into())].into(),
         ..Default::default()
     };
@@ -217,8 +217,8 @@ fn independent_template_review_bases_are_pinned_and_replayed() {
     document.schema_version = 2;
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text("")),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text("")),
         ]
         .into(),
         ..Default::default()
@@ -310,7 +310,7 @@ fn writer_provision_recovery_keeps_the_checkpointed_base() {
     let pinned = "a".repeat(40);
     let mut owner = FakeOwner {
         resolved_review_base: Some(pinned.clone()),
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let mut journal = CrashJournal {
@@ -384,9 +384,9 @@ fn typed_review_synthesis_retains_omitted_findings_and_refuses_pass() {
     synthesis.route = Some(route("fixture"));
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS",
             ),
         ]
@@ -403,7 +403,7 @@ fn typed_review_synthesis_retains_omitted_findings_and_refuses_pass() {
     assert_eq!(synthesis.state, NodeState::Failed);
     assert_eq!(synthesis.outputs.as_ref().unwrap().findings.len(), 1);
     assert_eq!(
-        synthesis.advance_error_code.as_deref(),
+        synthesis.advance_code.as_deref(),
         Some("disposition_count")
     );
 }
@@ -419,8 +419,8 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
         .unwrap();
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(",\"verification\":\"upheld\""))),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(r#"{"id":"F1","verification":"falsified","reason":"Delta removed the failing path","triage":{"decision":"rejected","reason":"Delta removed the failing path","worth_fixing":false,"root_cause":"failing path","blocking_class":"none"}}"#)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(",\"verification\":\"upheld\""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(r#"{"id":"F1","verification":"falsified","reason":"Delta removed the failing path","triage":{"decision":"rejected","reason":"Delta removed the failing path","worth_fixing":false,"root_cause":"failing path","blocking_class":"none"}}"#)),
         ].into(),
         ..Default::default()
     };
@@ -431,7 +431,7 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
         run.checkpoint.nodes[1].state,
         NodeState::Succeeded,
         "{:?}",
-        run.checkpoint.nodes[1].advance_error
+        run.checkpoint.nodes[1].advance_note
     );
     assert_eq!(
         output.findings[0].verification.as_deref().unwrap(),
@@ -544,7 +544,7 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
             _: Option<&str>,
             _: Replay<'_>,
         ) -> Result<AttemptObservation, Self::Error> {
-            Ok(terminal(AttemptOutcome::Succeeded))
+            Ok(terminal(GraphAttemptOutcome::Succeeded))
         }
     }
     for phase in 0..3 {

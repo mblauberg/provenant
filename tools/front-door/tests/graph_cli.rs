@@ -1202,6 +1202,18 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
             ],
         ),
         (
+            "review-repair",
+            vec![
+                json!({"id":"exercise", "use":"review-repair", "with":{"worktree":rig.project, "write_scope":["."], "max_repair_cycles":1}}),
+            ],
+        ),
+        (
+            "deliver",
+            vec![
+                json!({"id":"exercise", "use":"deliver", "with":{"worktree":rig.project, "write_scope":["."], "max_ci_rounds":1}}),
+            ],
+        ),
+        (
             "synthesise",
             vec![
                 json!({"id":"source", "use":"task"}),
@@ -1225,6 +1237,51 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
             .output()?;
         let explained: Value = serde_json::from_slice(&output.stdout)?;
         assert!(output.status.success(), "{name}: {explained}");
+        if matches!(name, "review-repair" | "deliver") {
+            use provenant_fabric_runtime::graph::{GraphDocument, NodeKind};
+            let document: GraphDocument =
+                serde_json::from_value(explained["data"]["document"].clone())?;
+            let expanded =
+                document.expanded(&provenant_fabric_runtime::config::GraphLimits::default())?;
+            let rows = explained["data"]["node_routes"]
+                .as_array()
+                .ok_or("node routes")?;
+            let structural: Vec<_> = expanded
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.composite.is_some()
+                        || node.condition.is_some()
+                        || node.decide.is_some()
+                        || node.loop_body.is_some()
+                        || node.land.is_some()
+                        || matches!(
+                            node.kind,
+                            Some(
+                                NodeKind::Composite
+                                    | NodeKind::Gate
+                                    | NodeKind::Loop
+                                    | NodeKind::Decide
+                                    | NodeKind::Land
+                                    | NodeKind::Hygiene
+                                    | NodeKind::Publish
+                            )
+                        )
+                })
+                .collect();
+            assert!(
+                !structural.is_empty(),
+                "{name} must exercise structural nodes"
+            );
+            for node in structural {
+                assert!(
+                    rows.iter().all(|row| row["node"] != node.id),
+                    "{name}: structural node {} has a route: {rows:?}",
+                    node.id
+                );
+            }
+            assert!(!rows.is_empty(), "{name} must report launchable routes");
+        }
     }
     let worktree = format!("worktree={}", rig.project.display());
     let (output, explained) = rig.run(&[
@@ -1360,6 +1417,94 @@ fn node_route_table_reaches_explain_with_one_full_model_spelling() -> Result {
         assert_eq!(node["route"]["adapter"], "opencode", "{node}");
         assert_eq!(node["route"]["model"], full, "{node}");
     }
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#one-model-spelling-per-route
+#[test]
+fn explain_reports_each_nodes_route_with_its_sources() -> Result {
+    let rig = GraphProject::new()?;
+    let full = "opencode/opencode/hy4-flash-free";
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "node-route-sources",
+        "nodes": [
+            {"id":"exact","prompt":"inspect","access":"read_only",
+             "route":{"adapter":"opencode","model":full,"effort":"high"}},
+            {"id":"named-adapter","prompt":"inspect","access":"read_only",
+             "route":{"adapter":"codex","name":"configured-entry"}},
+            {"id":"pooled","prompt":"inspect","access":"read_only",
+             "route":{"alias":"senior"}},
+            {"id":"pooled-override","prompt":"inspect","access":"read_only",
+             "route":{"alias":"senior","effort":"low"}}
+        ]
+    }))?;
+    let (_, explained) = rig.run(&[
+        "run",
+        "--file",
+        document.to_str().ok_or("document path")?,
+        "--explain",
+    ])?;
+    assert!(explained["error"].is_null(), "{explained}");
+    let rows = explained["data"]["node_routes"]
+        .as_array()
+        .ok_or_else(|| format!("node routes: {explained}"))?;
+    let exact = rows
+        .iter()
+        .find(|row| row["node"] == "exact")
+        .ok_or_else(|| format!("exact route: {rows:?}"))?;
+    assert_eq!(exact["adapter"], "opencode", "{exact}");
+    assert_eq!(exact["model"], full, "{exact}");
+    assert_eq!(exact["effort"], "high", "{exact}");
+    assert_eq!(exact["sources"]["model"], "node field", "{exact}");
+    let named = rows
+        .iter()
+        .find(|row| row["node"] == "named-adapter")
+        .ok_or_else(|| format!("named adapter route: {rows:?}"))?;
+    assert_eq!(named["adapter"], "codex", "{named}");
+    assert_eq!(named["route_name"], "configured-entry", "{named}");
+    let pooled = rows
+        .iter()
+        .find(|row| row["node"] == "pooled")
+        .ok_or_else(|| format!("pool route: {rows:?}"))?;
+    assert_eq!(pooled["selection"], "pool", "{pooled}");
+    assert_eq!(pooled["sources"]["model"], "pool", "{pooled}");
+    assert_eq!(pooled["sources"]["effort"], "pool", "{pooled}");
+    let candidates = pooled["candidates"]
+        .as_array()
+        .ok_or_else(|| format!("pool candidates: {pooled}"))?;
+    assert!(!candidates.is_empty(), "{pooled}");
+    assert!(
+        candidates.iter().any(|candidate| {
+            candidate["model"].is_string()
+                && candidate["adapter"].is_string()
+                && candidate["effort"].is_string()
+                && candidate["sources"]["effort"] == "pool"
+        }),
+        "pool candidates retain member effort and provenance: {pooled}"
+    );
+    for effort in ["medium", "high"] {
+        assert!(
+            candidates.iter().any(|candidate| {
+                candidate["effort"] == effort && candidate["sources"]["effort"] == "pool"
+            }),
+            "pool candidate effort {effort} is visible with pool provenance: {pooled}"
+        );
+    }
+    let overridden = rows
+        .iter()
+        .find(|row| row["node"] == "pooled-override")
+        .ok_or_else(|| format!("overridden pool route: {rows:?}"))?;
+    assert!(
+        overridden["candidates"]
+            .as_array()
+            .is_some_and(|candidates| {
+                candidates.iter().all(|candidate| {
+                    candidate["effort"] == "low" && candidate["sources"]["effort"] == "node field"
+                })
+            }),
+        "node effort overrides every pool candidate: {overridden}"
+    );
     Ok(())
 }
 
@@ -2641,7 +2786,7 @@ fn bundled_smoke_runs_from_a_primary_checkout_and_a_linked_worktree() -> Result 
             .ok_or_else(|| format!("{name} launch carried no write node: {launched}"))?;
         assert_eq!(write["state"], "skipped", "{name}: {write}");
         assert!(write["writer_binding"].is_null(), "{name}: {write}");
-        assert!(write["advance_error_code"].is_null(), "{name}: {write}");
+        assert!(write["advance_code"].is_null(), "{name}: {write}");
         let read = by_name("read")
             .ok_or_else(|| format!("{name} launch carried no read node: {launched}"))?;
         assert_ne!(read["state"], "skipped", "{name}: {read}");
@@ -3115,7 +3260,7 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
     checkpoint.nodes[0].state = NodeState::Succeeded;
     checkpoint.nodes[0].attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Terminal;
     checkpoint.nodes[0].attempts[0].outcome =
-        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+        Some(provenant_fabric_runtime::graph::GraphAttemptOutcome::Succeeded);
     let mut journal = FileJournal::open(
         &state,
         project,
@@ -3198,7 +3343,7 @@ fn steer_at_a_settled_node_refuses_even_while_a_sibling_is_running() -> Result {
     checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
     checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
     checkpoint.nodes[0].attempts[0].outcome =
-        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+        Some(provenant_fabric_runtime::graph::GraphAttemptOutcome::Succeeded);
     // A sibling still running keeps the graph unfinished, but cannot read the
     // settled node's steering note.
     checkpoint.nodes[1].state = NodeState::Running;
@@ -3249,7 +3394,7 @@ fn steer_on_a_complete_graph_refuses_even_when_warn_is_configured() -> Result {
         .ok_or("checkpoint")?;
     use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
     use provenant_fabric_runtime::graph::{
-        AttemptOutcome, AttemptState, FileJournal, GraphJournal, NodeState,
+        AttemptState, FileJournal, GraphAttemptOutcome, GraphJournal, NodeState,
     };
     let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
     inputs.state_dir = Some(rig.state());
@@ -3270,7 +3415,7 @@ fn steer_on_a_complete_graph_refuses_even_when_warn_is_configured() -> Result {
     checkpoint.nodes[0].state = NodeState::Succeeded;
     checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
     checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
-    checkpoint.nodes[0].attempts[0].outcome = Some(AttemptOutcome::Succeeded);
+    checkpoint.nodes[0].attempts[0].outcome = Some(GraphAttemptOutcome::Succeeded);
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = CancelToken::new();
     let mut journal = FileJournal::open(
@@ -3440,7 +3585,7 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
             &provenant_fabric_runtime::config::GraphBudget::default(),
         )?;
         assert_eq!(
-            run.checkpoint.nodes[0].advance_error_code.as_deref(),
+            run.checkpoint.nodes[0].advance_code.as_deref(),
             Some("launch_refused")
         );
         assert_eq!(
@@ -3449,7 +3594,7 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
         );
         assert!(
             run.checkpoint.nodes[0]
-                .advance_error
+                .advance_note
                 .as_deref()
                 .is_some_and(|error| !error.is_empty())
         );

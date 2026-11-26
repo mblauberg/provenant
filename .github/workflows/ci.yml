@@ -275,6 +275,7 @@ jobs:
           scripts/test-select-ci-suites
           scripts/test-check-ci-suites
           scripts/test-report-main-health
+          scripts/test-junit-failures
           scripts/test-summarise-clippy
           scripts/test-check-ci-status
           scripts/test-select-affected-crate-tests
@@ -325,14 +326,22 @@ jobs:
     timeout-minutes: 5
     outputs:
       filter: ${{ steps.filter.outputs.filter }}
+    permissions:
+      contents: read
+      issues: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: List issue-backed quarantines
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/issues?state=open&labels=ci%3Aflaky&per_page=100" > "$RUNNER_TEMP/flaky-issues.json"
       - name: Validate entries and prepare filter
         id: filter
         run: |
-          filter="$(scripts/flaky-quarantine --filter-only)"
+          filter="$(scripts/flaky-quarantine --filter-only --issue-list "$RUNNER_TEMP/flaky-issues.json")"
           printf 'filter=%s\n' "$filter" >> "$GITHUB_OUTPUT"
 
   rust-test-archive:
@@ -637,10 +646,18 @@ jobs:
     if: ${{ always() && fromJSON(needs.scope.outputs.suites).rust == 'run' && needs.rust-test-archive.result == 'success' && needs.quarantine-filter.result == 'success' && (needs.rust-macos-archive.result == 'success' || (fromJSON(needs.scope.outputs.suites).macos_native != 'run' && needs.rust-macos-archive.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: List issue-backed quarantines
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/issues?state=open&labels=ci%3Aflaky&per_page=100" > "$RUNNER_TEMP/flaky-issues.json"
       - name: Download Linux test list
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -656,7 +673,7 @@ jobs:
         env:
           RUN_MACOS: ${{ fromJSON(needs.scope.outputs.suites).macos_native }}
         run: |
-          args=(--test-list "$RUNNER_TEMP/linux-test-list.json")
+          args=(--test-list "$RUNNER_TEMP/linux-test-list.json" --issue-list "$RUNNER_TEMP/flaky-issues.json")
           if [ "$RUN_MACOS" = run ]; then
             args+=(--test-list "$RUNNER_TEMP/native-test-list.json")
           else
@@ -777,6 +794,21 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: ../../scripts/run-native-test-group tls cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'package(=provenant-providers) & test(claude_network_on)'
+
+      # Issue #4070: these fixtures failed only on a clean macOS host (long
+      # TMPDIR, APFS non-UTF-8 names, and an inconclusive process census).
+      # Run them on every macOS native batch so the repaired behaviour stays pinned.
+      - name: Pin macOS socket and relay fixtures
+        if: ${{ !cancelled() && matrix.group == 'light' }}
+        working-directory: tools/front-door
+        run: >-
+          cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst"
+          --workspace-remap "$GITHUB_WORKSPACE/tools/front-door"
+          --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite
+          -E 'test(=fabric::lane_read_tests::parent_reads_child_result_failure_status_and_trace_through_host_relay)
+          | test(=run::tests::access_tests::lane_access_keeps_non_utf8_origin_json_safe)
+          | test(=run::tests::access_tests::non_utf8_origin_is_json_safe_without_a_filesystem_name)
+          | test(=tests::ssh_agent_follows_lane_access)'
 
       - name: Preserve native test evidence
         if: always()
@@ -982,6 +1014,64 @@ jobs:
         working-directory: apps/quota-menubar
         run: swift test
 
+  # A flake is quarantined only with re-run evidence. This job runs the exact
+  # Linux tests that failed once on main; macOS failures stay actionable until
+  # a maintainer confirms them, because native runners cannot be reused here.
+  rerun-failed:
+    name: Re-run failed main tests
+    needs: [scope, rust-test-archive, rust]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.rust.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_INCREMENTAL: "0"
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/install-rust
+      - name: Install nextest
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
+      - name: Download main JUnit results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rust-nextest-junit-*
+          path: ${{ runner.temp }}/main-junit
+      - name: Download Linux test archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux-tests
+          path: ${{ runner.temp }}
+      - name: Select failed tests
+        id: candidates
+        run: |
+          filter="$(scripts/junit-failures --dir "$RUNNER_TEMP/main-junit" --filter)"
+          printf 'filter=%s\n' "$filter" >> "$GITHUB_OUTPUT"
+      - name: Re-run failed tests once
+        if: steps.candidates.outputs.filter != ''
+        continue-on-error: true
+        working-directory: tools/front-door
+        env:
+          FAILED_TEST_FILTER: ${{ steps.candidates.outputs.filter }}
+        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level pass --final-status-level pass -E "$FAILED_TEST_FILTER"
+      - name: Upload re-run results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rerun-junit
+          path: tools/front-door/target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 1
+
   # The manifest and selection record define the single required gate.
   ci-status:
     runs-on: ubuntu-latest
@@ -1025,10 +1115,11 @@ jobs:
 
   main-health:
     name: Report main health
-    needs: [scope, ci-status]
+    needs: [scope, ci-status, rerun-failed]
     # A cancelled run (superseded or stopped by hand) still runs always() jobs, whose
     # missing evidence reads as failure; it says nothing about main's health.
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ci-status.result != 'skipped' }}
+    # `always()` is needed because the re-run job skips on a green main.
+    if: ${{ always() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ci-status.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1039,6 +1130,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Download main JUnit results
+        if: needs.ci-status.result == 'failure'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          pattern: rust-nextest-junit-*
+          path: ${{ runner.temp }}/main-junit
+      - name: Download native test evidence
+        if: needs.ci-status.result == 'failure'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          pattern: native-test-evidence-*
+          path: ${{ runner.temp }}/main-junit
+      - name: Download re-run results
+        if: needs.rerun-failed.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rerun-junit
+          path: ${{ runner.temp }}/rerun-junit
       - name: Report main health
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1048,4 +1159,6 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
           SELECTION_JSON: ${{ needs.scope.outputs.selection }}
+          JUNIT_DIR: ${{ runner.temp }}/main-junit
+          RERUN_JUNIT_DIR: ${{ runner.temp }}/rerun-junit
         run: scripts/report-main-health

@@ -5,6 +5,9 @@ use provenant_core::WallTime;
 use serde::{Deserialize, Serialize};
 
 pub use provenant_records::route_selection::Workload;
+/// The route layer of settlement policy, declared here as model policy.
+pub use provenant_records::settlement::policy::RouteSettlement;
+use provenant_records::settlement::policy::SettlementKey;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -81,6 +84,54 @@ pub struct LanePolicy {
     #[serde(skip)]
     pub access_key: Option<String>,
 }
+/// Lane settings a model policy overrides under the same `lanes.<key>`
+/// spelling the host and project `[knobs]` use.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LanesPolicy {
+    /// `lanes.settlement.<key>` actions that override host and project knobs
+    /// for routes matching this model policy.
+    pub settlement: RouteSettlement,
+    /// The model-policy entry that set each settlement key, such as
+    /// `model_policy.rules[2].policy`; filled while rules are applied.
+    #[serde(skip)]
+    pub settlement_origins: std::collections::BTreeMap<SettlementKey, String>,
+}
+impl LanesPolicy {
+    pub fn is_empty(&self) -> bool {
+        self.settlement.entries().is_empty()
+    }
+
+    /// Overlay `patch` and name `origin` as the entry for each key it sets.
+    fn overlay(&mut self, patch: &Self, origin: &str) {
+        self.settlement.overlay(&patch.settlement);
+        for (key, _) in patch.settlement.entries() {
+            self.settlement_origins.insert(key, origin.to_owned());
+        }
+    }
+
+    /// The route layer as launch seals it: each set key with the entry that
+    /// set it, for example `model_policy.rules[2].policy.lanes.settlement.stray_work`.
+    pub fn route_layer(&self) -> Vec<provenant_records::settlement::policy::RouteLayerValue> {
+        self.settlement
+            .entries()
+            .into_iter()
+            .map(|(key, value)| {
+                let entry = self
+                    .settlement_origins
+                    .get(&key)
+                    .map_or("model_policy", String::as_str);
+                provenant_records::Sourced {
+                    value: (key.knob().to_owned(), value),
+                    source: provenant_records::provenance::Source {
+                        layer: provenant_records::Layer::Route,
+                        origin: Some(format!("{entry}.lanes.settlement.{}", key.field())),
+                    },
+                }
+            })
+            .collect()
+    }
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResultPolicy {
@@ -96,6 +147,8 @@ pub struct ModelPolicy {
     pub compaction: CompactionPolicy,
     pub cache: CachePolicy,
     pub lane: LanePolicy,
+    #[serde(skip_serializing_if = "LanesPolicy::is_empty")]
+    pub lanes: LanesPolicy,
     pub result: ResultPolicy,
 }
 
@@ -230,7 +283,7 @@ impl ModelPolicy {
         }
         if self.lane.stop_early_ok == Some(false) {
             lines.push(format!(
-                "Carry the task to completion. Keep the schema v2 handoff current and repeat it as the final fenced handoff block. {}",
+                "Carry the task to completion. Declare the schema v2 result with `provenant declare --stdin` before you finish. {}",
                 provenant_records::handoff::STATUS_GUIDANCE
             ));
         }
@@ -621,6 +674,9 @@ impl ModelPolicies {
             ModelPolicy::default()
         };
         policy.overlay(&self.defaults);
+        policy
+            .lanes
+            .overlay(&self.defaults.lanes, "model_policy.defaults");
         if self.defaults.lane.access.is_some() {
             policy.lane.access_key = Some("defaults.lane.access".into());
         }
@@ -691,6 +747,10 @@ impl ModelPolicies {
         });
         for (index, rule) in matching {
             policy.overlay(&rule.policy);
+            policy.lanes.overlay(
+                &rule.policy.lanes,
+                &format!("model_policy.rules[{index}].policy"),
+            );
             if rule.policy.lane.access.is_some() {
                 policy.lane.access_key = Some("rules.policy.lane.access".into());
             }
@@ -1025,6 +1085,55 @@ mod tests {
             assert_eq!(policy.lane.access, Some(expected));
             assert_eq!(policy.lane.access_key.as_deref(), Some(key));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_route_policy_names_the_entry_that_set_each_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            "[defaults.lanes.settlement]\nstray_work='warn'\nno_work='off'\n[[rules]]\nadapter='claude'\n[rules.policy.lanes.settlement]\nstray_work='off'\n",
+        )?;
+        let layer = policies
+            .effective(
+                &crate::Catalogue::bundled()?,
+                &ModelId::parse("claude/claude-sonnet-5-5")?,
+                None,
+                at(1),
+            )
+            .policy
+            .lanes
+            .route_layer();
+        let seen: Vec<_> = layer
+            .iter()
+            .map(|entry| {
+                (
+                    entry.value.0.as_str(),
+                    entry.value.1.as_str(),
+                    entry.source.origin.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (
+                    "lanes.settlement.stray_work",
+                    Some("off"),
+                    Some("model_policy.rules[0].policy.lanes.settlement.stray_work"),
+                ),
+                (
+                    "lanes.settlement.no_work",
+                    Some("off"),
+                    Some("model_policy.defaults.lanes.settlement.no_work"),
+                ),
+            ]
+        );
+        assert!(
+            layer
+                .iter()
+                .all(|entry| entry.source.layer == provenant_records::Layer::Route)
+        );
         Ok(())
     }
 

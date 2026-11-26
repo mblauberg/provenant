@@ -44,6 +44,10 @@ The [human inbox](human-inbox.md#delivery-service) owns how the hook offers answ
 
 ## SessionStart output
 
+Native subagent payloads marked with `agent_id` or `agent_transcript_path`
+receive no chair checkpoint context and do not consume an account-switch
+handoff.
+
 The hook reports checkpoint and lane state. An unavailable section is not an
 empty one: inspect the source before acting. The checkpoint points to authority
 but does not create it. Record delivered PRs in the checkpoint so the digest can
