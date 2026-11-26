@@ -279,8 +279,8 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
         if budget {
             let reopened = store.record(id, &call)?;
             assert_eq!(
-                reopened.settlement_reason,
-                Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+                reopened.settlement_class,
+                Some(provenant_records::run::SettlementClass::CompletedBeforeBudget)
             );
             let stop: provenant_records::Stop = match &reopened.state {
                 AttemptState::Terminal { stop, .. } => stop.clone().ok_or("stop")?,
@@ -294,8 +294,8 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
             let fact = store.attempt(id, &call)?;
             assert_eq!(fact.cause_source, provenant_records::run::CauseSource::Host);
             assert_eq!(
-                fact.settlement_reason,
-                Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+                fact.settlement_class,
+                Some(provenant_records::run::SettlementClass::CompletedBeforeBudget)
             );
         }
         assert_eq!(store.finish(id, &dir, &observed, &fake, &call)?, record);

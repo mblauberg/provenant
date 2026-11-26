@@ -504,7 +504,7 @@ fn review_contract_accepts_one_verdict_after_a_valid_closed_handoff() {
             result_path: None,
             branch: None,
             commit: None,
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             stop: None,
         cause: None,
         }]
@@ -564,7 +564,7 @@ fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
                 result_path: None,
                 branch: None,
                 commit: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
             cause: None,
             }]

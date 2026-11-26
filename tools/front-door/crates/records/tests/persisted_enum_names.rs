@@ -21,7 +21,7 @@ use provenant_records::{
         AccountSource, AttemptState, CancellationDisposition, CauseSource, ChildWait,
         EffectDisposition, LaneAccess, OriginReceipt, Outcome, SettlementSignal, PathScope,
         PreparationFailure, RepositoryAdmissionPhase, RequestedRoute, SandboxFloorStrength,
-        SettlementEffect, SettlementReason, SkipKind, StopWorkPush, StopWorkTrigger, CauseKind,
+        SettlementEffect, SettlementClass, SkipKind, StopWorkPush, StopWorkTrigger, CauseKind,
         TerminalBasis, UserSkillsMode, WriteGrantLimitOrigin, WriteSource, WriterDeliveryStage,
         WriterDeliveryState,
     },
@@ -327,9 +327,9 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "delivery",
         ],
     )?;
-    assert_all_names::<SettlementReason>(
-        "SettlementReason",
-        SettlementReason::ALL,
+    assert_all_names::<SettlementClass>(
+        "SettlementClass",
+        SettlementClass::ALL,
         &[
             "completed",
             "completed_before_budget",

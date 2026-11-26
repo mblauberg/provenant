@@ -756,13 +756,13 @@ impl Stop {
     pub fn sealed(
         cause: Option<crate::run::CauseKind>,
         outcome: crate::run::Outcome,
-        reason: crate::run::SettlementReason,
+        reason: crate::run::SettlementClass,
         handoff: HandoffResult,
     ) -> Result<Option<Self>, StopError> {
         let declared = handoff
             .as_ref()
             .is_ok_and(|handoff| handoff.as_ref().is_some_and(Handoff::unfinished));
-        let host = if reason == crate::run::SettlementReason::HandoffMalformed {
+        let host = if reason == crate::run::SettlementClass::HandoffMalformed {
             Some(StopCause::HandoffMalformed)
         } else {
             cause.map(Into::into).or(reason.rule().stop_cause)

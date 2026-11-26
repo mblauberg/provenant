@@ -407,7 +407,7 @@ fn handoff_missing_classification_does_not_release_a_dependant() {
             branch: None,
             commit: None,
             stop: Some(provenant_records::StopCause::HandoffMissing),
-            settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+            settlement_class: Some(provenant_records::run::SettlementClass::HandoffMissing),
         cause: None,
         }]
         .into(),
@@ -656,7 +656,7 @@ fn budget_pause() -> (GraphDocument, FakeOwner, crate::config::GraphBudget) {
         result_path: None,
         branch: None,
         commit: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };

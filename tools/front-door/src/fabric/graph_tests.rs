@@ -248,8 +248,8 @@ mod graph_writer_admission_tests {
                 Ok(
                     provenant_fabric_runtime::graph::AttemptObservation::Terminal {
                         attempt_ref: None,
-                        settlement_reason: Some(
-                            provenant_records::run::SettlementReason::Completed,
+                        settlement_class: Some(
+                            provenant_records::run::SettlementClass::Completed,
                         ),
                         outcome: provenant_fabric_runtime::graph::AttemptOutcome::Succeeded,
                         launched: true,
@@ -1091,7 +1091,7 @@ mod graph_writer_admission_tests {
         {
             *outcome = provenant_records::run::Outcome::Failed;
         }
-        launched_failure.settlement_reason = Some(provenant_records::run::SettlementReason::Failed);
+        launched_failure.settlement_class = Some(provenant_records::run::SettlementClass::Failed);
         assert!(durable_launch_refusal(&[launched_failure.clone()]).is_none());
         assert!(durable_launch_refusal(&[lanes[0].clone(), launched_failure]).is_none());
         let attempt = lanes[0].attempt_id;
@@ -2945,7 +2945,7 @@ mod result_tests {
                 capture.push(b"bounded producer excerpt");
                 Ok(graph::AttemptObservation::Terminal {
                     attempt_ref: producer.then(|| self.reference.clone()),
-                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                     outcome: graph::AttemptOutcome::Succeeded,
                     launched: true,
                     result: Some(Box::new(capture.finish())),
@@ -3557,7 +3557,7 @@ mod retry_allowance_tests {
         ) -> Result<graph::AttemptObservation, Self::Error> {
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 outcome: graph::AttemptOutcome::Succeeded,
                 launched: false,
                 result: None,

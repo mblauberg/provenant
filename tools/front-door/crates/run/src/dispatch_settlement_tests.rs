@@ -761,8 +761,8 @@ fn a_read_only_answer_without_handoff_settles_succeeded() -> TestResult {
             return Err(format!("read-only answer must succeed: {:?}", record.state).into());
         };
         assert_ne!(
-            record.settlement_reason,
-            Some(provenant_records::run::SettlementReason::HandoffMissing)
+            record.settlement_class,
+            Some(provenant_records::run::SettlementClass::HandoffMissing)
         );
     }
     Ok(())

@@ -302,7 +302,7 @@ pub(super) fn apply_attempt_observation(
                 branch,
                 commit,
                 stop,
-                settlement_reason,
+                settlement_class,
                 cause,
             } => {
                 let mut result = result;
@@ -485,7 +485,7 @@ pub(super) fn apply_attempt_observation(
                 let malformed = result
                     .as_ref()
                     .is_some_and(|capture| capture.handoff.is_err());
-                let settlement_reason = if malformed
+                let settlement_class = if malformed
                     && matches!(
                         outcome,
                         AttemptOutcome::Succeeded
@@ -494,9 +494,9 @@ pub(super) fn apply_attempt_observation(
                             | AttemptOutcome::StoppedNoWork
                     ) {
                     attempt.stop = Some(provenant_records::StopCause::HandoffMalformed);
-                    Some(provenant_records::run::SettlementReason::HandoffMalformed)
+                    Some(provenant_records::run::SettlementClass::HandoffMalformed)
                 } else {
-                    settlement_reason
+                    settlement_class
                 };
                 let review_result = node.access == AccessMode::ReadOnly
                     && template::review_node(node)
@@ -604,7 +604,7 @@ pub(super) fn apply_attempt_observation(
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
-                let node_outcome = settlement_reason
+                let node_outcome = settlement_class
                     .map(|reason| reason.node_outcome(attempt.stop))
                     .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed);
                 let outcome = if matches!(
@@ -2145,7 +2145,7 @@ mod tests {
                     branch: None,
                     commit: None,
                     stop: None,
-                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                     cause: None,
                 },
                 ObservationFacts {
@@ -2221,7 +2221,7 @@ mod tests {
             branch: None,
             commit: Some(base.clone()),
             stop: None,
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             cause: None,
         };
         apply_attempt_observation(
@@ -2348,7 +2348,7 @@ mod tests {
                     branch: None,
                     commit: commit.map(str::to_owned),
                     stop: None,
-                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                     cause: None,
                 },
                 ObservationFacts {
@@ -2403,7 +2403,7 @@ mod tests {
                 branch: None,
                 commit: None,
                 stop: Some(provenant_records::StopCause::HandoffMissing),
-                settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+                settlement_class: Some(provenant_records::run::SettlementClass::HandoffMissing),
                 cause: None,
             },
             ObservationFacts {
@@ -2561,7 +2561,7 @@ mod tests {
                 branch: None,
                 commit: None,
                 stop: Some(provenant_records::StopCause::StoppedNoWork),
-                settlement_reason: Some(provenant_records::run::SettlementReason::DeclaredStop),
+                settlement_class: Some(provenant_records::run::SettlementClass::DeclaredStop),
                 cause: Some(provenant_records::run::CauseKind::StoppedNoWork),
             },
             ObservationFacts {

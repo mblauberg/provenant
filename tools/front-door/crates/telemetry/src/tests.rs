@@ -52,7 +52,7 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Provider,
-        settlement_reason: None,
+        settlement_class: None,
         account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0).unwrap(),
@@ -1643,8 +1643,8 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         true,
     );
     completed_before_budget.fact.cause_source = provenant_records::run::CauseSource::Host;
-    completed_before_budget.fact.settlement_reason =
-        Some(provenant_records::run::SettlementReason::CompletedBeforeBudget);
+    completed_before_budget.fact.settlement_class =
+        Some(provenant_records::run::SettlementClass::CompletedBeforeBudget);
     let identity_only = evidence(
         11,
         AttemptOutcome::Succeeded,

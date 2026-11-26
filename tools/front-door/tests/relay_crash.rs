@@ -47,7 +47,7 @@ impl AttemptOwner for Provider {
                 result_path: None,
                 branch: None,
                 commit: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
                 cause: None,
             })

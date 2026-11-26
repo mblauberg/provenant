@@ -137,7 +137,7 @@ fn loop_composite_review_pins_each_repaired_commit() {
         result_path: None,
         branch: None,
         commit: Some(commit.to_owned()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };
@@ -1438,7 +1438,7 @@ fn commit_terminal(commit: &str) -> AttemptObservation {
         result_path: None,
         branch: None,
         commit: Some(commit.to_owned()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     }
@@ -2880,7 +2880,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
         result_path: None,
         branch: Some("work/item".into()),
         commit: Some("1".repeat(40)),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };

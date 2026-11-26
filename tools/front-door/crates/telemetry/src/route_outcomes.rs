@@ -57,7 +57,7 @@ fn has_quality_outcome(fact: &AttemptFact) -> bool {
     fact.cause_source == CauseSource::Provider
         || (fact.cause_source == CauseSource::Host
             && fact.terminal_state == AttemptOutcome::Succeeded
-            && fact.settlement_reason.is_some_and(|reason| {
+            && fact.settlement_class.is_some_and(|reason| {
                 reason.rule().terminal_outcome == SettlementTerminalOutcome::Succeeded
             }))
 }

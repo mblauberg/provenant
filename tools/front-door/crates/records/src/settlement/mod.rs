@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::declaration::{DeclarationCounts, DeclarationEvidence};
 use crate::handoff::Handoff;
 use crate::run::{
-    CauseSource, Outcome, SettlementSignal, SettlementNodeOutcome, SettlementReason, CauseKind,
+    CauseSource, Outcome, SettlementSignal, SettlementNodeOutcome, SettlementClass, CauseKind,
     TerminalBasis,
 };
 use crate::settlement::policy::{AppliedPolicy, SettlementPolicy};
@@ -144,7 +144,7 @@ pub enum Progress {
 pub struct OutcomeFact {
     pub outcome: Outcome,
     pub cause: Option<CauseKind>,
-    pub settlement_reason: SettlementReason,
+    pub settlement_class: SettlementClass,
     pub stop: Option<Stop>,
     pub source: CauseSource,
     pub node: SettlementNodeOutcome,

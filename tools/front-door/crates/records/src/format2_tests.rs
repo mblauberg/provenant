@@ -39,15 +39,15 @@ fn each_stop_cause_round_trips_with_one_rule_and_declared_source() {
 
 #[test]
 fn settlement_reasons_round_trip_against_the_declared_rules() {
-    use crate::run::{SETTLEMENT_TABLE, SettlementReason};
-    for reason in SettlementReason::ALL {
+    use crate::run::{SETTLEMENT_CLASS_TABLE, SettlementClass};
+    for reason in SettlementClass::ALL {
         let encoded = serde_json::to_value(reason).unwrap();
         assert_eq!(
-            serde_json::from_value::<SettlementReason>(encoded).unwrap(),
+            serde_json::from_value::<SettlementClass>(encoded).unwrap(),
             *reason
         );
         assert_eq!(
-            SETTLEMENT_TABLE
+            SETTLEMENT_CLASS_TABLE
                 .iter()
                 .filter(|rule| rule.reason == *reason)
                 .count(),
@@ -56,7 +56,7 @@ fn settlement_reasons_round_trip_against_the_declared_rules() {
         let rule = reason.rule();
         assert_eq!(rule.reason, *reason);
         assert_eq!(
-            SETTLEMENT_TABLE.iter().find(|row| row.reason == *reason),
+            SETTLEMENT_CLASS_TABLE.iter().find(|row| row.class == *reason),
             Some(&rule)
         );
         let stop =
@@ -68,24 +68,24 @@ fn settlement_reasons_round_trip_against_the_declared_rules() {
             stop
         );
     }
-    assert_eq!(SETTLEMENT_TABLE.len(), SettlementReason::ALL.len());
+    assert_eq!(SETTLEMENT_CLASS_TABLE.len(), SettlementClass::ALL.len());
 }
 
 #[test]
 fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
     use crate::run::{
-        CauseSource, Outcome, SETTLEMENT_TABLE, SettlementNodeOutcome, SettlementReason,
+        CauseSource, Outcome, SETTLEMENT_CLASS_TABLE, SettlementNodeOutcome, SettlementClass,
         CauseKind,
     };
     use crate::settlement::{LaneRole, classify::settle};
-    for reason in SettlementReason::ALL {
+    for reason in SettlementClass::ALL {
         let encoded = serde_json::to_value(reason).unwrap();
         assert_eq!(
-            serde_json::from_value::<SettlementReason>(encoded).unwrap(),
+            serde_json::from_value::<SettlementClass>(encoded).unwrap(),
             *reason
         );
         assert_eq!(
-            SETTLEMENT_TABLE
+            SETTLEMENT_CLASS_TABLE
                 .iter()
                 .filter(|rule| rule.reason == *reason)
                 .count(),
@@ -100,13 +100,13 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
     let mut completed_evidence = evidence_for(Outcome::ReviewRequired, None);
     completed_evidence.lane = LaneRole::Reader;
     let completed = settle(&completed_evidence);
-    assert_eq!(completed.reason, SettlementReason::Completed);
+    assert_eq!(completed.reason, SettlementClass::Completed);
     assert_eq!(completed.source, CauseSource::Provider);
     assert_eq!(completed.node, SettlementNodeOutcome::Succeeded);
     assert!(completed.stop.is_none());
 
     let handoff_missing = settle(&evidence_for(Outcome::Succeeded, None));
-    assert_eq!(handoff_missing.reason, SettlementReason::HandoffMissing);
+    assert_eq!(handoff_missing.reason, SettlementClass::HandoffMissing);
     assert_eq!(handoff_missing.outcome, Outcome::ReviewRequired);
     assert_eq!(
         handoff_missing.stop.as_ref().map(Stop::cause),
@@ -118,7 +118,7 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
         Outcome::ReviewRequired,
         Some(CauseKind::EmptyWriterResult),
     ));
-    assert_eq!(empty.reason, SettlementReason::EmptyResult);
+    assert_eq!(empty.reason, SettlementClass::EmptyResult);
     let stop = empty.stop.as_ref().unwrap();
     assert_eq!(stop.cause(), StopCause::EmptyResult);
     assert_eq!(stop.cause().default_next(), NextStep::NewRoute);
@@ -128,7 +128,7 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
     let mut blocked_evidence = evidence_for(Outcome::Succeeded, Some(CauseKind::Blocked));
     blocked_evidence.handoff = accepted(blocked_handoff);
     let blocked = settle(&blocked_evidence);
-    assert_eq!(blocked.reason, SettlementReason::DeclaredStop);
+    assert_eq!(blocked.reason, SettlementClass::DeclaredStop);
     assert_eq!(blocked.outcome, Outcome::ReviewRequired);
     assert_eq!(blocked.source, CauseSource::Owner);
     assert_eq!(
@@ -140,7 +140,7 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
     for cause in StopCause::ALL {
         if cause.default_next() == NextStep::Chair {
             assert_eq!(
-                SettlementReason::Completed.node_outcome(Some(cause)),
+                SettlementClass::Completed.node_outcome(Some(cause)),
                 SettlementNodeOutcome::Failed
             );
         }
@@ -618,7 +618,7 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
 #[test]
 fn stray_work_holds_dependants_instead_of_completing() {
     use crate::run::{
-        CauseSource, Outcome, SettlementSignal, SettlementNodeOutcome, SettlementReason,
+        CauseSource, Outcome, SettlementSignal, SettlementNodeOutcome, SettlementClass,
     };
     use crate::settlement::{GitEvidence, LaneRole, PrimaryCheckout, classify::settle};
     let mut evidence = evidence_for(Outcome::ReviewRequired, None);
@@ -634,7 +634,7 @@ fn stray_work_holds_dependants_instead_of_completing() {
         },
     });
     let stray = settle(&evidence);
-    assert_eq!(stray.reason, SettlementReason::StrayWork);
+    assert_eq!(stray.reason, SettlementClass::StrayWork);
     assert_eq!(stray.outcome, Outcome::ReviewRequired);
     assert_eq!(stray.source, CauseSource::Host);
     assert_eq!(stray.node, SettlementNodeOutcome::Failed);
@@ -652,9 +652,9 @@ fn a_declared_stop_survives_uncommitted_edits_but_not_uncertain_custody() {
     .unwrap();
     let cause = |outcome, handoff: Option<&Handoff>| {
         let reason = if handoff.is_some_and(Handoff::unfinished) {
-            crate::run::SettlementReason::DeclaredStop
+            crate::run::SettlementClass::DeclaredStop
         } else {
-            crate::run::SettlementReason::UncommittedWork
+            crate::run::SettlementClass::UncommittedWork
         };
         Stop::sealed(None, outcome, reason, Ok(handoff.cloned()))
             .unwrap()

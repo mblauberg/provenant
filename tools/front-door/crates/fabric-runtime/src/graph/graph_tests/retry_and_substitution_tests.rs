@@ -405,7 +405,7 @@ fn review_substitute_keeps_writer_chain_exclusion() {
         result_path: None,
         branch: Some("writer".into()),
         commit: Some("3".repeat(40)),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };
@@ -567,13 +567,13 @@ fn refused_steer_successor_pauses_the_graph_for_retry() {
     if let AttemptObservation::Terminal {
         attempt_ref,
         stop,
-        settlement_reason,
+        settlement_class,
         ..
     } = &mut stopped
     {
         *attempt_ref = Some("host/attempt".into());
         *stop = Some(provenant_records::StopCause::Steered);
-        *settlement_reason = Some(provenant_records::run::SettlementReason::Steered);
+        *settlement_class = Some(provenant_records::run::SettlementClass::Steered);
     }
     let mut owner = FakeOwner {
         observations: VecDeque::from([stopped]),

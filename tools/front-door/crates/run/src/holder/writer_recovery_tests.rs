@@ -1505,8 +1505,8 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             if !dirty {
                 assert_eq!(*outcome, Outcome::Succeeded);
                 assert_eq!(
-                    finished.settlement_reason,
-                    Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+                    finished.settlement_class,
+                    Some(provenant_records::run::SettlementClass::CompletedBeforeBudget)
                 );
                 continue;
             }
@@ -1531,8 +1531,8 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             continue;
         }
         assert_eq!(
-            finished.settlement_reason,
-            Some(provenant_records::run::SettlementReason::DeclaredStop)
+            finished.settlement_class,
+            Some(provenant_records::run::SettlementClass::DeclaredStop)
         );
         let AttemptState::Terminal {
             cause,
@@ -1721,8 +1721,8 @@ fn empty_committed_writer_requires_review_and_controls_fail()
             } else {
                 assert!(reason.as_deref().unwrap().contains(NO_HANDOFF_REASON));
                 assert_eq!(
-                    finished.settlement_reason,
-                    Some(provenant_records::run::SettlementReason::HandoffMissing)
+                    finished.settlement_class,
+                    Some(provenant_records::run::SettlementClass::HandoffMissing)
                 );
                 assert_eq!(
                     finished.signals,
@@ -1745,7 +1745,7 @@ fn empty_committed_writer_requires_review_and_controls_fail()
                 );
                 assert_eq!(
                     finished
-                        .settlement_reason
+                        .settlement_class
                         .unwrap()
                         .node_outcome(Some(stop.cause())),
                     provenant_records::run::SettlementNodeOutcome::Failed
@@ -1779,7 +1779,7 @@ fn empty_committed_writer_requires_review_and_controls_fail()
 fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
-    use provenant_records::run::{SettlementSignal, SettlementReason};
+    use provenant_records::run::{SettlementSignal, SettlementClass};
 
     const DIRTY: &str = "left-uncommitted.txt";
     for (answer, empty) in [("", true), ("Work remains in the renderer.", false)] {
@@ -1898,8 +1898,8 @@ fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
         if empty {
             assert!(reason.contains(EMPTY_WRITER_REASON), "{reason}");
             assert_eq!(
-                finished.settlement_reason,
-                Some(SettlementReason::EmptyResult)
+                finished.settlement_class,
+                Some(SettlementClass::EmptyResult)
             );
             assert_eq!(stop.cause(), provenant_records::StopCause::EmptyResult);
             // run.md "What follows a stop": `empty_result` allows one fresh
@@ -1918,8 +1918,8 @@ fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
                 "missing handoff not named: {reason}"
             );
             assert_eq!(
-                finished.settlement_reason,
-                Some(SettlementReason::HandoffMissing)
+                finished.settlement_class,
+                Some(SettlementClass::HandoffMissing)
             );
             assert_eq!(stop.cause(), provenant_records::StopCause::HandoffMissing);
             assert_eq!(next, provenant_records::NextStep::Chair, "{reason}");

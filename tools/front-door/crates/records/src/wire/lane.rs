@@ -41,7 +41,7 @@ fn token_budget_usage_schema() -> Value {
 
 fn settlement_reason_schema() -> Value {
     let mut schema = choices(&[]);
-    schema["enum"] = json!(crate::run::SettlementReason::ALL);
+    schema["enum"] = json!(crate::run::SettlementClass::ALL);
     schema
 }
 
@@ -67,7 +67,7 @@ lane_row! {
         attempt_number: u64 => unsigned();
         retry_of: Option<String> => nullable(string());
         superseded_by: Option<String> => nullable(string());
-        cause: Option<crate::run::SettlementReason> => nullable(settlement_reason_schema());
+        cause: Option<crate::run::SettlementClass> => nullable(settlement_reason_schema());
         state: String => string();
         presence: Option<LanePresence> => nullable(choices(&["live", "unattended", "unknown", "settling"]));
         recorded_state: Option<String> => nullable(string());
@@ -347,7 +347,7 @@ impl LaneRow {
         }
         // Settlement reasons are closed, locally recorded facts, unlike the
         // terminal state's free text, which can contain provider output.
-        if let Some(reason) = lane.settlement_reason
+        if let Some(reason) = lane.settlement_class
             && matches!(
                 lane.state,
                 AttemptState::Terminal {
@@ -358,31 +358,31 @@ impl LaneRow {
                 }
             )
         {
-            use crate::run::SettlementReason;
+            use crate::run::SettlementClass;
             let detail = match reason {
-                SettlementReason::HandoffMalformed => Some(
+                SettlementClass::HandoffMalformed => Some(
                     "the lane finished with a malformed handoff; inspect its field diagnostics",
                 ),
-                SettlementReason::HandoffMissing => {
+                SettlementClass::HandoffMissing => {
                     Some("the lane finished without a handoff; inspect its result")
                 }
-                SettlementReason::EmptyResult => {
+                SettlementClass::EmptyResult => {
                     Some(crate::run::CauseKind::EmptyWriterResult.detail())
                 }
-                SettlementReason::DeclaredStop => match &lane.state {
+                SettlementClass::DeclaredStop => match &lane.state {
                     AttemptState::Terminal {
                         cause: Some(crate::run::CauseKind::StoppedNoWork),
                         ..
                     } => Some(crate::run::CauseKind::StoppedNoWork.detail()),
                     _ => Some("the lane stopped with work remaining; inspect its result"),
                 },
-                SettlementReason::ProviderStop => {
+                SettlementClass::ProviderStop => {
                     Some("the provider stopped early; inspect its result and resume if needed")
                 }
-                SettlementReason::UncommittedWork => {
+                SettlementClass::UncommittedWork => {
                     Some("the writer has uncommitted changes; preserve or commit the edits")
                 }
-                SettlementReason::StrayWork => Some(
+                SettlementClass::StrayWork => Some(
                     "the primary checkout moved with work no launch ref or other worktree reaches; the lane's work may be in the primary checkout",
                 ),
                 _ => None,
@@ -530,9 +530,9 @@ impl LaneRow {
             stop_work: lane.stop_work.clone(),
             warnings: (!lane.warnings.is_empty()).then(|| lane.warnings.clone()),
             cause: if git_import_failure.is_some() {
-                Some(crate::run::SettlementReason::Failed)
+                Some(crate::run::SettlementClass::Failed)
             } else {
-                lane.settlement_reason
+                lane.settlement_class
             },
             cause: if git_import_failure.is_some() {
                 Some(crate::run::CauseKind::SettlementFailure)

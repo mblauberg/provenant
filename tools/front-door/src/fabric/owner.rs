@@ -3235,7 +3235,7 @@ impl BoundGraphOwner<'_> {
                 branch: None,
                 commit: None,
                 stop: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::PreLaunchRefusal),
+                settlement_class: Some(provenant_records::run::SettlementClass::PreLaunchRefusal),
                 cause: None,
             }));
         }
@@ -4283,7 +4283,7 @@ impl BoundGraphOwner<'_> {
                         source_commit.map(str::to_owned)
                     },
                     stop,
-                    settlement_reason: attempt.settlement_reason,
+                    settlement_class: attempt.settlement_class,
                     cause: attempt.state.cause(),
                 })
             }

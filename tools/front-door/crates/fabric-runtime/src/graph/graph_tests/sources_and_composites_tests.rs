@@ -1340,7 +1340,7 @@ fn batch_merge_conflict_isolation_pauses_only_conflicted_slice() {
                 branch: None,
                 commit: None,
                 stop: Some(provenant_records::StopCause::Blocked),
-                settlement_reason: None,
+                settlement_class: None,
             cause: None,
             },
             AttemptObservation::Pending { attempt_ref: None },

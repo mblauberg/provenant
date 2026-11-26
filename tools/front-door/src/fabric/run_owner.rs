@@ -914,11 +914,11 @@ fn cause(
 pub(crate) fn durable_launch_refusal(
     lanes: &[provenant_run::AttemptRecord],
 ) -> Option<provenant_core::AttemptId> {
-    use provenant_records::run::{AttemptState, SettlementReason, CauseKind};
+    use provenant_records::run::{AttemptState, SettlementClass, CauseKind};
     (!lanes.is_empty()
         && lanes.iter().all(|lane| {
             lane.provider_launched == Some(false)
-                && lane.settlement_reason == Some(SettlementReason::PreLaunchRefusal)
+                && lane.settlement_class == Some(SettlementClass::PreLaunchRefusal)
                 && matches!(lane.state, AttemptState::Terminal { .. })
                 && (cause(lane).is_some_and(|cause| {
                     matches!(

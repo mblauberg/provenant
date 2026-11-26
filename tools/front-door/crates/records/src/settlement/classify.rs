@@ -11,7 +11,7 @@ use crate::declaration::DeclarationEvidence;
 use crate::handoff::{HandoffResult, HandoffStatus};
 use crate::provenance::Sourced;
 use crate::run::{
-    Outcome, SettlementSignal, SettlementNodeOutcome, SettlementReason, CauseKind,
+    Outcome, SettlementSignal, SettlementNodeOutcome, SettlementClass, CauseKind,
     TerminalBasis,
 };
 use crate::settlement::policy::{AppliedPolicy, NoWork, SettlementPolicy, SignalAction};
@@ -49,48 +49,48 @@ fn derived_reason(
     cause: Option<CauseKind>,
     handoff: &HandoffResult,
     launched: bool,
-) -> SettlementReason {
+) -> SettlementClass {
     if outcome == Outcome::Lost {
-        return SettlementReason::Lost;
+        return SettlementClass::Lost;
     }
     if outcome == Outcome::Unsettled {
-        return SettlementReason::Unsettled;
+        return SettlementClass::Unsettled;
     }
     if outcome == Outcome::Unclassified {
-        return SettlementReason::Unclassified;
+        return SettlementClass::Unclassified;
     }
     if matches!(evidence, TerminalBasis::Lost { .. }) {
-        return SettlementReason::Lost;
+        return SettlementClass::Lost;
     }
     if matches!(evidence, TerminalBasis::Unsettled { .. }) {
-        return SettlementReason::Unsettled;
+        return SettlementClass::Unsettled;
     }
     if outcome == Outcome::Cancelled && cause == Some(CauseKind::Steered) {
-        return SettlementReason::Steered;
+        return SettlementClass::Steered;
     }
     if outcome == Outcome::Cancelled {
-        return SettlementReason::Cancelled;
+        return SettlementClass::Cancelled;
     }
     if !launched || matches!(evidence, TerminalBasis::PreLaunchRefusal) {
-        return SettlementReason::PreLaunchRefusal;
+        return SettlementClass::PreLaunchRefusal;
     }
     if handoff.is_err() {
-        return SettlementReason::HandoffMalformed;
+        return SettlementClass::HandoffMalformed;
     }
     match cause {
-        Some(CauseKind::EmptyWriterResult) => return SettlementReason::EmptyResult,
+        Some(CauseKind::EmptyWriterResult) => return SettlementClass::EmptyResult,
         Some(CauseKind::Blocked | CauseKind::StoppedNoWork) => {
-            return SettlementReason::DeclaredStop;
+            return SettlementClass::DeclaredStop;
         }
         Some(
             CauseKind::ProviderEarlyStop
             | CauseKind::ProviderStalled
             | CauseKind::ProviderStalledRetry,
-        ) => return SettlementReason::ProviderStop,
+        ) => return SettlementClass::ProviderStop,
         _ => {}
     }
     if partial.contains(&SettlementSignal::StrayWork) {
-        return SettlementReason::StrayWork;
+        return SettlementClass::StrayWork;
     }
     if handoff
         .as_ref()
@@ -98,19 +98,19 @@ fn derived_reason(
         .flatten()
         .is_some_and(crate::handoff::Handoff::unfinished)
     {
-        return SettlementReason::DeclaredStop;
+        return SettlementClass::DeclaredStop;
     }
     if partial.contains(&SettlementSignal::DeclaredStop) {
-        return SettlementReason::DeclaredStop;
+        return SettlementClass::DeclaredStop;
     }
     if partial.contains(&SettlementSignal::HandoffMissing) {
-        return SettlementReason::HandoffMissing;
+        return SettlementClass::HandoffMissing;
     }
     if partial.contains(&SettlementSignal::ProviderStop) {
-        return SettlementReason::ProviderStop;
+        return SettlementClass::ProviderStop;
     }
     if partial.contains(&SettlementSignal::UncommittedWork) || outcome == Outcome::Uncommitted {
-        return SettlementReason::UncommittedWork;
+        return SettlementClass::UncommittedWork;
     }
     if cause == Some(CauseKind::TokenBudget)
         && matches!(
@@ -123,12 +123,12 @@ fn derived_reason(
             .flatten()
             .is_some_and(|accepted| !accepted.unfinished() && accepted.validate().is_ok())
     {
-        return SettlementReason::CompletedBeforeBudget;
+        return SettlementClass::CompletedBeforeBudget;
     }
     if matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired) {
-        return SettlementReason::Completed;
+        return SettlementClass::Completed;
     }
-    SettlementReason::Failed
+    SettlementClass::Failed
 }
 
 /// Settle one launched attempt from a sealed evidence record. Pure: no I/O, no
@@ -565,7 +565,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         } else {
             declaration.clone()
         };
-    let settlement_reason = derived_reason(
+    let settlement_class = derived_reason(
         outcome,
         &terminal_basis,
         &class_signals,
@@ -573,14 +573,14 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         &class_declaration,
         custody.launched,
     );
-    let outcome = settlement_reason.rule().terminal_outcome.apply(outcome);
-    let stop = match Stop::sealed(cause, outcome, settlement_reason, declaration.clone()) {
+    let outcome = settlement_class.rule().terminal_outcome.apply(outcome);
+    let stop = match Stop::sealed(cause, outcome, settlement_class, declaration.clone()) {
         Ok(stop) => stop,
-        Err(_) => Stop::sealed(cause, outcome, settlement_reason, Ok(None)).unwrap_or(None),
+        Err(_) => Stop::sealed(cause, outcome, settlement_class, Ok(None)).unwrap_or(None),
     };
     let stop_cause = stop.as_ref().map(Stop::cause);
-    let source = stop_cause.map_or(settlement_reason.rule().source, StopCause::source);
-    let node: SettlementNodeOutcome = settlement_reason.node_outcome(stop_cause);
+    let source = stop_cause.map_or(settlement_class.rule().source, StopCause::source);
+    let node: SettlementNodeOutcome = settlement_class.node_outcome(stop_cause);
 
     // 15. Progress is the sealed head against the sealed launch pin only.
     let progress = evidence.git.as_ref().map(|git| git.progress());
@@ -602,7 +602,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     OutcomeFact {
         outcome,
         cause,
-        settlement_reason,
+        settlement_class,
         stop,
         source,
         node,

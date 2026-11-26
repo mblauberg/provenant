@@ -1179,7 +1179,7 @@ fn enrich_status_rows_with_facts(
         // A peer owns a separate graph rooted at the submitted attempt. Its
         // authenticated status retains the origin binding beside that pointer.
         row["preparation_failure"] = json!(record.preparation_failure);
-        row["settlement_reason"] = json!(record.settlement_reason);
+        row["settlement_class"] = json!(record.settlement_class);
         let target: provenant_cli::Target = row["id"]
             .as_str()
             .ok_or(FacadeError::StateCorrupt)?

@@ -170,7 +170,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
     let cause_source = match stop {
         Some(stop) => stop.cause().source(),
         None => r
-            .settlement_reason
+            .settlement_class
             .map(|reason| reason.rule().source)
             .unwrap_or(provenant_records::run::CauseSource::Unavailable),
     };
@@ -186,7 +186,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         project_id: r.project_id,
         terminal_state: outcome.into(),
         cause_source,
-        settlement_reason: r.settlement_reason,
+        settlement_class: r.settlement_class,
         account_identity,
         exit_code,
         queued_at: r.queued_at,
@@ -1590,7 +1590,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                 .as_ref()
                 .is_none_or(|result| !result.complete || result.bytes == 0)
                 || (exit_code != Some(0)
-                    && !r.settlement_reason.is_some_and(|reason| {
+                    && !r.settlement_class.is_some_and(|reason| {
                         matches!(
                             reason.rule().terminal_outcome,
                             provenant_records::run::SettlementTerminalOutcome::Succeeded

@@ -119,7 +119,7 @@ fn lane_rows_validate_with_and_without_optional_members() {
     full.state = "terminal".into();
     full.retry_of = Some("3".repeat(32));
     full.superseded_by = Some("4".repeat(32));
-    full.cause = Some(crate::run::SettlementReason::DeclaredStop);
+    full.cause = Some(crate::run::SettlementClass::DeclaredStop);
     full.exit_code = Some(0);
     full.reason = Some("done".into());
     full.settlement = Some(LaneSettlement {

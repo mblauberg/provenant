@@ -2231,7 +2231,7 @@ pub enum SettlementNodeOutcome {
 /// The source and graph result for one settlement reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettlementRule {
-    pub reason: SettlementReason,
+    pub class: SettlementClass,
     pub source: CauseSource,
     pub node_outcome: SettlementNodeOutcome,
     pub terminal_outcome: SettlementTerminalOutcome,
@@ -2266,21 +2266,21 @@ impl SettlementTerminalOutcome {
 
 /// One declaration owns the durable reasons and their cross-cutting policy.
 /// Generated enum, ALL and table cannot drift apart.
-macro_rules! settlement_reasons {
+macro_rules! settlement_classes {
     ($($(#[$meta:meta])* $reason:ident { source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
-        pub enum SettlementReason {
+        pub enum SettlementClass {
             $($(#[$meta])* $reason),+
         }
 
-        impl SettlementReason {
+        impl SettlementClass {
             pub const ALL: &'static [Self] = &[$(Self::$reason),+];
 
             pub const fn rule(self) -> SettlementRule {
                 match self {
                     $(Self::$reason => SettlementRule {
-                        reason: Self::$reason,
+                        class: Self::$reason,
                         source: CauseSource::$source,
                         node_outcome: SettlementNodeOutcome::$node,
                         terminal_outcome: SettlementTerminalOutcome::$outcome,
@@ -2290,9 +2290,9 @@ macro_rules! settlement_reasons {
             }
         }
 
-        pub const SETTLEMENT_TABLE: &[SettlementRule] = &[
+        pub const SETTLEMENT_CLASS_TABLE: &[SettlementRule] = &[
             $(SettlementRule {
-                reason: SettlementReason::$reason,
+                class: SettlementClass::$reason,
                 source: CauseSource::$source,
                 node_outcome: SettlementNodeOutcome::$node,
                 terminal_outcome: SettlementTerminalOutcome::$outcome,
@@ -2302,7 +2302,7 @@ macro_rules! settlement_reasons {
     };
 }
 
-settlement_reasons! {
+settlement_classes! {
     /// The provider finished and reported its results.
     Completed { source: Provider, node: Succeeded, outcome: Preserve, stop: None },
     /// A complete handoff preceded the host token-budget stop.
@@ -2334,7 +2334,7 @@ settlement_reasons! {
     /// The provider ran and ended in a non-success outcome.
     Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
 }
-impl SettlementReason {
+impl SettlementClass {
     /// A completed budget boundary retains its host stop without closing
     /// dependants. Other typed stops keep dependants closed.
     pub const fn node_outcome(self, stop: Option<crate::stop::StopCause>) -> SettlementNodeOutcome {
@@ -2722,7 +2722,7 @@ pub struct AttemptRecord {
     /// Why the attempt ended, as a closed set a waiter can match on. Stamped
     /// with every terminal decision, including refusals before launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settlement_reason: Option<SettlementReason>,
+    pub settlement_class: Option<SettlementClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<crate::settlement::Progress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

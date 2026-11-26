@@ -147,7 +147,7 @@ impl AttemptOwner for Provider {
                 result_path: None,
                 branch: self.terminal_commit.as_ref().map(|_| "lane/parity".into()),
                 commit: self.terminal_commit.clone(),
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
                 cause: None,
             }),

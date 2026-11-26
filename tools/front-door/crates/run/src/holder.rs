@@ -5380,7 +5380,7 @@ mod settlement_5a_tests {
         assert_eq!(outcome, first_outcome);
         assert_eq!(cause, first_cause);
         assert_eq!(reason, first_reason);
-        assert_eq!(again.settlement_reason, first.settlement_reason);
+        assert_eq!(again.settlement_class, first.settlement_class);
         assert_eq!(again.settlement_evidence, Some(digest));
         assert_eq!(
             crate::evidence::read_evidence(&attempt)?.map(|(_, digest)| digest),
