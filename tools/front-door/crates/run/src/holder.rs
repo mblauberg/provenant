@@ -333,7 +333,7 @@ mod identity_policy_tests {
             (LaneRole::AdapterWriter, Some(base), Outcome::Failed),
             (LaneRole::Reader, None, Outcome::Failed),
         ] {
-            let mut evidence = SettlementEvidence::fixture(lane, Outcome::Succeeded, None);
+            let mut evidence = SettlementEvidence::fixture(lane.clone(), Outcome::Succeeded, None);
             evidence.custody.identity.route = route.clone();
             if writer_head.is_some() {
                 evidence.git = Some(GitEvidence {

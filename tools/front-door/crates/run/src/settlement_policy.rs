@@ -354,15 +354,17 @@ mod tests {
     fn every_declared_key_has_a_resolved_source() {
         let (policy, warnings) = resolve(&SettlementConfig::default(), None);
         assert!(warnings.is_empty());
-        for sourced in [
-            &policy.handoff_missing,
-            &policy.handoff_malformed,
-            &policy.empty_result,
-            &policy.uncommitted_work,
-            &policy.stray_work,
+        // Each key now resolves to its own value type, so assert on the
+        // homogeneous `Layer` projection rather than the heterogeneous `Sourced<T>`.
+        for layer in [
+            policy.handoff_missing.source.layer,
+            policy.handoff_malformed.source.layer,
+            policy.empty_result.source.layer,
+            policy.uncommitted_work.source.layer,
+            policy.stray_work.source.layer,
+            policy.no_work.source.layer,
         ] {
-            assert_eq!(sourced.source.layer, Layer::Default);
+            assert_eq!(layer, Layer::Default);
         }
-        assert_eq!(policy.no_work.source.layer, Layer::Default);
     }
 }
