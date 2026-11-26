@@ -761,6 +761,33 @@ fn gc_default_output_aggregates_routine_rows_and_keeps_exceptions() {
     assert!(serde_json::to_value(&data).unwrap_or_default()["removed"].is_array());
 }
 #[test]
+fn stopped_gc_budgets_return_exit_three_with_actionable_output()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (preview, setting) in [(true, "gc.preview_budget"), (false, "gc.sweep_budget")] {
+        let data = GcData {
+            preview_budget_stopped: preview,
+            sweep_stopped: !preview,
+            ..GcData::default()
+        };
+        let result = gc_result(&data, false);
+        assert_eq!(result.status.exit_code(), 3);
+        let mut output = Vec::new();
+        provenant_cli::render(
+            &result,
+            provenant_cli::RenderMode::Human {
+                text: "",
+                read_only: false,
+                summary: None,
+            },
+            &mut output,
+        )?;
+        let output = String::from_utf8(output)?;
+        assert!(output.contains(setting), "{output}");
+        assert!(output.contains("raise"), "{output}");
+    }
+    Ok(())
+}
+#[test]
 fn gc_failure_human_output_names_failed_paths_and_next_step()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut data = GcData::default();

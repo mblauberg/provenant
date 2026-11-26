@@ -1123,6 +1123,22 @@ fn gc_failure<'a>(data: &'a GcData, message: &str, detailed: bool) -> CommandRes
     result
 }
 
+fn gc_result(data: &GcData, detailed: bool) -> CommandResult<GcOutput<'_>> {
+    let failed = !data.provider_state.errors.is_empty()
+        || !data.chair_logs.errors.is_empty()
+        || !data.discard_archives.errors.is_empty()
+        || !data.port_receipts.errors.is_empty()
+        || !data.retention_errors.is_empty()
+        || !data.provider_state.payload.errors.is_empty()
+        || data.preview_budget_stopped
+        || data.sweep_stopped;
+    if failed {
+        gc_failure(data, "retention incomplete", detailed)
+    } else {
+        CommandResult::new("gc", Outcome::Ok, gc_result_data(data, detailed))
+    }
+}
+
 /// How a scheduled collection that raised no error ended.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum GcCompletion {
@@ -1205,18 +1221,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
     match gc(&command, globals, workers, None) {
         Ok(data) => {
             let human = gc_compact_summary(&data, globals.full);
-            let failed = !data.provider_state.errors.is_empty()
-                || !data.chair_logs.errors.is_empty()
-                || !data.discard_archives.errors.is_empty()
-                || !data.port_receipts.errors.is_empty()
-                || !data.retention_errors.is_empty()
-                || !data.provider_state.payload.errors.is_empty()
-                || data.sweep_stopped;
-            let result = if failed {
-                gc_failure(&data, "retention incomplete", globals.json)
-            } else {
-                CommandResult::new("gc", Outcome::Ok, gc_result_data(&data, globals.json))
-            };
+            let result = gc_result(&data, globals.json);
             emit(&result, globals, &human, command.dry_run)
         }
         Err(Error::CacheGc(

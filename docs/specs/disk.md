@@ -174,7 +174,10 @@ repeating work. A preview observes the overridable `gc.preview_budget` (default
 applied collection. When either budget stops a pass, exit 3 names the budget,
 its value and source and how to raise it. The report carries reclaimed bytes
 for every retention class it measured, naming unmeasured classes rather than
-reporting them as zero. The advisory dweller census runs
+reporting them as zero. `check` warns with `ATTEMPT_SCRATCH_HIGH` when measured
+attempt scratch exceeds the configured `gc.scratch_warning_share` of free space;
+zero disables the warning and positive shares retain their configured precision.
+The advisory dweller census runs
 after the collection classes: one bounded observation is cached for the whole
 pass and reused for every settled attempt
 and terminal worktree instead of re-walking the process table per candidate.

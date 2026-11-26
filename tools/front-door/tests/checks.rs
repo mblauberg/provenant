@@ -8,6 +8,42 @@ fn check_rig() -> Result<TestRig> {
 }
 
 #[test]
+fn check_warns_when_attempt_scratch_exceeds_the_configured_share() -> Result {
+    use std::{fs, os::unix::fs::DirBuilderExt};
+
+    let rig = check_rig()?;
+    let scratch = rig.state.join("attempt-scratch/attempt-1/tmp/candidate-0");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&scratch)?;
+    fs::write(scratch.join("payload"), vec![1_u8; 65536])?;
+    for (share, expected) in [("0.000000000000001", true), ("0.0", false)] {
+        fs::write(
+            rig.state.join("config.toml"),
+            format!("schema_version=1\n[gc]\nscratch_warning_share={share}\n"),
+        )?;
+        let output = rig.command(&["check", "config", "--json"])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+        let value = json(&output)?;
+        let warnings = value["warnings"].as_array().ok_or("missing warnings")?;
+        assert_eq!(
+            warnings
+                .iter()
+                .any(|warning| warning["code"] == "ATTEMPT_SCRATCH_HIGH"),
+            expected,
+            "{value}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn check_install_uses_tmpdir_and_cleans_private_home() -> Result {
     use std::{collections::BTreeSet, fs};
 
