@@ -705,7 +705,8 @@ mod tests {
             row(110, "before_cutoff"),
             row(150, "after_cutoff"),
         ];
-        let selected = window_cost_rows(&rows, "claude", "account", Some((100, 200)));
+        let identity_key = rows[0].identity.account_key();
+        let selected = window_cost_rows(&rows, "claude", &identity_key, Some((100, 200)));
         assert_eq!(
             selected
                 .iter()
@@ -713,7 +714,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["before_cutoff", "after_cutoff"]
         );
-        assert!(window_cost_rows(&rows, "claude", "account", None).is_empty());
+        assert!(window_cost_rows(&rows, "claude", &identity_key, None).is_empty());
     }
 
     #[test]
