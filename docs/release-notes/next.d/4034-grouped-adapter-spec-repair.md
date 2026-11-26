@@ -14,6 +14,11 @@
   so the compact configuration reference documents their defaults and effects
   instead of refusing to generate. (#4034)
 
+### Provider readiness
+
+- `check providers` retains sourced adapter overlays and declared capability
+  caveats when its optional version-probe executor cannot start. (#4034)
+
 ### Routing
 
 - An exact pin whose adapter declares no effort control again records a sourced

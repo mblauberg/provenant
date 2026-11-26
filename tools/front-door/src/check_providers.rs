@@ -627,8 +627,40 @@ fn compatibility_findings(
     warnings.extend(overlay_warnings);
     let project_key = provenant_config::ports::project_key_for(project).unwrap_or_default();
     let policy: Policy = provenant_config::policy::read(state, &project_key, &BTreeMap::new());
+    let mut overlays = Vec::new();
+    let mut caveats = Vec::new();
+    for spec in provenant_records::ADAPTER_SPECS {
+        if let Some(entry) = overlay.entry(spec.identity.name) {
+            overlays.push(OverlayLine {
+                adapter: spec.identity.name.to_owned(),
+                disabled: entry
+                    .disable
+                    .iter()
+                    .map(|item| item.key().to_owned())
+                    .collect(),
+                reason: entry.reason.clone(),
+                layer: entry.source.layer.as_str().to_owned(),
+                origin: entry.source.origin.clone(),
+            });
+        }
+        for caveat in spec.capabilities.caveats {
+            caveats.push(CaveatLine {
+                adapter: spec.identity.name.to_owned(),
+                code: caveat.code.to_owned(),
+                note: caveat.note.to_owned(),
+                source: caveat.source.to_owned(),
+            });
+        }
+    }
     let Ok(executor) = SystemExecutor::new(1) else {
-        return Ok(Vec::new());
+        // Version probing is best-effort; declared overlays and caveats remain
+        // useful even when this process cannot create an executor.
+        return Ok(CompatibilityReport {
+            findings: Vec::new(),
+            warnings,
+            overlays,
+            caveats,
+        });
     };
     let cache = VERSIONS.get_or_init(provenant_providers::version::VersionCache::new);
     let mut findings = Vec::new();
@@ -689,31 +721,6 @@ fn compatibility_findings(
             policy,
             blocks,
         });
-    }
-    let mut overlays = Vec::new();
-    let mut caveats = Vec::new();
-    for spec in provenant_records::ADAPTER_SPECS {
-        if let Some(entry) = overlay.entry(spec.identity.name) {
-            overlays.push(OverlayLine {
-                adapter: spec.identity.name.to_owned(),
-                disabled: entry
-                    .disable
-                    .iter()
-                    .map(|item| item.key().to_owned())
-                    .collect(),
-                reason: entry.reason.clone(),
-                layer: entry.source.layer.as_str().to_owned(),
-                origin: entry.source.origin.clone(),
-            });
-        }
-        for caveat in spec.capabilities.caveats {
-            caveats.push(CaveatLine {
-                adapter: spec.identity.name.to_owned(),
-                code: caveat.code.to_owned(),
-                note: caveat.note.to_owned(),
-                source: caveat.source.to_owned(),
-            });
-        }
     }
     Ok(CompatibilityReport {
         findings,

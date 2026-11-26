@@ -7107,8 +7107,8 @@ mod attachment_tests {
             ..Default::default()
         };
         let cursor = AdapterSpec::get("cursor").unwrap();
-        let decision = cursor
-            .check_launch(&request)
+        let checked = cursor.check_launch(&request);
+        let decision = checked
             .degraded(provenant_records::LaunchField::ImageInput)
             .expect("cursor declares no image input");
         assert_eq!(decision.action, provenant_records::LaunchAction::Degrade);
@@ -7148,14 +7148,13 @@ mod attachment_tests {
                 },
             }],
         };
-        let gap = AdapterSpec::get("cursor")
-            .unwrap()
-            .with_overlay(&overlay)
-            .check_launch(&provenant_records::LaunchRequest {
-                image_input: true,
-                gap_policy: provenant_records::GapPolicy::default(),
-                ..Default::default()
-            })
+        let effective = AdapterSpec::get("cursor").unwrap().with_overlay(&overlay);
+        let checked = effective.check_launch(&provenant_records::LaunchRequest {
+            image_input: true,
+            gap_policy: provenant_records::GapPolicy::default(),
+            ..Default::default()
+        });
+        let gap = checked
             .degraded(provenant_records::LaunchField::ImageInput)
             .expect("a disabled image input degrades");
         assert_eq!(gap.source, OVERLAY_SOURCE);
@@ -7180,14 +7179,13 @@ mod attachment_tests {
             }],
         };
         let policy = off.gap_policy("cursor", &provenant_records::policy::Policy::default());
-        let silent = AdapterSpec::get("cursor")
-            .unwrap()
-            .with_overlay(&off)
-            .check_launch(&provenant_records::LaunchRequest {
-                image_input: true,
-                gap_policy: policy,
-                ..Default::default()
-            })
+        let effective = AdapterSpec::get("cursor").unwrap().with_overlay(&off);
+        let checked = effective.check_launch(&provenant_records::LaunchRequest {
+            image_input: true,
+            gap_policy: policy,
+            ..Default::default()
+        });
+        let silent = checked
             .degraded(provenant_records::LaunchField::ImageInput)
             .expect("off still degrades rather than refusing");
         assert!(!silent.warn);

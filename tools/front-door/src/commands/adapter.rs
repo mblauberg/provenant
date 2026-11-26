@@ -1,9 +1,9 @@
 //! `adapter` — inspect the declared capability matrix.
 use crate::commands::{Call, Domain, Verb};
-use provenant_cli::{Command, CommandResult};
+use provenant_cli::Command;
 use provenant_core::{ActorId, ProjectId, consumer_env::Stability};
-use provenant_records::{CommandError, Outcome};
-use serde_json::{Value, json};
+use provenant_records::{CommandError, CommandResult, Outcome};
+use serde_json::Value;
 
 pub static DOMAIN: Domain = Domain {
     name: "adapter",
