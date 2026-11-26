@@ -143,11 +143,11 @@ pub fn unused_at_reset(readings: &[Reading]) -> Option<UnusedShare> {
     })
 }
 
-/// Direction of a value across completed windows, in basis points of change.
+/// Direction of full-window API-equivalent cost across completed windows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Trend {
     pub direction: Option<&'static str>,
-    pub change_basis_points: Option<i64>,
+    pub change_microdollars: Option<i64>,
     /// Windows compared, not ledger attempts.
     pub samples: u64,
     pub unavailable: Option<Unavailable>,
@@ -160,7 +160,7 @@ pub fn trend(values: &[u64]) -> Trend {
     if values.len() < 2 {
         return Trend {
             direction: None,
-            change_basis_points: None,
+            change_microdollars: None,
             samples,
             unavailable: Some(Unavailable::NotEnoughReadings),
         };
@@ -174,7 +174,7 @@ pub fn trend(values: &[u64]) -> Trend {
     };
     Trend {
         direction: Some(direction),
-        change_basis_points: Some(change),
+        change_microdollars: Some(change),
         samples,
         unavailable: None,
     }
@@ -386,7 +386,7 @@ mod tests {
         );
         let falling = trend(&[8_000, 5_000, 2_000]);
         assert_eq!(falling.direction, Some("down"));
-        assert_eq!(falling.change_basis_points, Some(-6_000));
+        assert_eq!(falling.change_microdollars, Some(-6_000));
         assert_eq!(falling.samples, 3);
         let rising = trend(&[2_000, 8_000]);
         assert_eq!(rising.direction, Some("up"));

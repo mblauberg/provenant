@@ -24,7 +24,10 @@ chair session to an account, see [account switching](configuration.md#chair-acco
   per account with a quota reading and a configured plan. Each requested window
   carries `cost_per_full_window` (API-equivalent cost scaled from the observed
   usage), `value_multiple` against the plan price in force, `unused_share_at_reset`
-  with its timestamp and sample count, and `trend` over completed windows. Every
+  with its timestamp and sample count, and `trend` in full-window API-equivalent
+  cost across completed windows. The trend uses costs through the last pre-reset
+  reading, reports its change in microdollars and is unavailable if a cycle
+  lacks bounds or fully priced usage. Every
   figure states its coverage; an unpriced bucket is a named lower bound, never
   zero. Credit accounts add `credit_runway` (draw-down per day and days to
   exhaustion), or a named unavailable reason when the readings are missing.

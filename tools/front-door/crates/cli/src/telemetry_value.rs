@@ -165,6 +165,198 @@ fn window_cost_rows<'a>(
         .collect()
 }
 
+/// Compare the cost scaled to a full window at consecutive observed resets.
+/// The last pre-reset snapshot supplies both the cycle bounds and utilisation;
+/// only ledger rows up to that snapshot can be paired with that utilisation.
+fn completed_window_trend(
+    records: &[HistoryRecord],
+    pool: &str,
+    rows: &[Row],
+    provider: &str,
+    identity_key: &str,
+) -> Result<Value, Failure> {
+    let mut values = Vec::new();
+    let mut unavailable = None;
+    for pair in records.windows(2).filter(|pair| {
+        pair[1]
+            .markers
+            .iter()
+            .any(|marker| marker.kind == MarkerKind::Reset && marker.pool.as_deref() == Some(pool))
+    }) {
+        let previous = &pair[0];
+        let window = previous.windows.iter().find(|window| window.pool == pool);
+        let bounds = window.and_then(|window| {
+            let length = i64::try_from(window.window_seconds?)
+                .ok()
+                .filter(|n| *n > 0)?;
+            let reset = window.resets_unix_seconds?;
+            let start = reset.checked_sub(length)?;
+            (start <= previous.observed_unix_seconds
+                && previous.observed_unix_seconds < reset
+                && reset <= pair[1].observed_unix_seconds)
+                .then_some((start, previous.observed_unix_seconds))
+        });
+        let Some((window, bounds)) = window.zip(bounds) else {
+            unavailable = Some(value::Unavailable::IncompleteWindow);
+            continue;
+        };
+        let cost_rows = window_cost_rows(rows, provider, identity_key, Some(bounds));
+        let totals = report::totals(cost_rows.iter().copied()).map_err(io)?;
+        let measured = value::window_value(
+            totals.microdollars,
+            window.used_basis_points,
+            None,
+            totals.complete,
+            true,
+        );
+        if let Some(cost) = measured.cost_per_full_window_microdollars {
+            values.push(cost);
+        } else {
+            unavailable = measured.unavailable;
+        }
+    }
+    let mut trend = value::trend(&values);
+    if let Some(reason) = unavailable {
+        trend.direction = None;
+        trend.change_microdollars = None;
+        trend.unavailable = Some(reason);
+    }
+    Ok(json!({"basis": "api_equivalent_cost_per_full_window_microdollars", "value": trend}))
+}
+
+fn window_report(
+    w: &provenant_quota::QuotaWindow,
+    records: &[HistoryRecord],
+    rows: &[Row],
+    provider: &str,
+    identity_key: &str,
+    price: Option<&provenant_quota::PlanPrice>,
+) -> Result<(Value, String), Failure> {
+    let mut window_lines = Vec::new();
+    let window_readings: Vec<ValueReading> = records
+        .iter()
+        .map(|record| {
+            let used = record
+                .windows
+                .iter()
+                .find(|candidate| candidate.pool == w.pool)
+                .map(|candidate| candidate.used_basis_points);
+            ValueReading {
+                observed_unix_seconds: record.observed_unix_seconds,
+                used_basis_points: used,
+                reset: record.markers.iter().any(|marker| {
+                    marker.kind == MarkerKind::Reset
+                        && marker.pool.as_deref() == Some(w.pool.as_str())
+                }),
+            }
+        })
+        .collect();
+    let unused = value::unused_at_reset(&window_readings);
+    let trend = completed_window_trend(records, &w.pool, rows, provider, identity_key)?;
+    // A report cutoff cannot truncate the denominator's quota cycle.
+    let bounds = w
+        .window_seconds
+        .zip(w.resets_unix_seconds)
+        .map(|(len, reset)| {
+            (
+                reset.saturating_sub(i64::try_from(len).unwrap_or(i64::MAX)),
+                reset,
+            )
+        });
+    let cost_basis = bounds.map_or_else(
+        || "unavailable_no_window_bounds".to_owned(),
+        |(start, end)| format!("api_equivalent_{start}_to_{end}"),
+    );
+    let cost_rows = window_cost_rows(rows, provider, identity_key, bounds);
+    let totals = report::totals(cost_rows.iter().copied()).map_err(io)?;
+    let (price_per_window, price_unavailable) = price_per_window_usd(price, w.window_seconds);
+    let mut window_value = value::window_value(
+        totals.microdollars,
+        w.used_basis_points,
+        price_per_window,
+        totals.complete,
+        bounds.is_some(),
+    );
+    if window_value.cost_per_full_window_microdollars.is_some() && price_unavailable.is_some() {
+        window_value.unavailable = price_unavailable;
+    }
+    let cost_text = match window_value.cost_per_full_window_microdollars {
+        Some(micros) => usd(micros),
+        None => format!("unavailable ({})", named(window_value.unavailable)),
+    };
+    let multiple_text = match window_value.value_multiple_basis_points {
+        Some(bp) => format!("{}.{:02}x", bp / 10_000, (bp % 10_000) / 100),
+        None => format!("unavailable ({})", named(window_value.unavailable)),
+    };
+    let unused_text = unused.as_ref().map_or_else(
+        || "unavailable (no_readings)".to_owned(),
+        |share| match share.unused_basis_points {
+            Some(bp) => format!(
+                "{} ({}, {} samples, observed {}{})",
+                percent(bp),
+                share.basis,
+                share.samples,
+                share.observed_unix_seconds.map_or_else(
+                    || "unknown".to_owned(),
+                    |at| jiff::Timestamp::from_second(at)
+                        .map_or_else(|_| "unknown".to_owned(), |time| time.to_string())
+                ),
+                if share.below_half_used {
+                    ", below half used"
+                } else {
+                    ""
+                }
+            ),
+            None => format!("unavailable ({})", named(share.unavailable)),
+        },
+    );
+    let trend_value = &trend["value"];
+    let trend_text = trend_value["direction"].as_str().map_or_else(
+        || {
+            format!(
+                "unavailable ({})",
+                trend_value["unavailable"].as_str().unwrap_or("unknown")
+            )
+        },
+        str::to_owned,
+    );
+    window_lines.push(format!(
+        "  {}: cost per full window {} ({}), value multiple {}, unused at reset {}, full-window cost trend {} ({} windows)\n",
+        plain_text(&w.pool, 128),
+        cost_text,
+        coverage(&totals),
+        multiple_text,
+        unused_text,
+        trend_text,
+        trend_value["samples"],
+    ));
+    if let Some(bound) = window_value.lower_bound_microdollars {
+        window_lines.push(format!(
+            "    unpriced bucket: cost is a lower bound of {} per full window\n",
+            usd(bound)
+        ));
+    }
+    let data = json!({
+        "pool": w.pool,
+        "used_basis_points": w.used_basis_points,
+        "window_seconds": w.window_seconds,
+        "resets_unix_seconds": w.resets_unix_seconds,
+        "samples": window_readings.len(),
+        "cost_basis": cost_basis,
+        "usage": totals,
+        "coverage": {
+            "attempts": totals.attempts,
+            "priced_attempts": totals.priced_attempts,
+            "unpriced_attempts": totals.unpriced_attempts,
+            "unattributed_attempts": totals.unattributed_attempts,
+        },
+        "cost_per_full_window": window_value,
+        "unused_share_at_reset": unused,
+        "trend": trend,
+    });
+    Ok((data, window_lines.join("")))
+}
+
 /// Credit balances arrive as decimal strings (`9.50`) or `unlimited`.
 fn credit_balance_microdollars(text: &str) -> Option<u64> {
     let trimmed = text.trim();
@@ -354,127 +546,11 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
             .windows
             .iter()
             .filter(|w| command.window.as_deref().is_none_or(|name| w.pool == name))
-            .map(|w| -> Result<Value, Failure> {
-                let window_readings: Vec<ValueReading> = records
-                    .iter()
-                    .map(|record| {
-                        let used = record
-                            .windows
-                            .iter()
-                            .find(|candidate| candidate.pool == w.pool)
-                            .map(|candidate| candidate.used_basis_points);
-                        ValueReading {
-                            observed_unix_seconds: record.observed_unix_seconds,
-                            used_basis_points: used,
-                            reset: record.markers.iter().any(|marker| {
-                                marker.kind == MarkerKind::Reset
-                                    && marker.pool.as_deref() == Some(w.pool.as_str())
-                            }),
-                        }
-                    })
-                    .collect();
-                let unused = value::unused_at_reset(&window_readings);
-                let at_reset: Vec<u64> = window_readings
-                    .windows(2)
-                    .filter(|pair| pair[1].reset)
-                    .filter_map(|pair| pair[0].used_basis_points)
-                    .collect();
-                let trend = value::trend(&at_reset);
-                // A report cutoff cannot truncate the denominator's quota cycle.
-                let bounds = w.window_seconds.zip(w.resets_unix_seconds).map(|(len, reset)| {
-                    (
-                        reset.saturating_sub(i64::try_from(len).unwrap_or(i64::MAX)),
-                        reset,
-                    )
-                });
-                let cost_basis = bounds.map_or_else(
-                    || "unavailable_no_window_bounds".to_owned(),
-                    |(start, end)| format!("api_equivalent_{start}_to_{end}"),
-                );
-                let cost_rows = window_cost_rows(&ledger.rows, provider, &identity_key, bounds);
-                let totals = report::totals(cost_rows.iter().copied()).map_err(io)?;
-                let (price_per_window, price_unavailable) =
-                    price_per_window_usd(price, w.window_seconds);
-                let mut window_value = value::window_value(
-                    totals.microdollars,
-                    w.used_basis_points,
-                    price_per_window,
-                    totals.complete,
-                    bounds.is_some(),
-                );
-                if window_value.cost_per_full_window_microdollars.is_some()
-                    && price_unavailable.is_some()
-                {
-                    window_value.unavailable = price_unavailable;
-                }
-                let cost_text = match window_value.cost_per_full_window_microdollars {
-                    Some(micros) => usd(micros),
-                    None => format!("unavailable ({})", named(window_value.unavailable)),
-                };
-                let multiple_text = match window_value.value_multiple_basis_points {
-                    Some(bp) => format!("{}.{:02}x", bp / 10_000, (bp % 10_000) / 100),
-                    None => format!("unavailable ({})", named(window_value.unavailable)),
-                };
-                let unused_text = unused.as_ref().map_or_else(
-                    || "unavailable (no_readings)".to_owned(),
-                    |share| match share.unused_basis_points {
-                        Some(bp) => format!(
-                            "{} ({}, {} samples, observed {}{})",
-                            percent(bp),
-                            share.basis,
-                            share.samples,
-                            share.observed_unix_seconds.map_or_else(
-                                || "unknown".to_owned(),
-                                |at| jiff::Timestamp::from_second(at)
-                                    .map_or_else(|_| "unknown".to_owned(), |time| time.to_string())
-                            ),
-                            if share.below_half_used {
-                                ", below half used"
-                            } else {
-                                ""
-                            }
-                        ),
-                        None => format!("unavailable ({})", named(share.unavailable)),
-                    },
-                );
-                let trend_text = trend.direction.map_or_else(
-                    || format!("unavailable ({})", named(trend.unavailable)),
-                    |direction| direction.to_owned(),
-                );
-                window_lines.push(format!(
-                    "  {}: cost per full window {} ({}), value multiple {}, unused at reset {}, usage-at-reset trend {} ({} windows)\n",
-                    plain_text(&w.pool, 128),
-                    cost_text,
-                    coverage(&totals),
-                    multiple_text,
-                    unused_text,
-                    trend_text,
-                    trend.samples,
-                ));
-                if let Some(bound) = window_value.lower_bound_microdollars {
-                    window_lines.push(format!(
-                        "    unpriced bucket: cost is a lower bound of {} per full window\n",
-                        usd(bound)
-                    ));
-                }
-                Ok(json!({
-                    "pool": w.pool,
-                    "used_basis_points": w.used_basis_points,
-                    "window_seconds": w.window_seconds,
-                    "resets_unix_seconds": w.resets_unix_seconds,
-                    "samples": window_readings.len(),
-                    "cost_basis": cost_basis,
-                    "usage": totals,
-                    "coverage": {
-                        "attempts": totals.attempts,
-                        "priced_attempts": totals.priced_attempts,
-                        "unpriced_attempts": totals.unpriced_attempts,
-                        "unattributed_attempts": totals.unattributed_attempts,
-                    },
-                    "cost_per_full_window": window_value,
-                    "unused_share_at_reset": unused,
-                    "trend": {"basis": "used_basis_points_at_reset", "value": trend},
-                }))
+            .map(|w| {
+                let (data, line) =
+                    window_report(w, records, &ledger.rows, provider, &identity_key, price)?;
+                window_lines.push(line);
+                Ok(data)
             })
             .collect::<Result<Vec<_>, Failure>>()?;
         let credit_points: Vec<CreditPoint> = records
@@ -715,6 +791,63 @@ mod tests {
             ["before_cutoff", "after_cutoff"]
         );
         assert!(window_cost_rows(&rows, "claude", &identity_key, None).is_empty());
+    }
+
+    #[test]
+    fn report_trend_tracks_full_window_cost_not_reset_utilisation() {
+        let reading = |at, reset, used, marker| -> HistoryRecord {
+            serde_json::from_value(json!({
+                "schema_version": 1, "observed_unix_seconds": at,
+                "account_key": "account", "label": "work", "provider": "claude",
+                "status": "available", "plan": null,
+                "windows": [{"pool": "p", "window_seconds": 100,
+                    "used_basis_points": used, "resets_unix_seconds": reset}],
+                "credit_balance": null, "reset_credits": null,
+                "markers": if marker { json!([{"kind": "reset", "pool": "p"}]) } else { json!([]) }
+            }))
+            .expect("history fixture")
+        };
+        let records = [
+            reading(190, 200, 5_000, false),
+            reading(200, 300, 0, true),
+            reading(290, 300, 5_000, false),
+            reading(300, 400, 0, true),
+        ];
+        let mut rows = [row(150, "first"), row(250, "second")];
+        rows[0].cost.as_mut().unwrap().picodollars = 1_000_000_000_000;
+        rows[1].cost.as_mut().unwrap().picodollars = 2_000_000_000_000;
+        let identity = rows[0].identity.account_key();
+        let (window, _) = window_report(
+            &records[3].windows[0],
+            &records,
+            &rows,
+            "claude",
+            &identity,
+            None,
+        )
+        .expect("window report");
+        let trend = &window["trend"];
+        assert_eq!(
+            trend["basis"],
+            "api_equivalent_cost_per_full_window_microdollars"
+        );
+        assert_eq!(trend["value"]["direction"], "up");
+        assert_eq!(trend["value"]["change_microdollars"], 2_000_000);
+        assert_eq!(trend["value"]["samples"], 2);
+
+        rows[1].cost = None;
+        let (window, _) = window_report(
+            &records[3].windows[0],
+            &records,
+            &rows,
+            "claude",
+            &identity,
+            None,
+        )
+        .expect("window report");
+        let trend = &window["trend"];
+        assert!(trend["value"]["direction"].is_null());
+        assert_eq!(trend["value"]["unavailable"], "unpriced");
     }
 
     #[test]

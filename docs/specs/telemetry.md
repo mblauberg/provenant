@@ -66,6 +66,13 @@ reset, a sample count and priced coverage. Credit accounts add a draw-down rate
 and days to exhaustion, or a named unavailable reason. The plan price and the
 window set are stated with the source that supplied them.
 
+The trend compares API-equivalent cost scaled to full utilisation across completed
+windows. Each cycle uses its last pre-reset reading and ledger costs from the
+cycle start through that reading; it requires known reset bounds and a fully
+priced cost. An unusable cycle makes the trend unavailable rather than silently
+skipping it. JSON reports the change in microdollars and the number of usable
+windows.
+
 An unused share is the last reading before the reset, labelled
 `observed_before_reset` with its timestamp and sample count; a reset with no
 reading before it is named unavailable. If the immediately preceding snapshot
