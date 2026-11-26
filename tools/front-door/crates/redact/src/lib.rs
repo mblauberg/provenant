@@ -1694,7 +1694,7 @@ mod tests {
     #[test]
     #[allow(
         clippy::disallowed_methods,
-        reason = "fixture subprocess isolates ambient credentials and captures process-wide stderr"
+        reason = "fixture subprocess isolates ambient credentials"
     )]
     fn oversized_ambient_credential_withdraws_publication_but_admits_retry() {
         let _mode = scoped(Mode::Secrets);
@@ -1702,8 +1702,20 @@ mod tests {
         const NAME: &str = "UNTRUSTED\n\u{1b}[31m_API_KEY";
         let oversized = "oversized-held-credential-".repeat(800);
         if std::env::var_os(CHILD).is_some() {
-            for _ in 0..2 {
-                assert!(!matches_credential_value_for_retry(b"ordinary retry brief").unwrap());
+            let (_, warnings) = provenant_records::warning::capture(|| {
+                for _ in 0..2 {
+                    assert!(!matches_credential_value_for_retry(b"ordinary retry brief").unwrap());
+                }
+            });
+            assert_eq!(warnings.len(), 2);
+            for warning in warnings {
+                assert_eq!(
+                    warning.code,
+                    provenant_records::warning::RETRY_CREDENTIALS_SKIPPED.as_str()
+                );
+                assert!(!warning.message.contains(&oversized));
+                assert!(!warning.message.contains(NAME));
+                assert!(!warning.message.contains('\u{1b}'));
             }
             assert_eq!(ambient_values(), Err(RedactorError::SecretTooLong));
             assert_eq!(
@@ -1731,15 +1743,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // Each retry admission that skips the oversized credential emits one
-        // typed warning. Collapsing repeats is the command sink's job, and this
-        // fixture has no sink, so the child's two admissions print twice.
-        assert_eq!(
-            stderr
-                .matches("warning: retry admission skipped out-of-bounds ambient credentials")
-                .count(),
-            2
-        );
+        assert!(!stderr.contains("warning:"), "{stderr}");
         assert!(!stderr.contains(&oversized));
         assert!(!stderr.contains(NAME));
         assert!(!stderr.contains('\u{1b}'));
