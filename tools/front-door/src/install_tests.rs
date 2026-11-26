@@ -717,7 +717,7 @@ fn smoke_never_reads_the_caller_checkout() -> Result<(), Box<dyn std::error::Err
             &home,
             &smoke_upgrade(None, Vec::new()),
         )
-        .map_err(|error| std::io::Error::other(error))?;
+        .map_err(std::io::Error::other)?;
         let recorded = std::fs::read_to_string(&calls)?;
         let run = recorded.lines().next().ok_or("run argv")?;
         let project = run
@@ -854,7 +854,7 @@ fn remote_smoke_carries_the_writer_branch_and_fixture_nonce()
     provenant_os::fixture::private_state_dir(&state)?;
     let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
     let runner = smoke_runner(&home)?;
-    crate::smoke::run_lifecycle(
+    let outcome = crate::smoke::run_lifecycle(
         &provenant_os::clock::SystemClock::new(),
         &runner,
         &program,
@@ -873,17 +873,23 @@ fn remote_smoke_carries_the_writer_branch_and_fixture_nonce()
         .split_once("--project ")
         .and_then(|(_, rest)| rest.split_whitespace().next())
         .ok_or("project argument")?;
-    let fixture_text = std::fs::read_to_string(std::path::Path::new(project).join("fixture.txt"))?;
+    // The stub echoes the nonce it read from the fixture into every summary,
+    // so a passing verdict proves the lanes saw this run's fixture. The
+    // fixture itself is removed on every path once the smoke settles.
     assert!(
-        fixture_text.starts_with("nonce: ") && fixture_text.trim().len() == 19,
-        "{fixture_text}"
+        !matches!(outcome.verdict, crate::smoke::SmokeVerdict::Failed { .. }),
+        "{}",
+        outcome.text()
+    );
+    assert!(
+        !std::path::Path::new(project).exists(),
+        "the fixture project outlived its smoke: {project}"
     );
     Ok(())
 }
 
 #[test]
 fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir()?;
@@ -919,7 +925,6 @@ fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::E
 
 #[test]
 fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir()?;
@@ -968,7 +973,6 @@ fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::e
 #[test]
 fn smoke_dry_run_keeps_a_user_diff_base_and_adds_fixture_base()
 -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir()?;

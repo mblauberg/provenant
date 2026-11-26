@@ -1172,7 +1172,7 @@ fn review_fallback_warns_range_and_keeps_empty_context_free() -> Result {
             .any(|warning| {
                 warning.as_str().is_some_and(|warning| {
                     warning.contains(&format!("{base}...{head}"))
-                        && warning.contains("first parent")
+                        && warning.contains("checkout HEAD's parent")
                 })
             })
     );

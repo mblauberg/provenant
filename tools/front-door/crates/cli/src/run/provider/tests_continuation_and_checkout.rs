@@ -207,7 +207,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn read_only_checkout_warning_reports_a_local_read_for_an_unpinned_checkout()
+fn read_only_checkout_warning_reports_the_local_commit_each_resolution_pins()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 
@@ -298,17 +298,18 @@ fn read_only_checkout_warning_reports_a_local_read_for_an_unpinned_checkout()
 
     // Level with, or ahead of, the default: auto pins the observed checkout
     // HEAD, so the advisory warning names that commit instead of going
-    // unpinned. A later commit cannot move the tree a read lane sees.
+    // unpinned. Each resolution pins the HEAD it observed: a later commit is
+    // named by the next resolution, never by a pin already taken.
     run(&checkout, &["reset", "-q", "--hard", &default])?;
     let warning = confinement::read_only_checkout_warning(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("current checkout did not report its pinned HEAD")?;
     assert!(warning.contains(&default), "{warning}");
     assert!(warning.contains("read the local checkout"), "{warning}");
-    let before = run(&checkout, &["rev-parse", "HEAD"])?;
     run(&checkout, &["commit", "-q", "--allow-empty", "-m", "three"])?;
+    let ahead = run(&checkout, &["rev-parse", "HEAD"])?;
     let warning = confinement::read_only_checkout_warning(&state, &checkout, &crate::run::ReadSourceChoice::automatic())
         .ok_or("ahead checkout did not report its pinned HEAD")?;
-    assert!(warning.contains(&before), "{warning}");
+    assert!(warning.contains(&ahead), "{warning}");
 
     // Without a configured upstream or origin/HEAD, the remote's advertised
     // default is the advisory stand-in, not origin/main.
