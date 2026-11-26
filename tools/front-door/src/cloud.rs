@@ -432,7 +432,8 @@ mod forge_remote_tests {
     /// Cloud fetch and `ls-remote` follow the declared remote, not `origin`.
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     #[test]
-    fn collect_uses_the_declared_remote_for_ls_remote() -> Result<(), Box<dyn std::error::Error>> {
+    fn collect_uses_the_declared_remote_for_ls_remote_and_trailer_fetch()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
         let project = temp.path().join("project");
@@ -449,6 +450,8 @@ mod forge_remote_tests {
         git(&project, &["init", "-q"])?;
         std::fs::write(project.join("fixture.txt"), "fixture\n")?;
         git(&project, &["add", "."])?;
+        let nonce = "session-nonce";
+        let trailer = super::trailer(nonce);
         git(
             &project,
             &[
@@ -469,6 +472,33 @@ mod forge_remote_tests {
             &project,
             &["push", "-q", "upstream", "HEAD:refs/heads/trunk"],
         )?;
+        let publisher = temp.path().join("publisher");
+        std::fs::create_dir_all(&publisher)?;
+        git(&publisher, &["init", "-q", "-b", "session"])?;
+        std::fs::write(publisher.join("fixture.txt"), "remote session\n")?;
+        git(&publisher, &["add", "."])?;
+        git(
+            &publisher,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "cloud session",
+                "-m",
+                &trailer,
+            ],
+        )?;
+        git(
+            &publisher,
+            &["remote", "add", "upstream", bare.to_str().expect("path")],
+        )?;
+        git(
+            &publisher,
+            &["push", "-q", "upstream", "HEAD:refs/heads/claude/session"],
+        )?;
         std::fs::create_dir_all(project.join(".provenant"))?;
         std::fs::write(
             project.join(".provenant/ports.json"),
@@ -482,9 +512,24 @@ mod forge_remote_tests {
         let remote = provenant_config::ForgeContext::remote(&config, &metadata)?.value;
         assert_eq!(remote, "upstream");
 
-        let found = super::find_branch(&project, "trunk", "nonce", &remote)?
-            .expect("the declared remote's branch is found");
-        assert_eq!(found.0, "refs/heads/trunk");
+        let published = provenant_os::fixture::run_git(
+            &project,
+            &["ls-remote", &remote, "refs/heads/claude/session"],
+        )?;
+        let oid = String::from_utf8_lossy(&published)
+            .split_once('\t')
+            .ok_or("remote trailer ref missing")?
+            .0
+            .to_owned();
+        assert!(
+            provenant_os::fixture::run_git(&project, &["cat-file", "-e", &oid]).is_err(),
+            "the publisher commit must not already exist in the collecting checkout"
+        );
+        let found = super::find_branch(&project, "missing", nonce, &remote)?
+            .expect("the declared remote's trailer branch is found after fetch");
+        assert_eq!(found.0, "refs/heads/claude/session");
+        assert_eq!(found.1, oid);
+        provenant_os::fixture::run_git(&project, &["cat-file", "-e", &found.1])?;
         Ok(())
     }
 }
