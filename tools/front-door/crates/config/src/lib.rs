@@ -11,6 +11,7 @@ pub use admission::{
     ResolvedAdmissionClass,
 };
 mod account_sync;
+pub mod adapter_capabilities;
 mod cache_budget;
 mod domains;
 mod edit;

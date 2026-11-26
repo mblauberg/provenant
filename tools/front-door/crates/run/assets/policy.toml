@@ -1458,3 +1458,30 @@ strength = "warn"
 refusable = true
 knob = "policy.HARNESS_VERSION_BROKEN"
 justification = "A harness version an overlay marks broken warns by default; refuse selects a configured stop at launch and in check providers."
+
+[[rule]]
+code = "LAUNCH_MODEL_UNSUPPORTED"
+site = "records/src/adapters.rs#check_launch"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LAUNCH_MODEL_UNSUPPORTED"
+justification = "A model gap degrades to an ineligible candidate with a fallback by default; refuse makes the configured stop explicit, and off drops the warning."
+
+[[rule]]
+code = "LAUNCH_EFFORT_UNSUPPORTED"
+site = "records/src/adapters.rs#check_launch"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LAUNCH_EFFORT_UNSUPPORTED"
+justification = "An effort gap drops the control with a sourced warning by default; refuse makes the configured stop explicit, and off drops the control silently."
+
+[[rule]]
+code = "LAUNCH_IMAGE_INPUT_UNSUPPORTED"
+site = "records/src/adapters.rs#check_launch"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED"
+justification = "Attachments stay readable with a sourced warning when image input is absent; refuse makes the configured stop explicit, and off drops the warning."

@@ -860,6 +860,7 @@ pub struct LaunchRequest<'a> {
     pub network: Option<NetworkAccess>,
     pub write: bool,
     pub skill_location: bool,
+    pub gap_policy: GapPolicy,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchField {
@@ -902,16 +903,22 @@ pub struct LaunchGap {
     pub action: LaunchAction,
     pub reason: &'static str,
     pub source: &'static str,
+    /// Whether the caller should surface this gap as a warning. Refusals always
+    /// warn; a degrades-only gap can be silenced by `off`.
+    pub warn: bool,
+    /// Which layer chose the action, so the text can name that layer.
+    pub origin: GapOrigin,
 }
 impl std::fmt::Display for LaunchGap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} does not support {}: {}; source={}",
+            "{} does not support {}: {}; source={}{}",
             self.adapter,
             self.field.name(),
             self.reason,
-            self.source
+            self.source,
+            self.origin.suffix(self.field)
         )
     }
 }
@@ -931,6 +938,180 @@ impl LaunchCheck {
     }
 }
 
+/// Why a fact was switched off by an owner entry rather than by the row.
+pub const OVERLAY_REASON: &str = "disabled by an [[adapter_capabilities]] entry; `provenant adapter capabilities` names its layer and reason";
+pub const OVERLAY_SOURCE: &str = "config.toml#adapter_capabilities";
+
+/// Capabilities an owner may narrow through `[[adapter_capabilities]]`.
+/// Widening a row's fact is not expressible: only `disable` is accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OverridableCapability {
+    Model,
+    Effort,
+    ImageInput,
+    Resume,
+    Write,
+    LiveInput,
+}
+impl OverridableCapability {
+    pub const ALL: &'static [Self] = &[
+        Self::Model,
+        Self::Effort,
+        Self::ImageInput,
+        Self::Resume,
+        Self::Write,
+        Self::LiveInput,
+    ];
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Effort => "effort",
+            Self::ImageInput => "image_input",
+            Self::Resume => "resume",
+            Self::Write => "write",
+            Self::LiveInput => "live_input",
+        }
+    }
+    pub fn parse(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|item| item.key() == key)
+    }
+}
+
+/// What happens when a requested capability is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GapAction {
+    #[default]
+    Warn,
+    Off,
+    Refuse,
+}
+
+/// Which layer chose a gap's action, so the gap can name that layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GapOrigin {
+    #[default]
+    Default,
+    Policy,
+    AdapterEntry,
+}
+impl GapOrigin {
+    fn suffix(self, field: LaunchField) -> &'static str {
+        match self {
+            Self::Default => "",
+            Self::Policy => match field {
+                LaunchField::Model => "; action set by policy.LAUNCH_MODEL_UNSUPPORTED",
+                LaunchField::Effort => "; action set by policy.LAUNCH_EFFORT_UNSUPPORTED",
+                LaunchField::ImageInput => "; action set by policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED",
+                _ => "; action set by policy",
+            },
+            Self::AdapterEntry => "; action set by an adapter_capabilities entry",
+        }
+    }
+}
+
+/// One degradable field's action and the layer that chose it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GapRule {
+    pub action: GapAction,
+    pub origin: GapOrigin,
+}
+
+/// The effective gap actions. Resume, network, write and skill location have no
+/// rule: they always keep their default refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GapPolicy {
+    pub model: GapRule,
+    pub effort: GapRule,
+    pub image_input: GapRule,
+}
+impl GapPolicy {
+    pub fn rule(&self, field: LaunchField) -> Option<GapRule> {
+        match field {
+            LaunchField::Model => Some(self.model),
+            LaunchField::Effort => Some(self.effort),
+            LaunchField::ImageInput => Some(self.image_input),
+            LaunchField::Resume
+            | LaunchField::Network
+            | LaunchField::Write
+            | LaunchField::SkillLocation => None,
+        }
+    }
+    fn rule_mut(&mut self, field: LaunchField) -> Option<&mut GapRule> {
+        match field {
+            LaunchField::Model => Some(&mut self.model),
+            LaunchField::Effort => Some(&mut self.effort),
+            LaunchField::ImageInput => Some(&mut self.image_input),
+            LaunchField::Resume
+            | LaunchField::Network
+            | LaunchField::Write
+            | LaunchField::SkillLocation => None,
+        }
+    }
+    fn set(&mut self, field: LaunchField, rule: GapRule) {
+        if let Some(slot) = self.rule_mut(field) {
+            *slot = rule;
+        }
+    }
+}
+
+/// One `[[adapter_capabilities]]` row from a host or project layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterOverride {
+    pub adapter: String,
+    pub disable: Vec<OverridableCapability>,
+    pub reason: Option<String>,
+    pub on_gap: Vec<(LaunchField, GapAction)>,
+    pub source: crate::Source,
+}
+
+/// Effective owner entries; a later layer replaces the whole entry by adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CapabilityOverlay {
+    pub entries: Vec<AdapterOverride>,
+}
+impl CapabilityOverlay {
+    pub fn entry(&self, adapter: &str) -> Option<&AdapterOverride> {
+        self.entries.iter().find(|row| row.adapter == adapter)
+    }
+
+    /// Each degradable field takes its policy strength first (with Policy
+    /// origin when a layer overrode the compiled default), then the adapter
+    /// entry's `on_gap` (AdapterEntry origin). Other fields have no rule.
+    pub fn gap_policy(&self, adapter: &str, policy: &crate::policy::Policy) -> GapPolicy {
+        let mut gap = GapPolicy::default();
+        for (field, code) in [
+            (LaunchField::Model, "LAUNCH_MODEL_UNSUPPORTED"),
+            (LaunchField::Effort, "LAUNCH_EFFORT_UNSUPPORTED"),
+            (LaunchField::ImageInput, "LAUNCH_IMAGE_INPUT_UNSUPPORTED"),
+        ] {
+            let effective = policy.rule(code);
+            let action = match effective.rule.strength {
+                crate::policy::Strength::Warn => GapAction::Warn,
+                crate::policy::Strength::Off => GapAction::Off,
+                crate::policy::Strength::Refuse => GapAction::Refuse,
+            };
+            let origin = if effective.source == crate::policy::Source::CompiledDefault {
+                GapOrigin::Default
+            } else {
+                GapOrigin::Policy
+            };
+            gap.set(field, GapRule { action, origin });
+        }
+        if let Some(entry) = self.entry(adapter) {
+            for (field, action) in &entry.on_gap {
+                gap.set(
+                    *field,
+                    GapRule {
+                        action: *action,
+                        origin: GapOrigin::AdapterEntry,
+                    },
+                );
+            }
+        }
+        gap
+    }
+}
+
 impl AdapterSpec {
     /// Whether account entries describe metadata for one shared local login
     /// instead of separate registered credential trees.
@@ -945,15 +1126,69 @@ impl AdapterSpec {
     pub fn is_unregistered_local(&self, key: &str) -> bool {
         self.accounts.registered && self.login.local && key == "local"
     }
+    /// A copy whose disabled facts are unsupported with the overlay's own
+    /// reason and source. It never turns a fact on and changes nothing else.
+    pub fn with_overlay(&self, overlay: &CapabilityOverlay) -> AdapterSpec {
+        let Some(entry) = overlay.entry(self.identity.name) else {
+            return *self;
+        };
+        if entry.disable.is_empty() {
+            return *self;
+        }
+        let mut spec = *self;
+        for capability in &entry.disable {
+            match capability {
+                OverridableCapability::Model => {
+                    spec.capabilities.launch.model =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+                OverridableCapability::Effort => {
+                    spec.capabilities.launch.effort =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+                OverridableCapability::ImageInput => {
+                    spec.capabilities.launch.image_input =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+                OverridableCapability::Resume => {
+                    spec.capabilities.launch.resume =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+                OverridableCapability::Write => {
+                    spec.capabilities.launch.write =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+                OverridableCapability::LiveInput => {
+                    spec.capabilities.live_input =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+            }
+        }
+        spec
+    }
+
     /// Check a request against the declared table before any side effect.
     pub fn check_launch(&self, request: &LaunchRequest<'_>) -> LaunchCheck {
         let caps = &self.capabilities.launch;
         let mut gaps = Vec::new();
         let mut add = |field: LaunchField, reason, source| {
+            let rule = request.gap_policy.rule(field);
+            let action = match rule {
+                Some(GapRule {
+                    action: GapAction::Refuse,
+                    ..
+                }) => LaunchAction::Refuse,
+                Some(_) => LaunchAction::Degrade,
+                None => field.default_action(),
+            };
+            let warn = action == LaunchAction::Refuse
+                || rule.is_some_and(|rule| rule.action == GapAction::Warn);
             gaps.push(LaunchGap {
                 adapter: self.identity.name,
                 field,
-                action: field.default_action(),
+                action,
+                warn,
+                origin: rule.map_or(GapOrigin::Default, |rule| rule.origin),
                 reason,
                 source,
             })
@@ -2426,6 +2661,7 @@ mod launch_tests {
             network: Some(NetworkAccess::Open),
             write: true,
             skill_location: true,
+            gap_policy: GapPolicy::default(),
         });
         let expected = [
             LaunchField::Model,
@@ -2604,5 +2840,283 @@ mod launch_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gap_policy_tests {
+    use super::*;
+    use crate::{
+        Layer, Source,
+        policy::{Policy, Source as PolicySource, Strength},
+    };
+    use std::collections::BTreeMap;
+
+    fn request(field: LaunchField) -> LaunchRequest<'static> {
+        match field {
+            LaunchField::Model => LaunchRequest {
+                model: Some("fixture/model"),
+                ..Default::default()
+            },
+            LaunchField::Effort => LaunchRequest {
+                effort: Some("high"),
+                ..Default::default()
+            },
+            LaunchField::ImageInput => LaunchRequest {
+                image_input: true,
+                ..Default::default()
+            },
+            _ => panic!("{field:?} is not a degradable field"),
+        }
+    }
+
+    fn policy_code(field: LaunchField) -> &'static str {
+        match field {
+            LaunchField::Model => "LAUNCH_MODEL_UNSUPPORTED",
+            LaunchField::Effort => "LAUNCH_EFFORT_UNSUPPORTED",
+            LaunchField::ImageInput => "LAUNCH_IMAGE_INPUT_UNSUPPORTED",
+            _ => panic!("{field:?} is not a degradable field"),
+        }
+    }
+
+    fn entry(adapter: &str, field: LaunchField, action: GapAction) -> CapabilityOverlay {
+        CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: adapter.into(),
+                disable: vec![],
+                reason: None,
+                on_gap: vec![(field, action)],
+                source: Source {
+                    layer: Layer::Host,
+                    origin: Some("config.toml#adapter_capabilities".into()),
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn gap_actions_are_table_driven_across_policy_and_entry_origins() {
+        let spec = AdapterSpec::get("command").unwrap();
+        for field in [
+            LaunchField::Model,
+            LaunchField::Effort,
+            LaunchField::ImageInput,
+        ] {
+            for action in [GapAction::Warn, GapAction::Off, GapAction::Refuse] {
+                let strength = match action {
+                    GapAction::Warn => Strength::Warn,
+                    GapAction::Off => Strength::Off,
+                    GapAction::Refuse => Strength::Refuse,
+                };
+                let mut policy = Policy::default();
+                policy.overlay(
+                    &BTreeMap::from([(policy_code(field).to_string(), strength)]),
+                    PolicySource::Host,
+                );
+                let policy_request = LaunchRequest {
+                    gap_policy: CapabilityOverlay::default().gap_policy("command", &policy),
+                    ..request(field)
+                };
+                let entry_request = LaunchRequest {
+                    gap_policy: entry("command", field, action)
+                        .gap_policy("command", &Policy::default()),
+                    ..request(field)
+                };
+                let expected_action = if action == GapAction::Refuse {
+                    LaunchAction::Refuse
+                } else {
+                    LaunchAction::Degrade
+                };
+                let expected_warn =
+                    expected_action == LaunchAction::Refuse || action == GapAction::Warn;
+                for (request, origin) in [
+                    (policy_request, GapOrigin::Policy),
+                    (entry_request, GapOrigin::AdapterEntry),
+                ] {
+                    let check = spec.check_launch(&request);
+                    let gap = &check.gaps[0];
+                    assert_eq!(gap.field, field);
+                    assert_eq!(gap.action, expected_action, "{field:?} {action:?}");
+                    assert_eq!(gap.warn, expected_warn, "{field:?} {action:?}");
+                    assert_eq!(gap.origin, origin, "{field:?} {action:?}");
+                    let text = gap.to_string();
+                    match origin {
+                        GapOrigin::Policy => assert!(
+                            text.contains(&format!("policy.{}", policy_code(field))),
+                            "{text}"
+                        ),
+                        GapOrigin::AdapterEntry => assert!(
+                            text.contains("action set by an adapter_capabilities entry"),
+                            "{text}"
+                        ),
+                        GapOrigin::Default => panic!("origin set by a layer"),
+                    }
+                    if expected_action == LaunchAction::Refuse {
+                        assert_eq!(check.refusal().map(|gap| gap.field), Some(field));
+                    } else {
+                        assert_eq!(check.degraded(field).map(|gap| gap.field), Some(field));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_policy_keeps_the_declared_actions() {
+        let spec = AdapterSpec::get("command").unwrap();
+        for field in [
+            LaunchField::Model,
+            LaunchField::Effort,
+            LaunchField::ImageInput,
+        ] {
+            let gap = &spec
+                .check_launch(&LaunchRequest {
+                    gap_policy: CapabilityOverlay::default()
+                        .gap_policy("command", &Policy::default()),
+                    ..request(field)
+                })
+                .gaps[0];
+            assert_eq!(gap.action, field.default_action());
+            assert!(gap.warn, "{gap:?}");
+            assert_eq!(gap.origin, GapOrigin::Default);
+            assert!(!gap.to_string().contains("action set by"), "{}", gap);
+        }
+    }
+
+    #[test]
+    fn refuse_only_fields_ignore_every_gap_policy() {
+        let row = AdapterSpec::get("command").unwrap();
+        let spec = AdapterSpec {
+            capabilities: Capabilities {
+                launch: LaunchCapabilities {
+                    network: &[],
+                    ..row.capabilities.launch
+                },
+                ..row.capabilities
+            },
+            ..*row
+        };
+        let mut policy = Policy::default();
+        policy.overlay(
+            &BTreeMap::from([
+                ("LAUNCH_MODEL_UNSUPPORTED".to_string(), Strength::Refuse),
+                ("LAUNCH_EFFORT_UNSUPPORTED".to_string(), Strength::Refuse),
+                (
+                    "LAUNCH_IMAGE_INPUT_UNSUPPORTED".to_string(),
+                    Strength::Refuse,
+                ),
+            ]),
+            PolicySource::Host,
+        );
+        let overlay = CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "command".into(),
+                disable: vec![],
+                reason: None,
+                on_gap: vec![
+                    (LaunchField::Resume, GapAction::Off),
+                    (LaunchField::Network, GapAction::Off),
+                    (LaunchField::Write, GapAction::Off),
+                    (LaunchField::SkillLocation, GapAction::Off),
+                ],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: Some("config.toml#adapter_capabilities".into()),
+                },
+            }],
+        };
+        let check = spec.check_launch(&LaunchRequest {
+            resume: true,
+            network: Some(NetworkAccess::Open),
+            write: true,
+            skill_location: true,
+            gap_policy: overlay.gap_policy("command", &policy),
+        });
+        assert_eq!(
+            check.gaps.iter().map(|gap| gap.field).collect::<Vec<_>>(),
+            [
+                LaunchField::Resume,
+                LaunchField::Network,
+                LaunchField::Write,
+                LaunchField::SkillLocation,
+            ]
+        );
+        for gap in &check.gaps {
+            assert_eq!(gap.action, LaunchAction::Refuse);
+            assert!(gap.warn, "{gap:?}");
+            assert_eq!(gap.origin, GapOrigin::Default);
+            assert!(!gap.to_string().contains("action set by"), "{}", gap);
+        }
+    }
+
+    #[test]
+    fn with_overlay_disables_exactly_the_requested_facts() {
+        let spec = AdapterSpec::get("codex").unwrap();
+        let overlay = CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "codex".into(),
+                disable: OverridableCapability::ALL.to_vec(),
+                reason: Some("narrowed by the host".into()),
+                on_gap: vec![],
+                source: Source {
+                    layer: Layer::Host,
+                    origin: Some("config.toml#adapter_capabilities".into()),
+                },
+            }],
+        };
+        let narrowed = spec.with_overlay(&overlay);
+        let launch = narrowed.capabilities.launch;
+        for fact in [
+            launch.model,
+            launch.effort,
+            launch.image_input,
+            launch.resume,
+            launch.write,
+            narrowed.capabilities.live_input,
+        ] {
+            assert!(!fact.value, "{fact:?}");
+            assert_eq!(fact.reason, OVERLAY_REASON);
+            assert_eq!(fact.source, OVERLAY_SOURCE);
+        }
+        assert_eq!(launch.network, spec.capabilities.launch.network);
+        assert_eq!(
+            launch.default_network,
+            spec.capabilities.launch.default_network
+        );
+        assert_eq!(narrowed.capabilities.control, spec.capabilities.control);
+        assert_eq!(
+            narrowed.capabilities.terminal_event,
+            spec.capabilities.terminal_event
+        );
+        assert_eq!(
+            narrowed.capabilities.answering_model,
+            spec.capabilities.answering_model
+        );
+        assert_eq!(
+            narrowed.capabilities.usage_attribution,
+            spec.capabilities.usage_attribution
+        );
+        assert_eq!(narrowed.id, spec.id);
+        assert_eq!(narrowed.identity.name, spec.identity.name);
+        assert_eq!(narrowed.launch.skill_location, spec.launch.skill_location);
+        assert_eq!(narrowed.retention.artifacts, spec.retention.artifacts);
+        assert_eq!(
+            narrowed.retention.transcript_layout,
+            spec.retention.transcript_layout
+        );
+        assert_eq!(narrowed.install, spec.install);
+
+        let untouched = AdapterSpec::get("claude").unwrap();
+        assert_eq!(
+            untouched.with_overlay(&overlay).capabilities.launch.model,
+            untouched.capabilities.launch.model
+        );
+        assert_eq!(
+            spec.with_overlay(&CapabilityOverlay::default())
+                .capabilities
+                .launch
+                .model,
+            spec.capabilities.launch.model
+        );
     }
 }

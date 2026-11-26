@@ -37,6 +37,7 @@ impl RouteIntent {
             network: self.network,
             write: self.writes,
             skill_location: self.skill_location,
+            gap_policy: provenant_records::GapPolicy::default(),
         })
     }
 }
