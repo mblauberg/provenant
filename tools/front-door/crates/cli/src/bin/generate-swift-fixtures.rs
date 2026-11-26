@@ -57,6 +57,19 @@ fn write(directory: &Path, name: &str, value: &Value) -> Result<PathBuf, String>
     Ok(path)
 }
 
+fn first_different_line(actual: &str, expected: &str) -> Option<usize> {
+    let mut actual = actual.lines();
+    let mut expected = expected.lines();
+    for line in 1.. {
+        match (actual.next(), expected.next()) {
+            (None, None) => return None,
+            (left, right) if left != right => return Some(line),
+            _ => {}
+        }
+    }
+    unreachable!()
+}
+
 fn main() -> Result<(), String> {
     let mut out: Option<PathBuf> = None;
     let mut check: Option<PathBuf> = None;
@@ -82,7 +95,12 @@ fn main() -> Result<(), String> {
             let path = committed.join(format!("{name}.json"));
             match std::fs::read_to_string(&path) {
                 Ok(actual) if actual == expected => {}
-                _ => drifted.push((*name).to_owned()),
+                Ok(actual) => drifted.push(format!(
+                    "{name} (first difference at line {})",
+                    first_different_line(&actual, &expected)
+                        .map_or_else(|| "after final line".to_owned(), |line| line.to_string())
+                )),
+                Err(error) => drifted.push(format!("{name} ({error})")),
             }
         }
         if !drifted.is_empty() {
@@ -2210,7 +2228,18 @@ mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures;
+    use super::{default_fixtures, fixtures};
+
+    #[test]
+    fn committed_fixtures_match_every_projected_byte() {
+        for (name, value) in fixtures::all().expect("synthetic fixtures") {
+            let mut expected = serde_json::to_string_pretty(&value).expect("fixture JSON");
+            expected.push('\n');
+            let actual = std::fs::read_to_string(default_fixtures().join(format!("{name}.json")))
+                .expect("committed fixture");
+            assert_eq!(actual, expected, "fixture {name} must match its projection");
+        }
+    }
 
     #[test]
     fn synthetic_overview_lanes_share_valid_attempt_ids_with_tree() {

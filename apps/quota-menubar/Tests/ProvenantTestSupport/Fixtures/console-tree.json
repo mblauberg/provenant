@@ -463,7 +463,7 @@
               "provider": "fixture"
             },
             "result_path": null,
-            "retry_of": null,
+            "retry_of": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
             "runtime_deadline": null,
             "settlement": null,
             "skipped_routes": [],

@@ -27,7 +27,7 @@
     "delivery_id": null,
     "effort": "high",
     "effort_source": "applied_route.effort",
-    "exit_code": null,
+    "exit_code": 0,
     "family": "unknown",
     "finished_at": "2026-11-02T02:05:00.000000Z",
     "git_grants_digest": null,
