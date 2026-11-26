@@ -46,7 +46,20 @@ def check(config, workflow, packages):
     for job in always | ungated:
         if 'needs.scope.outputs.suites' in str(jobs.get(job, {}).get('if', '')):
             errors.append(f'{job} must not bind a suite')
-    return errors + unwatched_packages(config, jobs, packages) + gate_edges(config, jobs)
+    return errors + unwatched_packages(config, jobs, packages) + gate_edges(config, jobs) + artifact_edges(jobs)
+
+
+def artifact_edges(jobs):
+    """Artifact inventories run only when their native test archive exists."""
+    consumer, producer = 'rust-macos-inventory', 'rust-macos-archive'
+    if consumer not in jobs:
+        return []
+    errors = []
+    if producer not in job_needs(jobs[consumer]):
+        errors.append(f'{consumer} does not wait for {producer}')
+    if f"needs.{producer}.result == 'success'" not in str(jobs[consumer].get('if', '')):
+        errors.append(f'{consumer} does not require {producer} success before downloading its artifact')
+    return errors
 
 
 def job_needs(job):

@@ -739,11 +739,15 @@ pub(crate) fn run_lifecycle(
         }
     }
     let mut set = settings.merged_set(&args.set);
-    let has = |name: &str| {
-        set.iter()
-            .any(|item| item.split_once('=').is_some_and(|(key, _)| key == name))
-    };
-    if !has("diff_base") {
+    let has_diff_base = set.iter().any(|item| {
+        item.split_once('=')
+            .is_some_and(|(key, _)| key == "diff_base")
+    });
+    let has_fixture_base = set.iter().any(|item| {
+        item.split_once('=')
+            .is_some_and(|(key, _)| key == "fixture_base")
+    });
+    if !has_diff_base {
         set.push(format!("diff_base={}", commits.head));
         parameters.insert(
             "diff_base".to_owned(),
@@ -753,7 +757,7 @@ pub(crate) fn run_lifecycle(
             },
         );
     }
-    if !has("fixture_base") {
+    if !has_fixture_base {
         set.push(format!("fixture_base={}", commits.base));
         parameters.insert(
             "fixture_base".to_owned(),
