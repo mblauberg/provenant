@@ -635,6 +635,37 @@ pub fn peer(
         }
         let request = decode_request(&bytes)?;
         let common = request.project.resolve(&home)?;
+        // A Create request names a fixture that does not exist on this host
+        // yet. Build and bind it before project-root preparation needs it;
+        // Remove still sees it until its own arm deletes it. The locator's
+        // home-relative path is the only authority for the fixture location.
+        let smoke_created = match &request.action {
+            PeerAction::SmokeFixture {
+                op: SmokeFixtureOp::Create { nonce },
+                ..
+            } => {
+                let expected = crate::smoke::fixture_root(&home).join(nonce).join(".git");
+                if common != expected {
+                    return Err(PeerError::Project.into());
+                }
+                Some(crate::smoke::create_fixture(
+                    host.roots.state.as_path(),
+                    &home,
+                    nonce,
+                )?)
+            }
+            PeerAction::SmokeFixture {
+                op: SmokeFixtureOp::Remove { nonce },
+                ..
+            } => {
+                let expected = crate::smoke::fixture_root(&home).join(nonce).join(".git");
+                if common != expected {
+                    return Err(PeerError::Project.into());
+                }
+                None
+            }
+            _ => None,
+        };
         if provenant_os::fs::canonicalize(&common)? != common {
             return Err(PeerError::Project.into());
         }
@@ -688,13 +719,46 @@ pub fn peer(
             chair: None,
         };
         let result = match &request.action {
-            PeerAction::SmokeFixture { .. } => PeerResult::Error {
-                data: provenant_fabric_runtime::hosts::PeerResultError {
+            PeerAction::SmokeFixture { op, .. } => {
+                let state = peer_factory.context.roots.state.as_path();
+                let refused = || PeerResult::Error {
+                    data: provenant_fabric_runtime::hosts::PeerResultError {
+                        extra: Default::default(),
+                        error: FacadeError::invalid(InvalidInputDetail::Field(
+                            "smoke_fixture".into(),
+                        )),
+                    },
                     extra: Default::default(),
-                    error: FacadeError::invalid(InvalidInputDetail::Field("smoke_fixture".into())),
-                },
-                extra: Default::default(),
-            },
+                };
+                match op {
+                    SmokeFixtureOp::Create { .. } => match smoke_created {
+                        Some(commits) => PeerResult::SmokeFixture {
+                            data: SmokeFixtureReceipt {
+                                extra: Default::default(),
+                                base: Some(commits.base),
+                                head: Some(commits.head),
+                                reason: None,
+                            },
+                            extra: Default::default(),
+                        },
+                        None => refused(),
+                    },
+                    SmokeFixtureOp::Remove { nonce } => {
+                        match crate::smoke::remove_fixture(state, &home, nonce) {
+                            Ok(()) => PeerResult::SmokeFixture {
+                                data: SmokeFixtureReceipt {
+                                    extra: Default::default(),
+                                    base: None,
+                                    head: None,
+                                    reason: Some("removed".into()),
+                                },
+                                extra: Default::default(),
+                            },
+                            Err(_) => refused(),
+                        }
+                    }
+                }
+            }
             PeerAction::Inbox { input, .. } => {
                 use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
                 let graph_steer = matches!(

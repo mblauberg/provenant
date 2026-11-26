@@ -467,67 +467,6 @@ fn peer_reader_is_pinned_to_the_initiator_subject() -> TestResult {
 }
 
 #[test]
-// Spec: docs/specs/run-launch.md#writer-binding — a remote smoke read node gets
-// the same fixture as a local one, carried as bytes rather than a caller path.
-fn peer_placed_smoke_reader_carries_its_fixture_to_the_remote_attempt() -> TestResult {
-    if host_test(
-        "fabric::peer_tests::peer_graph_tests::peer_placed_smoke_reader_carries_its_fixture_to_the_remote_attempt",
-    )? {
-        return Ok(());
-    }
-    let (rig, factory) = receiver()?;
-    let cancel = CancelToken::new();
-    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    let input = serde_json::from_value(json!({
-        "op":"submit", "operation_id":"peer-smoke-reader-fixture",
-        "origin_work_key":provenant_records::WorkKey::new(
-            provenant_core::ProjectId::from_bytes([77; 16]), "origin-graph", "read", 1)?,
-        "task":{"prompt":"Read the supplied fixture and report its single stated fact.",
-            "access":"read_only", "head":head,
-            "fixture":{"name":"fixture.txt","content":b"smoke fixture\n".to_vec()},
-            "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
-            "timeout_seconds":30,
-            "context":{"graph_id":"origin-graph", "node_id":"read", "attempt":1,
-                "graph_template_launch":true}}
-    }))?;
-    let receipt = provenant_cli::run::with_deferred_provider_launch(|| {
-        super::super::peer::peer_submit_graph(
-            &factory,
-            input,
-            factory.context.identity.inbox.actor,
-            Default::default(),
-            None,
-            None,
-            WaitBudget::cli(factory.clock.mono_now(), 30).unwrap(),
-            &cancel,
-        )
-    })?;
-    let attempt = receipt.targets[0].attempt;
-    let owner = BinaryRunOwner {
-        factory: &factory,
-        allow_remote: false,
-        actor: None,
-        chair: None,
-    };
-    let store = owner.store(&cancel)?;
-    let call = owner.call(&cancel);
-    let record = store.record(attempt, &call)?;
-    let request = store.request(record.attempt_id, &call)?;
-    let fixture = request
-        .task
-        .fixture
-        .as_ref()
-        .ok_or("the remote read node lost its fixture")?;
-    assert_eq!(fixture.name, "fixture.txt");
-    assert_eq!(fixture.content, b"smoke fixture\n");
-    assert!(
-        !String::from_utf8_lossy(&fixture.content).contains(factory.cwd.to_string_lossy().as_ref()),
-        "a caller path leaked into the fixture bytes"
-    );
-    Ok(())
-}
-
-#[test]
 fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResult {
     if host_test(
         "fabric::peer_tests::peer_graph_tests::peer_hosted_lane_launches_a_local_child_and_collects_its_result",

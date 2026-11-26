@@ -2098,10 +2098,10 @@ pub(super) fn sync_after_registration(
     }
 }
 
-struct UpgradeRunner {
-    executor: provenant_os::exec::SystemExecutor,
-    environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
-    cwd: PathBuf,
+pub(crate) struct UpgradeRunner {
+    pub(crate) executor: provenant_os::exec::SystemExecutor,
+    pub(crate) environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    pub(crate) cwd: PathBuf,
 }
 
 /// Refuses to install over state a newer binary wrote. A missing or older
@@ -2139,68 +2139,6 @@ fn verify_release(
     Ok(())
 }
 
-fn verify_graph_name() -> String {
-    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    format!(
-        "smoke-verify-{}-{}",
-        std::process::id(),
-        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )
-}
-
-struct SmokeProject {
-    directory: crate::scratch_dir::ScratchDir,
-    /// The commit the fixture's change sits on, so the review nodes have a
-    /// non-empty range to inspect.
-    base: String,
-}
-
-impl SmokeProject {
-    fn path(&self) -> &Path {
-        self.directory.path()
-    }
-
-    fn base(&self) -> &str {
-        &self.base
-    }
-}
-
-/// The binding the smoke child creates for `project`. Resolve it while the
-/// scratch exists: it is the canonical common directory the child's `run`
-/// binds, not the scratch path's own spelling, and cleanup must still name the
-/// record after the graph or the fixture has removed the checkout. An
-/// unresolved binding is an error, never an empty success.
-fn smoke_project_binding(
-    state_dir: &Path,
-    project: &Path,
-) -> Result<provenant_core::ProjectId, String> {
-    let directory = provenant_config::host_project_dir(state_dir, project).ok_or_else(|| {
-        format!(
-            "cannot resolve the host project binding for {}",
-            project.display()
-        )
-    })?;
-    directory
-        .file_name()
-        .and_then(OsStr::to_str)
-        .and_then(|name| provenant_core::ProjectId::parse(name).ok())
-        .ok_or_else(|| "smoke project binding name is invalid".to_owned())
-}
-
-/// Remove the record the smoke child published for the scratch project, when
-/// the run ends, success or failure, so deleting the fixture cannot leave a
-/// registered project whose layout no longer resolves. A missing record means
-/// the child never bound (a refused launch); an unreadable registry or a
-/// refused removal is reported to the caller.
-fn forget_smoke_binding(
-    state_dir: &Path,
-    project: provenant_core::ProjectId,
-) -> Result<(), String> {
-    provenant_config::forget_project_at_state(state_dir, project)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
 fn runner_for_verify(targets: &provenant_config::Targets) -> Result<UpgradeRunner, String> {
     Ok(UpgradeRunner {
         executor: provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?,
@@ -2216,16 +2154,18 @@ fn installed_destination(targets: &provenant_config::Targets) -> PathBuf {
     targets.bin_dir.join(provenant_config::STABLE_BINARY_NAME)
 }
 
+/// `upgrade --verify` runs the same lifecycle as `run smoke`: a nonce fixture
+/// under the host's home, a child graph pinned to that fixture, and cleanup.
 fn verify_smoke(
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
 ) -> Result<String, String> {
     let runner = runner_for_verify(targets)?;
-    verify_smoke_with(
+    crate::smoke::run_lifecycle(
         &runner,
         &installed_destination(targets),
         targets.roots.state.as_path(),
-        &std::env::temp_dir(),
+        &targets.home,
         args,
     )
 }
@@ -2324,217 +2264,24 @@ fn run_verify_only(
     }
 }
 
-fn smoke_git(runner: &UpgradeRunner, project: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut argv = vec![
-        provenant_os::git::git_executable()
-            .ok_or("Git unavailable")?
-            .into_os_string(),
-    ];
-    argv.extend(args.iter().map(std::ffi::OsString::from));
-    runner.execute_at(&argv, project, None, 65_536, 30)
-}
-
-fn smoke_project(runner: &UpgradeRunner, scratch: &Path) -> Result<SmokeProject, String> {
-    let directory = crate::scratch_dir::ScratchDir::new_in(scratch, "provenant-smoke-project-")
-        .map_err(|error| error.to_string())?;
-    let project = directory.path();
-    // Two commits: the review nodes inspect the fixture change, so their base
-    // and subject must be different commits even though the writer starts at
-    // HEAD.
-    std::fs::write(project.join("fixture.txt"), "smoke base\n")
-        .map_err(|error| error.to_string())?;
-    for args in [
-        vec!["init", "-q"],
-        vec!["add", "fixture.txt"],
-        vec![
-            "-c",
-            "user.name=Provenant Smoke",
-            "-c",
-            "user.email=smoke@localhost",
-            "commit",
-            "-qm",
-            "smoke base",
-        ],
-    ] {
-        smoke_git(runner, project, &args)?;
-    }
-    let base = String::from_utf8_lossy(&smoke_git(runner, project, &["rev-parse", "HEAD"])?)
-        .trim()
-        .to_owned();
-    if base.is_empty() {
-        return Err("smoke fixture has no base commit".to_owned());
-    }
-    std::fs::write(project.join("fixture.txt"), "smoke fixture\n")
-        .map_err(|error| error.to_string())?;
-    for args in [
-        vec!["add", "fixture.txt"],
-        vec![
-            "-c",
-            "user.name=Provenant Smoke",
-            "-c",
-            "user.email=smoke@localhost",
-            "commit",
-            "-qm",
-            "smoke fixture",
-        ],
-    ] {
-        smoke_git(runner, project, &args)?;
-    }
-    Ok(SmokeProject { directory, base })
-}
-
-fn verify_smoke_with(
-    runner: &UpgradeRunner,
-    program: &Path,
-    state_dir: &Path,
-    scratch: &Path,
-    args: &cli::Upgrade,
-) -> Result<String, String> {
-    let project = smoke_project(runner, scratch)?;
-    // Resolve the binding before the graph launches: the child binds this same
-    // canonical common directory, and the scratch may not survive the run. An
-    // unresolved binding is reported by cleanup, never hidden.
-    let binding = smoke_project_binding(state_dir, project.path());
-    let program = program.as_os_str().to_owned();
-    let graph = verify_graph_name();
-    let mut run = vec![
-        program.clone(),
-        "--project".into(),
-        project.path().as_os_str().to_owned(),
-        "--state-dir".into(),
-        state_dir.as_os_str().to_owned(),
-        "--json".into(),
-        "run".into(),
-        "smoke".into(),
-        "--name".into(),
-        graph.clone().into(),
-    ];
-    // The writer node needs a linked worktree. Locally the launch creates one
-    // on a branch of the fixture; on a peer the branch and base are carried
-    // across as peer-owned provisioning intent, so the peer creates its own
-    // worktree instead of inheriting this host's scratch path.
-    run.extend([
-        "--branch".into(),
-        format!("smoke/{graph}").into(),
-        "--base".into(),
-        "HEAD".into(),
-    ]);
-    if let Some(host) = &args.host {
-        run.extend(["--host".into(), host.into()]);
-    }
-    if let Some(route) = &args.route {
-        run.extend(["--route".into(), route.into()]);
-    }
-    for setting in &args.set {
-        if setting.starts_with("worktree=") || setting.starts_with("diff_base=") {
-            continue;
-        }
-        run.extend(["--set".into(), setting.into()]);
-    }
-    // The review nodes inspect the fixture's change; give them the base the
-    // fixture committed before it, not the writer's start point.
-    run.extend([
-        "--set".into(),
-        format!("diff_base={}", project.base()).into(),
-    ]);
-    let outcome = match runner.execute(&run, None, 1_048_576, 3600) {
-        Ok(launched) => {
-            let wait = runner.execute(
-                &[
-                    program.clone(),
-                    "--project".into(),
-                    project.path().as_os_str().to_owned(),
-                    "--state-dir".into(),
-                    state_dir.as_os_str().to_owned(),
-                    "--json".into(),
-                    "wait".into(),
-                    graph.clone().into(),
-                    "--timeout".into(),
-                    "3600".into(),
-                ],
-                None,
-                1_048_576,
-                3700,
-            );
-            let status = runner.execute(
-                &[
-                    program,
-                    "--project".into(),
-                    project.path().as_os_str().to_owned(),
-                    "--state-dir".into(),
-                    state_dir.as_os_str().to_owned(),
-                    "--json".into(),
-                    "status".into(),
-                    graph.into(),
-                ],
-                None,
-                1_048_576,
-                60,
-            );
-            match (wait, status) {
-                (Ok(wait), Ok(status)) => Ok(format!(
-                    "{}{}{}",
-                    String::from_utf8_lossy(&launched),
-                    String::from_utf8_lossy(&wait),
-                    String::from_utf8_lossy(&status)
-                )),
-                (Err(error), status) => Err(format!(
-                    "{}\nsmoke node report: {}",
-                    error,
-                    status
-                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                        .unwrap_or_else(|err| err)
-                )),
-                (Ok(_), Err(error)) => Err(format!(
-                    "{error}\nsmoke launch: {}",
-                    String::from_utf8_lossy(&launched)
-                )),
-            }
-        }
-        Err(error) => Err(error),
-    };
-    report_smoke_cleanup(
-        outcome,
-        binding.and_then(|project| forget_smoke_binding(state_dir, project)),
-    )
-}
-
-fn report_smoke_cleanup<T>(
-    outcome: Result<T, String>,
-    cleanup: Result<(), String>,
-) -> Result<T, String> {
-    // Cleanup is secondary to the smoke result, but leaving a scratch binding
-    // behind is never silent: warn on stderr and keep the warning in a failed
-    // smoke's report.
-    let Err(error) = cleanup else {
-        return outcome;
-    };
-    let warning = format!("smoke scratch project binding was not removed: {error}");
-    warn(
-        Warning::new(
-            provenant_records::warning::SMOKE_BINDING_RETAINED,
-            warning.clone(),
-        )
-        .once_per_change(),
-    );
-    match outcome {
-        Ok(output) => Ok(output),
-        Err(error) => Err(format!("{error}\n{warning}")),
-    }
-}
-
+/// The dry run compiles the same fixture-pinned graph the lifecycle would
+/// launch. It never waits or reports a verdict, and it forgets the fixture
+/// binding when it is done.
 fn preview_smoke(
     runner: &UpgradeRunner,
     program: &Path,
     state_dir: &Path,
+    home: &Path,
     args: &cli::Upgrade,
 ) -> Result<Vec<u8>, String> {
-    let project = smoke_project(runner, &std::env::temp_dir())?;
-    let binding = smoke_project_binding(state_dir, project.path());
+    let _ = crate::smoke::sweep_fixtures(state_dir, home);
+    let nonce = crate::smoke::nonce()?;
+    let commits = crate::smoke::create_fixture(state_dir, home, &nonce)?;
+    let fixture = crate::smoke::fixture_root(home).join(&nonce);
     let mut argv = vec![
         program.as_os_str().to_owned(),
         "--project".into(),
-        project.path().as_os_str().to_owned(),
+        fixture.as_os_str().to_owned(),
         "--state-dir".into(),
         state_dir.as_os_str().to_owned(),
         "--json".into(),
@@ -2548,25 +2295,35 @@ fn preview_smoke(
     if let Some(route) = &args.route {
         argv.extend(["--route".into(), route.into()]);
     }
+    let mut diff_base_set = false;
+    let mut fixture_base_set = false;
     for setting in &args.set {
         if setting.starts_with("diff_base=") {
-            continue;
+            diff_base_set = true;
+        }
+        if setting.starts_with("fixture_base=") {
+            fixture_base_set = true;
         }
         argv.extend(["--set".into(), setting.into()]);
     }
-    argv.extend([
-        "--set".into(),
-        format!("diff_base={}", project.base()).into(),
-    ]);
+    if !diff_base_set {
+        argv.extend(["--set".into(), format!("diff_base={}", commits.head).into()]);
+    }
+    if !fixture_base_set {
+        argv.extend([
+            "--set".into(),
+            format!("fixture_base={}", commits.base).into(),
+        ]);
+    }
     let outcome = runner.execute(&argv, None, 1_048_576, 60);
-    report_smoke_cleanup(
+    crate::smoke::report_smoke_cleanup(
         outcome,
-        binding.and_then(|project| forget_smoke_binding(state_dir, project)),
+        crate::smoke::remove_fixture(state_dir, home, &nonce),
     )
 }
 
 impl UpgradeRunner {
-    fn execute(
+    pub(crate) fn execute(
         &self,
         argv: &[std::ffi::OsString],
         input: Option<&[u8]>,
@@ -2762,7 +2519,13 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             }
         };
         let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("provenant"));
-        let output = preview_smoke(&runner, &program, targets.roots.state.as_path(), &args);
+        let output = preview_smoke(
+            &runner,
+            &program,
+            targets.roots.state.as_path(),
+            &targets.home,
+            &args,
+        );
         return match output {
             Ok(bytes) => {
                 let human = format!(

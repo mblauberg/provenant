@@ -564,6 +564,31 @@ pub(crate) fn run(
             ),
         ));
     }
+    // `run smoke` is the hermetic lifecycle, not a graph against the caller's
+    // checkout. The lifecycle re-execs this binary with a fixture project; the
+    // child then lands here with a project under fixture_root and launches the
+    // compiled graph normally. An explanation is a pure compile and stays on
+    // that path too.
+    if request.template.as_deref() == Some("smoke")
+        && !request.explain
+        && request.file.is_none()
+        && let Ok(resolved) = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Directory,
+            crate::roots::Product::Optional,
+        )
+        && !resolved
+            .project
+            .starts_with(&crate::smoke::fixture_root(&resolved.home))
+    {
+        if globals.project.is_some() {
+            warn(Warning::new(
+                provenant_records::warning::SMOKE_PROJECT_IGNORED,
+                "run smoke ignores --project and uses a hermetic fixture",
+            ));
+        }
+        return smoke_lifecycle(&request, globals, &resolved);
+    }
     let bare_model = request
         .model
         .as_deref()
@@ -622,6 +647,86 @@ pub(crate) fn run(
         globals,
         workers,
     )
+}
+
+/// Drive the smoke lifecycle from the CLI edge and publish its typed output.
+/// A failed lifecycle carries the failing row named by the verifier; a passed
+/// one carries the child's launch, wait and status envelopes.
+fn smoke_lifecycle(
+    request: &GraphRunArgs,
+    globals: &Globals,
+    resolved: &crate::roots::Resolved,
+) -> u8 {
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(error) => {
+            return cli_input_error_emit(
+                "run",
+                &format!("smoke program is unavailable: {error}"),
+                globals,
+            );
+        }
+    };
+    let runner = match provenant_os::exec::SystemExecutor::new(1) {
+        Ok(executor) => crate::install::UpgradeRunner {
+            executor,
+            environment: std::env::vars_os().collect(),
+            cwd: resolved.project.clone(),
+        },
+        Err(error) => {
+            return cli_input_error_emit(
+                "run",
+                &format!("smoke executor is unavailable: {error}"),
+                globals,
+            );
+        }
+    };
+    let args = provenant_cli::install::Upgrade {
+        yes: false,
+        from_source: None,
+        hosts: "all".into(),
+        verify: true,
+        verify_only: false,
+        dry_run: false,
+        host: request.host.clone(),
+        route: request.route.clone(),
+        set: request.set.clone(),
+    };
+    match crate::smoke::run_lifecycle(
+        &runner,
+        &program,
+        resolved.roots.state.as_path(),
+        &resolved.home,
+        &args,
+    ) {
+        Ok(output) => crate::emit(
+            &CommandResult::new("run", Outcome::Ok, serde_json::json!({"smoke": output})),
+            globals,
+            "",
+            false,
+        ),
+        Err(error) => {
+            let mut result = CommandResult::new("run", Outcome::Failed, serde_json::Value::Null);
+            result.error = Some(provenant_records::CommandError::new(
+                "SMOKE_FAILED",
+                &error,
+                None,
+                "inspect the reported smoke failure, then rerun `provenant run smoke`",
+            ));
+            crate::emit(&result, globals, "", false)
+        }
+    }
+}
+
+fn cli_input_error_emit(command: &str, detail: &str, globals: &Globals) -> u8 {
+    let mut result = CommandResult::new(command, Outcome::Invalid, serde_json::Value::Null);
+    result.error = Some(provenant_records::CommandError::new(
+        "INVALID",
+        detail,
+        None,
+        "resolve the reported input error and retry",
+    ));
+    crate::emit(&result, globals, "", false)
 }
 
 /// A `--model` without an adapter names the one catalogued model that carries

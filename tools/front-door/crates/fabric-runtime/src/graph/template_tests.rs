@@ -947,7 +947,7 @@ fn every_bundled_template_compiles_with_required_bindings() {
 
 #[test]
 // Spec: docs/specs/fabric.md#bundled-template-declarations — the bundled smoke
-// template declares the read, review, write, retry-route and steer-route nodes.
+// template declares six nodes: read, write, two reviews and two route probes.
 fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
     let library = library();
     let node = Compiler::new(&library)
@@ -955,7 +955,7 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
         .unwrap();
     let composite = node.composite.unwrap();
     assert_eq!(composite.exports.len(), 1);
-    assert_eq!(composite.exports[0].node, "review");
+    assert_eq!(composite.exports[0].node, "review-fixture");
     let children = composite.nodes;
     let by_id = |id: &str| children.iter().find(|node| node.id == id).unwrap();
     assert_eq!(
@@ -963,11 +963,19 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
-        ["read", "review", "write", "retry-route", "steer-route"]
+        [
+            "read",
+            "write",
+            "review",
+            "review-fixture",
+            "retry-route",
+            "steer-route"
+        ]
     );
     assert_eq!(by_id("read").access, AccessMode::ReadOnly);
-    assert_eq!(by_id("review").access, AccessMode::ReadOnly);
     assert_eq!(by_id("write").access, AccessMode::WorktreeWrite);
+    assert_eq!(by_id("review").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("review-fixture").access, AccessMode::ReadOnly);
     assert_eq!(by_id("retry-route").access, AccessMode::ReadOnly);
     assert_eq!(by_id("steer-route").access, AccessMode::ReadOnly);
 
@@ -977,7 +985,7 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
             "with":{"worktree":"/fixture/writer", "smoke-write":true}
         }))
         .unwrap();
-    assert_eq!(node.composite.unwrap().exports[0].node, "write");
+    assert_eq!(node.composite.unwrap().exports[0].node, "review");
 }
 
 #[test]
@@ -1053,50 +1061,120 @@ fn smoke_nodes_resolve_on_a_free_capable_tier() {
 }
 
 #[test]
-// Spec: docs/specs/fabric.md#sources-and-read-roots — a smoke review node is
-// pinned to its base only when a launch supplies one.
-fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
+// Spec: docs/specs/fabric.md#sources-and-read-roots — the write-review is pinned
+// to the writer's commit, not to the base the fixture change started from.
+fn smoke_review_covers_only_the_writer_commit() -> Result<(), String> {
     let library = library();
-    let review_bases = |with: Value| -> Vec<Option<String>> {
-        let compiled = Compiler::new(&library)
-            .compile(&json!({"id":"smoke", "use":"smoke", "with":with}))
-            .unwrap();
-        let composite = compiled.composite.unwrap();
-        // The non-review nodes stay in the graph in either case.
-        assert_eq!(
-            composite
-                .nodes
-                .iter()
-                .map(|node| node.id.as_str())
-                .collect::<Vec<_>>(),
-            ["read", "review", "write", "retry-route", "steer-route"]
-        );
-        composite
-            .nodes
-            .into_iter()
-            .find(|node| node.id == "review")
-            .unwrap()
-            .composite
-            .unwrap()
-            .nodes
-            .into_iter()
-            .map(|lens| lens.review_base)
-            .collect()
-    };
-    // A launch binds the fixture's base so every review lens has that range.
-    let base = "1111111111111111111111111111111111111111";
-    let bound = review_bases(json!({"diff_base":base}));
-    assert_eq!(bound.len(), 2);
-    assert!(bound.iter().all(|value| value.as_deref() == Some(base)));
-
-    // Without a launch binding no review lens carries a base at all, so the
-    // facade decides whether to skip review while read and write compile unchanged.
-    let unbound = review_bases(json!({}));
-    assert_eq!(unbound.len(), bound.len());
-    assert!(
-        unbound.iter().all(|value| value.is_none()),
-        "a smoke review lens was pinned without diff_base: {unbound:?}"
+    let diff_base = "1111111111111111111111111111111111111111";
+    let fixture_base = "2222222222222222222222222222222222222222";
+    let compiled = Compiler::new(&library)
+        .compile(&json!({
+            "id":"smoke", "use":"smoke",
+            "with":{
+                "diff_base":diff_base,
+                "fixture_base":fixture_base,
+                "smoke-write":true
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+    let composite = compiled.composite.unwrap();
+    let review = composite
+        .nodes
+        .iter()
+        .find(|node| node.id == "review")
+        .unwrap();
+    assert_eq!(
+        review.source,
+        Some(SourceBinding::Node {
+            node: "write".into()
+        })
     );
+    assert!(
+        review.depends_on.iter().any(|id| id == "write"),
+        "the write-review must depend on the writer: {:?}",
+        review.depends_on
+    );
+    let lenses = &review.composite.as_ref().unwrap().nodes;
+    assert_eq!(lenses.len(), 2);
+    assert!(
+        lenses
+            .iter()
+            .all(|lens| lens.review_base.as_deref() == Some(diff_base)),
+        "a write-review lens was not pinned to diff_base: {:?}",
+        lenses
+            .iter()
+            .map(|lens| lens.review_base.clone())
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#sources-and-read-roots — smoke carries no staged
+// fixture. The read node is plain prose, and each review takes its range from
+// the launch-supplied base for its own subject.
+fn smoke_template_reads_no_staged_fixture() -> Result<(), String> {
+    let library = library();
+    let diff_base = "1111111111111111111111111111111111111111";
+    let fixture_base = "2222222222222222222222222222222222222222";
+
+    fn collect<'a>(nodes: &'a [GraphNode], out: &mut Vec<&'a GraphNode>) {
+        for node in nodes {
+            out.push(node);
+            if let Some(composite) = &node.composite {
+                collect(&composite.nodes, out);
+            }
+            if let Some(loop_body) = &node.loop_body {
+                collect(&loop_body.body, out);
+            }
+        }
+    }
+    fn bases(node: &GraphNode, out: &mut Vec<String>) {
+        if let Some(base) = &node.review_base {
+            out.push(base.clone());
+        }
+        if let Some(composite) = &node.composite {
+            for child in &composite.nodes {
+                bases(child, out);
+            }
+        }
+    }
+
+    for smoke_write in [true, false] {
+        let compiled = Compiler::new(&library)
+            .compile(&json!({
+                "id":"smoke", "use":"smoke",
+                "with":{
+                    "diff_base":diff_base,
+                    "fixture_base":fixture_base,
+                    "smoke-write":smoke_write
+                }
+            }))
+            .map_err(|error| error.to_string())?;
+        let composite = compiled.composite.unwrap();
+        let mut all = Vec::new();
+        collect(&composite.nodes, &mut all);
+        assert!(
+            all.iter()
+                .all(|node| node.fixture.is_none() && node.fixture_bytes.is_none()),
+            "smoke staged a fixture with smoke-write={smoke_write}"
+        );
+        let by_id = |id: &str| all.iter().find(|node| node.id == id).unwrap();
+        let read = by_id("read");
+        assert_eq!(read.access, AccessMode::ReadOnly);
+        assert!(read.fixture.is_none(), "the read node stages a fixture");
+
+        for (id, expected) in [("review", diff_base), ("review-fixture", fixture_base)] {
+            let mut found = Vec::new();
+            bases(by_id(id), &mut found);
+            assert!(!found.is_empty(), "{id} carries no review_base");
+            assert!(
+                found.iter().all(|base| base == expected),
+                "{id} carried a wrong review_base with smoke-write={smoke_write}: {found:?}"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[test]
