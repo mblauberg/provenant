@@ -320,9 +320,7 @@ fn soft_panel_settles_and_names_its_stopped_lens() {
 #[test]
 fn blocked_environment_lens_settles_the_panel_and_names_the_gap() {
     let clean = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n";
-    let blocked = format!(
-        "```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: INCONCLUSIVE\n```handoff\n{{\"schema_version\":2,\"status\":\"blocked\",\"blocked_on\":\"environment\",\"note\":\"the shared cargo lock\",\"remaining\":[],\"decisions\":[],\"verify\":[]}}\n```\n"
-    );
+    let blocked = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: INCONCLUSIVE\n```handoff\n{\"schema_version\":2,\"status\":\"blocked\",\"blocked_on\":\"environment\",\"note\":\"the shared cargo lock\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```\n";
     let lens = |id: &str| {
         serde_json::json!({
             "id": id, "access": "read_only", "review_lens": id,
