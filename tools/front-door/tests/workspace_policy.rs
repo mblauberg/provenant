@@ -1905,9 +1905,10 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/ci.rs", 2500),
         ("src/fabric/graph_execution.rs", 2750),
         // The #4064 reused-worktree review-base binding, typed writer-base
-        // report and node-sourced panel helpers grew this owner deliberately:
-        // 4327 lines on the CI head. Next 250-band above size + 100, with
-        // headroom for routine growth.
+        // report and node-sourced panel helpers, plus #4066's authored repair
+        // writer resolution and per-node route preview, grew this owner. The
+        // 4500 ceiling is the next 250-band above size + 100, with headroom.
+
         ("src/fabric/interface.rs", 4500),
         // Peer fixture transport and writer boundary coverage (#3979).
         ("src/fabric/owner.rs", 6000),
