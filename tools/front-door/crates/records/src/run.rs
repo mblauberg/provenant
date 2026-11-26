@@ -2221,7 +2221,8 @@ pub enum CauseSource {
 }
 
 /// Whether a settled attempt may release its graph dependants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SettlementNodeOutcome {
     Succeeded,
     Failed,
@@ -2830,6 +2831,10 @@ pub struct AttemptRecord {
     /// with every terminal decision, including refusals before launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_reason: Option<SettlementReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<crate::settlement::Progress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_evidence: Option<crate::FileDigest>,
     /// The cancellation disposition known when the decision was sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation_disposition: Option<CancellationDisposition>,

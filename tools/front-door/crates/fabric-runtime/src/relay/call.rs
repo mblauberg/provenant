@@ -15,6 +15,7 @@ use thiserror::Error;
 
 /// Wire names of the relayed coordination requests.
 const NOTES: &str = "notes";
+pub const HANDOFF: &str = "handoff";
 const MAIL: &str = "fabric_mail";
 const EVENTS: &str = "fabric_events";
 const CLAIM: &str = "fabric_custody";
@@ -22,6 +23,7 @@ const CLAIM: &str = "fabric_custody";
 /// A parsed relay request. Inputs are the runtime's exact serde contracts.
 pub enum ToolCall {
     Notes(crate::notes::Input),
+    Handoff(provenant_records::declaration::DeclarationInput),
     Mail(MailInput, Option<OperationId>),
     Events(EventsInput, Option<OperationId>),
     Claim(ClaimInput, Option<OperationId>),
@@ -41,6 +43,7 @@ impl ToolCall {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Notes(..) => NOTES,
+            Self::Handoff(..) => HANDOFF,
             Self::Mail(..) => MAIL,
             Self::Events(..) => EVENTS,
             Self::Claim(..) => CLAIM,
@@ -95,12 +98,14 @@ impl ToolCall {
             Self::Events(input, id) => Some((Mutation::Events(input.clone()), id.clone())),
             Self::Claim(input, id) => Some((Mutation::Claim(input.clone()), id.clone())),
             Self::Notes(_) => None,
+            Self::Handoff(_) => None,
         }
     }
 
     pub(crate) fn lane_request(&self) -> Result<super::host::Request, ServiceError> {
         let (mut arguments, id) = match self {
             Self::Notes(input) => (serde_json::to_value(input)?, &None),
+            Self::Handoff(input) => (serde_json::to_value(input)?, &None),
             Self::Mail(input, id) => (serde_json::to_value(input)?, id),
             Self::Events(input, id) => (serde_json::to_value(input)?, id),
             Self::Claim(input, id) => (serde_json::to_value(input)?, id),
@@ -167,6 +172,11 @@ impl ToolCall {
             Self::Notes(_) => Err(ServiceError::Cli {
                 code: "notes_host_missing".into(),
                 message: "notes require the host-bound notes owner".into(),
+                data: Value::Null,
+            }),
+            Self::Handoff(_) => Err(ServiceError::Cli {
+                code: "handoff_host_missing".into(),
+                message: "handoff requires the host-bound declaration owner".into(),
                 data: Value::Null,
             }),
             Self::Mail(input, _) => Ok(serde_json::to_value(
