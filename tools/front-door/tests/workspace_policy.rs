@@ -1304,6 +1304,15 @@ fn adapter_policy_excludes_fixture_items_but_scans_production_neighbours() {
     }
 }
 
+/// Chair telemetry reads Claude Code's native transcript only. Its one
+/// single-harness identity check is a named exception to the adapter policy
+/// scan, not a dispatch branch. The comparison regex matches from the operator,
+/// so the predicate keys on the matched text and the line prefix rather than
+/// on a full expression the scanner never sees as one match.
+fn chair_telemetry_identity_exception(line_prefix: &str, matched: &str) -> bool {
+    line_prefix.trim_end().ends_with("event.unit") && matched == "!= \"claude\""
+}
+
 fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
     let names = provenant_records::ADAPTER_SPECS
         .iter()
@@ -1449,7 +1458,7 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
                 // This single-harness identity is deliberate, not a dispatch
                 // branch: adding a second chair harness requires a new ingest.
                 || (path.ends_with("telemetry/src/usage.rs")
-                    && line_text.contains("event.unit != \"claude\""));
+                    && chair_telemetry_identity_exception(line_text, found.as_str()));
             if non_adapter_literal {
                 continue;
             }
@@ -1474,6 +1483,22 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
         violations.join("\n")
     );
     Ok(())
+}
+
+/// The named chair-telemetry exception must stay narrow: it covers only the
+/// deliberate single-harness identity check, never a second harness, a reversed
+/// operator, or an unrelated comparison in the same file. Without the match
+/// shape above, the scanner reports the production line as a policy violation.
+#[test]
+fn chair_telemetry_identity_exception_matches_only_its_named_check() {
+    let prefix = "            if event.kind != \"chair.session\" || event.unit ";
+    assert!(chair_telemetry_identity_exception(prefix, "!= \"claude\""));
+    assert!(!chair_telemetry_identity_exception(prefix, "!= \"codex\""));
+    assert!(!chair_telemetry_identity_exception(prefix, "== \"claude\""));
+    assert!(!chair_telemetry_identity_exception(
+        "    let ready = ",
+        "!= \"claude\""
+    ));
 }
 
 // One implementation per shared primitive. The owner path is relative to
