@@ -506,10 +506,18 @@ fn base_fourteen_migration_preserves_local_delivery_receipts() -> TestResult {
     let (_temp, context, store, input, _attempt) = seeded()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    withdraw(&store, &input, &call)?;
+    crate::tests::seal_exit_fixture(&store, &input)?;
+    store.publish_terminal(
+        input.attempt_id,
+        1,
+        &crate::tests::publication(),
+        &crate::tests::exit(),
+        &call,
+    )?;
     let mut legacy = base_twelve_record(&store, input.attempt_id)?;
     legacy["delivery"] = serde_json::json!({
-        "schema_version": 1, "remote": "", "branch": "main", "head": null,
+        "schema_version": 1, "remote": "", "branch": "main",
+        "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "state": {"state": "delivered", "pull_request": null},
         "integration": {"remote": "", "target": "refs/heads/main",
             "previous": null, "integrated": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
