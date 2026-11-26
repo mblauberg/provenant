@@ -1558,3 +1558,47 @@ fn upgrade_full_human_keeps_capability_notices_and_smoke_envelopes() {
     assert!(text.contains("\"schema_version\""), "{text}");
     assert!(!text.contains("use --full for detail"), "{text}");
 }
+
+#[test]
+// Spec: docs/specs/cli.md#upgrade-verification — a peer can only name a project
+// whose canonical common dir is relative to its home, so the smoke fixture must
+// sit under $HOME rather than $TMPDIR, owner-only.
+fn smoke_fixture_is_projectable_to_a_peer() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{HostId, ProjectId};
+    use provenant_fabric_runtime::{
+        hosts::ProjectLocator,
+        identity::{Address, Identity},
+    };
+    use provenant_records::AbsolutePath;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let state = temp.path().join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    let root = provenant_cli::smoke::Settings::default().root();
+    let nonce = crate::smoke::nonce()?;
+    crate::smoke::create_fixture(&state, &home, &nonce, &root)?;
+    let fixture = crate::smoke::fixture_root(&home, &root).join(&nonce);
+    assert!(fixture.starts_with(&home), "{}", fixture.display());
+    assert_eq!(
+        std::fs::metadata(&fixture)?.permissions().mode() & 0o777,
+        0o700
+    );
+    let common_dir = fixture.join(".git");
+    let host = HostId::from_bytes([1; 16]);
+    let identity = Identity {
+        project: ProjectId::from_bytes([2; 16]),
+        host,
+        inbox: Address::new(host, "chair")?,
+        client: "test".into(),
+        cwd: AbsolutePath::new(&fixture)?,
+        common_dir: AbsolutePath::new(&common_dir)?,
+        federation: None,
+    };
+    let locator = ProjectLocator::new(&identity, &home)
+        .expect("the smoke fixture must be projectable to a peer");
+    assert_eq!(locator.resolve(&home)?, common_dir);
+    Ok(())
+}

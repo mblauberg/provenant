@@ -75,6 +75,24 @@ addressable.
 - Why: inspection must be safe outside a checkout and paths must not change in
   transit.
 
+## Upgrade verification
+
+`provenant upgrade --verify` builds its smoke fixture in an owner-only scratch
+project under the home-relative `domains.smoke.fixture_root` (default
+`.local/state/provenant-smoke`; see run-launch.md), never in the system
+temporary directory. A peer can only name a
+project whose canonical common directory is relative to its own home:
+`ProjectLocator` strips `$HOME`, hashes that relative path into a cross-host key
+and resolves it against the receiving home. A fixture under `$TMPDIR` is outside
+that home, so a remote smoke could never be submitted and refused at its first
+node with `peer_project_unprojectable`. Every smoke scratch, including the
+`--dry-run` preview, uses the home-relative root, and the host binding is removed
+when verification ends. `--host PEER` runs the same graph on the peer and reaches
+its reader because the locator names a project the peer can resolve.
+
+- Why: a real remote verification must reach every node on the peer; a scratch
+  outside the home can never be projected and fails before submission.
+
 ## Build commands
 
 `provenant build` inspects and resets the host's build slots without reading

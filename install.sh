@@ -91,6 +91,9 @@ while [ "$#" -gt 0 ]; do
 done
 case "$state" in /*) ;; *) die 2 '--state-dir must be absolute' ;; esac
 case "$apps_dir" in /*) ;; *) die 2 'PROVENANT_APPS_DIR must be absolute' ;; esac
+while [ "$apps_dir" != / ] && [ "${apps_dir%/}" != "$apps_dir" ]; do
+    apps_dir=${apps_dir%/}
+done
 case "$bin_dir" in ''|/*) ;; *) die 2 '--bin-dir must be absolute' ;; esac
 case "$tag" in *[!a-zA-Z0-9._-]*) die 2 'Invalid release tag' ;; esac
 if [ -z "$source_dir" ]; then
@@ -121,6 +124,11 @@ umask 077
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/provenant-install.XXXXXX")
 app_stage=
 app='Provenant Console.app'
+# A moved install target leaves the old bundle behind. Removing it would be
+# destructive without the owner's say-so, so warn and let them decide.
+if [ "$apps_dir" != "$HOME/Applications" ] && [ -e "$HOME/Applications/$app" ]; then
+    printf '%s\n' "Warning: a Provenant app remains at $HOME/Applications/$app while PROVENANT_APPS_DIR installs to $apps_dir; move or remove the old bundle so a stale app cannot be launched." >&2
+fi
 app_backup=
 old_app_inode=
 agent_temp=

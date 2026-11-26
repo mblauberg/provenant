@@ -292,7 +292,11 @@ pub(crate) fn create_fixture(
     if fixture.exists() {
         std::fs::remove_dir_all(&fixture).map_err(|error| error.to_string())?;
     }
-    std::fs::create_dir_all(&fixture).map_err(|error| error.to_string())?;
+    // Owner-only, like the private run store: the fixture is scratch that no
+    // other local user needs to read.
+    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+        .create(&fixture)
+        .map_err(|error| error.to_string())?;
     let env = author_env();
     git(&fixture, &["init", "-q", "-b", "main"], &[])?;
     std::fs::write(fixture.join("fixture.txt"), "smoke base\n")

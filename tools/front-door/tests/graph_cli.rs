@@ -2560,7 +2560,7 @@ fn explain_refuses_document_read_roots_outside_the_project() -> Result {
     Ok(())
 }
 
-// Spec: docs/specs/run-launch.md#writer-binding
+// Spec: docs/specs/cli.md#upgrade-verification
 #[test]
 fn upgrade_verify_dry_run_explains_a_fixture_project() -> Result {
     let rig = GraphProject::new()?;

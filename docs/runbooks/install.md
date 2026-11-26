@@ -156,7 +156,9 @@ The preview runs the currently installed binary's own `run smoke --explain`, not
 the candidate, so it shows the graph shape and route resolution that binary
 would launch; the candidate's graph is exercised only after it installs. The
 lifecycle creates one deterministic fixture under `domains.smoke.fixture_root`
-(default `.local/state/provenant-smoke`, home-relative) on every target host. A
+(default `.local/state/provenant-smoke`, home-relative, owner-only) on every
+target host; a home-relative fixture is one a peer can project as a cross-host
+project, which a fixture in the system temporary directory never is. A
 six-byte nonce names it; fixed author, committer and timestamps make the same
 nonce yield the same two commits on any host, and a `.git/provenant-smoke.json`
 marker lets the sweep remove only fixtures it owns. The fixture carries a nonce
@@ -222,7 +224,9 @@ is still installed and the previous app is left untouched.
 Set `PROVENANT_APPS_DIR` to an absolute directory to keep the app somewhere
 other than `~/Applications`; install, upgrade, doctor and the installer all
 honour it. LaunchServices opens the console by bundle identifier regardless of
-the directory.
+the directory. When the directory moves, the installer warns if a bundle is
+still in `~/Applications`: it never removes the old bundle without the owner's
+say-so, but a leftover can still be launched and may be stale.
 
 ### Test a candidate binary
 

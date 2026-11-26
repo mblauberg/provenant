@@ -1,0 +1,33 @@
+{
+  "command": "console search",
+  "data": {
+    "coverage": {
+      "artifact_errors": [
+        {
+          "attempt_id": "dddddddddddddddddddddddddddddddd",
+          "reason": "fixture artifact read error"
+        }
+      ],
+      "bytes_scanned": 512,
+      "file_limit": 1000,
+      "files_scanned": 1,
+      "peers": "not_searched",
+      "per_artifact_bytes": 65536,
+      "restart": "If the cursor is invalid or stale, restart with the same query and filters without --cursor.",
+      "scope": "local",
+      "total_bytes": 8388608
+    },
+    "matches": [],
+    "next_cursor": null,
+    "part": "result",
+    "query": "fixture",
+    "schema_version": 1,
+    "snapshot": "sha256:f805edf1a92f835c445970fff163e99b662982f4341f841c748bfa4021803d86",
+    "truncated": false
+  },
+  "error": null,
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}

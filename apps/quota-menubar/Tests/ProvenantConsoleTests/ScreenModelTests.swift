@@ -96,21 +96,52 @@ final class ConsoleModelTests: XCTestCase {
         return (ConsoleModel(cli: replay.client, defaults: nil), replay)
     }
 
-    func testAFailedOverviewLaneKeepsItsStateInRowAndHeading() async throws {
+    func testUnknownOverviewLaneKeepsItsStateInRowAndHeading() async throws {
         let replay = Replay([(["console", "overview"], "console-overview-active", 0), (["inbox"], "inbox-console", 0)])
         let model = ConsoleModel(cli: replay.client, defaults: nil)
         await model.load(.overview)
         let lane = try XCTUnwrap(model.overview.reader.value?.overview.lanes.last)
-        XCTAssertEqual(lane.state, "failed")
+        XCTAssertEqual(lane.state, "unknown")
         let row = LaneRow(lane)
-        XCTAssertEqual(row.style, StatusStyle.attempt(state: "failed"))
-        XCTAssertEqual(row.style.tone, .bad)
-        XCTAssertNotEqual(row.style.label, "Finished")
+        XCTAssertEqual(row.style, StatusStyle.attempt(state: "unknown"))
+        XCTAssertEqual(row.style.tone, .neutral)
         let heading = try XCTUnwrap(model.heading(lane.id))
-        XCTAssertEqual(StatusStyle.attempt(state: heading.state).tone, .bad)
+        XCTAssertEqual(StatusStyle.attempt(state: heading.state).tone, .neutral)
         // The project label is context beside the state, not what the attempt waits on.
         XCTAssertNil(row.waiting)
         XCTAssertEqual(row.project, "provenant")
+    }
+
+    func testFailedOverviewStateKeepsItsRedRowAndHeadingStyle() throws {
+        let json = #"""
+        {
+          "counts": {"needs_you": 0, "running": 0, "attention": 0},
+          "coverage": {"scope": "local", "inbox": "complete", "runs": "complete", "nested_runs": "unavailable"},
+          "needs_you": [],
+          "lanes": [{
+            "project_id": "01010101010101010101010101010101",
+            "project_label": "provenant",
+            "attempt_id": "failed-attempt",
+            "task_label": "Synthetic failure",
+            "state": "failed",
+            "attention": true,
+            "key": {"attempt": 1, "graph": "synthetic-failure", "node": "task", "project": "01010101010101010101010101010101"}
+          }]
+        }
+        """#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let overview = try decoder.decode(Overview.self, from: Data(json.utf8))
+        let lane = try XCTUnwrap(overview.lanes.first)
+        let model = ConsoleModel(cli: Replay().client, defaults: nil)
+        model.overview.reader.replace(OverviewSnapshot(overview: overview, needsYou: [], inboxJoined: true))
+
+        let row = LaneRow(lane)
+        XCTAssertEqual(row.style, StatusStyle.attempt(state: "failed"))
+        XCTAssertEqual(row.style.tone, .bad)
+        let heading = try XCTUnwrap(model.heading(lane.id))
+        XCTAssertEqual(heading.state, "failed")
+        XCTAssertEqual(StatusStyle.attempt(state: heading.state).tone, .bad)
     }
 
     func testLoadedAgesUseTheSameClockAsDisplayedAges() async throws {
@@ -442,7 +473,7 @@ final class ScreenModelTests: XCTestCase {
         // Two saved records for one host session collapse to the later save.
         XCTAssertEqual(snapshot?.sessions.first?.summaryLine, "Implementing the console")
         XCTAssertEqual(snapshot?.sessions.first?.record.summary?.now, "Implementing the console")
-        XCTAssertEqual(snapshot?.sessions.first?.record.lastSavedAt, "2026-11-02T02:18:00Z")
+        XCTAssertEqual(snapshot?.sessions.first?.record.lastSavedAt, "2026-11-02T02:18:00.000000Z")
         XCTAssertEqual(snapshot?.projects.count, 1)
         XCTAssertNil(snapshot?.projectName("no-such-project"))
     }
@@ -456,7 +487,7 @@ final class ScreenModelTests: XCTestCase {
         XCTAssertFalse(Stamp.relative("2026-11-02T02:18:00Z", now: clock).contains("in "))
     }
 
-    func testChairRowShowsTheDerivedLineWhenThereIsNoStructuredSummary() async throws {
+    func testChairRowShowsSavedContextWhenThereIsNoDerivedLine() async throws {
         let replies: [Replay.Reply] = [(["console", "sessions"], "console-sessions-without-summary", 0),
                                        (["console", "projects"], "console-projects", 0)]
         let (console, _) = client(replies)
@@ -466,14 +497,14 @@ final class ScreenModelTests: XCTestCase {
         let project = chairs.reader.value?.projectName(session.record.projectId)
         let now = try XCTUnwrap(Stamp.parse("2026-11-22T09:00:00Z"))
         XCTAssertNil(session.record.summary)
-        XCTAssertEqual(session.summaryLine, "Console checkpoint")
-        XCTAssertEqual(session.summarySource, "title")
-        XCTAssertEqual(ChairsModel.title(session, project: project, now: now), "Console checkpoint")
-        // The derived line does not carry the row context, so the detail line must still show it.
-        let detail = ChairsModel.detailLine(session, project: project, now: now)
-        XCTAssertTrue(detail.contains("project"), detail)
-        XCTAssertTrue(detail.contains("saved"), detail)
-        XCTAssertFalse(detail.contains("Console checkpoint"), detail)
+        XCTAssertNil(session.summaryLine)
+        XCTAssertEqual(session.summarySource, "unavailable")
+        // An untouched checkpoint template has no derived line, so the title
+        // carries project, session and save time instead.
+        let title = ChairsModel.title(session, project: project, now: now)
+        XCTAssertTrue(title.contains("project"), title)
+        XCTAssertTrue(title.contains("saved"), title)
+        XCTAssertFalse(title.contains("Console checkpoint"), title)
     }
 
     func testChairRowPrefersTheSummaryWhenPresent() async throws {

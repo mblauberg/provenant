@@ -260,7 +260,9 @@ local worktree for that writer; its checkpoint retains the peer provisioning int
 
 `run smoke` and `upgrade --verify` share one hermetic lifecycle. It creates a deterministic
 fixture repository under `domains.smoke.fixture_root` (default `.local/state/provenant-smoke`,
-home-relative) in the home of every target host. A fresh six-byte hex nonce names the fixture;
+home-relative, owner-only) in the home of every target host; a peer can only project a project
+whose common directory is relative to its own home, so a fixture in `$TMPDIR` would refuse before
+submission. A fresh six-byte hex nonce names the fixture;
 fixed author, committer and 2000-01-01 timestamps make the same nonce yield the same OIDs on any
 host. A `.git/provenant-smoke.json` marker records the nonce, creation time and `FIXTURE_RECIPE`;
 the sweep removes only expired marked fixtures and warns `SMOKE_FIXTURE_FOREIGN` for an unmarked
