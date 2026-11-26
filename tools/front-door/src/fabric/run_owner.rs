@@ -2048,7 +2048,6 @@ impl BinaryRunOwner<'_> {
                     extra: Default::default(),
                     presence,
                     lane_waits: waits,
-                    presence,
                     attempt,
                 })
             }

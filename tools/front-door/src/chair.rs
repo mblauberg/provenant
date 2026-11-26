@@ -1159,11 +1159,9 @@ pub fn hook(start: bool, globals: &Globals, deadline: Instant) -> u8 {
     0
 }
 
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::disallowed_methods)]
-
 
     // The hook timing test measures real monotonic time.
     #[test]

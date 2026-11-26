@@ -1303,7 +1303,6 @@ fn enrich_status_rows_with_facts(
                         attempt: record,
                         presence,
                         lane_waits,
-                        presence,
                         ..
                     } if record.attempt_id == attempt => (record, lane_waits, presence),
                     _ => return Err(FacadeError::StateCorrupt),

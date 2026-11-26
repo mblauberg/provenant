@@ -832,7 +832,6 @@ fn advisory(
     0
 }
 
-
 fn provider_advisory_output(
     output: &[u8],
     moment: Moment,
