@@ -17,7 +17,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let command = inv.command.clone();
     let status = match command {
-        Command::Wait(cmd) => crate::status_wait::run(cmd, globals),
+        Command::Wait(cmd) => crate::status_wait::run(cmd, globals, inv.process.workers()),
         _ => return crate::commands::mismatched(),
     };
     crate::commands::rendered(status)

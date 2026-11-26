@@ -1204,9 +1204,10 @@ fn launch_named_and_wait(
 }
 
 /// Run the host tick until `settled` holds for NAME's checkpoint, failing
-/// with the last observation once `limit` passes. A wait only observes
-/// (retry-owner.md); the tick advances due launch retries and observes peer
-/// settlement for the origin graph.
+/// with the last observation once `limit` passes. These waits observe local
+/// attempts only (retry-owner.md): the tick advances due launch retries and
+/// observes peer settlement for the origin graph. Terminal *remote* attempts
+/// are settled by the wait's own recovery path (cli.md#graph-wait-recovery).
 fn tick_until(
     rig: &TestRig,
     name: &str,

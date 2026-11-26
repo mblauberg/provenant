@@ -2421,9 +2421,9 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
         attempts.push((graph.to_owned(), node.to_owned()));
     }
 
-    // `wait` observes attempt settlement but does not run graph advancement.
-    // Once each provider attempt is terminal, one explicit host tick drives
-    // the normal graph settlement owner for every concurrently launched run.
+    // These attempts run on this host, so their wait only observes: recovery
+    // is for terminal *remote* attempts, whose peer owns the settlement. One
+    // explicit host tick drives the graph settlement owner for every local run.
     for (graph, node) in &attempts {
         let target = format!("{graph}/{node}#1");
         let waited = rig.command(&["wait", &target, "--timeout", "30s", "--json"])?;

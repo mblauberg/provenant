@@ -442,6 +442,7 @@ fn bare_wait_reports_an_unreadable_graph_as_unsuccessful() -> Result<(), Box<dyn
         deadline,
         Duration::from_secs(1),
         &cancel,
+        &provenant_confinement::worktrees::SystemWorkerObserver,
     );
     assert_eq!(reading.settle, Settle::Unsuccessful);
     assert!(reading.done());
@@ -506,7 +507,7 @@ fn graph_wait_readers_share_the_callers_deadline_and_cancellation()
             )
             .unwrap_err(),
             crate::fabric::unsettled_graphs(&edge, deadline, &cancel).unwrap_err(),
-            crate::fabric::read_status_rows(&target, &edge, &mut None, deadline, &cancel)
+            crate::fabric::unified::read_status_rows(&target, &edge, &mut None, deadline, &cancel)
                 .unwrap_err(),
         ] {
             assert!(matches!(

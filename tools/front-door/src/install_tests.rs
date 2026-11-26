@@ -1350,6 +1350,98 @@ fn refusal_reports_the_innermost_error_from_a_verify_envelope() {
 }
 
 #[test]
+fn verify_failure_names_the_smoke_graph_root_cause_and_next_command() {
+    // A blocked smoke's innermost envelope is its dependant's
+    // `upstream_blocked`; the checkpoint also carries the node that actually
+    // failed. The verify summary must name that node, its code and detail, the
+    // graph, and the command to read it, never just the blocked dependant.
+    let graph = "smoke-verify-4102-1";
+    let dependant = serde_json::json!({
+        "id": "task--review",
+        "state": "blocked",
+        "advance_code": "upstream_blocked",
+        "advance_note": "blocked by task--read (Blocked)",
+        "attempts": []
+    });
+    let cause = serde_json::json!({
+        "id": "task--read",
+        "state": "blocked",
+        "advance_code": "launch_refused",
+        "advance_owner_code": "confinement_refused",
+        "advance_note": "[confinement_refused] confinement rule peer_project_unprojectable on /fixture/scratch/project/.git",
+        "attempts": [{}]
+    });
+    let child = envelope(
+        "run",
+        provenant_records::Outcome::Error,
+        serde_json::json!({
+            "checkpoint": {"graph_id": graph, "nodes": [dependant, cause]}
+        }),
+        Some(provenant_records::CommandError::new(
+            "upstream_blocked",
+            "blocked by task--read (Blocked)",
+            None,
+            "unblock the reported node",
+        )),
+    );
+    let report = format!("Command failed (Exit(1)): {child}\n");
+    let summary = super::report::smoke_failure_summary(&report)
+        .expect("a blocked smoke checkpoint names its root cause");
+    for expected in [
+        graph,
+        "failed at task--read",
+        "confinement_refused",
+        "peer_project_unprojectable",
+        "next: `provenant status smoke-verify-4102-1`",
+    ] {
+        assert!(
+            summary.contains(expected),
+            "{expected} missing from {summary}"
+        );
+    }
+    assert!(!summary.contains("blocked by"), "{summary}");
+    assert!(!summary.contains("upstream_blocked"), "{summary}");
+
+    let hosts = vec![fixture_smoke_host(false, &report)];
+    let message = super::failed_hosts_message(&hosts);
+    for expected in [
+        graph,
+        "task--read",
+        "confinement_refused",
+        "peer_project_unprojectable",
+        "provenant status smoke-verify-4102-1",
+    ] {
+        assert!(
+            message.contains(expected),
+            "{expected} missing from {message}"
+        );
+    }
+    assert!(!message.contains("blocked by"), "{message}");
+
+    // The parent only sees the child's refusal envelope, which carries this
+    // summary as its message; the next command must reach the host line too.
+    let child_refusal = envelope(
+        "upgrade",
+        provenant_records::Outcome::Error,
+        serde_json::json!({"verify": "installed"}),
+        Some(provenant_records::CommandError::new(
+            "confinement_refused",
+            summary.clone(),
+            None,
+            "resolve the reported smoke cause",
+        )),
+    );
+    let parent = vec![fixture_smoke_host(false, &child_refusal)];
+    let parent_message = super::failed_hosts_message(&parent);
+    for expected in [graph, "task--read", "provenant status smoke-verify-4102-1"] {
+        assert!(
+            parent_message.contains(expected),
+            "{expected} missing from {parent_message}"
+        );
+    }
+}
+
+#[test]
 fn upgrade_failure_repair_points_at_json_per_host_detail() {
     // A failed envelope drops the human view, so the repair must send the
     // operator to the typed per-host detail, not to `--full`.
