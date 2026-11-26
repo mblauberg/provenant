@@ -81,7 +81,7 @@ fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
     assert_eq!(owner.prompts.len(), 1);
     assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[1].advance_error_code.as_deref(),
+        run.checkpoint.nodes[1].advance_code.as_deref(),
         Some("upstream_outputs_too_large")
     );
 }
@@ -210,7 +210,7 @@ fn required_inputs_stop_before_consumer_attempt_when_unavailable() {
         } else {
             assert_eq!(child.state, NodeState::Failed, "{kind:?} {text}");
             assert_eq!(
-                child.advance_error_code.as_deref(),
+                child.advance_code.as_deref(),
                 Some("required_input_unavailable")
             );
             assert!(child.attempts.is_empty());
@@ -265,7 +265,7 @@ fn required_findings_that_do_not_fit_are_not_partially_delivered() {
         .unwrap();
     assert_eq!(child.state, NodeState::Failed);
     assert_eq!(
-        child.advance_error_code.as_deref(),
+        child.advance_code.as_deref(),
         Some("upstream_outputs_too_large")
     );
     assert!(child.attempts.is_empty());
@@ -308,7 +308,7 @@ fn required_values_do_not_trust_a_truncated_source() {
             .find(|node| node.id == "child")
             .unwrap();
         assert_eq!(
-            child.advance_error_code.as_deref(),
+            child.advance_code.as_deref(),
             Some("required_input_unavailable")
         );
         assert!(child.attempts.is_empty());
@@ -676,7 +676,7 @@ fn selected_inputs_without_room_fail_before_launch() {
     .unwrap();
     assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[1].advance_error_code.as_deref(),
+        run.checkpoint.nodes[1].advance_code.as_deref(),
         Some("input_prompt_too_large")
     );
     assert_eq!(owner.calls.len(), 1);
@@ -741,7 +741,7 @@ fn oversized_prompt_with_inputs_pauses_and_resumes_after_extension() {
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(paused.checkpoint.nodes[1].state, NodeState::Pending);
-    assert!(paused.checkpoint.nodes[1].advance_error.is_none());
+    assert!(paused.checkpoint.nodes[1].advance_note.is_none());
     let run = resume_with_budget(
         &document,
         &mut owner,

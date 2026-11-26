@@ -1413,14 +1413,14 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             .start(record.attempt_id, &Allowance, &|_, _| Ok(Vec::new()), &call);
     }
     let mut result = json!({"checkpoint":{"nodes":[{
-        "id":"parent", "advance_error_code":"preparation_refused",
-        "advance_error":"The launch was refused before admission.",
+        "id":"parent", "advance_code":"preparation_refused",
+        "advance_note":"The launch was refused before admission.",
         "attempts":[{"attempt_ref": format!("{}/{attempt}", factory.context.identity.host)}]
     }]}});
     factory.name_refusal_causes(&mut result);
-    let message = result["checkpoint"]["nodes"][0]["advance_error"]
+    let message = result["checkpoint"]["nodes"][0]["advance_note"]
         .as_str()
-        .ok_or("advance_error")?;
+        .ok_or("advance_note")?;
     let route = provenant_records::run::SkippedRoute {
         skipped_accounts: Vec::new(),
         extra: Default::default(),

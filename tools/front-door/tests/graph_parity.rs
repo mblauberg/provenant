@@ -333,7 +333,7 @@ fn success() -> Result {
     assert_eq!(node.state, NodeState::Succeeded);
     assert_eq!(node.attempts.len(), 1);
     assert_eq!(node.attempts[0].outcome, Some(GraphAttemptOutcome::Succeeded));
-    assert_eq!(node.advance_error_code, None);
+    assert_eq!(node.advance_code, None);
     let events = h.events()?;
     assert_same_story(&events, &checkpoint);
     Ok(())

@@ -138,7 +138,7 @@ pub(super) fn append_changes(
         let old = previous.and_then(|previous| previous.nodes.iter().find(|old| old.id == node.id));
         if old.is_none_or(|old| {
             old.state != node.state
-                || old.advance_error_code != node.advance_error_code
+                || old.advance_code != node.advance_code
                 || old.loop_pause_code != node.loop_pause_code
         }) {
             let mut change = event(
@@ -152,10 +152,10 @@ pub(super) fn append_changes(
                     NodeState::Blocked => "blocked",
                     NodeState::Skipped => "skipped",
                 },
-                &node.advance_error_code,
+                &node.advance_code,
             )?;
             change.details = Some(
-                serde_json::json!({"cause": node.advance_error_code.as_deref().or(node.loop_pause_code.as_deref())}),
+                serde_json::json!({"cause": node.advance_code.as_deref().or(node.loop_pause_code.as_deref())}),
             );
             events.push(change);
         }
@@ -536,8 +536,8 @@ mod tests {
         let mut after = before.clone();
         after.nodes[0].concurrency_warning = Some("cap occupied".into());
         after.nodes[0].state = NodeState::Failed;
-        after.nodes[0].advance_error_code = Some("required_input_unavailable".into());
-        after.nodes[0].advance_error = Some("private brief or secret text".into());
+        after.nodes[0].advance_code = Some("required_input_unavailable".into());
+        after.nodes[0].advance_note = Some("private brief or secret text".into());
         append_changes(&directory, "g", Some(&before), &after, None).unwrap();
         let records = read(&directory, "g").unwrap();
         assert!(records.iter().any(|event| event.subject == "build"

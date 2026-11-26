@@ -4732,13 +4732,13 @@ mod journal_error_tests {
             // invalid-input refusals from the launch owner.
             if scenario == "same-head" {
                 assert_eq!(
-                    review.advance_error_code.as_deref(),
+                    review.advance_code.as_deref(),
                     Some("review_empty_range"),
                     "{scenario}: {result:?} {checkpoint:?}"
                 );
             } else {
                 assert_eq!(
-                    review.advance_error_code.as_deref(),
+                    review.advance_code.as_deref(),
                     Some("launch_refused"),
                     "{scenario}: {result:?} {checkpoint:?}"
                 );

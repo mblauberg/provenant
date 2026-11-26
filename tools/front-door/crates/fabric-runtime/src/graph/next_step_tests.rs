@@ -229,7 +229,7 @@ fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
                 assert_eq!(progress.attempts[0].stop, Some(StopCause::Blocked));
                 assert!(
                     progress
-                        .advance_error
+                        .advance_note
                         .as_deref()
                         .unwrap()
                         .contains("missing capability")

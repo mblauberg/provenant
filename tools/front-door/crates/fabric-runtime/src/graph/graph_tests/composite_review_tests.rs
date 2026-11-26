@@ -75,7 +75,7 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
         );
         if expected.is_none() {
             assert_eq!(
-                composite.advance_error_code.as_deref(),
+                composite.advance_code.as_deref(),
                 Some("coverage_below_minimum")
             );
         }
@@ -108,7 +108,7 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
         .find(|n| n.id == "reviews")
         .unwrap();
     assert_eq!(
-        composite.advance_error_code.as_deref(),
+        composite.advance_code.as_deref(),
         Some("coverage_below_minimum")
     );
     assert!(composite.outputs.is_none());
@@ -163,7 +163,7 @@ fn soft_panel_settles_and_names_its_stopped_lens() {
     assert!(excerpt.contains("Missing review lenses:"), "{excerpt}");
     assert!(excerpt.contains("lens-1"), "{excerpt}");
     assert!(output.warnings.iter().any(|warning| warning.contains("review_coverage_below_floor")));
-    assert_eq!(panel.advance_error_code, None);
+    assert_eq!(panel.advance_code, None);
     assert_eq!(
         advance(&document, &mut owner, &mut journal)
             .unwrap()
@@ -299,12 +299,12 @@ fn protected_panel_hard_floor_requires_named_lens_even_when_count_is_met() {
         .unwrap();
     assert_eq!(panel.state, NodeState::Failed);
     assert_eq!(
-        panel.advance_error_code.as_deref(),
+        panel.advance_code.as_deref(),
         Some("coverage_below_minimum")
     );
     assert!(
         panel
-            .advance_error
+            .advance_note
             .as_deref()
             .unwrap()
             .contains("security-privacy")
@@ -598,7 +598,7 @@ fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
     assert_eq!(verify.state, NodeState::Blocked);
     assert!(
         verify
-            .advance_error
+            .advance_note
             .as_deref()
             .unwrap()
             .contains("lenses (Failed)")
@@ -618,8 +618,8 @@ fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reaso
         .find(|n| n.id == "verify")
         .unwrap();
     assert_eq!(verify.state, NodeState::Blocked);
-    verify.advance_error = None;
-    verify.advance_error_code = None;
+    verify.advance_note = None;
+    verify.advance_code = None;
 
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     let verify = replay
@@ -629,11 +629,11 @@ fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reaso
         .find(|n| n.id == "verify")
         .unwrap();
     assert_eq!(
-        verify.advance_error_code.as_deref(),
+        verify.advance_code.as_deref(),
         Some("upstream_blocked")
     );
     assert_eq!(
-        verify.advance_error.as_deref(),
+        verify.advance_note.as_deref(),
         Some("blocked by lenses (Failed)")
     );
     assert_eq!(journal.0.as_ref().unwrap(), &replay.checkpoint);
@@ -646,8 +646,8 @@ fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reaso
         .iter_mut()
         .find(|n| n.id == "verify")
         .unwrap();
-    verify.advance_error = Some("existing reason".into());
-    verify.advance_error_code = Some("other_reason".into());
+    verify.advance_note = Some("existing reason".into());
+    verify.advance_code = Some("other_reason".into());
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     let verify = replay
         .checkpoint
@@ -655,8 +655,8 @@ fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reaso
         .iter()
         .find(|n| n.id == "verify")
         .unwrap();
-    assert_eq!(verify.advance_error.as_deref(), Some("existing reason"));
-    assert_eq!(verify.advance_error_code.as_deref(), Some("other_reason"));
+    assert_eq!(verify.advance_note.as_deref(), Some("existing reason"));
+    assert_eq!(verify.advance_code.as_deref(), Some("other_reason"));
 }
 
 #[test]
@@ -674,7 +674,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     assert_eq!(node("lens-a").state, NodeState::Succeeded);
     assert_eq!(node("lens-b").state, NodeState::Failed);
     assert_eq!(
-        node("lens-b").advance_error_code.as_deref(),
+        node("lens-b").advance_code.as_deref(),
         Some("findings_required")
     );
     assert_eq!(node("verify").state, NodeState::Succeeded);
@@ -699,7 +699,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     assert!(excerpt.contains(&format!(
         "{}: {}",
         unavailable.id,
-        unavailable.advance_error.as_deref().unwrap()
+        unavailable.advance_note.as_deref().unwrap()
     )));
     assert!(excerpt.contains("LENS-A-OK"));
     assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
@@ -883,10 +883,10 @@ fn partial_composite_below_its_minimum_fails_with_the_recorded_reason() {
         .unwrap();
     assert_eq!(lenses.state, NodeState::Failed);
     assert_eq!(
-        lenses.advance_error_code.as_deref(),
+        lenses.advance_code.as_deref(),
         Some("coverage_below_minimum")
     );
-    let reason = lenses.advance_error.as_deref().unwrap();
+    let reason = lenses.advance_note.as_deref().unwrap();
     assert!(
         reason.contains("1 of 3 members succeeded, minimum 2"),
         "{reason}"

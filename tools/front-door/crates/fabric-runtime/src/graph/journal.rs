@@ -1747,7 +1747,7 @@ impl FileJournal {
                     other => Ok(other?),
                 };
             };
-            let mut end = error.len().min(MAX_ADVANCE_ERROR_BYTES);
+            let mut end = error.len().min(MAX_ADVANCE_NOTE_BYTES);
             while !error.is_char_boundary(end) {
                 end -= 1;
             }
@@ -1784,7 +1784,7 @@ impl FileJournal {
                 Err(error) => return Err(error.into()),
             };
             let mut bytes = Vec::new();
-            file.take(MAX_ADVANCE_ERROR_BYTES as u64)
+            file.take(MAX_ADVANCE_NOTE_BYTES as u64)
                 .read_to_end(&mut bytes)?;
             Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
         })()

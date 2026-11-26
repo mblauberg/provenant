@@ -83,7 +83,7 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
             let code = node
                 .advance_owner_code
                 .clone()
-                .or_else(|| node.advance_error_code.clone())
+                .or_else(|| node.advance_code.clone())
                 .unwrap_or_else(|| {
                     if quota {
                         "usage_limited".into()
@@ -92,7 +92,7 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                     }
                 });
             let next = node
-                .advance_error
+                .advance_note
                 .as_deref()
                 .and_then(|error| error.split_once("next: ").map(|(_, next)| next.to_owned()))
                 .filter(|next| !next.is_empty())
@@ -129,7 +129,7 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                 cause: node
                     .advance_owner_code
                     .clone()
-                    .or_else(|| node.advance_error_code.clone())
+                    .or_else(|| node.advance_code.clone())
                     .or_else(|| node.loop_pause_code.clone())
                     .or_else(|| quota.then(|| "usage_limited".into())),
                 branch: node
@@ -219,7 +219,7 @@ mod tests {
                 {"id":"ci","state":"running","worktree":null,"attempts":[],"ci":{"state":"pending","summary":"waiting"}},
                 {"id":"land","state":"running","worktree":null,"attempts":[],"land":{"tier":"routine","policy":"auto","policy_source":"default","branch":"work","head":"abc"}},
                 {"id":"retry","state":"running","worktree":null,"launch_retry":{"policy":{"limit":3,"limit_source":"host","first_seconds":5,"max_seconds":60},"failures":2,"wake_at":"2026-01-01T00:00:00.000000Z"},"attempts":[{"launched":false,"key":{"graph_id":"g","node_id":"retry","route_index":0, "attempt": 1},"route":{"alias":"senior"},"state":"starting","attempt_ref":"host/attempt","outcome":null,"launch_actor":"actor"}]},
-                {"id":"blocked","state":"blocked","worktree":null,"advance_error_code":"launch_retry_exhausted","last_launch_retry":{"policy":{"limit":1,"limit_source":"project","first_seconds":5,"max_seconds":60},"failures":2},"attempts":[]},
+                {"id":"blocked","state":"blocked","worktree":null,"advance_code":"launch_retry_exhausted","last_launch_retry":{"policy":{"limit":1,"limit_source":"project","first_seconds":5,"max_seconds":60},"failures":2},"attempts":[]},
                 {"id":"quota","state":"failed","worktree":null,"attempts":[{"launched":true,"key":{"graph_id":"g","node_id":"quota","route_index":0, "attempt": 1},"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/quota","outcome":"usage_limited","launch_actor":"actor"}]},
                 {"id":"pending","state":"pending","worktree":null,"attempts":[]},
                 {"id":"done","state":"succeeded","worktree":null,"handoff":{"schema_version":2,"status":"stopped_early","note":"done","remaining":[],"decisions":[],"verify":[]},"outputs":{"schema_version":1,"result":{"digest":"sha256:test","excerpt":"","truncated":false,"path":"result.txt"},"verdict":null,"findings":[],"findings_available":null,"branch":"lane","commit":"abc","warnings":[]},"attempts":[]}
@@ -263,7 +263,7 @@ mod tests {
             status: GraphStatus::Pending,
             outcome: None,
             checkpoint,
-            advance_error: None,
+            advance_note: None,
         };
         let wire = serde_json::to_value(&run).unwrap();
         assert_eq!(wire["waits"], serde_json::to_value(&waits).unwrap());

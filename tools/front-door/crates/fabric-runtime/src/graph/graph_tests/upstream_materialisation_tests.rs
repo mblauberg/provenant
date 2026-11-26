@@ -258,7 +258,7 @@ fn file_notices_must_fit_the_prompt_before_a_consumer_attempt() {
         .unwrap();
     assert_eq!(consumer.state, NodeState::Failed);
     assert_eq!(
-        consumer.advance_error_code.as_deref(),
+        consumer.advance_code.as_deref(),
         Some("upstream_outputs_too_large")
     );
     assert!(consumer.attempts.is_empty());

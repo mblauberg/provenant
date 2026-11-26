@@ -54,7 +54,7 @@ fn verifier_markers_without_the_composite_prefix_keep_each_lens_finding_separate
         synthesis.state,
         NodeState::Succeeded,
         "{:?}",
-        synthesis.advance_error
+        synthesis.advance_note
     );
     assert!(
         !node("verify")
@@ -190,7 +190,7 @@ fn qualified_propagations_group_colliding_originals() {
         run.checkpoint.nodes[3].state,
         NodeState::Succeeded,
         "{:?}",
-        run.checkpoint.nodes[3].advance_error
+        run.checkpoint.nodes[3].advance_note
     );
     let prompt = &owner.prompts[3];
     assert!(prompt.contains("a-verified") && prompt.contains("b-verified"));
@@ -262,7 +262,7 @@ fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
         run.checkpoint.nodes[3].state,
         NodeState::Succeeded,
         "{:?}",
-        run.checkpoint.nodes[3].advance_error
+        run.checkpoint.nodes[3].advance_note
     );
     let prompt = &owner.prompts[3];
     assert!(prompt.contains("evidence-one") && prompt.contains("evidence-two"));
@@ -330,7 +330,7 @@ fn chain_resolves_rendered_markers_and_preserves_every_copy() {
         progress.state,
         NodeState::Succeeded,
         "{:?}",
-        progress.advance_error
+        progress.advance_note
     );
     let findings = &progress.outputs.as_ref().unwrap().findings;
     assert_eq!(findings.len(), 4);
@@ -406,7 +406,7 @@ fn result_only_inputs_do_not_change_rendered_finding_ids() {
         run.checkpoint.nodes[4].state,
         NodeState::Succeeded,
         "{:?}",
-        run.checkpoint.nodes[4].advance_error
+        run.checkpoint.nodes[4].advance_note
     );
     assert_eq!(
         run.checkpoint.nodes[4]
@@ -477,7 +477,7 @@ fn qualified_id_collision_requires_three_distinct_dispositions() {
         assert_eq!(
             run.checkpoint.nodes[3].state, expected,
             "{:?}",
-            run.checkpoint.nodes[3].advance_error
+            run.checkpoint.nodes[3].advance_note
         );
     }
 }
@@ -542,7 +542,7 @@ fn ambiguous_propagation_warns_and_remains_independent() {
         run.checkpoint.nodes[4].state,
         NodeState::Succeeded,
         "{:?}",
-        run.checkpoint.nodes[4].advance_error
+        run.checkpoint.nodes[4].advance_note
     );
     let findings = &run.checkpoint.nodes[4].outputs.as_ref().unwrap().findings;
     assert_eq!(
@@ -688,13 +688,13 @@ fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[1].advance_error_code.as_deref(),
+        run.checkpoint.nodes[1].advance_code.as_deref(),
         Some("disposition_count")
     );
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(replay.checkpoint.nodes[1].state, NodeState::Failed);
     assert_eq!(
-        replay.checkpoint.nodes[1].advance_error_code.as_deref(),
+        replay.checkpoint.nodes[1].advance_code.as_deref(),
         Some("disposition_count")
     );
 }
@@ -840,7 +840,7 @@ fn a_synthesis_without_valid_dispositions_settles_as_failed_with_a_reason() {
     for (text, expected) in cases {
         let progress = synthesis_run(&text);
         assert_eq!(progress.state, NodeState::Failed, "{text}");
-        assert_eq!(progress.advance_error_code.as_deref(), Some(expected));
+        assert_eq!(progress.advance_code.as_deref(), Some(expected));
     }
     // A node that declares no dispositions keeps accepting bare findings.
     let plain = node("plain", route("first"));
@@ -899,7 +899,7 @@ fn findings_required_and_review_nodes_still_fail_on_a_missing_block() {
     let settled = settle_single(required, "");
     assert_eq!(settled.state, NodeState::Failed);
     assert_eq!(
-        settled.advance_error_code.as_deref(),
+        settled.advance_code.as_deref(),
         Some("findings_required")
     );
 

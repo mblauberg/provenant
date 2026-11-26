@@ -238,7 +238,7 @@ pub(super) fn correct_verdict(
             && checkpoint.nodes[*index]
                 .review_verdict_correction_refused
                 .is_none()
-            && checkpoint.nodes[*index].advance_error_code.as_deref()
+            && checkpoint.nodes[*index].advance_code.as_deref()
                 == Some("review_verdict_invalid")
             && !checkpoint
                 .expansions
@@ -292,7 +292,7 @@ pub(super) fn correct_verdict(
             plans::clear_expansion_pause(&mut next, index, true);
         }
         next.nodes[index].review_verdict_correction_refused =
-            Some(bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES));
+            Some(bounded(&error.to_string(), MAX_ADVANCE_NOTE_BYTES));
         return Ok(Some(next));
     }
     transitions::retain_automatic_retry_accounting(

@@ -968,7 +968,7 @@ mod graph_writer_admission_tests {
         let first = advance(&document, &mut owner, &mut journal)?;
         let node = &first.checkpoint.nodes[0];
         assert_eq!(node.state, NodeState::Failed, "{node:?}");
-        assert_ne!(node.advance_error_code.as_deref(), Some("launch_refused"));
+        assert_ne!(node.advance_code.as_deref(), Some("launch_refused"));
         assert_eq!(node.attempts.len(), 2);
         assert_eq!(node.attempts[0].key.route_index, 0);
         assert_eq!(node.attempts[1].key.route_index, 1);
@@ -984,7 +984,7 @@ mod graph_writer_admission_tests {
         let saved = graph::FileJournal::read_checkpoint(&roots.state, project, &document.graph_id)?
             .ok_or("checkpoint")?;
         assert_eq!(saved.nodes[0].state, NodeState::Failed);
-        assert_eq!(saved.nodes[0].advance_error_code, node.advance_error_code);
+        assert_eq!(saved.nodes[0].advance_code, node.advance_code);
         let operation_id = graph_operation("graph-attempt-operation", &node.attempts[0].key)?;
         let binary = BinaryRunOwner {
             factory: &factory,
@@ -1944,7 +1944,7 @@ mod result_tests {
             "schema_version": 2, "graph_id": "fixture", "plan_digest": "digest",
             "nodes": [
                 {"id":"ordinary", "state":"failed", "worktree":null,
-                 "advance_error":"repair this", "attempts":[
+                 "advance_note":"repair this", "attempts":[
                     {"launched":true,"key":{"graph_id":"fixture","node_id":"ordinary","route_index":0, "attempt": 1},
                      "route":{"alias":"first"},"state":"terminal","attempt_ref":"old","outcome":"task_failed","launch_actor":"actor"},
                     {"launched":true,"key":{"graph_id":"fixture","node_id":"ordinary","route_index":1, "attempt": 2},
@@ -2163,7 +2163,7 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[1];
         node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some("blocked by ordinary (Failed)".into());
+        node.advance_note = Some("blocked by ordinary (Failed)".into());
         assert!(
             super::graph_human(&run).contains("composite: Blocked (blocked by ordinary (Failed))")
         );
@@ -2180,7 +2180,7 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[0];
         node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some("node ordinary: the launch failed [invalid_input]: input exceeds the 1 MiB limit; check the named input field and retry".into());
+        node.advance_note = Some("node ordinary: the launch failed [invalid_input]: input exceeds the 1 MiB limit; check the named input field and retry".into());
         let human = super::graph_human(&run);
         let machine = serde_json::to_value(&run).unwrap();
         for text in [human, machine.to_string()] {
@@ -2207,7 +2207,7 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[0];
         node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some(format!(
+        node.advance_note = Some(format!(
             "node ordinary: the launch failed: [{}] {}; {}",
             diagnostic.code,
             diagnostic.next.unwrap(),
@@ -2631,8 +2631,8 @@ mod result_tests {
             detail: None,
             projection: None,
         });
-        checkpoint.nodes[0].advance_error = refusal.diagnostic().detail;
-        checkpoint.nodes[0].advance_error_code = Some("dispatch_refused".into());
+        checkpoint.nodes[0].advance_note = refusal.diagnostic().detail;
+        checkpoint.nodes[0].advance_code = Some("dispatch_refused".into());
         checkpoint.nodes[0].attempts.clear();
         let display = "node ordinary expansion paused: planner fragment invalid: invalid fragment: missing nodes; fallback expansion paused: source requires a full commit ID";
         checkpoint.set_pause(
@@ -2687,14 +2687,14 @@ mod result_tests {
                 .unwrap()
                 .contains("invalid fragment: missing nodes")
         );
-        let refusal_reason = status.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+        let refusal_reason = status.checkpoint.nodes[0].advance_note.as_deref().unwrap();
         assert!(refusal_reason.contains("setup script failed: missing pnpm"));
         assert!(refusal_reason.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
         assert!(!refusal_reason.contains("receipt"));
         assert!(status.checkpoint.nodes[0].attempts.is_empty());
         assert!(human.contains("setup script failed: missing pnpm"));
         assert!(
-            json["checkpoint"]["nodes"][0]["advance_error"]
+            json["checkpoint"]["nodes"][0]["advance_note"]
                 .as_str()
                 .unwrap()
                 .contains("setup script failed: missing pnpm")

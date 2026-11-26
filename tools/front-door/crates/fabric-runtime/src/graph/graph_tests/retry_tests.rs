@@ -655,7 +655,7 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
         .iter_mut()
         .find(|node| node.id == "work--leaf")
         .unwrap();
-    leaf.advance_error_code = Some("launch_refused".into());
+    leaf.advance_code = Some("launch_refused".into());
     let attempt = &mut leaf.attempts[0];
     attempt.state = AttemptState::Starting;
     // Dispatch sets this flag before the host can refuse acceptance.
@@ -676,7 +676,7 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
             }
             1 => leaf.attempts[0].state = AttemptState::Running,
             2 => leaf.attempts[0].attempt_ref = Some("host/uncertain".into()),
-            _ => leaf.advance_error_code = Some("launch_retry_exhausted".into()),
+            _ => leaf.advance_code = Some("launch_retry_exhausted".into()),
         }
         let before = candidate.clone();
         assert!(retry_id(&document, &mut candidate, "work", None, None).is_err());
@@ -1218,7 +1218,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     let mut checkpoint: GraphCheckpoint =
         serde_json::from_value(serde_json::to_value(checkpoint).unwrap()).unwrap();
     assert_eq!(
-        checkpoint.nodes[work_index].advance_error_code.as_deref(),
+        checkpoint.nodes[work_index].advance_code.as_deref(),
         Some("launch_refused")
     );
     assert_eq!(
@@ -1323,7 +1323,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
                 candidate.nodes[work_index].attempts[0].attempt_ref = Some("host/uncertain".into())
             }
             2 => {
-                candidate.nodes[work_index].advance_error_code =
+                candidate.nodes[work_index].advance_code =
                     Some("launch_retry_exhausted".into())
             }
             3 => candidate.nodes[work_index].state = NodeState::Running,
@@ -2163,17 +2163,17 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     assert!(checkpoint.pause.is_none());
     let original = checkpoint.nodes[0].clone();
     assert_eq!(
-        original.advance_error_code.as_deref(),
+        original.advance_code.as_deref(),
         Some("stopped_no_work")
     );
     assert!(next_step::pending(&checkpoint));
     cancel_node_subtree(&document, &mut checkpoint, "work", Some("chair stop")).unwrap();
     assert_eq!(checkpoint.nodes[0].attempts, original.attempts);
     assert_eq!(checkpoint.nodes[0].state, original.state);
-    assert_eq!(checkpoint.nodes[0].advance_error, original.advance_error);
+    assert_eq!(checkpoint.nodes[0].advance_note, original.advance_note);
     assert_eq!(
-        checkpoint.nodes[0].advance_error_code,
-        original.advance_error_code
+        checkpoint.nodes[0].advance_code,
+        original.advance_code
     );
     journal.save(&checkpoint).unwrap();
     drop(journal);
@@ -2188,10 +2188,10 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     assert!(next_step::stop_cause(&checkpoint.nodes[0], &checkpoint).is_none());
     assert!(!next_step::pending(&checkpoint));
     assert_eq!(checkpoint.nodes[0].attempts, original.attempts);
-    assert_eq!(checkpoint.nodes[0].advance_error, original.advance_error);
+    assert_eq!(checkpoint.nodes[0].advance_note, original.advance_note);
     assert_eq!(
-        checkpoint.nodes[0].advance_error_code,
-        original.advance_error_code
+        checkpoint.nodes[0].advance_code,
+        original.advance_code
     );
     let mut recovery_owner = FakeOwner::default();
     let run = advance(&document, &mut recovery_owner, &mut journal).unwrap();
@@ -2710,7 +2710,7 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
     .unwrap();
     assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(
-        checkpoint.nodes[0].advance_error_code.as_deref(),
+        checkpoint.nodes[0].advance_code.as_deref(),
         Some("launch_retry_exhausted")
     );
     assert_eq!(
@@ -2724,7 +2724,7 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
         checkpoint.nodes[0].attempts[0].host_refused_before_acceptance,
         "contention before acceptance must be recorded as a fact"
     );
-    let reason = checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    let reason = checkpoint.nodes[0].advance_note.as_deref().unwrap();
     assert!(
         reason.contains(&holder.to_string()),
         "blocked diagnostic must name the lock holder: {reason}"

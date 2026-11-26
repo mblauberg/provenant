@@ -508,7 +508,7 @@ fn configured_graph_concurrency_refusal_uses_the_owner_policy() {
         .unwrap();
     assert_eq!(refused.state, NodeState::Failed);
     assert_eq!(
-        refused.advance_error_code.as_deref(),
+        refused.advance_code.as_deref(),
         Some("concurrency_cap")
     );
     assert!(refused.concurrency_warning.is_none());
@@ -586,7 +586,7 @@ fn refused_steer_successor_pauses_the_graph_for_retry() {
     assert_eq!(run.outcome, None);
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(
-        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        run.checkpoint.nodes[0].advance_code.as_deref(),
         Some("steer_continuation_refused")
     );
     assert_eq!(owner.calls.len(), 1);

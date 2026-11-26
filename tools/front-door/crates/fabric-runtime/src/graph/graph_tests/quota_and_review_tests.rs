@@ -403,7 +403,7 @@ fn typed_review_synthesis_retains_omitted_findings_and_refuses_pass() {
     assert_eq!(synthesis.state, NodeState::Failed);
     assert_eq!(synthesis.outputs.as_ref().unwrap().findings.len(), 1);
     assert_eq!(
-        synthesis.advance_error_code.as_deref(),
+        synthesis.advance_code.as_deref(),
         Some("disposition_count")
     );
 }
@@ -431,7 +431,7 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
         run.checkpoint.nodes[1].state,
         NodeState::Succeeded,
         "{:?}",
-        run.checkpoint.nodes[1].advance_error
+        run.checkpoint.nodes[1].advance_note
     );
     assert_eq!(
         output.findings[0].verification.as_deref().unwrap(),

@@ -1290,7 +1290,7 @@ impl Factory {
                     plan_digest: String::new(),
                     nodes: Vec::new(),
                 },
-                advance_error: Some(message),
+                advance_note: Some(message),
             }
         };
         if matches!(input, GraphInput::Status { .. }) {
@@ -1320,7 +1320,7 @@ impl Factory {
                 id,
             )
             .map_err(|_| FacadeError::io("access graph journal"))?;
-            run.advance_error = sidecar_error.or(run.advance_error);
+            run.advance_note = sidecar_error.or(run.advance_note);
             return Ok(run);
         }
         if matches!(input, GraphInput::Cancel { .. })
@@ -1523,13 +1523,13 @@ impl Factory {
                     // who created this submission. A matching waiter only reads.
                     *replayed = true;
                     let mut run = graph_snapshot(checkpoint.ok_or(FacadeError::StateCorrupt)?);
-                    run.advance_error = FileJournal::read_advance_error(
+                    run.advance_note = FileJournal::read_advance_error(
                         &self.context.roots.state,
                         self.context.identity.project,
                         id,
                     )
                     .map_err(graph_journal_error)?
-                    .or(run.advance_error);
+                    .or(run.advance_note);
                     return Ok(run);
                 }
             }
@@ -2309,7 +2309,7 @@ mod tests {
         )?;
         assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
         assert_eq!(run.checkpoint.plan_digest, checkpoint.plan_digest);
-        assert!(run.advance_error.is_none(), "{:?}", run.advance_error);
+        assert!(run.advance_note.is_none(), "{:?}", run.advance_note);
         let rebound = FileJournal::execution(&roots.state, project, "g-test")?.unwrap();
         assert_eq!(rebound.document, execution.document);
         let landed = landing_reviews(&roots.state, project, head)?;

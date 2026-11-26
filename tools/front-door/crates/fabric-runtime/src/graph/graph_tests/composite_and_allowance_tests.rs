@@ -875,7 +875,7 @@ fn composite_rejects_overlong_qualified_finding_id() {
         .unwrap();
     assert_eq!(composite.state, NodeState::Failed);
     assert_eq!(
-        composite.advance_error_code.as_deref(),
+        composite.advance_code.as_deref(),
         Some("composite_findings_exceed_cap")
     );
     assert_ne!(
@@ -941,7 +941,7 @@ fn identity_dispositions_preserve_large_inherited_fields() {
         result.state,
         NodeState::Succeeded,
         "{:?}",
-        result.advance_error
+        result.advance_note
     );
     let findings = &result.outputs.as_ref().unwrap().findings;
     assert!(canonical_len(findings) > FINDINGS_BYTES);
@@ -1000,7 +1000,7 @@ fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
         let result = &run.checkpoint.nodes[2];
         assert!(owner.prompts[2].contains("a:F1"));
         assert!(owner.prompts[2].contains("b:F1"));
-        assert_eq!(result.state, expected, "{:?}", result.advance_error);
+        assert_eq!(result.state, expected, "{:?}", result.advance_note);
         if expected == NodeState::Succeeded {
             let findings = &result.outputs.as_ref().unwrap().findings;
             assert_eq!(
@@ -1010,7 +1010,7 @@ fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
         } else {
             assert!(
                 result
-                    .advance_error
+                    .advance_note
                     .as_deref()
                     .unwrap()
                     .contains("ambiguous")
@@ -1040,7 +1040,7 @@ fn empty_review_range_stops_before_lens_launch() {
     assert!(owner.calls.is_empty());
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        run.checkpoint.nodes[0].advance_code.as_deref(),
         Some("review_empty_range")
     );
 }
@@ -1273,7 +1273,7 @@ fn composite_byte_budget_overflow_below_entry_cap_requires_verifier_proof() {
     assert!(composite.outputs.as_ref().unwrap().findings.len() < count);
     let verifier = &run.checkpoint.nodes[positions["verify"]];
     assert_eq!(
-        verifier.advance_error_code.as_deref(),
+        verifier.advance_code.as_deref(),
         Some("disposition_overflow_incomplete")
     );
     assert!(owner.prompts.last().unwrap().contains("DISPOSITION"));

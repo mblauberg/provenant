@@ -170,7 +170,7 @@ fn node_deadline_is_forwarded_to_the_lane_run() {
     assert_eq!(owner.deadlines, vec![Some(7)]);
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        run.checkpoint.nodes[0].advance_code.as_deref(),
         Some("deadline_exceeded")
     );
     assert_eq!(

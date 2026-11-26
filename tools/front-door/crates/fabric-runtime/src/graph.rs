@@ -295,7 +295,7 @@ pub const MAX_CANCEL_REASON_BYTES: usize = 256;
 const MAX_CHECKPOINT_BYTES: u64 = 17_825_792;
 /// Every JSON member costs at least two bytes, so the byte limit binds first.
 const MAX_CHECKPOINT_MEMBERS: usize = MAX_CHECKPOINT_BYTES as usize / 2;
-const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
+const MAX_ADVANCE_NOTE_BYTES: usize = 2_048;
 // Canonical-byte shares for runtime text stored in a checkpoint. The envelope
 // bound in `graph/envelope.rs` adds them up for each plan before admission.
 const RESULT_EXCERPT_BYTES: usize = 4_096;
@@ -2992,8 +2992,8 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
             node.id
         );
         checkpoint.nodes[node_index].state = NodeState::Blocked;
-        checkpoint.nodes[node_index].advance_error_code = Some("steer_continuation_refused".into());
-        checkpoint.nodes[node_index].advance_error = Some(reason.clone());
+        checkpoint.nodes[node_index].advance_code = Some("steer_continuation_refused".into());
+        checkpoint.nodes[node_index].advance_note = Some(reason.clone());
         checkpoint.set_pause(
             provenant_records::pause::PauseCause::Stop(
                 provenant_records::StopCause::LaunchHandoffRefused,
@@ -3176,7 +3176,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         status: GraphStatus::Cancelled,
                         outcome: None,
                         checkpoint,
-                        advance_error: None,
+                        advance_note: None,
                     })));
                 }
             } else {
@@ -3677,7 +3677,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     resume = false;
                     continue 'schedule;
                 }
-                if checkpoint.nodes[node_index].advance_error_code.as_deref()
+                if checkpoint.nodes[node_index].advance_code.as_deref()
                     == Some("review_verdict_invalid")
                 {
                     resume = false;
@@ -4047,7 +4047,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 status: GraphStatus::Cancelled,
                 outcome: None,
                 checkpoint,
-                advance_error: None,
+                advance_note: None,
             });
         }
         checkpoint.set_pause(PauseCause::StructuralLimit, &limit.to_string());

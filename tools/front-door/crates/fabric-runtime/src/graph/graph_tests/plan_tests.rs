@@ -303,7 +303,7 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
             run.checkpoint
                 .nodes
                 .iter()
-                .any(|n| n.advance_error_code.as_deref() == Some("usage_limited"))
+                .any(|n| n.advance_code.as_deref() == Some("usage_limited"))
         );
         journal.0 =
             Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());

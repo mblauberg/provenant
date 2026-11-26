@@ -384,8 +384,8 @@ fn node_bound(
         wait_reason: None,
         cancelled_from: Some(NodeState::Running),
         skip_reason: Some("graph cancelled".into()),
-        advance_error: Some(String::new()),
-        advance_error_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
+        advance_note: Some(String::new()),
+        advance_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         advance_owner_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         outputs: Some(if boundary {
             gate_outputs(false)
@@ -469,8 +469,8 @@ fn node_bound(
     }
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
-        + MAX_ADVANCE_ERROR_BYTES // advance error
-        + if correction { MAX_ADVANCE_ERROR_BYTES } else { 0 };
+        + MAX_ADVANCE_NOTE_BYTES // advance error
+        + if correction { MAX_ADVANCE_NOTE_BYTES } else { 0 };
     if template::review_node(node) {
         bytes += canonical_len(&serde_json::json!({"review_settlement": {
             "attempt_id": "1".repeat(32),
@@ -487,10 +487,10 @@ fn node_bound(
     }
     // The node's own bounded launch retry wait, kept while it is running.
     if !boundary && node.composite.is_none() && node.decide.is_none() && node.land.is_none() {
-        bytes += MAX_ADVANCE_ERROR_BYTES + 320; // retry reason, timing and bounded policy
+        bytes += MAX_ADVANCE_NOTE_BYTES + 320; // retry reason, timing and bounded policy
     }
     if expands {
-        bytes += MAX_ADVANCE_ERROR_BYTES; // expansion pause
+        bytes += MAX_ADVANCE_NOTE_BYTES; // expansion pause
     }
     if plans::agent(node) && !admitted {
         // Final blocks are always externalised by prompt_store. Reserve the
@@ -517,7 +517,7 @@ fn node_bound(
             + 256;
     }
     if let Some(spec) = &node.loop_body {
-        bytes += MAX_ADVANCE_ERROR_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
+        bytes += MAX_ADVANCE_NOTE_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
         if let Some(session) = &spec.decision_session {
             let ask = asks::loop_ask(&plan.graph_id, &node.id, usize::MAX, session);
             bytes += loop_rounds * (ask_bound(&ask) + RETRY_SUFFIX_BYTES);
@@ -545,7 +545,7 @@ fn node_bound(
     if let Some(spec) = &node.land {
         // branch, head, ask ID, actor and note; and one ask link.
         bytes +=
-            2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_ERROR_BYTES;
+            2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_NOTE_BYTES;
         let session = land::session(spec, plan).unwrap_or("");
         let ask = land::land_ask(
             &plan.graph_id,

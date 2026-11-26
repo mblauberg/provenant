@@ -418,7 +418,7 @@ fn blocked_reason(
 ) -> Option<String> {
     use provenant_records::handoff::BlockedOn;
     let note = progress
-        .advance_error
+        .advance_note
         .as_deref()
         .unwrap_or("inspect its handoff");
     let id = &node.id;
@@ -748,7 +748,7 @@ fn unblock_dependants(plan: &PlannedGraph, checkpoint: &mut GraphCheckpoint, id:
         for (node, progress) in plan.nodes.iter().zip(&mut checkpoint.nodes) {
             if progress.state == NodeState::Blocked
                 && matches!(
-                    progress.advance_error_code.as_deref(),
+                    progress.advance_code.as_deref(),
                     None | Some("upstream_blocked" | "required_input_unavailable")
                 )
                 && node
@@ -758,8 +758,8 @@ fn unblock_dependants(plan: &PlannedGraph, checkpoint: &mut GraphCheckpoint, id:
                     .any(|parent| restarted.contains(parent))
             {
                 progress.state = NodeState::Pending;
-                progress.advance_error = None;
-                progress.advance_error_code = None;
+                progress.advance_note = None;
+                progress.advance_code = None;
                 restarted.insert(node.id.clone());
             }
         }
@@ -911,10 +911,10 @@ pub(super) fn settlement_fallback_decision(
     }
     let allowed = step == Some(NextStep::NewRoute);
     if !allowed || route_index + 1 == node.routes.len() || review_limit_reached {
-        let (mut advance_error_code, mut advance_error) = match outcome {
+        let (mut advance_code, mut advance_note) = match outcome {
             GraphAttemptOutcome::PreparationRefused(cause) => (
                 Some("preparation_refused"),
-                Some(bounded(cause.detail(), MAX_ADVANCE_ERROR_BYTES)),
+                Some(bounded(cause.detail(), MAX_ADVANCE_NOTE_BYTES)),
             ),
             GraphAttemptOutcome::AuthRequired => (
                 Some("auth_required"),
@@ -931,13 +931,13 @@ pub(super) fn settlement_fallback_decision(
             _ => (None, None),
         };
         if outcome == GraphAttemptOutcome::UsageLimited {
-            advance_error_code = Some("usage_limited");
+            advance_code = Some("usage_limited");
             let pool = route
                 .and_then(|r| r.alias.as_deref())
                 .map_or_else(String::new, |alias| format!(" for pool {alias}"));
             // A refusal before launch names each account it passed over: a
             // stale failure or a login is not a spent allowance.
-            advance_error = Some(bounded(
+            advance_note = Some(bounded(
                 &if !launched && !skipped_accounts.is_empty() {
                     format!(
                         "No account could take the route{pool}: {}; repair or refresh an account (`provenant quota tick`) or choose an eligible route.",
@@ -948,7 +948,7 @@ pub(super) fn settlement_fallback_decision(
                         "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
                     )
                 },
-                MAX_ADVANCE_ERROR_BYTES,
+                MAX_ADVANCE_NOTE_BYTES,
             ));
         }
         if route_index + 1 == node.routes.len()
@@ -956,8 +956,8 @@ pub(super) fn settlement_fallback_decision(
             && node.access == AccessMode::ReadOnly
             && route.is_some_and(|r| r.account.is_some() || r.model.is_some())
         {
-            advance_error_code = Some("fallback_route_pinned");
-            advance_error = Some("The selected route is pinned and has no fallback.".into());
+            advance_code = Some("fallback_route_pinned");
+            advance_note = Some("The selected route is pinned and has no fallback.".into());
         }
         if !allowed && route_index + 1 < node.routes.len() {
             let (code, message) = fallback_denial(
@@ -967,16 +967,16 @@ pub(super) fn settlement_fallback_decision(
                 outcome,
                 fallback_cause,
             );
-            advance_error_code = Some(code);
-            advance_error = Some(message);
+            advance_code = Some(code);
+            advance_note = Some(message);
         }
         if review_limit_reached && route_index + 1 < node.routes.len() && allowed {
-            advance_error_code = Some("review_substitution_limit");
-            advance_error = Some("review substitution limit reached".into());
+            advance_code = Some("review_substitution_limit");
+            advance_note = Some("review substitution limit reached".into());
         }
         SettlementFallback::Fail {
-            code: advance_error_code,
-            message: advance_error,
+            code: advance_code,
+            message: advance_note,
         }
     } else {
         SettlementFallback::Continue

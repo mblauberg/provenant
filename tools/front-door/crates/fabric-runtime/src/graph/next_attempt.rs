@@ -239,7 +239,7 @@ pub(crate) fn writer_binding_reason(id: &str, error: &(dyn Error + 'static)) -> 
                 .unwrap_or("inspect writer custody before retrying"),
             diagnostic.detail.as_deref().unwrap_or(&diagnostic.code)
         ),
-        MAX_ADVANCE_ERROR_BYTES,
+        MAX_ADVANCE_NOTE_BYTES,
     )
 }
 
@@ -296,7 +296,7 @@ pub(crate) fn apply_launch_disposition(
                     .unwrap_or("inspect the current state before taking further action"),
                 projected.detail.as_deref().unwrap_or(&projected.code)
             ),
-            MAX_ADVANCE_ERROR_BYTES,
+            MAX_ADVANCE_NOTE_BYTES,
         ));
         if now < deadline && (contention || retry.failures <= retry.policy.limit) {
             let delay = provenant_core::retry::Backoff::new(
@@ -327,7 +327,7 @@ pub(crate) fn apply_launch_disposition(
     } else {
         "launch_refused"
     };
-    progress.advance_error_code = Some(code.into());
+    progress.advance_code = Some(code.into());
     let projected = launch_diagnostic(error);
     progress.advance_owner_code = Some(projected.code.clone());
     let detail = projected.detail.as_deref().unwrap_or(&projected.code);
@@ -358,13 +358,13 @@ pub(crate) fn apply_launch_disposition(
     } else {
         "; inspect the graph, then use `provenant retry` with its graph and node selectors".into()
     };
-    progress.advance_error = Some(bounded(
+    progress.advance_note = Some(bounded(
         &format!(
             "node {}: the launch failed [{}]: {action}; {detail}{recovery}",
             provenant_records::diagnostic::safe_text(id),
             projected.code
         ),
-        MAX_ADVANCE_ERROR_BYTES,
+        MAX_ADVANCE_NOTE_BYTES,
     ));
     progress.state = NodeState::Blocked;
     // Keep the attempt row even when launch handoff is uncertain. A guardian
@@ -909,11 +909,11 @@ pub(super) fn fail_node(
 ) {
     progress.state = NodeState::Failed;
     if code.is_some() {
-        progress.advance_error_code = code;
+        progress.advance_code = code;
         progress.advance_owner_code = None;
     }
     if message.is_some() {
-        progress.advance_error = message;
+        progress.advance_note = message;
     }
 }
 
@@ -1101,8 +1101,8 @@ mod tests {
         let mut withdrawn = progress(
             vec![attempt(0, true, "terminal", Some("task_failed"))],
             serde_json::json!({
-                "advance_error_code": "missing_verdict",
-                "advance_error": "the review returned no verdict"
+                "advance_code": "missing_verdict",
+                "advance_note": "the review returned no verdict"
             }),
         );
         let decision = decide_next_attempt(&lens, &withdrawn, &limits, &mut Owner, None).unwrap();
@@ -1119,11 +1119,11 @@ mod tests {
         fail_node(&mut withdrawn, code.map(Into::into), message);
         assert_eq!(withdrawn.state, NodeState::Failed);
         assert_eq!(
-            withdrawn.advance_error_code.as_deref(),
+            withdrawn.advance_code.as_deref(),
             Some("missing_verdict")
         );
         assert_eq!(
-            withdrawn.advance_error.as_deref(),
+            withdrawn.advance_note.as_deref(),
             Some("the review returned no verdict")
         );
 
@@ -1201,13 +1201,13 @@ mod tests {
         };
         let mut settled = progress(
             Vec::new(),
-            serde_json::json!({"advance_error_code": "earlier", "advance_error": "kept"}),
+            serde_json::json!({"advance_code": "earlier", "advance_note": "kept"}),
         );
         fail_node(&mut settled, code.map(str::to_owned), message);
         assert_eq!(settled.state, NodeState::Failed);
-        assert_eq!(settled.advance_error_code.as_deref(), Some("auth_required"));
+        assert_eq!(settled.advance_code.as_deref(), Some("auth_required"));
         assert_eq!(
-            settled.advance_error.as_deref(),
+            settled.advance_note.as_deref(),
             Some("The lane requires authentication.")
         );
     }
@@ -1257,7 +1257,7 @@ mod tests {
         .unwrap();
         assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
         assert_eq!(
-            checkpoint.nodes[0].advance_error_code.as_deref(),
+            checkpoint.nodes[0].advance_code.as_deref(),
             Some("launch_retry_exhausted")
         );
         assert_eq!(
@@ -1362,7 +1362,7 @@ mod tests {
         // The gate reads the recorded fact, not an owner-code string.
         let mut node = progress(
             vec![attempt(0, false, "starting", None)],
-            serde_json::json!({"advance_error_code": "launch_retry_exhausted"}),
+            serde_json::json!({"advance_code": "launch_retry_exhausted"}),
         );
         assert!(!all_attempts_refused_before_acceptance(&node));
         node.attempts[0].host_refused_before_acceptance = true;

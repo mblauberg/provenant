@@ -2925,7 +2925,7 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             .find(|node| node["id"] == "writer")
             .ok_or("writer")?;
         assert_eq!(
-            writer["advance_error_code"], "writer_binding_unavailable",
+            writer["advance_code"], "writer_binding_unavailable",
             "{response}"
         );
         assert_eq!(writer["attempts"], json!([]), "{response}");
@@ -2933,12 +2933,12 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             response["error"]["code"],
             writer["advance_owner_code"]
                 .as_str()
-                .or_else(|| writer["advance_error_code"].as_str())
+                .or_else(|| writer["advance_code"].as_str())
                 .ok_or("code")?,
             "{response}"
         );
         assert_eq!(
-            response["error"]["message"], writer["advance_error"],
+            response["error"]["message"], writer["advance_note"],
             "{response}"
         );
     }
@@ -5289,9 +5289,9 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
             json!({"preparation_refused": "unregistered_account"}),
             "{node}"
         );
-        assert_eq!(node["advance_error_code"], "preparation_refused", "{node}");
+        assert_eq!(node["advance_code"], "preparation_refused", "{node}");
         assert_eq!(
-            node["advance_error"],
+            node["advance_note"],
             provenant_records::run::CauseKind::UnregisteredAccount.detail(),
             "{node}"
         );

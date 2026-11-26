@@ -290,7 +290,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                 .cancel_reason
                 .as_deref()
                 .or(run.checkpoint.pause_reason())
-                .or(run.advance_error.as_deref()),
+                .or(run.advance_note.as_deref()),
         ));
     }
     for node in &run.checkpoint.nodes {
@@ -309,7 +309,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             } else {
                 (
                     json!(node.state),
-                    node.advance_error
+                    node.advance_note
                         .as_deref()
                         .or(node.skip_reason.as_deref()),
                     Value::Null,
@@ -486,7 +486,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         row["cause_code"] = json!(node.and_then(|node| {
             node.advance_owner_code
                 .as_deref()
-                .or(node.advance_error_code.as_deref())
+                .or(node.advance_code.as_deref())
         }));
         if row["cause_code"].is_null()
             && let Some(stop) = attempt.and_then(|attempt| attempt.stop.as_ref())
@@ -508,7 +508,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             }));
         }
         if row["kind"] == "graph"
-            && run.advance_error.as_deref().is_some_and(|reason| {
+            && run.advance_note.as_deref().is_some_and(|reason| {
                 reason.starts_with(&provenant_fabric_runtime::graph::unreadable_graph_guidance(
                     &target.graph,
                 ))
@@ -532,7 +532,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             // presented as permission to start a fresh attempt.
             "blocked" | "failed"
                 if matches!(
-                    node.and_then(|node| node.advance_error_code.as_deref()),
+                    node.and_then(|node| node.advance_code.as_deref()),
                     Some(
                         "launch_refused" | "launch_retry_exhausted" | "writer_binding_unavailable"
                     )
@@ -2494,7 +2494,7 @@ pub(crate) fn graph_listing(
                                 .cancel_reason
                                 .as_deref()
                                 .or(run.checkpoint.pause_reason())
-                                .or(run.advance_error.as_deref())
+                                .or(run.advance_note.as_deref())
                                 .map(str::to_owned)
                         })
                         .flatten();
@@ -3964,7 +3964,7 @@ fn localise_worktree_actions(factory: &Factory, graph: &str, rows: &mut [Value])
     let binding_failed = |row: &Value| {
         checkpoint.nodes.iter().any(|node| {
             Some(node.id.as_str()) == row["node_id"].as_str()
-                && node.advance_error_code.as_deref() == Some("writer_binding_unavailable")
+                && node.advance_code.as_deref() == Some("writer_binding_unavailable")
                 && node.advance_owner_code.as_deref() != Some("writer_lock_busy")
         })
     };

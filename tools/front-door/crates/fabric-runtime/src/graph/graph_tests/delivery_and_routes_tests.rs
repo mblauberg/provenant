@@ -597,9 +597,9 @@ fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let node = &run.checkpoint.nodes[0];
     assert_eq!(node.state, NodeState::Failed);
-    assert_eq!(node.advance_error_code.as_deref(), Some("usage_limited"));
+    assert_eq!(node.advance_code.as_deref(), Some("usage_limited"));
     assert!(
-        node.advance_error
+        node.advance_note
             .as_deref()
             .unwrap()
             .contains("quota or rate limit")
@@ -650,8 +650,8 @@ fn exhausted_pool_names_the_cause_and_the_pool() {
     let node = &run.checkpoint.nodes[0];
     assert_eq!(node.state, NodeState::Failed);
     assert_eq!(node.attempts.len(), 2);
-    assert_eq!(node.advance_error_code.as_deref(), Some("usage_limited"));
-    let error = node.advance_error.as_deref().unwrap();
+    assert_eq!(node.advance_code.as_deref(), Some("usage_limited"));
+    let error = node.advance_note.as_deref().unwrap();
     assert!(error.contains("quota or rate limit"), "{error}");
     assert!(error.contains("pool junior"), "{error}");
 }
@@ -782,7 +782,7 @@ fn launched_reader_reports_pinned_route() {
     .unwrap();
     assert_eq!(owner.calls.len(), 1);
     assert_eq!(
-        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        run.checkpoint.nodes[0].advance_code.as_deref(),
         Some("fallback_route_pinned")
     );
 }
@@ -872,7 +872,7 @@ fn fallback_reports_unreadable_evidence() {
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(owner.calls.len(), 1);
     assert_eq!(
-        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        run.checkpoint.nodes[0].advance_code.as_deref(),
         Some("fallback_evidence_unreadable")
     );
 }
@@ -906,7 +906,7 @@ fn missing_fallback_evidence_waits_briefly_then_refuses() {
     let result = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(result.checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(owner.calls.len(), 1);
-    let reason = result.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    let reason = result.checkpoint.nodes[0].advance_note.as_deref().unwrap();
     assert!(reason.contains("authentication"));
     assert!(reason.contains("custody"));
     assert!(reason.contains("stale"));
@@ -931,7 +931,7 @@ fn preparation_refusal_without_evidence_fails_immediately_with_its_cause() {
     let progress = &result.checkpoint.nodes[0];
     assert_eq!(progress.state, NodeState::Failed);
     assert!(progress.fallback_evidence_retry.is_none());
-    assert!(progress.advance_error.as_deref().unwrap().contains(cause.detail()));
+    assert!(progress.advance_note.as_deref().unwrap().contains(cause.detail()));
     assert_eq!(owner.calls.len(), 1);
 }
 

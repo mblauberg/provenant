@@ -1558,7 +1558,7 @@ fn loop_stops_when_the_target_moved_after_the_previous_delivery() {
         .unwrap();
     assert_eq!(second.state, NodeState::Failed);
     assert_eq!(
-        second.advance_error_code.as_deref(),
+        second.advance_code.as_deref(),
         Some("integration_head_moved")
     );
     assert!(second.attempts.is_empty());
@@ -3264,7 +3264,7 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
         run.checkpoint
             .nodes
             .iter()
-            .map(|node| (&node.id, node.state, &node.gate, &node.advance_error))
+            .map(|node| (&node.id, node.state, &node.gate, &node.advance_note))
             .collect::<Vec<_>>()
     );
     assert_eq!(owner.repair_panel_calls, 2);

@@ -538,12 +538,12 @@ pub(super) fn apply_attempt_observation(
                     // and pushes no longer revise a settled outcome. One rule
                     // for every writer stop: restart in place on the retained
                     // worktree, or return to the chair (see `next_step`).
-                    progress.advance_error_code = outcome.advance_code().map(str::to_owned);
-                    progress.advance_error = Some(
+                    progress.advance_code = outcome.advance_code().map(str::to_owned);
+                    progress.advance_note = Some(
                         if let Some(handoff) = handoff.filter(|handoff| {
                             handoff.status == provenant_records::handoff::HandoffStatus::Blocked
                         }) {
-                            bounded(&handoff.note, MAX_ADVANCE_ERROR_BYTES)
+                            bounded(&handoff.note, MAX_ADVANCE_NOTE_BYTES)
                         } else if outcome == GraphAttemptOutcome::StoppedNoWork {
                             "writer stopped with no work: no new commit".into()
                         } else {
@@ -577,8 +577,8 @@ pub(super) fn apply_attempt_observation(
                 if outcome == GraphAttemptOutcome::TaskFailed
                     && let Some((code, reason)) = disposition_error
                 {
-                    progress.advance_error_code = Some(code.into());
-                    progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+                    progress.advance_code = Some(code.into());
+                    progress.advance_note = Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
                 }
                 if node.access == AccessMode::WorktreeWrite {
                     progress.blocked = result.as_ref().is_some_and(|capture| {
@@ -791,8 +791,8 @@ pub(super) fn apply_attempt_observation(
                         }
                     }
                     GraphAttemptOutcome::DeadlineExceeded => {
-                        progress.advance_error_code = Some("deadline_exceeded".into());
-                        progress.advance_error =
+                        progress.advance_code = Some("deadline_exceeded".into());
+                        progress.advance_note =
                             Some("node deadline exceeded; lane was cancelled".into());
                         progress.state = NodeState::Failed;
                         false
@@ -808,8 +808,8 @@ pub(super) fn apply_attempt_observation(
                                 < limits.review_substitutions =>
                     {
                         progress.outputs = None;
-                        progress.advance_error = None;
-                        progress.advance_error_code = None;
+                        progress.advance_note = None;
+                        progress.advance_code = None;
                         progress.advance_owner_code = None;
                         progress.state = NodeState::Running;
                         true
@@ -823,10 +823,10 @@ pub(super) fn apply_attempt_observation(
                         });
                         if is_merge_conflict {
                             progress.state = NodeState::Blocked;
-                            progress.advance_error_code = Some("merge_conflict".into());
-                            progress.advance_error = result_warning
+                            progress.advance_code = Some("merge_conflict".into());
+                            progress.advance_note = result_warning
                                 .as_ref()
-                                .map(|w| bounded(w, MAX_ADVANCE_ERROR_BYTES));
+                                .map(|w| bounded(w, MAX_ADVANCE_NOTE_BYTES));
                         } else {
                             progress.state = NodeState::Failed;
                         }
@@ -952,8 +952,8 @@ pub(super) fn initial_checkpoint(
                 cancelled_from: None,
                 wait_reason: None,
                 skip_reason: when::skip_reason(&node.when),
-                advance_error: None,
-                advance_error_code: None,
+                advance_note: None,
+                advance_code: None,
                 advance_owner_code: None,
                 launch_retry: None,
                 fallback_evidence_retry: None,
@@ -977,13 +977,13 @@ pub(super) fn writer_binding_failed(progress: &mut NodeProgress, _id: &str, reas
 }
 
 pub(super) fn retry_exhausted(progress: &mut NodeProgress, reason: &str) {
-    progress.advance_error_code = Some("launch_retry_exhausted".into());
-    progress.advance_error = Some(bounded(
+    progress.advance_code = Some("launch_retry_exhausted".into());
+    progress.advance_note = Some(bounded(
         &format!(
             "node {}: the launch failed: {reason}",
             provenant_records::diagnostic::safe_text(&progress.id)
         ),
-        MAX_ADVANCE_ERROR_BYTES,
+        MAX_ADVANCE_NOTE_BYTES,
     ));
     progress.state = NodeState::Blocked;
     progress.last_launch_retry = progress.launch_retry.take().map(|mut retry| {
@@ -1428,7 +1428,7 @@ fn attribute_blocker(
     if node.condition.is_some()
         || node.composite.is_some()
         || node.land.is_some()
-        || checkpoint.nodes[node_index].advance_error.is_some()
+        || checkpoint.nodes[node_index].advance_note.is_some()
     {
         return false;
     }
@@ -1440,9 +1440,9 @@ fn attribute_blocker(
         .find(|parent| matches!(parent.state, NodeState::Failed | NodeState::Blocked));
     if let Some(parent) = blocker {
         let reason = format!("blocked by {} ({:?})", parent.id, parent.state);
-        checkpoint.nodes[node_index].advance_error =
-            Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-        checkpoint.nodes[node_index].advance_error_code = Some("upstream_blocked".into());
+        checkpoint.nodes[node_index].advance_note =
+            Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
+        checkpoint.nodes[node_index].advance_code = Some("upstream_blocked".into());
         true
     } else {
         false
@@ -1590,10 +1590,10 @@ pub(super) fn node_action<'a>(
         if state != NodeState::Blocked
             && state != NodeState::Pending
             && changed
-            && checkpoint.nodes[index].advance_error_code.as_deref() == Some("upstream_blocked")
+            && checkpoint.nodes[index].advance_code.as_deref() == Some("upstream_blocked")
         {
-            checkpoint.nodes[index].advance_error = None;
-            checkpoint.nodes[index].advance_error_code = None;
+            checkpoint.nodes[index].advance_note = None;
+            checkpoint.nodes[index].advance_code = None;
         }
         if changed {
             checkpoint.nodes[index].state = state;
@@ -1665,11 +1665,11 @@ fn recovery_pending(checkpoint: &GraphCheckpoint) -> bool {
         || !checkpoint.cancelled
             && checkpoint.nodes.iter().any(|node| {
                 node.state == NodeState::Blocked
-                    && node.advance_error_code.as_deref() == Some("steer_continuation_refused")
+                    && node.advance_code.as_deref() == Some("steer_continuation_refused")
             })
         || checkpoint.nodes.iter().any(|node| {
             node.state == NodeState::Failed
-                && node.advance_error_code.as_deref() == Some("review_verdict_invalid")
+                && node.advance_code.as_deref() == Some("review_verdict_invalid")
                 && node.review_verdict_correction_refused.is_none()
                 && !checkpoint
                     .expansions
@@ -1811,15 +1811,15 @@ pub(super) fn graph_run(checkpoint: GraphCheckpoint) -> GraphRun {
     } else {
         GraphStatus::Pending
     };
-    let advance_error = checkpoint
+    let advance_note = checkpoint
         .nodes
         .iter()
-        .find_map(|node| node.advance_error.clone());
+        .find_map(|node| node.advance_note.clone());
     GraphRun {
         status,
         outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
         checkpoint,
-        advance_error,
+        advance_note,
     }
 }
 
@@ -2172,7 +2172,7 @@ mod tests {
             assert_eq!(progress.extra["future_node"], true);
             if expected_outcome == GraphAttemptOutcome::DeadlineExceeded {
                 assert_eq!(
-                    progress.advance_error_code.as_deref(),
+                    progress.advance_code.as_deref(),
                     Some("deadline_exceeded")
                 );
             }
@@ -2364,7 +2364,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                checkpoint.nodes[0].advance_error_code.as_deref(),
+                checkpoint.nodes[0].advance_code.as_deref(),
                 expected_code,
                 "outcome={outcome:?} commit={commit:?}"
             );
@@ -2375,7 +2375,7 @@ mod tests {
             );
             if let Some(note) = expected_note {
                 assert_eq!(
-                    checkpoint.nodes[0].advance_error.as_deref(),
+                    checkpoint.nodes[0].advance_note.as_deref(),
                     Some(note),
                     "outcome={outcome:?} commit={commit:?}"
                 );
@@ -2509,7 +2509,7 @@ mod tests {
         ));
         assert_eq!(checkpoint.nodes[0].state, NodeState::Failed);
         assert_eq!(
-            checkpoint.nodes[0].advance_error_code.as_deref(),
+            checkpoint.nodes[0].advance_code.as_deref(),
             Some("integration_head_moved")
         );
         plan.nodes[0].inputs.push(GraphInput {
@@ -2527,7 +2527,7 @@ mod tests {
             limits.node_prompt_bytes
         ));
         assert_eq!(
-            checkpoint.nodes[0].advance_error_code.as_deref(),
+            checkpoint.nodes[0].advance_code.as_deref(),
             Some("upstream_outputs_too_large")
         );
     }
@@ -2583,7 +2583,7 @@ mod tests {
         );
         assert_eq!(attempt.outcome, Some(GraphAttemptOutcome::StoppedNoWork));
         assert_eq!(
-            checkpoint.nodes[0].advance_error_code.as_deref(),
+            checkpoint.nodes[0].advance_code.as_deref(),
             Some("stopped_no_work")
         );
         let status = serde_json::to_value(&checkpoint).unwrap();

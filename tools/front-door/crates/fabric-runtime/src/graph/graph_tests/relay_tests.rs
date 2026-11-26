@@ -615,7 +615,7 @@ fn a_waiting_parent_yields_its_slot_to_its_child() {
     // A refused admission is terminal for the node; it has no queued state.
     assert_eq!(progress(&held, "a--fix").state, NodeState::Failed);
     assert_eq!(
-        progress(&held, "a--fix").advance_error_code.as_deref(),
+        progress(&held, "a--fix").advance_code.as_deref(),
         Some("concurrency_cap")
     );
 
@@ -1387,8 +1387,8 @@ fn yielded_writer_parent_drains_more_children_than_the_slot_limit() {
             .find(|node| node.id == format!("a--c{index}"))
             .unwrap();
         completed.state = NodeState::Succeeded;
-        completed.advance_error_code = None;
-        completed.advance_error = None;
+        completed.advance_code = None;
+        completed.advance_note = None;
         for attempt in &mut completed.attempts {
             attempt.state = AttemptState::Terminal;
             attempt.outcome = Some(GraphAttemptOutcome::Succeeded);

@@ -2610,7 +2610,7 @@ fn bundled_smoke_runs_from_a_primary_checkout_and_a_linked_worktree() -> Result 
             .ok_or_else(|| format!("{name} launch carried no write node: {launched}"))?;
         assert_eq!(write["state"], "skipped", "{name}: {write}");
         assert!(write["writer_binding"].is_null(), "{name}: {write}");
-        assert!(write["advance_error_code"].is_null(), "{name}: {write}");
+        assert!(write["advance_code"].is_null(), "{name}: {write}");
         let read = by_name("read")
             .ok_or_else(|| format!("{name} launch carried no read node: {launched}"))?;
         assert_ne!(read["state"], "skipped", "{name}: {read}");
@@ -3409,7 +3409,7 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
             &provenant_fabric_runtime::config::GraphBudget::default(),
         )?;
         assert_eq!(
-            run.checkpoint.nodes[0].advance_error_code.as_deref(),
+            run.checkpoint.nodes[0].advance_code.as_deref(),
             Some("launch_refused")
         );
         assert_eq!(
@@ -3418,7 +3418,7 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
         );
         assert!(
             run.checkpoint.nodes[0]
-                .advance_error
+                .advance_note
                 .as_deref()
                 .is_some_and(|error| !error.is_empty())
         );

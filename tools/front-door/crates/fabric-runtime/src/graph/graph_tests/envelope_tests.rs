@@ -228,7 +228,7 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
                 u64::MAX,
                 None,
                 asks::WORST_DECIDE_TIMEOUT,
-                Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+                Some(&worst(MAX_ADVANCE_NOTE_BYTES)),
             );
             // A node raised again after a retry carries the generation.
             ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
@@ -241,7 +241,7 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
             u64::MAX,
             session,
             &worst(PAUSE_REASON_BYTES),
-            Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+            Some(&worst(MAX_ADVANCE_NOTE_BYTES)),
         )));
     }
     asks
@@ -259,7 +259,7 @@ fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
             ask_id: format!("{}.ask-{}", "l".repeat(64), u64::MAX),
         }),
         pull_request: Some(u64::MAX),
-        note: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+        note: Some(worst(MAX_ADVANCE_NOTE_BYTES)),
         wake_at: Some(envelope::latest()),
         pending_observations: u64::MAX,
     }
@@ -346,7 +346,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 extra: Default::default(),
                 review_verdict_correction_refused: (template::review_behaviour(node)
                     == Some(template::ReviewBehaviour::Lens))
-                .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
+                .then(|| worst(MAX_ADVANCE_NOTE_BYTES)),
                 warnings: Vec::new(),
                 children: node.composite_members.clone(),
                 source_binding: node.source.clone(),
@@ -372,13 +372,13 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     Vec::new()
                 },
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
-                    .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
+                    .then(|| worst(MAX_ADVANCE_NOTE_BYTES)),
                 expansion_cause: (node.plan.is_some() || plans::writer(node)).then_some(NodeDecisionCause::PlanExpansionPaused { active: false, fallback: false, structural_limit: Some(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX }), fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX })) }),
                 loop_pause: node.loop_body.as_ref().map(|_| {
                     format!(
                         "loop {0} exhausted; decision cannot be applied: {1}; use graph resume --extend loop.{0}.rounds=N or --extend loop.{0}.decision=stop|accept",
                         node.id,
-                        worst(MAX_ADVANCE_ERROR_BYTES)
+                        worst(MAX_ADVANCE_NOTE_BYTES)
                     )
                 }),
                 loop_cause: node.loop_body.as_ref().map(|_| NodeDecisionCause::InvalidLoopDecision),
@@ -429,8 +429,8 @@ new_worktree_base: None,
                 wait_reason: None,
                 cancelled_from: Some(NodeState::Running),
                 skip_reason: Some("graph cancelled".into()),
-                advance_error: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
-                advance_error_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
+                advance_note: Some(worst(MAX_ADVANCE_NOTE_BYTES)),
+                advance_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 advance_owner_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 launch_retry: None,
                 last_launch_retry: (!boundary
@@ -443,7 +443,7 @@ new_worktree_base: None,
                     failures: u8::MAX,
                     deadline: Some(envelope::latest()),
                     wake_at: Some(envelope::latest()),
-                    reason: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+                    reason: Some(worst(MAX_ADVANCE_NOTE_BYTES)),
                 }),
                 loop_pause_code: node.loop_body.as_ref().map(|_| "c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 outputs: Some(if boundary {

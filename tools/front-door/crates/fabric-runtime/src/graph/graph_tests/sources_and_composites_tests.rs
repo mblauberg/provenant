@@ -30,7 +30,7 @@ fn synthesis_stops_when_the_pinned_integration_head_moves() {
         assert_eq!(run.checkpoint.integration_pin, Some(pin.clone()));
         if !expected {
             assert_eq!(
-                run.checkpoint.nodes[1].advance_error_code.as_deref(),
+                run.checkpoint.nodes[1].advance_code.as_deref(),
                 Some("integration_head_moved")
             );
             assert_eq!(owner.calls.len(), 1);
@@ -313,8 +313,8 @@ fn a_writer_with_a_false_launch_condition_is_never_bound() {
         "{progress:?}"
     );
     assert!(progress.writer_binding.is_none(), "{progress:?}");
-    assert_eq!(progress.advance_error_code.as_deref(), None);
-    assert!(run.advance_error.is_none(), "{run:?}");
+    assert_eq!(progress.advance_code.as_deref(), None);
+    assert!(run.advance_note.is_none(), "{run:?}");
     assert_eq!(owner.implicit_bindings, 0);
 }
 
@@ -466,7 +466,7 @@ fn source_requires_upstream_commit_and_fails_before_launch_when_missing() {
     assert_eq!(owner.calls.len(), 1);
     assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[1].advance_error.as_deref(),
+        run.checkpoint.nodes[1].advance_note.as_deref(),
         Some("node review: source commit unavailable or invalid")
     );
     assert_eq!(
@@ -747,7 +747,7 @@ fn required_composite_findings_need_complete_member_evidence() {
         } else {
             assert_eq!(consumer.state, NodeState::Failed);
             assert_eq!(
-                consumer.advance_error_code.as_deref(),
+                consumer.advance_code.as_deref(),
                 Some("required_input_unavailable")
             );
             assert!(consumer.attempts.is_empty());
@@ -870,7 +870,7 @@ fn composite_running_status_does_not_consume_an_attempt_slot() {
     // A refused admission is terminal for the node; it has no queued state.
     assert_eq!(member("b").state, NodeState::Failed);
     assert_eq!(
-        member("b").advance_error_code.as_deref(),
+        member("b").advance_code.as_deref(),
         Some("concurrency_cap")
     );
 }
@@ -1118,7 +1118,7 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
         run.checkpoint.nodes.last().unwrap().state,
         NodeState::Blocked
     );
-    assert_eq!(run.checkpoint.nodes.last().unwrap().advance_error, None);
+    assert_eq!(run.checkpoint.nodes.last().unwrap().advance_note, None);
     assert!(!run.checkpoint.successful());
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
@@ -1356,10 +1356,10 @@ fn batch_merge_conflict_isolation_pauses_only_conflicted_slice() {
             .find(|n| n.id == format!("slices--{id}"))
             .unwrap()
     };
-    // s1 is Blocked with advance_error_code = "merge_conflict" and advance_error naming the files
+    // s1 is Blocked with advance_code = "merge_conflict" and advance_note naming the files
     assert_eq!(node("s1").state, NodeState::Blocked);
-    assert_eq!(node("s1").advance_error_code.as_deref(), Some("merge_conflict"));
-    let err = node("s1").advance_error.as_deref().unwrap();
+    assert_eq!(node("s1").advance_code.as_deref(), Some("merge_conflict"));
+    let err = node("s1").advance_note.as_deref().unwrap();
     assert!(err.contains("src/main.rs") && err.contains("Cargo.toml"), "{err}");
 
     // s2 is still running! The graph is not paused!

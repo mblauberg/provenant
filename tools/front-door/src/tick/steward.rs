@@ -148,10 +148,10 @@ fn checkpoint_is_live(checkpoint: &GraphCheckpoint) -> bool {
 fn classify_launch(result: &Value) -> Result<(), LaunchError> {
     if result["status"] == "paused"
         || result["outcome"] == "failed"
-        || result["advance_error"].is_string()
+        || result["advance_note"].is_string()
     {
         let reason = result
-            .get("advance_error")
+            .get("advance_note")
             .and_then(Value::as_str)
             .or_else(|| {
                 result
@@ -165,7 +165,7 @@ fn classify_launch(result: &Value) -> Result<(), LaunchError> {
                     .and_then(|nodes| {
                         nodes
                             .iter()
-                            .find_map(|node| node.get("advance_error").and_then(Value::as_str))
+                            .find_map(|node| node.get("advance_note").and_then(Value::as_str))
                     })
             });
         let attempt_reason = result

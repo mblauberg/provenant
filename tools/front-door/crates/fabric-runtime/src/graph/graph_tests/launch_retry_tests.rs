@@ -110,7 +110,7 @@ fn launch_retry_save_failure_keeps_the_prior_checkpoint() {
     assert_eq!(saved.nodes[0].state, NodeState::Running);
     assert_eq!(retry_of(saved).failures, 0);
     assert!(retry_of(saved).wake_at.is_none());
-    assert!(saved.nodes[0].advance_error_code.is_none());
+    assert!(saved.nodes[0].advance_code.is_none());
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn launch_retry_policy_limits_failures_and_persists_the_source() {
         let node = &journal.0.as_ref().unwrap().nodes[0];
         assert_eq!(node.state, NodeState::Blocked);
         assert_eq!(
-            node.advance_error_code.as_deref(),
+            node.advance_code.as_deref(),
             Some("launch_retry_exhausted")
         );
         let last = node
@@ -501,7 +501,7 @@ fn host_delivery_limit_reaches_graph_status_without_exposing_io_sources() {
     advance(&document, &mut owner, &mut journal).unwrap();
     let progress = &journal.0.as_ref().unwrap().nodes[0];
     assert_eq!(progress.state, NodeState::Blocked);
-    let text = progress.advance_error.as_deref().unwrap();
+    let text = progress.advance_note.as_deref().unwrap();
     assert!(text.contains(&reason), "{text}");
     assert!(text.contains("[io]"));
     assert!(text.contains("git worktree list"));
@@ -512,7 +512,7 @@ fn host_delivery_limit_reaches_graph_status_without_exposing_io_sources() {
     assert!(!text.contains("/private/host"));
     let stored = serde_json::to_string(journal.0.as_ref().unwrap()).unwrap();
     let restored: GraphCheckpoint = serde_json::from_str(&stored).unwrap();
-    assert_eq!(restored.nodes[0].advance_error.as_deref(), Some(text));
+    assert_eq!(restored.nodes[0].advance_note.as_deref(), Some(text));
     assert!(!stored.contains("TOKEN_SENTINEL"));
     assert!(!stored.contains("/private/host"));
 
@@ -588,10 +588,10 @@ fn launch_errors_retry_until_the_persisted_deadline() {
     assert_eq!(progress.attempts[0].state, AttemptState::Starting);
     assert_eq!(checkpoint.wake_at, None);
     assert_eq!(
-        progress.advance_error_code.as_deref(),
+        progress.advance_code.as_deref(),
         Some("launch_retry_exhausted")
     );
-    let reason = progress.advance_error.as_deref().expect("blocked reason");
+    let reason = progress.advance_note.as_deref().expect("blocked reason");
     assert!(reason.contains("service is busy"));
     assert!(!reason.contains("new graph_id"));
     assert_eq!(owner.calls.len(), 4);
@@ -778,10 +778,10 @@ fn a_permanent_refusal_blocks_the_node_at_once_with_reason_and_remedy() {
     assert_eq!(progress.attempts.len(), 1);
     assert_eq!(progress.attempts[0].state, AttemptState::Starting);
     assert_eq!(
-        progress.advance_error_code.as_deref(),
+        progress.advance_code.as_deref(),
         Some("launch_refused")
     );
-    let reason = progress.advance_error.as_deref().expect("blocked reason");
+    let reason = progress.advance_note.as_deref().expect("blocked reason");
     assert!(reason.contains("invalid input"));
     assert!(reason.contains("provenant retry g-test/one"));
     assert_eq!(run.checkpoint.wake_at, None);
@@ -963,10 +963,10 @@ fn concurrent_launch_waits_the_full_provisioning_allowance_for_a_held_writer_loc
     );
     assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(
-        checkpoint.nodes[0].advance_error_code.as_deref(),
+        checkpoint.nodes[0].advance_code.as_deref(),
         Some("launch_retry_exhausted")
     );
-    let reason = checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    let reason = checkpoint.nodes[0].advance_note.as_deref().unwrap();
     assert!(
         reason.contains(&holder.to_string()),
         "blocked contention must name the lock holder: {reason}"

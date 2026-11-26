@@ -1530,7 +1530,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     .as_ref()
                     .is_some_and(|evidence| !ci::valid_evidence(evidence, condition))
                 || !progress.attempts.is_empty()
-                || progress.advance_error.is_some()
+                || progress.advance_note.is_some()
                 || (progress.ci.is_some()
                     && !matches!(node.condition, Some(GateCondition::Ci { .. })))
                 || (matches!(node.condition, Some(GateCondition::Ci { .. }))
@@ -1752,14 +1752,14 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             NodeState::Blocked => {
                 progress.attempts.is_empty()
                     || (matches!(
-                        progress.advance_error_code.as_deref(),
+                        progress.advance_code.as_deref(),
                         Some("launch_refused" | "launch_retry_exhausted")
                     ) && last.is_some_and(|attempt| {
                         attempt.state != AttemptState::Terminal && attempt.attempt_ref.is_none()
                     }))
-                    || (progress.advance_error_code.as_deref()
+                    || (progress.advance_code.as_deref()
                         == Some("steer_continuation_refused")
-                        && progress.advance_error.is_some()
+                        && progress.advance_note.is_some()
                         && last.is_some_and(|attempt| {
                             attempt.state == AttemptState::Terminal && attempt.attempt_ref.is_some()
                         }))
@@ -1780,7 +1780,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     plans::writer(node)
                         && progress.writer_binding_pending
                         && progress.outputs.is_none()
-                        && progress.advance_error.is_none()
+                        && progress.advance_note.is_none()
                         && progress
                             .advance_owner_code
                             .as_deref()
@@ -1790,7 +1790,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                                 && matches!((retry.wake_at, retry.deadline),
                                     (Some(wake), Some(deadline)) if wake <= deadline)
                                 && retry.reason.as_ref().is_some_and(|reason| {
-                                    !reason.is_empty() && reason.len() <= MAX_ADVANCE_ERROR_BYTES
+                                    !reason.is_empty() && reason.len() <= MAX_ADVANCE_NOTE_BYTES
                                 })
                         })
                 }
@@ -1806,7 +1806,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         )
                 }) || fallback_settled(node, progress, document, checkpoint)
             }
-            NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {
+            NodeState::Failed if progress.advance_note.is_some() => last.is_none_or(|attempt| {
                 attempt.state == AttemptState::Terminal
                     && attempt
                         .outcome

@@ -254,8 +254,8 @@ fn a_contract_invalid_member_keeps_its_finding_through_verification_and_synthesi
             .map(|node| (
                 &node.id,
                 node.state,
-                &node.advance_error_code,
-                &node.advance_error
+                &node.advance_code,
+                &node.advance_note
             ))
             .collect::<Vec<_>>()
     );
@@ -267,7 +267,7 @@ fn a_contract_invalid_member_keeps_its_finding_through_verification_and_synthesi
         .unwrap();
     assert_eq!(invalid.state, NodeState::Failed);
     assert_eq!(
-        invalid.advance_error_code.as_deref(),
+        invalid.advance_code.as_deref(),
         Some("review_findings_invalid")
     );
     let output = run
@@ -367,7 +367,7 @@ fn invalid_propagation_cannot_alias_an_independent_sibling_finding() {
         .find(|node| node.id.ends_with("lenses--correctness"))
         .unwrap();
     assert_eq!(
-        invalid.advance_error_code.as_deref(),
+        invalid.advance_code.as_deref(),
         Some("review_propagation_invalid")
     );
     let synthesis = run
@@ -377,7 +377,7 @@ fn invalid_propagation_cannot_alias_an_independent_sibling_finding() {
         .find(|node| node.id.ends_with("--synthesis"))
         .unwrap();
     assert_eq!(
-        synthesis.advance_error_code.as_deref(),
+        synthesis.advance_code.as_deref(),
         Some("disposition_count")
     );
     let findings = &synthesis.outputs.as_ref().unwrap().findings;
@@ -414,7 +414,7 @@ fn typed_contract_rejects_invalid_verdicts_even_without_a_pass_requirement() {
             Some(GraphAttemptOutcome::TaskFailed)
         );
         assert_eq!(
-            progress.advance_error_code.as_deref(),
+            progress.advance_code.as_deref(),
             Some("review_verdict_invalid")
         );
         assert_eq!(
@@ -474,7 +474,7 @@ fn review_contract_accepts_verdict_followed_only_by_handoff() {
         progress.outputs.as_ref().unwrap().verdict.as_deref(),
         Some("VERDICT: FAIL")
     );
-    assert_eq!(progress.advance_error_code, None);
+    assert_eq!(progress.advance_code, None);
 }
 
 // Spec: docs/specs/run-settlement.md#settlement
@@ -523,7 +523,7 @@ fn review_contract_accepts_one_verdict_after_a_valid_closed_handoff() {
         progress.outputs.as_ref().unwrap().verdict.as_deref(),
         Some("VERDICT: PASS")
     );
-    assert_eq!(progress.advance_error_code, None);
+    assert_eq!(progress.advance_code, None);
 }
 
 /// A long review ending in one verdict, a blank line and a pretty-printed
@@ -584,7 +584,7 @@ fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
             "{source_truncated}"
         );
         assert_ne!(
-            progress.advance_error_code.as_deref(),
+            progress.advance_code.as_deref(),
             Some("review_verdict_invalid"),
             "{source_truncated}"
         );
@@ -592,7 +592,7 @@ fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
             progress.state == NodeState::Succeeded,
             !source_truncated,
             "{source_truncated}: {:?}",
-            progress.advance_error_code
+            progress.advance_code
         );
     }
 }
@@ -637,7 +637,7 @@ fn verifier_requires_a_reasoned_assessment_of_every_finding() {
             .unwrap();
         assert_eq!(progress.state, NodeState::Failed);
         assert_eq!(
-            progress.advance_error_code.as_deref(),
+            progress.advance_code.as_deref(),
             Some("verification_incomplete")
         );
         assert_eq!(
@@ -694,10 +694,10 @@ fn typed_contract_reports_malformed_findings_and_preserves_usable_entries() {
         let progress = &run.checkpoint.nodes[0];
         assert_eq!(progress.state, NodeState::Failed);
         assert_eq!(
-            progress.advance_error_code.as_deref(),
+            progress.advance_code.as_deref(),
             Some("review_findings_invalid"),
             "{bad} {:?}",
-            progress.advance_error
+            progress.advance_note
         );
         assert!(
             progress
@@ -730,7 +730,7 @@ fn lens_pass_conflicts_with_untriaged_boundary_and_default_path_findings() {
         };
         let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(
-            run.checkpoint.nodes[0].advance_error_code.as_deref(),
+            run.checkpoint.nodes[0].advance_code.as_deref(),
             Some("review_verdict_conflict"),
             "{class}"
         );
@@ -781,7 +781,7 @@ fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
             if verdict == "VERDICT: PASS" {
                 assert_eq!(progress.state, NodeState::Failed);
                 assert_eq!(
-                    progress.advance_error_code.as_deref(),
+                    progress.advance_code.as_deref(),
                     Some("review_verdict_conflict")
                 );
             } else {
@@ -982,7 +982,7 @@ fn realistic_aggregate_findings_do_not_require_overflow_proof() {
             run.checkpoint
                 .nodes
                 .iter()
-                .all(|node| node.advance_error_code.is_none()),
+                .all(|node| node.advance_code.is_none()),
             "{count}: {:?}",
             run.checkpoint.nodes
         );
@@ -1054,7 +1054,7 @@ fn below_minimum_review_keeps_returned_findings_on_replay() {
             .find(|node| node.id == "panel")
             .unwrap();
         assert_eq!(
-            boundary.advance_error_code.as_deref(),
+            boundary.advance_code.as_deref(),
             Some("coverage_below_minimum")
         );
         let output = boundary.outputs.as_ref().unwrap();
@@ -1204,7 +1204,7 @@ fn maximal_panel_verify_and_synthesis_prompts_fit_default_limits() {
         run.checkpoint
             .nodes
             .iter()
-            .all(|node| node.advance_error_code.is_none()),
+            .all(|node| node.advance_code.is_none()),
         "{:?}",
         run.checkpoint.nodes
     );

@@ -1741,9 +1741,9 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     assert_eq!(read().as_deref(), Some("first"));
     set(Some("second"));
     assert_eq!(read().as_deref(), Some("second"));
-    let long = "é".repeat(MAX_ADVANCE_ERROR_BYTES);
+    let long = "é".repeat(MAX_ADVANCE_NOTE_BYTES);
     set(Some(&long));
-    assert_eq!(read().unwrap().len(), MAX_ADVANCE_ERROR_BYTES);
+    assert_eq!(read().unwrap().len(), MAX_ADVANCE_NOTE_BYTES);
     set(None);
     assert_eq!(read(), None);
     set(None);

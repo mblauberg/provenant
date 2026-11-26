@@ -411,15 +411,15 @@ pub(super) fn graph_snapshot(
     } else {
         GraphStatus::Pending
     };
-    let advance_error = checkpoint
+    let advance_note = checkpoint
         .nodes
         .iter()
-        .find_map(|node| node.advance_error.clone());
+        .find_map(|node| node.advance_note.clone());
     GraphRun {
         status,
         outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
         checkpoint,
-        advance_error,
+        advance_note,
     }
 }
 

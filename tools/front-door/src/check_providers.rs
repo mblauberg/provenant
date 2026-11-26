@@ -352,7 +352,7 @@ fn settlement(row: &mut Row, run: &GraphRun) -> bool {
         row.error_code = node
             .advance_owner_code
             .clone()
-            .or_else(|| node.advance_error_code.clone());
+            .or_else(|| node.advance_code.clone());
         return true;
     }
     false
