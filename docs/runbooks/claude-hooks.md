@@ -61,8 +61,15 @@ find them.
 - `pre-compact` prints one instruction that Claude Code takes as guidance for
   the compaction summary: write an Intent section with each live ruling's wanted
   outcome, reason, rejected alternatives, open disagreement and uncertain
-  readings, and quote only authority grants or corrections. The hook only asks;
-  without a compliant summary, intent survives only if the chair saved it (see the
+  readings, and quote only authority grants or corrections. It also asks the
+  summary to state work done since the last checkpoint save as done and never
+  list a step the tail shows done as next, to treat the verbatim tail after the
+  summary as newer where they disagree, to list waits in flight with their
+  handles and what each blocks, to cite rulings saved in the checkpoint as 'see
+  checkpoint Intent' rather than replaying them, to drop items untouched for
+  24 h unless they are owner asks and move them to the tracker, and to keep the
+  summary under 12k characters. The hook only asks; without a compliant summary,
+  intent survives only if the chair saved it (see the
   [session skill](../../skills/session/SKILL.md)).
 
 ## Claude worktree hooks
