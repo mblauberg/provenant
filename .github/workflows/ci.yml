@@ -531,12 +531,16 @@ jobs:
         working-directory: tools/front-door
         run: cargo shear
 
+  # Expensive macOS jobs wait for the cheap Linux rust-lint gate: a change that
+  # does not compile fails there before a macOS runner is claimed. The skipped
+  # arm keeps a gated job running when rust-lint's own suite is covered by green
+  # evidence; scripts/check-ci-suites pins the dependency (docs/specs/ci.md).
   rust-macos-lint:
     name: Lint macOS Rust workspace
     runs-on: macos-15
     timeout-minutes: 20
-    needs: [scope]
-    if: fromJSON(needs.scope.outputs.suites).macos_lint == 'run'
+    needs: [scope, rust-lint]
+    if: ${{ (success() || needs.rust-lint.result == 'skipped') && fromJSON(needs.scope.outputs.suites).macos_lint == 'run' }}
     env:
       CARGO_INCREMENTAL: "0"
     permissions:
@@ -569,8 +573,8 @@ jobs:
     name: Build macOS test archive
     runs-on: macos-15
     timeout-minutes: 20
-    needs: [scope]
-    if: fromJSON(needs.scope.outputs.suites).macos_native == 'run'
+    needs: [scope, rust-lint]
+    if: ${{ (success() || needs.rust-lint.result == 'skipped') && fromJSON(needs.scope.outputs.suites).macos_native == 'run' }}
     env:
       CARGO_INCREMENTAL: "0"
     permissions:
@@ -831,8 +835,8 @@ jobs:
     name: Rust macOS release smoke
     runs-on: macos-15
     timeout-minutes: 20
-    needs: scope
-    if: fromJSON(needs.scope.outputs.suites).macos_release == 'run'
+    needs: [scope, rust-lint]
+    if: ${{ (success() || needs.rust-lint.result == 'skipped') && fromJSON(needs.scope.outputs.suites).macos_release == 'run' }}
     permissions:
       contents: read
     steps:
