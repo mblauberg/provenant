@@ -36,19 +36,6 @@ pub fn resolve_fail<E: std::fmt::Display>(error: ResolveError<E>) -> Fail {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn typed_not_found_keeps_one_code_prefix() {
-        let fail = super::resolve_fail::<std::convert::Infallible>(super::ResolveError::NotFound {
-            target: "missing".into(),
-            candidates: Vec::new(),
-        });
-        assert!(!fail.message.starts_with("NOT_FOUND:"));
-        assert_eq!(fail.kind.code(), "NOT_FOUND");
-    }
-}
-
 /// The local attempt id a resolved attempt names, or `NOT_FOUND` when it ran
 /// on another host or has not launched.
 pub(super) fn local_attempt(

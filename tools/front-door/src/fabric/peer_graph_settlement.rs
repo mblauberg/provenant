@@ -803,7 +803,6 @@ fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error
         mut attempt,
         presence,
         lane_waits,
-        presence,
         extra,
     } = status
     else {
@@ -813,7 +812,6 @@ fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error
         extra,
         presence,
         lane_waits,
-        presence,
         attempt: attempt.clone(),
     })?;
     assert!(status["attempt"].get("usage").is_some());

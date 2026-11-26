@@ -573,7 +573,6 @@ fn graph_peer_status_preserves_typed_wait_facts() -> Result<(), Box<dyn std::err
         attempt: peer_attempt,
         presence,
         lane_waits: peer_waits,
-        presence,
         ..
     } = decoded
     else {
