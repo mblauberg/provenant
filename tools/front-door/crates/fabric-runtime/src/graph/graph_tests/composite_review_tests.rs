@@ -391,6 +391,25 @@ fn blocked_environment_lens_settles_the_panel_and_names_the_gap() {
     assert_eq!(post.state, NodeState::Succeeded);
     assert!(owner.prompts[3].contains("blocked_environment"), "{}", owner.prompts[3]);
     assert_eq!(run.outcome, Some(GraphOutcome::Partial));
+    // A blocked lens does not excuse incomplete findings from a finished lens.
+    let mut blocked_again = terminal_with_result(GraphAttemptOutcome::DeclaredStop, blocked);
+    if let AttemptObservation::Terminal { stop, .. } = &mut blocked_again {
+        *stop = Some(provenant_records::StopCause::BlockedEnvironment);
+    }
+    let mut incomplete_owner = FakeOwner {
+        observations: [
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: PASS\n"),
+            blocked_again,
+            terminal_with_result(GraphAttemptOutcome::Succeeded, clean),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "posted"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let incomplete = advance(&document, &mut incomplete_owner, &mut MemoryJournal::default())
+        .unwrap();
+    let incomplete_panel = incomplete.checkpoint.nodes.iter().find(|node| node.id == "panel").unwrap();
+    assert_eq!(incomplete_panel.outputs.as_ref().unwrap().findings_available, Some(false));
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
             .unwrap()

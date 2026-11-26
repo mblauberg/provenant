@@ -672,6 +672,7 @@ fn outputs(
     let mut truncation_warning_indices = Vec::new();
     let partial = spec.min_successful.is_some() || spec.reduce_verdict;
     let unavailable = unavailable(spec, plan, checkpoint, positions);
+    let postable_gap = blocked_environment_gap(spec, plan, checkpoint, positions);
     let missing_review_lenses = if spec.soft_review_coverage {
         missing_review_lenses(boundary, plan, checkpoint, positions)
     } else {
@@ -681,8 +682,12 @@ fn outputs(
         .exports
         .iter()
         .filter(|export| {
+            // A named blocked lens has no findings to export; completeness
+            // still requires every remaining export to supply its findings.
             export.outputs.contains(&OutputKind::Findings)
                 && !repair::intentionally_skipped_lens(positions[&export.node], plan, checkpoint)
+                && !(postable_gap
+                    && checkpoint.nodes[positions[&export.node]].state == NodeState::Failed)
         })
         .collect();
     if !finding_exports.is_empty() {
@@ -839,7 +844,6 @@ fn outputs(
         .exports
         .iter()
         .any(|export| template::review_behaviour(&plan.nodes[positions[&export.node]]).is_some());
-    let postable_gap = blocked_environment_gap(spec, plan, checkpoint, positions);
     if review::partial(&selected)
         || (!postable_gap
             && ((!unavailable.is_empty() && review_members) || !missing_review_lenses.is_empty()))

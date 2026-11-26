@@ -345,8 +345,10 @@ evidence, marks its verdict inconclusive unless blocking findings require
 changes, and names unavailable lenses in its result and coverage warning. A
 lens whose sealed stop is `blocked_environment` is unavailable evidence rather
 than a finished review: the panel settles on the lenses that did finish, names
-that lens and its cause as a gap, and keeps its complete findings so a posting
-step can report the gap. No same-route retry or chair pause answers that lens.
+that lens and its cause as a gap, and keeps findings available when every
+finished exporting lens supplied complete findings, so a posting step can
+report the gap. Missing findings from a finished lens remain unavailable. No
+same-route retry or chair pause answers the blocked lens.
 A shortfall warns; a project floor declaring `hard = true` refuses when required
 lenses or the reviewer minimum are missing.
 - Why: an unavailable reviewer must not discard useful evidence, while a project
