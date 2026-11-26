@@ -97,9 +97,10 @@ unverified lifecycle fields to classify a corrupt record as settled.
 
 `GraphDocument.subject` is additive: the host writes the admitted `PinnedSubject`
 at admission and overwrites any caller-supplied value, and its serialisation is
-skipped when absent so older execution digests stay byte-identical. There is no
-`CHECKPOINT_SCHEMA_VERSION` bump. `GraphCheckpoint.subject` is a serde-skipped
-projection hydrated from the execution on reload and shown under
+skipped when absent so older execution digests stay byte-identical. A document
+with a subject uses graph schema v2; schema v1 cannot represent subject
+provenance. There is no `CHECKPOINT_SCHEMA_VERSION` bump. `GraphCheckpoint.subject`
+is a serde-skipped projection hydrated from the execution on reload and shown under
 `checkpoint.subject` in status; it is never stored on its own. Graphs already in
 flight at upgrade load with `subject` absent and status omits the field.
 

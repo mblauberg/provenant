@@ -5235,7 +5235,12 @@ fn graph_writer_restart_case(alternative: bool, dirty: bool) -> Result {
 
 /// A real owner observation must retain a non-adapter preparation refusal.
 fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
-    let rig = policy_codex_fixture()?;
+    let mut rig = policy_codex_fixture()?;
+    let assets = rig.root.join("product-assets");
+    fs::create_dir(&assets)?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
+    rig.env
+        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
     let _cleanup = rig.process_cleanup();
     let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
     let committed = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;

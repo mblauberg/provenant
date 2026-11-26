@@ -353,7 +353,7 @@ fn malformed_graph_refuses_unlisted_outputs_without_disclosing_prompt() -> Resul
             "id": "inner", "kind": "composite", "access": "read_only",
             "composite": {
                 "nodes": [{"id":"look", "prompt":"PROMPT_SENTINEL", "access":"read_only", "route":{"alias":"senior"}}],
-                "exports": [{"node":"look", "outputs":["result", "commit"]}]
+                "exports": [{"node":"look", "outputs":["result", "unlisted"]}]
             }
         }]
     }))?;

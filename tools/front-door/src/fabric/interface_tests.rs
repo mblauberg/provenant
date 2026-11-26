@@ -2207,7 +2207,16 @@ fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
         assert_eq!(attached["timed_out"], false);
         let checkpoint: graph::GraphCheckpoint =
             serde_json::from_value(attached["checkpoint"].clone())?;
-        assert_eq!(checkpoint, first.checkpoint);
+        let mut comparable = checkpoint.clone();
+        comparable.extra.remove("subject");
+        assert_eq!(comparable, first.checkpoint);
+        assert_eq!(
+            checkpoint.extra["subject"]["head"],
+            first.checkpoint.nodes[0]
+                .source_commit
+                .as_deref()
+                .unwrap_or_default()
+        );
         let attempts: Vec<_> = checkpoint
             .nodes
             .iter()
@@ -3112,7 +3121,9 @@ fn writer_base_knob_resolves_the_sole_remote_and_launch_base_wins() -> Result {
     }
     let provisioned = |response: &Value| {
         let mut bases = Vec::new();
-        provisioning_bases(&response["document"], &mut bases);
+        // `submission_patch` mirrors the canonical document nodes. Count the
+        // admitted provision once, from the canonical node list.
+        provisioning_bases(&response["document"]["nodes"], &mut bases);
         bases
     };
 
@@ -3250,12 +3261,15 @@ fn default_branch_pins_the_forge_default_not_the_feature_upstream() -> Result {
             "the tracking upstream is not the default branch: {chosen}"
         );
     }
-    // With no source setting the advisory pin keeps this level checkout.
+    // With no source setting the admission subject pins this level checkout.
     let automatic = submit(None, None)?;
-    assert!(
-        automatic["document"]["nodes"][0]["source"].is_null(),
-        "{automatic}"
+    assert_eq!(
+        automatic["document"]["nodes"][0]["source"]["commit"],
+        json!(feature),
+        "automatic admission pins the observed checkout subject: {automatic}"
     );
+    assert_eq!(automatic["subject"]["head"], json!(feature));
+    assert_eq!(automatic["subject"]["origin"]["name"], "feature");
     Ok(())
 }
 
@@ -5196,9 +5210,10 @@ fn one_subject_per_origin_survives_a_push() -> Result {
         )?
         .ok_or("reloaded checkpoint")?;
         assert_eq!(reloaded.subject, Some(expected.clone()), "{index}");
-        let wire = serde_json::to_value(&reloaded)?;
+        let subject = reloaded.subject.as_ref().ok_or("reloaded subject")?;
+        let wire = serde_json::to_value(subject)?;
         assert!(
-            wire["subject"]["policy_source"]["layer"].is_string(),
+            wire["policy_source"]["layer"].is_string(),
             "every admitted subject names its policy source: {index}: {wire}"
         );
     }

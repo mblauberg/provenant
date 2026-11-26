@@ -439,6 +439,11 @@ fn peer_reader_is_pinned_to_the_initiator_subject() -> TestResult {
         graph,
     )?
     .ok_or("receiver graph missing")?;
+    assert_eq!(execution.document.schema_version, 2);
+    assert_eq!(
+        execution.document.subject.as_ref().map(|subject| subject.head),
+        Some(head.parse()?)
+    );
     let node = execution.document.nodes.first().ok_or("receiver node")?;
     let bound = node.source.as_ref().and_then(|binding| match binding {
         // This module is also compiled under `feature = "fixture"` without

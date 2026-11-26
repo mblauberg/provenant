@@ -1346,24 +1346,24 @@ mod tests {
         let pr_head_policy = field("domains.wait.pr_head_policy");
         assert_eq!(
             (pr_head_policy.kind, &pr_head_policy.default),
-            ("string", &json!("pinned"))
+            ("enum", &json!("pinned"))
         );
         let pr_head_source = field("domains.wait.pr_head_source");
         assert_eq!(
             (pr_head_source.kind, &pr_head_source.default),
-            ("string", &json!("auto"))
+            ("enum", &json!("auto"))
         );
         let pr_head_unpinned = field("domains.wait.pr_head_unpinned");
         assert_eq!(
             (pr_head_unpinned.kind, &pr_head_unpinned.default),
-            ("string", &json!("first_sample"))
+            ("enum", &json!("first_sample"))
         );
         for path in [
             "domains.wait.projects.{project}.pr_head_policy",
             "domains.wait.projects.{project}.pr_head_source",
             "domains.wait.projects.{project}.pr_head_unpinned",
         ] {
-            assert_eq!(field(path).kind, "string");
+            assert_eq!(field(path).kind, "enum");
         }
         let idle = field("gc.idle");
         assert_eq!(

@@ -16,6 +16,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+const IGNORED_PR_WARNING: &str = "--pr was ignored: the selected template does not accept a review range; using the default review subject (source: template review range)";
+
 /// How a read-only lane sees its tree. `Pinned` binds an exact commit; `Live`
 /// keeps the checkout's working tree, which is only valid on the local host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,9 +251,7 @@ impl Factory {
         if ignored_pr {
             expected_head = None;
         }
-        let ignored_warning = ignored_pr.then(|| {
-            "--pr was ignored: the selected template does not accept a review range; using the default review subject (source: template review range)".to_owned()
-        });
+        let ignored_warning = ignored_pr.then(|| IGNORED_PR_WARNING.to_owned());
         if expected_head.is_some() && pr.is_none() {
             return Err(graph_subject_error("--head requires --pr"));
         }
@@ -564,6 +564,9 @@ impl Factory {
                 read_pin: None,
                 writer_warnings,
             });
+        }
+        if input.get("pr").is_some_and(|value| !value.is_null()) {
+            warnings.push(IGNORED_PR_WARNING.to_owned());
         }
         // Every other graph also resolves its one read source here: whether
         // the launch writes is known only once its template resolves, so the

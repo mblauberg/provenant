@@ -1580,17 +1580,19 @@ fn peer_smoke_fixture_create_and_remove_without_a_staged_fixture() -> Result {
     let host = identity["data"]["host"].as_str().ok_or("host")?.to_owned();
     let source = next_host(host.parse()?)?;
     configure_fixture_peer(&rig, source)?;
-    let key = identity["data"]["federation"]["key"]
-        .as_str()
-        .ok_or("project key")?
-        .to_owned();
-
     // A hermetic smoke fixture is named by a nonce under a home-relative root.
     // No caller checkout or staged fixture is carried on the wire: the peer
     // builds the same deterministic repository for the same nonce.
     let nonce = "0123456789ab";
     let root = ".local/state/provenant-smoke";
     let common = format!("{root}/{nonce}/.git");
+    let common_path = rig.home.join(&common);
+    let key = provenant_fabric_runtime::identity::CrossHostProjectKey::from_home(
+        &rig.home,
+        &common_path,
+    )?
+    .as_str()
+    .to_owned();
     let request = |action: Value| {
         json!({
             "version": 1, "protocol": SMOKE_FIXTURE_PROTOCOL,

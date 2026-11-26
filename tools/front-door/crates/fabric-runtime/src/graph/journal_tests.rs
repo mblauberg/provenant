@@ -2875,8 +2875,8 @@ fn bind_refuses_a_subject_that_disagrees_with_the_bound_review_base() {
         &clock,
     )
     .unwrap();
-    assert!(matches!(
-        disagreeing.bind(make_execution("g-disagree", &"b".repeat(40))),
-        Err(JournalError::BadEnvelope)
-    ));
+    let error = disagreeing
+        .bind(make_execution("g-disagree", &"b".repeat(40)))
+        .expect_err("a subject base must agree with the bound review base");
+    assert!(matches!(error.root_cause(), JournalError::BadEnvelope));
 }

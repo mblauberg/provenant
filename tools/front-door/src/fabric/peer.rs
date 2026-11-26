@@ -1611,7 +1611,8 @@ pub(crate) fn peer_submit_graph(
         None
     };
     let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":graph,"template_library":{},"exclude":exclude,
+        "schema_version":if task.subject.is_some() { 2 } else { 1 },
+        "graph_id":graph,"template_library":{},"exclude":exclude,
         "nodes":[{"id":node,"access":mode,"prompt":task.prompt,"title":task.title,
           "worktree":worktree,"route":route,"attempt":attempt,"context":origin,
           "require_skill_location":task.require_skill_location,
