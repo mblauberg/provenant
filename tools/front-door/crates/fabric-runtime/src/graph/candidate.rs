@@ -202,6 +202,7 @@ fn admit(
         }
     }
     validate_schema(document).map_err(CandidateError::from_admission)?;
+    validate_delivery_contracts(document).map_err(CandidateError::from_admission)?;
     let expanded = plans::expand_typed(document, &all, expansions, &generous)
         .map_err(CandidateError::from_admission)?;
     // Route models are canonicalised once by the host entry point that holds

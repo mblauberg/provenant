@@ -77,6 +77,7 @@ fn completion_report_retains_every_failed_check_and_link() {
     let check = |name: &str, bucket: &str, url: &str| super::super::observer::Check {
         head: "head".into(),
         name: name.into(),
+        job_id: None,
         bucket: bucket.into(),
         app: None,
         app_slug: None,
@@ -114,6 +115,7 @@ fn pending_check_names_survive_the_status_line_and_render() {
     let check = |name: &str, bucket: &str| super::super::observer::Check {
         head: "head".into(),
         name: name.into(),
+        job_id: None,
         bucket: bucket.into(),
         app: None,
         app_slug: None,
@@ -296,6 +298,7 @@ fn a_head_with_only_a_pending_selector_waits_for_the_aggregate_check() {
     let check = |name: &str, bucket: &str| super::super::observer::Check {
         head: "head".into(),
         name: name.into(),
+        job_id: None,
         bucket: bucket.into(),
         app: None,
         app_slug: None,
@@ -491,6 +494,7 @@ fn failed_policy_lookup_uses_all_reported_checks() {
     for (bucket, expected) in [("fail", CiState::Failed), ("pending", CiState::Pending)] {
         let observation = observe_ci_with(
             &[],
+            false,
             || None,
             || {
                 Some(vec![Check {
@@ -503,15 +507,26 @@ fn failed_policy_lookup_uses_all_reported_checks() {
         assert_eq!(observation.state, expected);
         assert!(observation.summary.contains("policy=all-reported"));
     }
-    let empty = observe_ci_with(&[], || None, || Some(vec![]), || None);
+    let empty = observe_ci_with(&[], false, || None, || Some(vec![]), || None);
     assert_eq!(empty.state, CiState::NotScheduled);
     assert!(empty.summary.contains("next:"));
-    let conflict = observe_ci_with(&[], || None, || Some(vec![]), || Some("CONFLICTING".into()));
+    let conflict = observe_ci_with(
+        &[],
+        false,
+        || None,
+        || Some(vec![]),
+        || Some("CONFLICTING".into()),
+    );
     assert_eq!(conflict.state, CiState::Conflict);
-    assert!(conflict.summary.contains("next: rebase"));
-    // A failed head stays failed even when the base also conflicts.
+    assert!(
+        conflict
+            .summary
+            .contains("next: merge the base into the branch; never rebase pushed history")
+    );
+    // A conflict gate runs before CI even if stale check evidence is present.
     let failed = observe_ci_with(
         &[],
+        false,
         || None,
         || {
             Some(vec![Check {
@@ -521,7 +536,32 @@ fn failed_policy_lookup_uses_all_reported_checks() {
         },
         || Some("CONFLICTING".into()),
     );
-    assert_eq!(failed.state, CiState::Failed);
+    assert_eq!(failed.state, CiState::Conflict);
+    assert!(
+        failed
+            .summary
+            .contains("next: merge the base into the branch; never rebase pushed history")
+    );
+
+    let unreadable_queue_policy = observe_ci_with(
+        &[],
+        true,
+        || None,
+        || {
+            Some(vec![Check {
+                name: "build".into(),
+                bucket: "pass".into(),
+            }])
+        },
+        || None,
+    );
+    assert_eq!(unreadable_queue_policy.state, CiState::Pending);
+    assert!(unreadable_queue_policy.failed_checks.is_empty());
+    assert!(
+        unreadable_queue_policy
+            .summary
+            .contains("policy=required-unavailable")
+    );
 }
 
 #[test]

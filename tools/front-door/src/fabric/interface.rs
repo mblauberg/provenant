@@ -5,19 +5,91 @@ use super::writer_base::{
 };
 use super::*;
 use provenant_fabric_runtime::graph::{
-    FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, Template, TemplateLibrary,
+    FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, QueueKnobs, Template,
+    TemplateLibrary,
     patch::{self, LiveGraph, Patch, PatchContext},
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+
+pub(super) mod observation;
+pub(super) use observation::wait_submission;
+use observation::{launch_retry_due, observation_clock_error, wait_graph_updates};
 
 /// A `wait_seconds` that is not a usable wait budget.
 fn wait_seconds_invalid() -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into()))
 }
 
-fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
+pub(super) fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
+}
+
+pub(super) fn seal_delivery_queue_knobs(
+    config: &provenant_fabric_runtime::config::QueueConfig,
+    origins: &BTreeMap<String, provenant_config::Origin>,
+    authored: Option<&QueueKnobs>,
+) -> Result<QueueKnobs, FacadeError> {
+    use provenant_fabric_runtime::graph::template::seal_queue_knobs;
+    use provenant_fabric_runtime::graph::{
+        QUEUE_CI_SLOTS_KEY, QUEUE_MAX_PARALLEL_KEY, QUEUE_PREP_RETRIES_KEY,
+    };
+    use provenant_records::{Layer, Sourced};
+
+    let mut candidates = BTreeMap::<&str, Vec<Sourced<usize>>>::new();
+    for (key, value) in [
+        (QUEUE_MAX_PARALLEL_KEY, config.max_parallel),
+        (QUEUE_CI_SLOTS_KEY, config.ci_slots),
+        (QUEUE_PREP_RETRIES_KEY, config.prep_retries),
+    ] {
+        let source = provenant_cli::config_reads::origin_source(origins.get(key), key);
+        if matches!(source.layer, Layer::Host | Layer::Project) {
+            candidates
+                .entry(key)
+                .or_default()
+                .push(Sourced { value, source });
+        }
+    }
+    if let Some(authored) = authored {
+        for (key, value) in [
+            (QUEUE_MAX_PARALLEL_KEY, authored.max_parallel.clone()),
+            (QUEUE_CI_SLOTS_KEY, authored.ci_slots.clone()),
+            (QUEUE_PREP_RETRIES_KEY, authored.prep_retries.clone()),
+        ] {
+            candidates.entry(key).or_default().push(value);
+        }
+    }
+    let knobs = seal_queue_knobs(&candidates);
+    knobs.validate().map_err(graph_input_reason)?;
+    Ok(knobs)
+}
+
+fn seal_document_queue(
+    document: &mut GraphDocument,
+    config: Option<(
+        &provenant_fabric_runtime::config::QueueConfig,
+        &BTreeMap<String, provenant_config::Origin>,
+    )>,
+    config_error: Option<&str>,
+) -> Result<(), FacadeError> {
+    let Some(authored) = document.queue.clone() else {
+        return Ok(());
+    };
+    let sealed = match config {
+        Some((queue_config, origins)) => {
+            seal_delivery_queue_knobs(queue_config, origins, Some(&authored))?
+        }
+        None => {
+            warn_operator(format!(
+                "delivery queue configuration unavailable; using compiled defaults: {}",
+                config_error.unwrap_or("unknown configuration error")
+            ));
+            seal_delivery_queue_knobs(&Default::default(), &BTreeMap::new(), Some(&authored))?
+        }
+    };
+    document.queue = Some(sealed);
+    document.schema_version = document.schema_version.max(2);
+    Ok(())
 }
 
 // Preserve the parser's field path and message for actionable diagnostics.
@@ -125,295 +197,6 @@ fn required<'a>(input: &'a Value, field: &str) -> Result<&'a str, FacadeError> {
         .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field(field.into())))
 }
 
-fn graph_run_has_remote_pending(
-    run: &provenant_fabric_runtime::graph::GraphRun,
-    local_host: Option<provenant_core::HostId>,
-    target: Option<&super::unified::GraphTarget>,
-) -> bool {
-    use provenant_fabric_runtime::graph::AttemptState;
-    run.checkpoint
-        .nodes
-        .iter()
-        .filter(|node| {
-            target.is_none_or(|target| {
-                target
-                    .node
-                    .as_ref()
-                    .is_none_or(|id| &node.id == id || node.subtree_cancel.as_deref() == Some(id))
-            })
-        })
-        .flat_map(|node| node.recorded_attempts())
-        .filter(|attempt| {
-            attempt.state != AttemptState::Terminal
-                && target
-                    .and_then(|target| target.attempt.as_deref())
-                    .is_none_or(|reference| attempt.attempt_ref.as_deref() == Some(reference))
-        })
-        .any(|attempt| {
-            let Some(reference) = attempt.attempt_ref.as_deref() else {
-                return false;
-            };
-            let Some(local_host) = local_host.as_ref() else {
-                return true;
-            };
-            !reference
-                .split_once('/')
-                .and_then(|(owner, _)| owner.parse::<provenant_core::HostId>().ok())
-                .is_some_and(|owner| &owner == local_host)
-        })
-}
-
-fn observation_clock_error(error: provenant_core::TimeError) -> FacadeError {
-    FacadeError::StateCorruptDetail {
-        detail: format!("graph observation clock: {error}"),
-    }
-}
-
-fn next_launch_retry_delay(
-    run: &provenant_fabric_runtime::graph::GraphRun,
-    clock: &(impl provenant_core::Clock + ?Sized),
-) -> Result<Option<std::time::Duration>, provenant_core::TimeError> {
-    let wake_at = run
-        .checkpoint
-        .nodes
-        .iter()
-        .filter_map(|node| node.launch_retry.as_ref()?.wake_at)
-        .min();
-    let Some(wake_at) = wake_at else {
-        return Ok(None);
-    };
-    let now = clock.wall_now()?;
-    Ok(Some(std::time::Duration::from_micros(
-        wake_at.as_micros().saturating_sub(now.as_micros()).max(0) as u64,
-    )))
-}
-
-fn launch_retry_due(
-    run: &provenant_fabric_runtime::graph::GraphRun,
-    clock: &(impl provenant_core::Clock + ?Sized),
-) -> Result<bool, provenant_core::TimeError> {
-    let wake_at = run
-        .checkpoint
-        .nodes
-        .iter()
-        .filter_map(|node| node.launch_retry.as_ref()?.wake_at)
-        .min();
-    let Some(wake_at) = wake_at else {
-        return Ok(false);
-    };
-    Ok(clock.wall_now()? >= wake_at)
-}
-
-pub(super) fn graph_wait_needs_refresh(
-    wake: crate::status_wait::ObservationWake,
-    launch_retry_due: bool,
-) -> bool {
-    use crate::status_wait::ObservationWake;
-    match wake {
-        ObservationWake::Changed | ObservationWake::PacedFallback => true,
-        ObservationWake::NativeTimeout => launch_retry_due,
-        ObservationWake::Woken | ObservationWake::Cancelled => false,
-    }
-}
-
-#[derive(Default)]
-struct GraphObservationHistory {
-    remote_source_seen: bool,
-    reader_woken: bool,
-}
-impl GraphObservationHistory {
-    fn record(
-        &mut self,
-        run: &provenant_fabric_runtime::graph::GraphRun,
-        local_host: Option<provenant_core::HostId>,
-        target: Option<&super::unified::GraphTarget>,
-    ) -> bool {
-        let remote_pending = graph_run_has_remote_pending(run, local_host, target);
-        self.remote_source_seen |= remote_pending;
-        remote_pending
-    }
-
-    fn report(&self, observation: &crate::status_wait::LocalObservation) -> String {
-        observation.report(self.remote_source_seen)
-    }
-}
-
-fn interval_micros(interval: std::time::Duration) -> u64 {
-    u64::try_from(interval.as_micros()).unwrap_or(u64::MAX)
-}
-
-pub(super) fn next_remote_deadline(
-    previous: Option<u64>,
-    remote_pending: bool,
-    remote_due: bool,
-    now: u64,
-    interval: u64,
-) -> Option<u64> {
-    if !remote_pending {
-        None
-    } else if previous.is_none() || remote_due {
-        Some(now.saturating_add(interval))
-    } else {
-        previous
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
-    mut run: provenant_fabric_runtime::graph::GraphRun,
-    wait: WaitBudget,
-    clock: &C,
-    cancel: &CancelToken,
-    observation: &mut crate::status_wait::LocalObservation,
-    local_host: Option<provenant_core::HostId>,
-    remote_target: Option<&super::unified::GraphTarget>,
-    watch_launch_retries: bool,
-    mut active: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> bool,
-    mut observe: impl FnMut(
-        &provenant_fabric_runtime::graph::GraphRun,
-    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
-    mut observe_remote: impl FnMut(
-        &provenant_fabric_runtime::graph::GraphRun,
-    ) -> Result<(), FacadeError>,
-) -> Result<
-    (
-        provenant_fabric_runtime::graph::GraphRun,
-        GraphObservationHistory,
-    ),
-    FacadeError,
-> {
-    use crate::status_wait::ObservationWake;
-    let interval = observation.interval();
-    let mut history = GraphObservationHistory::default();
-    let mut remote_pending = history.record(&run, local_host, remote_target);
-    let mut remote_deadline = next_remote_deadline(
-        None,
-        remote_pending,
-        false,
-        clock.mono_now().as_micros(),
-        interval_micros(interval),
-    );
-
-    // The observer is registered before this refresh, closing the race between
-    // submission/stop and the first status read.
-    if active(&run) && !cancel.is_cancelled() && wait.remaining(clock.mono_now()).as_micros() > 0 {
-        run = observe(&run)?;
-        remote_pending = history.record(&run, local_host, remote_target);
-        if remote_pending {
-            observe_remote(&run)?;
-        }
-        remote_deadline = next_remote_deadline(
-            remote_deadline,
-            remote_pending,
-            remote_pending,
-            clock.mono_now().as_micros(),
-            interval_micros(interval),
-        );
-    }
-
-    while active(&run) && !cancel.is_cancelled() {
-        let now = clock.mono_now();
-        let remaining = wait.remaining(now).as_micros();
-        if remaining == 0 {
-            break;
-        }
-        let retry_due = watch_launch_retries
-            && launch_retry_due(&run, clock).map_err(observation_clock_error)?;
-        let remote_due = remote_deadline.is_some_and(|deadline| now.as_micros() >= deadline);
-        if retry_due || remote_due {
-            if retry_due {
-                run = observe(&run)?;
-                remote_pending = history.record(&run, local_host, remote_target);
-            }
-            if remote_due && remote_pending {
-                observe_remote(&run)?;
-            }
-            remote_deadline = next_remote_deadline(
-                remote_deadline,
-                remote_pending,
-                remote_due,
-                clock.mono_now().as_micros(),
-                interval_micros(interval),
-            );
-            continue;
-        }
-
-        let mut maximum_micros = remaining;
-        if watch_launch_retries
-            && let Some(delay) =
-                next_launch_retry_delay(&run, clock).map_err(observation_clock_error)?
-        {
-            maximum_micros = maximum_micros.min(interval_micros(delay));
-        }
-        if let Some(deadline) = remote_deadline {
-            maximum_micros = maximum_micros.min(deadline.saturating_sub(now.as_micros()));
-        }
-        let wake = observation
-            .wait(
-                std::time::Duration::from_micros(maximum_micros),
-                cancel,
-                clock,
-            )
-            .map_err(|error| FacadeError::StateCorruptDetail {
-                detail: format!("graph observation clock: {error}"),
-            })?;
-        if matches!(wake, ObservationWake::Woken | ObservationWake::Cancelled) {
-            history.reader_woken = true;
-            break;
-        }
-        if wait.remaining(clock.mono_now()).as_micros() == 0 {
-            break;
-        }
-        let now = clock.mono_now();
-        let retry_due = watch_launch_retries
-            && launch_retry_due(&run, clock).map_err(observation_clock_error)?;
-        let remote_due = remote_deadline.is_some_and(|deadline| now.as_micros() >= deadline);
-        if graph_wait_needs_refresh(wake, retry_due) {
-            run = observe(&run)?;
-            remote_pending = history.record(&run, local_host, remote_target);
-        }
-        if remote_due && remote_pending {
-            observe_remote(&run)?;
-        }
-        remote_deadline = next_remote_deadline(
-            remote_deadline,
-            remote_pending,
-            remote_due,
-            clock.mono_now().as_micros(),
-            interval_micros(interval),
-        );
-    }
-    Ok((run, history))
-}
-
-/// Observe a submitted graph within the caller's original wait budget.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn wait_submission<C: provenant_core::Clock + ?Sized>(
-    run: provenant_fabric_runtime::graph::GraphRun,
-    wait: WaitBudget,
-    clock: &C,
-    cancel: &CancelToken,
-    observation: &mut crate::status_wait::LocalObservation,
-    local_host: Option<provenant_core::HostId>,
-    mut observe: impl FnMut(&str) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
-    observe_remote: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> Result<(), FacadeError>,
-) -> Result<(provenant_fabric_runtime::graph::GraphRun, String, bool), FacadeError> {
-    let (run, history) = wait_graph_updates(
-        run,
-        wait,
-        clock,
-        cancel,
-        observation,
-        local_host,
-        None,
-        true,
-        |run| run.status == GraphStatus::Pending,
-        |run| observe(&run.checkpoint.graph_id),
-        observe_remote,
-    )?;
-    Ok((run, history.report(observation), !history.reader_woken))
-}
-
 fn control_receipt_unfinished(
     run: &provenant_fabric_runtime::graph::GraphRun,
     target: &super::unified::GraphTarget,
@@ -437,7 +220,7 @@ fn control_receipt_unfinished(
 }
 
 /// Attempt settings are reserved launch controls, not template parameters.
-fn launch_input(input: &Value) -> Result<Value, FacadeError> {
+pub(super) fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     let mut input = input.clone();
     let invalid = || FacadeError::invalid(InvalidInputDetail::Field("attempt".into()));
     let mut attempt = input.get("attempt").cloned().unwrap_or_else(|| json!({}));
@@ -552,6 +335,8 @@ fn override_launch(
             provenant_fabric_runtime::graph::NodeKind::Gate
                 | provenant_fabric_runtime::graph::NodeKind::Decide
                 | provenant_fabric_runtime::graph::NodeKind::Land
+                | provenant_fabric_runtime::graph::NodeKind::Hygiene
+                | provenant_fabric_runtime::graph::NodeKind::Publish
         )
     ) {
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("route".into()));
@@ -1547,6 +1332,13 @@ impl Factory {
         use provenant_fabric_runtime::graph::relay::{ChildLaunch, ChildRequest};
         let input = self.apply_pr_repair(launch_input(input)?)?;
         let input = &input;
+        if input.get("template").and_then(Value::as_str) == Some("deliver")
+            && input.get("over").is_some_and(|value| !value.is_null())
+        {
+            return Err(graph_input_reason(
+                "deliver --over is only supported by the top-level durable queue dispatcher",
+            ));
+        }
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("document".into()));
         let raw = input.get("document").filter(|value| !value.is_null());
         if raw.is_some_and(|value| !value.is_object()) {
@@ -1658,6 +1450,7 @@ impl Factory {
                 None => json!({"use":"task"}),
             }
         };
+        // Top-level queue selectors are dispatched before this nested-run compiler.
         let library = self.template_library(Some(&inline))?;
         let template_name = input
             .get("template")
@@ -1932,7 +1725,21 @@ impl Factory {
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
+        if input.get("queue_control").is_some() {
+            if self.context.in_lane || self.context.inspection_only {
+                return Err(FacadeError::ConfinementRefused { resource: None });
+            }
+            return super::queue_controls::handle_graph_operation(self, input, budget, cancel);
+        }
         let operation = required(&input, "op")?;
+        if operation == "run"
+            && input.get("template").and_then(Value::as_str) == Some("deliver")
+            && input.get("over").is_some_and(|value| !value.is_null())
+        {
+            return Err(graph_input_reason(
+                "deliver --over must enter through the top-level durable queue dispatcher",
+            ));
+        }
         let warnings = if matches!(operation, "edit" | "retry") {
             self.graph_input_warnings(&input)?
         } else {
@@ -2073,8 +1880,103 @@ impl Factory {
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
+        if super::queue_dispatch::is_queue_submission(input) {
+            return super::queue_dispatch::submit_queue(self, input, budget, cancel, announce);
+        }
         let submitted = input;
-        let mut input = self.apply_pr_repair(launch_input(input)?)?;
+        let prepared = launch_input(input)?;
+        let queue_launch = if prepared.get("queue_item").is_some() {
+            let registry =
+                super::queue_registry::QueueRegistry::open(self.context.roots.state.as_path())
+                    .map_err(|_| FacadeError::StateCorrupt)?;
+            let project = self.context.identity.project.to_string();
+            let execution_directory = self.cwd.to_string_lossy().into_owned();
+            Some(
+                registry
+                    .authorise_launch(
+                        &project,
+                        &execution_directory,
+                        &prepared,
+                        budget,
+                        cancel,
+                        &self.clock,
+                    )
+                    .map_err(|_| FacadeError::Conflict)?,
+            )
+        } else {
+            None
+        };
+        let queue_replay_digest = queue_launch
+            .as_ref()
+            .map(|_| submission_digest(&prepared, None, None))
+            .transpose()?;
+        if let Some(launch) = &queue_launch
+            && let Some(execution) = FileJournal::execution(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &launch.item.graph_id,
+            )
+            .map_err(graph_journal_error)?
+        {
+            if !super::queue_scheduler::matches_item_execution(
+                &launch.queue.queue_id,
+                &launch.item,
+                &execution,
+            )
+            .map_err(|_| FacadeError::StateCorrupt)?
+            {
+                return Err(FacadeError::Conflict);
+            }
+            let run = self.graph(
+                GraphInput::Status {
+                    extra: Default::default(),
+                    id: launch.item.graph_id.clone(),
+                },
+                budget,
+                cancel,
+            )?;
+            let mut result = encode(run)?;
+            result["timed_out"] = json!(false);
+            result["named"] = json!({"requested":launch.item.graph_id, "graph":launch.item.graph_id, "replayed":true});
+            return Ok(result);
+        }
+        let mut input = self.apply_pr_repair(prepared)?;
+        if let Some(launch) = &queue_launch {
+            let branch = if let Some(adoption) = &launch.item.adoption {
+                adoption
+                    .get("branch")
+                    .and_then(Value::as_str)
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .to_owned()
+            } else {
+                format!("queue/{}", launch.item.graph_id)
+            };
+            provenant_confinement::repo::GitRefName::branch(&branch)
+                .map_err(|_| FacadeError::StateCorrupt)?;
+            let worktree = if let Some(adoption) = &launch.item.adoption {
+                PathBuf::from(
+                    adoption
+                        .get("worktree")
+                        .and_then(Value::as_str)
+                        .filter(|path| Path::new(path).is_absolute())
+                        .ok_or(FacadeError::StateCorrupt)?,
+                )
+            } else {
+                self.context.project_root.join(
+                    self.context
+                        .port_table
+                        .managed_writer_path(&branch)
+                        .map_err(|_| FacadeError::StateCorrupt)?,
+                )
+            };
+            if input.get("set").is_none_or(Value::is_null) {
+                input["set"] = json!({});
+            }
+            input["set"]
+                .as_object_mut()
+                .ok_or(FacadeError::StateCorrupt)?
+                .insert("worktree".into(), json!(worktree));
+        }
         let raw_owned = input.get("document").cloned();
         let raw = raw_owned.as_ref();
         let mut input_warnings = self.graph_input_warnings(&input)?;
@@ -2164,7 +2066,14 @@ impl Factory {
         // Review ranges are launch controls: resolve them on the host before
         // admitting a graph, and bind immutable object IDs into its identity.
         let review_launch = declared.accepts_review_range();
-        let review_subject = self.review_subject(input, review_launch, cancel)?;
+        // The bundled smoke graph pins its review to the writer's scratch
+        // commit in the template itself. The host's checkout-derived default
+        // subject would point that review back at the caller and make a smoke
+        // check as expensive as the release commit it was launched from, so
+        // leave range resolution to the template for a bundled smoke launch.
+        let bundled_smoke = input.get("template").and_then(Value::as_str) == Some("smoke")
+            && library.layer("smoke") == Some(Layer::Default);
+        let review_subject = self.review_subject(input, review_launch && !bundled_smoke, cancel)?;
         let review_pin = review_subject
             .as_ref()
             .map(|subject| json!({"base":subject.base,"head":subject.head}));
@@ -2188,7 +2097,9 @@ impl Factory {
         // layer and the host/project knob supplies the ref and fetch flag. An
         // unreadable configuration is advisory; the compiled default keeps the
         // stale-checkout pin.
-        let read_config = provenant_cli::config_reads::read_for(&self.context.roots, "run").ok();
+        let read_config_result = provenant_cli::config_reads::read_for(&self.context.roots, "run");
+        let read_config_error = read_config_result.as_ref().err().map(ToString::to_string);
+        let read_config = read_config_result.ok();
         let read_source = read_config
             .as_ref()
             .map(|config| read_source_choice(input, config))
@@ -2220,9 +2131,20 @@ impl Factory {
         // Its read-only members read that base; only a writer that names no base
         // falls back to the caller checkout, and only then does a read-only
         // source pin still apply to it.
+        let mut queue_base_input = None;
+        if let Some(launch) = &queue_launch
+            && launch.item.adoption.is_none()
+        {
+            let mut selection = input.clone();
+            // The managed item checkout does not exist yet. Resolve the same
+            // default base as an explicitly provisioned branch, then pin that
+            // one commit into both the item branch and worktree intent.
+            selection["branch"] = json!(format!("queue/{}", launch.item.graph_id));
+            queue_base_input = Some(selection);
+        }
         let writer_base = if writer_launch {
             Some(resolve_writer_base(
-                input,
+                queue_base_input.as_ref().unwrap_or(input),
                 &self.context.project_root,
                 &self.cwd,
                 self.context.roots.state.as_path(),
@@ -2291,6 +2213,42 @@ impl Factory {
             raw.and_then(|document| document.get("graph_id"))
                 .and_then(Value::as_str)
         });
+        // A queue item owns one fixed graph handle. Its launch digest remains
+        // part of the submission identity, so journal custody can accept an
+        // exact replay and reject a competing launch under the same handle.
+        let strict_queue_id = input
+            .get("queue_item")
+            .map(|item| {
+                let valid = item.is_object()
+                    && item["queue_id"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                    && item["launch_digest"]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("sha256:"))
+                    && ["project", "tracker", "item"].iter().all(|field| {
+                        item["identity"][field]
+                            .as_str()
+                            .is_some_and(|value| !value.is_empty())
+                    });
+                let graph_id = item["graph_id"].as_str().filter(|value| !value.is_empty());
+                if valid && graph_id.is_some() {
+                    Ok(graph_id)
+                } else {
+                    Err(FacadeError::invalid(InvalidInputDetail::Field(
+                        "queue_item".into(),
+                    )))
+                }
+            })
+            .transpose()?;
+        let strict_queue_id = strict_queue_id.flatten();
+        if let Some(queue_id) = strict_queue_id
+            && requested.is_none_or(|name| name != queue_id)
+        {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "queue_item.graph_id".into(),
+            )));
+        }
         let (base, named) = match requested {
             Some(name) => {
                 let folded = provenant_fabric_runtime::graph::template::fold_graph_name(name)
@@ -2310,8 +2268,10 @@ impl Factory {
         if let Some(subject) = &review_subject {
             identity_input["review_subject"] = json!({"base":subject.base,"head":subject.head});
         }
-        let digest =
-            submission_digest(&identity_input, source_commit.as_deref(), Some(&templates))?;
+        let digest = match queue_replay_digest {
+            Some(digest) => digest,
+            None => submission_digest(&identity_input, source_commit.as_deref(), Some(&templates))?,
+        };
         let explain = input["explain"] == true;
         let (generated_id, taken) = if explain {
             (
@@ -2338,6 +2298,9 @@ impl Factory {
                 .map_err(graph_input_reason)?
             {
                 NameDecision::Replay(id) => {
+                    if strict_queue_id.is_some_and(|queue_id| id != queue_id) {
+                        return Err(FacadeError::Conflict);
+                    }
                     // The same input is the same launch: report that graph as
                     // it stands and start nothing. Advancing it stays with the
                     // scheduler and explicit recovery.
@@ -2354,7 +2317,12 @@ impl Factory {
                     result["named"] = json!({"requested":requested, "graph":id, "replayed":true});
                     return Ok(result);
                 }
-                NameDecision::Create { id, taken } => (id, taken),
+                NameDecision::Create { id, taken } => {
+                    if strict_queue_id.is_some_and(|queue_id| id != queue_id) {
+                        return Err(FacadeError::Conflict);
+                    }
+                    (id, taken)
+                }
             }
         };
         let id = generated_id.as_str();
@@ -2415,6 +2383,7 @@ impl Factory {
             let mut compiled = encode(&document)?;
             for key in [
                 "limits",
+                "queue",
                 "delivery",
                 "review_base",
                 "context",
@@ -2431,6 +2400,21 @@ impl Factory {
                 }
             }
             document = decode_input(compiled, "document")?;
+        }
+        // NameDecision::Replay returns above. A graph_id in the raw document
+        // can still name a new full-document submission, so queue presence is
+        // the only selector here.
+        let queue_config = read_config
+            .as_ref()
+            .map(|config| (&config.domains.fabric.queue, &config.origins));
+        seal_document_queue(&mut document, queue_config, read_config_error.as_deref())?;
+        if let Some(launch) = &queue_launch {
+            super::queue_delivery::bind_item(
+                self,
+                launch,
+                &mut document,
+                writer_base.as_ref().and_then(|base| base.commit.as_deref()),
+            )?;
         }
         // Template compilation selected a schema before document metadata was
         // applied; a retained review base requires the schema-2 representation.
@@ -2698,10 +2682,19 @@ impl Factory {
                 },
             }));
         }
-        let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
+        let mut result = match self.launch_submission(
+            document,
+            input,
+            queue_launch.as_ref(),
+            budget,
+            cancel,
+            announce,
+        ) {
             // A concurrent launch bound this name to other input between the
             // choice and the bind. Choose again: the family now includes it.
-            Err(FacadeError::Conflict) if self.name_taken_by_other_input(id, &digest) => {
+            Err(FacadeError::Conflict)
+                if strict_queue_id.is_none() && self.name_taken_by_other_input(id, &digest) =>
+            {
                 return self.submit_document(submitted, budget, cancel, announce);
             }
             result => result?,
@@ -2862,133 +2855,15 @@ impl Factory {
             parameters["integration_branch"] = branch.clone();
         }
         if bundled_smoke {
-            let is_remote = input
-                .get("host")
-                .and_then(Value::as_str)
-                .is_some_and(|h| !h.is_empty() && !matches!(h, "local" | "localhost"));
-            let controls = smoke_writer
-                .as_object()
-                .is_some_and(|node| !node.is_empty());
-            if controls {
-                // A remote graph must not retain or transmit a caller path.
-                // `--branch`/`--base` name a worktree the peer creates in its
-                // own clone, so they are admitted; only a caller path is not.
-                if is_remote && first_control == Some(&"worktree") {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                        "worktree".into(),
-                    )));
-                }
-                // A control and a `--set` of the same binding are two
-                // answers to one question.
-                if ["worktree", "write_attempt"]
-                    .iter()
-                    .any(|name| overrides.get(*name).is_some())
-                {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                        "set".into(),
-                    )));
-                }
-                parameters["worktree"] = smoke_writer["worktree"].clone();
-                if let Some(attempt) = smoke_writer.get("attempt") {
-                    parameters["write_attempt"] = attempt.clone();
-                }
-            }
-            // A peer-owned writer is provisioned from a branch and a base ref,
-            // never from a caller path. Drop the host path while retaining the
-            // branch intent so the peer can create its own worktree.
-            if is_remote {
-                parameters["worktree"] = json!("");
-            }
-            let requested = parameters.get("smoke-write").is_some();
-            let write_disabled = requested && parameters["smoke-write"] == json!(false);
-            // A remote launch carries no caller worktree. Provision a scratch
-            // branch from a sourced default so verification exercises the
-            // remote writer even when the caller supplies no --branch; an
-            // explicit --branch/--base or --set write_attempt still wins.
-            if is_remote
-                && !write_disabled
-                && !parameters
-                    .get("write_attempt")
-                    .and_then(|attempt| attempt.get("new_worktree"))
-                    .is_some()
-            {
-                let branch = input
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|name| !name.is_empty())
-                    .map(|name| format!("smoke/{name}"))
-                    .unwrap_or_else(|| "smoke/verify".to_owned());
-                let explicit_base = input
-                    .get("base")
-                    .and_then(Value::as_str)
-                    .filter(|base| !base.is_empty())
-                    .map(str::to_owned);
-                let base = explicit_base.as_deref().unwrap_or(DEFAULT_WRITER_BASE);
-                let mut attempt = parameters
-                    .get("write_attempt")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                let object = attempt.as_object_mut().ok_or_else(|| {
-                    FacadeError::invalid(InvalidInputDetail::Field("write_attempt".into()))
-                })?;
-                let mut provision = json!({"branch":branch,"base":base});
-                if explicit_base.is_none() {
-                    provision["default_base"] = json!(true);
-                }
-                object.insert("new_worktree".into(), provision);
-                parameters["write_attempt"] = attempt;
-                input_warnings.push(format!(
-                    "remote smoke writer uses scratch branch {branch} from {base} (source: default smoke placement); pass --branch B --base REF to override"
-                ));
-            }
-            // Without an explicit base, a first parent supplies a distinct
-            // review range. A root commit (or unavailable Git) has no such
-            // range, so omit review rather than launching an empty one.
-            if parameters
-                .get("diff_base")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .is_empty()
-            {
-                if let Some(base) = provenant_os::git::git_executable()
-                    .and_then(|git| provenant_run::resolve_git_base(&git, &self.cwd, "HEAD^").ok())
-                {
-                    parameters["diff_base"] = json!(base);
-                    input_warnings.push(format!(
-                        "smoke review uses base {base} (source: checkout first parent); pass --set diff_base=BASE to override"
-                    ));
-                } else {
-                    parameters["smoke-review"] = json!(false);
-                    input_warnings.push(
-                        "smoke skipped review: no diff_base supplied and checkout first parent is unavailable; pass --set diff_base=BASE to enable review".into(),
-                    );
-                }
-            }
-            let peer_owned_writer = is_remote
-                && parameters
-                    .get("write_attempt")
-                    .and_then(|attempt| attempt.get("new_worktree"))
-                    .is_some();
-            if !requested {
-                let worktree = parameters
-                    .get("worktree")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                parameters["smoke-write"] =
-                    json!(peer_owned_writer || (!is_remote && !worktree.is_empty()));
-            }
-            if parameters["smoke-write"] != json!(true) {
-                let reason = if requested {
-                    "smoke-write is not enabled"
-                } else if is_remote {
-                    "remote placement needs --branch B to provision a peer-owned worktree; caller paths are not accepted"
-                } else {
-                    "no writer worktree supplied; pass --worktree PATH or --branch B to run it"
-                };
-                input_warnings.push(format!(
-                    "smoke skipped node write: {reason}; other eligible nodes still run"
-                ));
-            }
+            smoke::configure(
+                self,
+                input,
+                &mut parameters,
+                &overrides,
+                &smoke_writer,
+                first_control.copied(),
+                input_warnings,
+            )?;
         }
         node["with"] = parameters;
         Ok(TemplateLaunch {
@@ -3126,6 +3001,7 @@ impl Factory {
         &self,
         document: GraphDocument,
         input: &Value,
+        queue_launch: Option<&super::queue_registry::AuthorisedQueueLaunch>,
         budget: WaitBudget,
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
@@ -3151,6 +3027,7 @@ impl Factory {
             announce,
             Some(&mut replayed),
             None,
+            queue_launch,
         )?;
         let (run, wait_observation, observation_wait, remote_read_allowed) = if replayed {
             (run, None, None, true)
@@ -3237,6 +3114,9 @@ impl Factory {
             .load(&id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
+        if super::queue_controls::drop_fence_active(&checkpoint)? {
+            return Err(graph_input_reason("dropped queue items cannot be edited"));
+        }
         let library = self.template_library(None)?;
         let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
         let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
@@ -3283,7 +3163,7 @@ impl Factory {
         )
     }
 
-    fn retry_document(
+    pub(super) fn retry_document(
         &self,
         input: &Value,
         budget: WaitBudget,
@@ -3334,13 +3214,33 @@ impl Factory {
         self.control_receipt(run, &target, input, budget, cancel, false)
     }
 
-    pub(super) fn prepare_retry(
+    pub(super) fn prepare_retry_with_journal(
         &self,
         target: &mut super::unified::GraphTarget,
         input: &Value,
         document: &GraphDocument,
         checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+        journal: &mut FileJournal,
     ) -> Result<(), FacadeError> {
+        self.prepare_retry_inner(target, input, document, checkpoint, Some(journal))
+    }
+
+    fn prepare_retry_inner(
+        &self,
+        target: &mut super::unified::GraphTarget,
+        input: &Value,
+        document: &GraphDocument,
+        checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+        mut journal: Option<&mut FileJournal>,
+    ) -> Result<(), FacadeError> {
+        if super::queue_controls::drop_fence_active(checkpoint)? {
+            return Err(graph_input_reason("dropped queue items cannot be retried"));
+        }
+        if input.get("queue_accept_retry").is_some() && target.node.is_none() {
+            return Err(graph_input_reason(
+                "accept gate retry requires one exact node target",
+            ));
+        }
         if provenant_redact::mode().masks_egress()
             && let Some(brief) = input.get("brief").and_then(Value::as_str)
         {
@@ -3411,6 +3311,95 @@ impl Factory {
                     }
                 },
             };
+            if let Some(marker) = input.get("queue_accept_retry") {
+                if input.get("queue_control").is_some() || brief_given || !extensions_empty {
+                    return Err(graph_input_reason(
+                        "accept gate retry cannot carry another control, brief, or extension",
+                    ));
+                }
+                let (operation_key, operation_digest) =
+                    super::queue_controls::authorise_accept_gate_retry(
+                        checkpoint, &id, &node, marker,
+                    )?;
+                let journal = journal.as_deref_mut().ok_or(FacadeError::StateCorrupt)?;
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                let library = self.template_library(None)?;
+                let resolver = self.launch_resolvers(Some(&encode(document)?))?;
+                patch::retry_node_and_dependants_with_key(
+                    &mut LiveGraph {
+                        document,
+                        checkpoint,
+                    },
+                    &node,
+                    None,
+                    &PatchContext {
+                        catalogue: None,
+                        library: &library,
+                        resolvers: &resolver,
+                        journal: None,
+                        limits: &self.context.config.graph.limits,
+                        worktree_layout: self.context.port_table.worktree_layout.clone(),
+                    },
+                    &operation_key,
+                    &operation_digest,
+                )
+                .map_err(retry_patch_error)?;
+                target.node = Some(node);
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                return Ok(());
+            }
+            if let Some(control) = input.get("queue_control") {
+                let metadata = super::queue_controls::decode_metadata(control)?;
+                if !matches!(
+                    metadata.action,
+                    super::queue_controls::Action::Retry | super::queue_controls::Action::Fix
+                ) {
+                    return Err(graph_input_reason(
+                        "queue retry metadata requires the retry or fix action",
+                    ));
+                }
+                let payload = super::queue_controls::without_queue_control(input)?;
+                let operation_digest = super::queue_controls::control_digest(
+                    &metadata,
+                    &id,
+                    Some(&node),
+                    None,
+                    &payload,
+                )?;
+                let (terminal, _) = super::queue_controls::reserve_retry_control(
+                    checkpoint, document, &id, &node, &metadata, &payload,
+                )?;
+                let journal = journal.ok_or(FacadeError::StateCorrupt)?;
+                if terminal {
+                    journal.save(checkpoint).map_err(graph_journal_error)?;
+                    return Err(FacadeError::Conflict);
+                }
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                let library = self.template_library(None)?;
+                let resolver = self.launch_resolvers(Some(&encode(document)?))?;
+                patch::retry_node_and_dependants_with_key(
+                    &mut LiveGraph {
+                        document,
+                        checkpoint,
+                    },
+                    &node,
+                    input.get("brief").and_then(Value::as_str),
+                    &PatchContext {
+                        catalogue: None,
+                        library: &library,
+                        resolvers: &resolver,
+                        journal: None,
+                        limits: &self.context.config.graph.limits,
+                        worktree_layout: self.context.port_table.worktree_layout.clone(),
+                    },
+                    &metadata.operation_id.to_string(),
+                    &operation_digest,
+                )
+                .map_err(retry_patch_error)?;
+                target.node = Some(node);
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                return Ok(());
+            }
             // A previous retry may have committed its reset before its resume
             // failed. Resume that already admitted retry rather than archive
             // its predecessor a second time.
@@ -3924,7 +3913,7 @@ fn typed_binding(
 /// The host digest of a launch: everything the caller chose except the name and
 /// how long to wait, the effective templates it runs, and the commit the launch
 /// started from. Equal digests are the same launch.
-fn submission_digest(
+pub(super) fn submission_digest(
     input: &Value,
     source_commit: Option<&str>,
     templates: Option<&Value>,
@@ -4070,11 +4059,17 @@ fn route_choice(input: &Value, raw: Option<&Value>) -> Result<Option<RouteChoice
 
 #[path = "interface_route.rs"]
 mod route;
+#[path = "interface_smoke.rs"]
+mod smoke;
 use route::override_tier;
 
 fn add(row: &mut Value, key: &str, value: u64) {
     row[key] = json!(row[key].as_u64().unwrap_or(0).saturating_add(value));
 }
+
+#[cfg(test)]
+#[path = "interface_queue_config_tests.rs"]
+mod queue_config_tests;
 
 #[cfg(test)]
 #[path = "interface_writer_source_tests.rs"]

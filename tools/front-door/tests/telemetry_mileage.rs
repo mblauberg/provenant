@@ -76,7 +76,7 @@ fn start_chair_session(rig: &TestRig, session: &str) -> Result {
     Ok(())
 }
 
-/// Every stored row, one JSON line each, across the dated ingest segments.
+/// Every stored ingest row, one JSON line each, across the dated segments.
 fn stored(rig: &TestRig) -> std::result::Result<String, Box<dyn std::error::Error>> {
     let mut names: Vec<_> = fs::read_dir(rig.state.join("ingest"))?
         .map(|entry| entry.map(|entry| entry.path()))
@@ -87,34 +87,6 @@ fn stored(rig: &TestRig) -> std::result::Result<String, Box<dyn std::error::Erro
         text.push_str(&fs::read_to_string(name)?);
     }
     Ok(text)
-}
-
-/// A chair `SessionStart` now queues a detached incremental ingest worker
-/// (#4028), so rows land after the hook returns. Wait for that worker's rows
-/// rather than racing it with a second, explicit ingest: the store takes an
-/// exclusive lock and a losing ingest exits with code 3 (`Outcome::Error`).
-fn wait_for_ingested_rows(rig: &TestRig, count: usize) -> Result {
-    let text = provenant_test_support::wait_for(
-        "detached chair ingest rows for mileage",
-        Duration::from_secs(30),
-        || stored(rig).unwrap_or_default(),
-        |text| {
-            text.lines()
-                .filter(|line| serde_json::from_str::<Value>(line).is_ok())
-                .count()
-                >= count
-        },
-    )?;
-    let rows = text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        rows.len(),
-        count,
-        "the fixture writes exactly {count} messages"
-    );
-    Ok(())
 }
 
 fn fixture() -> Result<TestRig> {
@@ -168,7 +140,29 @@ fn fixture() -> Result<TestRig> {
     .join("\n");
     fs::write(&session, format!("{transcript}\n"))?;
     start_chair_session(&rig, "s1")?;
-    wait_for_ingested_rows(&rig, 2)?;
+    // Chair start queues usage ingest on a detached incremental worker and
+    // returns. Ingest takes ingest.lock nonblockingly, so an explicit ingest
+    // issued here races that worker and can be refused with Outcome::Error.
+    // Wait for the worker's rows instead: this is the production path, where
+    // mileage reads the usage the hook already recorded.
+    provenant_test_support::wait_for(
+        "detached chair ingest rows",
+        Duration::from_secs(30),
+        || {
+            stored(&rig)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>()
+        },
+        |rows| {
+            rows.len() >= 2
+                && rows.iter().all(|row| {
+                    row["identity"]["identity"]["state"] == "known"
+                        && row["identity"]["identity"]["account_key"] == identity_key
+                })
+        },
+    )?;
     Ok(rig)
 }
 
@@ -184,6 +178,22 @@ fn chair_start_worker_supplies_the_usage_that_mileage_prices() -> Result {
         .filter_map(|row| row["message"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
     assert_eq!(messages, ["m1", "m2"]);
+    Ok(())
+}
+
+#[test]
+fn chair_start_ingest_is_recorded_before_mileage_reads_it() -> Result {
+    let rig = fixture()?;
+    let rows: Vec<Value> = stored(&rig)?
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    // The hook's detached worker, not a competing explicit ingest, recorded
+    // both transcript messages with the chair's verified identity.
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| {
+        row["source"] == "chair" && row["identity"]["identity"]["state"] == "known"
+    }));
     Ok(())
 }
 

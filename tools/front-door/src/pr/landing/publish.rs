@@ -2,7 +2,7 @@ use super::{
     LandingError,
     approval::{Approvals, Approver, Decision},
     model::*,
-    ports::{Forge, Repo},
+    ports::{Forge, Mergeability, PullRequestState, Repo},
 };
 use provenant_cli::domains::{MergeMethod, Publication};
 /// Choose the configured publication mode, checking direct-push authority for auto.
@@ -184,7 +184,40 @@ pub fn merge_member(
     grant: &PublicationGrant,
     reviewed: bool,
 ) -> Result<String, LandingError> {
-    let result = if let Some(stack) = forge.pull_request(number)?.stack {
+    merge_member_with_queue_policy(forge, number, head, method, grant, reviewed, None)
+}
+
+/// Repeat the queue's exact-head checks when recovering an uncertain dispatch.
+pub(super) fn merge_delivery_member(
+    forge: &mut dyn Forge,
+    pr: &EligiblePr,
+    method: MergeMethod,
+    grant: &PublicationGrant,
+    reviewed: bool,
+) -> Result<String, LandingError> {
+    super::gate::require_delivery_queue_ci(forge, pr)?;
+    merge_member_with_queue_policy(
+        forge,
+        pr.number,
+        &pr.head,
+        method,
+        grant,
+        reviewed,
+        Some(pr),
+    )
+}
+
+fn merge_member_with_queue_policy(
+    forge: &mut dyn Forge,
+    number: u64,
+    head: &str,
+    method: MergeMethod,
+    grant: &PublicationGrant,
+    reviewed: bool,
+    queue_pr: Option<&EligiblePr>,
+) -> Result<String, LandingError> {
+    let stack = forge.pull_request(number)?.stack;
+    if let Some(stack) = &stack {
         let members = forge.stack_members(stack.number)?;
         let position = members
             .iter()
@@ -199,6 +232,11 @@ pub fn merge_member(
                 lower.number
             )));
         }
+    }
+    if let Some(pr) = queue_pr {
+        require_queue_mergeability(forge, pr)?;
+    }
+    let result = if stack.is_some() {
         forge.merge_stack(number, head, method)
     } else {
         forge.merge(number, head, method)
@@ -207,7 +245,7 @@ pub fn merge_member(
         Err(LandingError::RefusedWith {
             cause: "REVIEW_REQUIRED",
             ..
-        }) if reviewed && grant.allows_review_unavailable() => {
+        }) if reviewed && grant.allows_review_unavailable() && queue_pr.is_none() => {
             // The only 405 this grant may answer. The gate has passed, the
             // member carries independent review evidence, and the owner gave
             // host-layer permission; the admin call still uses their authority.
@@ -216,6 +254,23 @@ pub fn merge_member(
         other => other,
     }
 }
+fn require_queue_mergeability(forge: &mut dyn Forge, pr: &EligiblePr) -> Result<(), LandingError> {
+    let current = forge.pull_request(pr.number)?;
+    if current.state != PullRequestState::Open
+        || current.head != pr.head
+        || current.base_branch != pr.base_branch
+    {
+        return Err(LandingError::PullRequestChanged(pr.number));
+    }
+    if current.mergeability != Mergeability::Clean {
+        return Err(LandingError::Pending(format!(
+            "pull request #{} is not known clean immediately before merge ({:?})",
+            pr.number, current.mergeability
+        )));
+    }
+    Ok(())
+}
+
 /// Advance the target from the candidate base with an expected-old-value push.
 pub fn fast_forward(
     repo: &mut dyn Repo,
@@ -255,6 +310,7 @@ pub fn rest_ordered(
     candidate: &Candidate,
     method: MergeMethod,
     grant: &PublicationGrant,
+    delivery_queue: bool,
     landed: &mut Vec<String>,
     before_dispatch: &mut dyn FnMut(u64) -> Result<(), LandingError>,
 ) -> Result<PublishResult, LandingError> {
@@ -283,15 +339,19 @@ pub fn rest_ordered(
         {
             return Err(LandingError::PullRequestChanged(step.pr.number));
         }
+        if delivery_queue {
+            super::gate::require_delivery_queue_ci(forge, &step.pr)?;
+        }
         before_dispatch(step.pr.number)?;
         let reviewed = !step.pr.approval_evidence.is_empty();
-        expected = merge_member(
+        expected = merge_member_with_queue_policy(
             forge,
             step.pr.number,
             &step.pr.head,
             method,
             grant,
             reviewed,
+            delivery_queue.then_some(&step.pr),
         )?;
         landed.push(expected.clone());
     }
@@ -311,7 +371,7 @@ mod tests {
     use super::*;
     use crate::pr::landing::{
         fakes::{FakeForge, FakeRepo},
-        ports::Approval,
+        ports::{Approval, RequiredCiCheck},
         test_support::LandingFixture,
     };
 
@@ -340,6 +400,7 @@ mod tests {
                     base_branch: pr.base_branch,
                     author: "author".into(),
                     state: PullRequestState::Open,
+                    mergeability: crate::pr::landing::ports::Mergeability::Unknown,
                     merged_commit: None,
                     stack: None,
                     draft: false,
@@ -353,6 +414,195 @@ mod tests {
                 }],
             );
         }
+    }
+    fn queue_fixture() -> (FakeForge, FakeRepo, Candidate) {
+        let mut forge = FakeForge::default();
+        prepare(&mut forge);
+        let candidate = Candidate {
+            steps: vec![candidate().steps[0].clone()],
+            ..candidate()
+        };
+        let step = &candidate.steps[0];
+        forge
+            .pull_requests
+            .get_mut(&step.pr.number)
+            .expect("prepared pull request")
+            .mergeability = Mergeability::Clean;
+        forge.required_ci_policies.insert(
+            "main".into(),
+            Some(vec![RequiredCiCheck {
+                name: "build".into(),
+                app_id: Some(42),
+            }]),
+        );
+        forge.check_runs.insert(
+            step.pr.head.clone(),
+            vec![GateEvidence {
+                commit: step.pr.head.clone(),
+                tree: "head-tree".into(),
+                definition_digest: String::new(),
+                checks: vec![CheckEvidence {
+                    name: "build".into(),
+                    issuer: Some("required-app".into()),
+                    app_id: Some(42),
+                    result: GateResult::Passed,
+                }],
+                issuer: None,
+                coverage: Vec::new(),
+                result: GateResult::Passed,
+                pool: None,
+                duration_seconds: None,
+                reused_from_commit: None,
+                extra: Default::default(),
+            }],
+        );
+        let repo = FakeRepo {
+            target: candidate.base.clone(),
+            fetches: [candidate.base.clone()].into(),
+            ..FakeRepo::default()
+        };
+        (forge, repo, candidate)
+    }
+
+    fn queue_publish(
+        forge: &mut FakeForge,
+        repo: &mut FakeRepo,
+        candidate: &Candidate,
+    ) -> Result<super::super::model::PublishResult, LandingError> {
+        rest_ordered(
+            forge,
+            repo,
+            Approvals::forge(),
+            "main",
+            candidate,
+            MergeMethod::Merge,
+            &PublicationGrant::default(),
+            true,
+            &mut Vec::new(),
+            &mut |_| Ok(()),
+        )
+    }
+    #[test]
+    fn delivery_recovery_rechecks_current_ci_before_retrying_merge() {
+        let (mut forge, _, candidate) = queue_fixture();
+        let pr = &candidate.steps[0].pr;
+        forge.check_runs.get_mut(&pr.head).unwrap()[0].checks[0].result = GateResult::Failed;
+        assert!(matches!(
+            merge_delivery_member(
+                &mut forge,
+                pr,
+                MergeMethod::Merge,
+                &PublicationGrant::default(),
+                true
+            ),
+            Err(LandingError::UnmetGate(_))
+        ));
+        assert!(forge.merges.is_empty());
+    }
+
+    #[test]
+    fn delivery_queue_never_uses_admin_review_fallback() {
+        use provenant_cli::domains::AdminPublication;
+
+        let (mut forge, _, candidate) = queue_fixture();
+        let pr = &candidate.steps[0].pr;
+        forge.review_required_merge = Some(pr.number);
+        let grant = host_grant(AdminPublication::WhenReviewUnavailable);
+        assert!(matches!(
+            merge_delivery_member(&mut forge, pr, MergeMethod::Merge, &grant, true),
+            Err(LandingError::RefusedWith {
+                cause: "REVIEW_REQUIRED",
+                ..
+            })
+        ));
+        assert!(forge.admin_merges.is_empty());
+    }
+
+    #[test]
+    fn delivery_queue_merges_only_after_exact_head_ci_and_fresh_clean_mergeability()
+    -> Result<(), LandingError> {
+        let (mut forge, mut repo, candidate) = queue_fixture();
+        let result = queue_publish(&mut forge, &mut repo, &candidate)?;
+        assert_eq!(result.landed, vec!["landed-1".to_owned()]);
+        let tail = &forge.events[forge.events.len() - 2..];
+        assert_eq!(tail[0].as_str(), "pull_request:1:Clean:head-1");
+        assert_eq!(tail[1].as_str(), "merge:1:head-1");
+        assert!(forge.events.contains(&"checks:head-1".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn delivery_queue_does_not_accept_red_absent_or_wrong_app_ci() {
+        let (mut red, mut red_repo, red_candidate) = queue_fixture();
+        red.check_runs.get_mut("head-1").unwrap()[0].checks[0].result = GateResult::Failed;
+        assert!(matches!(
+            queue_publish(&mut red, &mut red_repo, &red_candidate),
+            Err(LandingError::UnmetGate(_))
+        ));
+        assert!(red.merges.is_empty());
+
+        let (mut absent, mut absent_repo, absent_candidate) = queue_fixture();
+        absent.check_runs.remove("head-1");
+        assert!(matches!(
+            queue_publish(&mut absent, &mut absent_repo, &absent_candidate),
+            Err(LandingError::Pending(_))
+        ));
+        assert!(absent.merges.is_empty());
+
+        let (mut wrong_app, mut wrong_app_repo, wrong_app_candidate) = queue_fixture();
+        wrong_app.check_runs.get_mut("head-1").unwrap()[0].checks[0].app_id = Some(17);
+        assert!(matches!(
+            queue_publish(&mut wrong_app, &mut wrong_app_repo, &wrong_app_candidate),
+            Err(LandingError::Pending(_))
+        ));
+        assert!(wrong_app.merges.is_empty());
+    }
+
+    #[test]
+    fn delivery_queue_rechecks_moved_head_and_mergeability_after_ci() {
+        let (mut moved, mut moved_repo, moved_candidate) = queue_fixture();
+        moved
+            .move_head_after_checks
+            .insert("head-1".into(), "new-head".into());
+        assert!(matches!(
+            queue_publish(&mut moved, &mut moved_repo, &moved_candidate),
+            Err(LandingError::PullRequestChanged(1))
+        ));
+        assert!(moved.merges.is_empty());
+
+        let (mut retargeted, mut retargeted_repo, retargeted_candidate) = queue_fixture();
+        retargeted
+            .move_base_after_checks
+            .insert("head-1".into(), "other".into());
+        assert!(matches!(
+            queue_publish(&mut retargeted, &mut retargeted_repo, &retargeted_candidate),
+            Err(LandingError::PullRequestChanged(1))
+        ));
+        assert!(retargeted.merges.is_empty());
+
+        let (mut conflicting, mut conflicting_repo, conflicting_candidate) = queue_fixture();
+        conflicting
+            .mergeability_after_checks
+            .insert("head-1".into(), Mergeability::Conflicting);
+        assert!(matches!(
+            queue_publish(
+                &mut conflicting,
+                &mut conflicting_repo,
+                &conflicting_candidate
+            ),
+            Err(LandingError::Pending(_))
+        ));
+        assert!(conflicting.merges.is_empty());
+
+        let (mut unknown, mut unknown_repo, unknown_candidate) = queue_fixture();
+        unknown
+            .mergeability_after_checks
+            .insert("head-1".into(), Mergeability::Unknown);
+        assert!(matches!(
+            queue_publish(&mut unknown, &mut unknown_repo, &unknown_candidate),
+            Err(LandingError::Pending(_))
+        ));
+        assert!(unknown.merges.is_empty());
     }
     #[test]
     fn stack_publication_uses_async_only_for_the_lowest_member() -> Result<(), LandingError> {
@@ -684,6 +934,7 @@ mod tests {
                 &candidate(),
                 MergeMethod::Merge,
                 &PublicationGrant::default(),
+                false,
                 &mut Vec::new(),
                 &mut |_| Ok(())
             ),
@@ -724,6 +975,7 @@ mod tests {
                 &candidate(),
                 MergeMethod::Merge,
                 &PublicationGrant::default(),
+                false,
                 &mut Vec::new(),
                 &mut |_| Ok(())
             ),
@@ -750,6 +1002,7 @@ mod tests {
             &candidate(),
             MergeMethod::Squash,
             &PublicationGrant::default(),
+            false,
             &mut Vec::new(),
             &mut |_| Ok(()),
         )?;

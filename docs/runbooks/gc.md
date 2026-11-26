@@ -25,7 +25,11 @@ provenant --project /absolute/path/to/repo gc --apply --json
   ownerless idle artefacts eligible at once. `--full` lists each affected PID
   where the text output aggregates them.
 - Attempt scratch is collected before the broader provider-state and payload-cap
-  scans, so those scans do not consume its first pass budget.
+  scans, so those scans do not consume its first pass budget. A settled attempt
+  whose scratch exceeds `gc.attempt_scratch_max` (default `2G`, `0` disables it)
+  is collected without waiting out `gc.idle`; the effective value and source
+  appear as `attempt scratch cap` in text and `attempt_scratch_max_bytes`/
+  `attempt_scratch_max_source` in JSON. An unmeasurable tree stays.
 - The advisory dweller census runs after collection with one cached observation
   per pass, so a large settled store cannot spend `gc.sweep_budget` before
   anything is collected. The report names how many settled candidates were

@@ -144,9 +144,12 @@ impl crate::Process for Fixture {
 }
 
 /// The worktree driver's entry. Its children re-enter it as the fake
-/// provider or as the command edge with fixture seams.
-pub fn main() -> std::process::ExitCode {
+/// provider or as the command edge with fixture seams. `production_binary` is
+/// the driver's Cargo-provided path; the library cannot read that target-local
+/// env itself, so fixtures that launch the real CLI take the explicit value.
+pub fn main(production_binary: Option<PathBuf>) -> std::process::ExitCode {
     use std::process::ExitCode;
+    support::set_production_binary(production_binary);
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let first = args.first().and_then(|arg| arg.to_str());
     let exit = |role: &str, result: Result| match result {

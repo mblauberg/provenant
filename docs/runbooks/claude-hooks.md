@@ -47,7 +47,21 @@ The [human inbox](human-inbox.md#delivery-service) owns how the hook offers answ
 The hook reports checkpoint and lane state. An unavailable section is not an
 empty one: inspect the source before acting. The checkpoint points to authority
 but does not create it. Record delivered PRs in the checkpoint so the digest can
-find them.
+find them. The custody list is printed once: when the derived digest is shown,
+the autosave's copy of that section is withheld. If the response reaches its
+8 KiB cap, derived state shrinks first and the chair's `## Intent` (up to 3 KiB)
+and `## Now` (up to 1 KiB) remain intact; the rest of the checkpoint excerpt is
+then trimmed with a notice. A fresh checkpoint with nothing actionable omits the
+"no save needed by freshness policy" boilerplate but keeps the save command.
+
+A native subagent carries its own task prompt. When the hook payload includes a
+non-empty `agent_id` or agent transcript path, the chair lifecycle hooks abstain:
+`chair-start` neither consumes a handoff nor records chair attribution, and the
+advisory hooks emit no checkpoint or custody text. `agent_type` alone does not
+mark a subagent because Claude Code also sets it for top-level `--agent` sessions.
+Lanes were already excluded by their lane identity. The guard applies to every
+advisory event, so a subagent's compaction and stop hooks also leave the chair's
+checkpoint alone.
 
 ## Autosave and compaction
 
