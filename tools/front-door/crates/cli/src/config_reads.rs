@@ -203,6 +203,31 @@ mod tests {
             );
         }
     }
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    #[test]
+    fn capability_overlay_warnings_carry_a_structured_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "[[adapter_capabilities]]\nadapter = \"no-such-adapter\"\ndisable = [\"model\"]\n",
+        )
+        .unwrap();
+        let (_, warnings) = provenant_records::warning::capture(|| capability_overlay(&roots));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            warnings[0].code.as_ref(),
+            provenant_records::warning::CONFIG_KEY_IGNORED.as_str()
+        );
+        assert_eq!(warnings[0].source.layer, Layer::Detected, "{warnings:?}");
+        assert_eq!(
+            warnings[0].source.origin.as_deref(),
+            Some("warning:CONFIG_KEY_IGNORED"),
+            "{warnings:?}"
+        );
+    }
+
     #[test]
     fn every_command_declares_its_config_and_unrelated_domains_cannot_refuse_it() {
         let temp = tempfile::tempdir().unwrap();
