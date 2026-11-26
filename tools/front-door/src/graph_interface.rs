@@ -582,7 +582,7 @@ pub(crate) fn run(
         let root = smoke_settings.root();
         if !resolved
             .project
-            .starts_with(&crate::smoke::fixture_root(&resolved.home, &root))
+            .starts_with(crate::smoke::fixture_root(&resolved.home, &root))
         {
             if globals.project.is_some() {
                 warn(Warning::new(
@@ -743,7 +743,7 @@ fn smoke_lifecycle(
                         CommandResult::new("run", Outcome::Failed, serde_json::Value::Null);
                     result.error = Some(provenant_records::CommandError::new(
                         "SMOKE_UNVERIFIED",
-                        &format!(
+                        format!(
                             "{text}\nsource: {}",
                             origin.describe(provenant_cli::smoke::UNVERIFIED_KEY)
                         ),
@@ -764,7 +764,7 @@ fn smoke_lifecycle(
                     CommandResult::new("run", Outcome::Failed, serde_json::Value::Null);
                 result.error = Some(provenant_records::CommandError::new(
                     "SMOKE_FAILED",
-                    &outcome.text(),
+                    outcome.text(),
                     None,
                     "inspect the reported smoke failure, then rerun `provenant run smoke`",
                 ));

@@ -35,7 +35,7 @@ enum Source {
         repository: Result<String, String>,
         /// The head and policy fixed once at admission. `None` until the forge
         /// reports a head; the first successful sample pins it then.
-        subject: Option<PinnedSubject>,
+        subject: Option<Box<PinnedSubject>>,
         /// Whether the pull request has reported the pinned head at least once.
         /// Only after that does a different head count as a move.
         pinned_head_seen: bool,
@@ -327,7 +327,7 @@ fn gate_line(line: &mut crate::pr::status::Line, watch_head: Option<&str>) {
 /// The head a PR reading is watching, always shown in its status line. The
 /// pinned subject is authoritative: a head the pull request moved to is never
 /// reported as the thing the wait is judging.
-fn pinned_head(subject: &Option<PinnedSubject>, line: &crate::pr::status::Line) -> String {
+fn pinned_head(subject: &Option<Box<PinnedSubject>>, line: &crate::pr::status::Line) -> String {
     subject.as_ref().map_or_else(
         || line.awaiting.as_deref().unwrap_or(&line.head).to_owned(),
         |subject| subject.head.to_string(),
@@ -338,7 +338,7 @@ fn pinned_head(subject: &Option<PinnedSubject>, line: &crate::pr::status::Line) 
 fn wall_now() -> WallTime {
     provenant_os::clock::SystemClock::new()
         .wall_now()
-        .unwrap_or_else(|_| WallTime::from_micros(0).expect("the epoch is a valid wall time"))
+        .unwrap_or(WallTime::UNIX_EPOCH)
 }
 
 /// Build the subject a `wait --pr` pins at admission. The invariant: exactly
@@ -425,27 +425,41 @@ fn unpinned_refusal(number: u64, source: &str) -> Reading {
     }
 }
 
+/// The fixed context of one PR observation: which pull request, the policy a
+/// first pin takes and the key that chose it, and when it was observed.
+#[derive(Clone, Copy)]
+pub(crate) struct PrSample<'a> {
+    pub(crate) number: u64,
+    pub(crate) repository: &'a Result<String, String>,
+    pub(crate) policy: SubjectPolicy,
+    pub(crate) policy_source: &'a str,
+    pub(crate) now: WallTime,
+}
+
 /// Apply one PR observation to the wait's pinned subject. Updates `subject`
 /// and `pinned_head_seen` in place; returns `true` only when a previously pinned_head_seen head moved
 /// past a pinned subject. The invariant: a verdict is drawn only from the head
 /// pinned at admission (or the first sample when the forge was unreadable),
 /// never from a later head whose checks belong to different work.
 fn apply_subject_sample(
-    subject: &mut Option<PinnedSubject>,
+    subject: &mut Option<Box<PinnedSubject>>,
     pinned_head_seen: &mut bool,
     head_check_seen: &mut Option<HeadCheck>,
-    policy_source: &str,
     line: &mut crate::pr::status::Line,
-    number: u64,
-    repository: &Result<String, String>,
-    policy: SubjectPolicy,
-    now: WallTime,
+    sample: &PrSample<'_>,
 ) -> bool {
-    if subject.is_none() {
+    let PrSample {
+        number,
+        repository,
+        policy,
+        policy_source,
+        now,
+    } = *sample;
+    let Some(subject_ref) = subject.as_deref_mut() else {
         // The forge was unreadable at admission: the first successful sample
         // pins its head, with the `ForgePr` origin and the configured policy.
         if let Ok(head) = GitOid::parse(&line.head) {
-            *subject = Some(PinnedSubject {
+            *subject = Some(Box::new(PinnedSubject {
                 extra: Default::default(),
                 base: None,
                 head,
@@ -459,15 +473,12 @@ fn apply_subject_sample(
                 base_ref: None,
                 policy_source: Some(policy_source.to_owned()),
                 followed_from: Vec::new(),
-            });
+            }));
         }
         *pinned_head_seen = true;
         return false;
-    }
-    let (pinned, policy) = {
-        let subject = subject.as_ref().expect("subject pinned before sampling");
-        (subject.head, subject.policy)
     };
+    let (pinned, policy) = (subject_ref.head, subject_ref.policy);
     let pinned_text = pinned.to_string();
     let observed = head_check(
         &pinned,
@@ -493,10 +504,9 @@ fn apply_subject_sample(
                                 "#{number} head moved from {pinned} to {current}; following the new head"
                             ),
                         );
-                        let subject = subject.as_mut().expect("subject pinned before sampling");
-                        subject.followed_from.push(pinned);
-                        subject.head = current;
-                        subject.pinned_at = now;
+                        subject_ref.followed_from.push(pinned);
+                        subject_ref.head = current;
+                        subject_ref.pinned_at = now;
                         *pinned_head_seen = false;
                     }
                 }
@@ -661,7 +671,7 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
 /// show exactly what the wait pinned.
 fn pr_reading(
     label: &str,
-    subject: &Option<PinnedSubject>,
+    subject: &Option<Box<PinnedSubject>>,
     head_check: &Option<HeadCheck>,
     line: crate::pr::status::Line,
     complete: bool,
@@ -745,12 +755,14 @@ fn read_pr(
             subject,
             pinned_head_seen,
             &mut head_check_seen,
-            &policy_source,
             &mut line,
-            number,
-            &Ok(repository),
-            policy,
-            wall_now(),
+            &PrSample {
+                number,
+                repository: &Ok(repository),
+                policy,
+                policy_source: &policy_source,
+                now: wall_now(),
+            },
         ),
         _ => unreachable!("checked above"),
     };
@@ -824,16 +836,13 @@ fn read(
 /// as a forge read. The label is derived from the PR number so event readings
 /// agree with direct readings in the wait's per-target rows.
 pub(crate) fn reading_pr_event(
-    subject: &mut Option<PinnedSubject>,
+    subject: &mut Option<Box<PinnedSubject>>,
     pinned_head_seen: &mut bool,
-    number: u64,
-    repository: &Result<String, String>,
-    policy: SubjectPolicy,
-    policy_source: &str,
+    sample: &PrSample<'_>,
     complete: bool,
     detail: Value,
 ) -> Reading {
-    let label = format!("#{number}");
+    let label = format!("#{}", sample.number);
     let status = &detail["status"];
     let malformed: Vec<_> = [
         "draft",
@@ -873,12 +882,8 @@ pub(crate) fn reading_pr_event(
                 subject,
                 pinned_head_seen,
                 &mut head_check_seen,
-                policy_source,
                 &mut line,
-                number,
-                repository,
-                policy,
-                wall_now(),
+                sample,
             );
             let mut reading = pr_reading(
                 &label,
@@ -2101,7 +2106,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             Source::Pr {
                 number,
                 repository: repository.clone(),
-                subject,
+                subject: subject.map(Box::new),
                 pinned_head_seen: false,
                 policy_source: pr_policy_source.clone(),
                 complete,
@@ -2520,9 +2525,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                     {
                         break;
                     }
-                    let reading = match event_reader.as_mut() {
-                        Some(journal) if repository.is_ok() => {
-                            let repository_ref = repository.as_ref().expect("checked above");
+                    let reading = match (event_reader.as_mut(), repository.as_ref()) {
+                        (Some(journal), Ok(repository_ref)) => {
                             match journal.next(
                                 repository_ref,
                                 number,
@@ -2539,10 +2543,13 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                         Source::Pr { subject, pinned_head_seen, .. } => reading_pr_event(
                                             subject,
                                             pinned_head_seen,
-                                            number,
-                                            &repository,
-                                            pr_head_policy,
-                                            &policy_source,
+                                            &PrSample {
+                                                number,
+                                                repository: &repository,
+                                                policy: pr_head_policy,
+                                                policy_source: &policy_source,
+                                                now: wall_now(),
+                                            },
                                             complete,
                                             detail,
                                         ),
@@ -2868,10 +2875,13 @@ mod tests {
         reading_pr_event(
             &mut subject,
             &mut pinned_head_seen,
-            number,
-            &Ok("owner/repo".into()),
-            SubjectPolicy::Pinned,
-            "domains.wait.pr_head_policy from the compiled test profile",
+            &PrSample {
+                number,
+                repository: &Ok("owner/repo".into()),
+                policy: SubjectPolicy::Pinned,
+                policy_source: "domains.wait.pr_head_policy from the compiled test profile",
+                now: WallTime::UNIX_EPOCH,
+            },
             complete,
             detail,
         )
@@ -3768,8 +3778,21 @@ mod tests {
         );
     }
 
-    fn pinned_subject(head: GitOid, policy: SubjectPolicy) -> PinnedSubject {
-        PinnedSubject {
+    /// One observation of PR #7 in owner/repo at the epoch.
+    fn test_sample(policy: SubjectPolicy) -> PrSample<'static> {
+        static FIXTURE_REPOSITORY: std::sync::LazyLock<Result<String, String>> =
+            std::sync::LazyLock::new(|| Ok("owner/repo".into()));
+        PrSample {
+            number: 7,
+            repository: &FIXTURE_REPOSITORY,
+            policy,
+            policy_source: "domains.wait.pr_head_policy from the compiled test profile",
+            now: WallTime::UNIX_EPOCH,
+        }
+    }
+
+    fn pinned_subject(head: GitOid, policy: SubjectPolicy) -> Box<PinnedSubject> {
+        Box::new(PinnedSubject {
             extra: Default::default(),
             base: None,
             head,
@@ -3785,7 +3808,7 @@ mod tests {
                 "domains.wait.pr_head_policy from the compiled test profile".into(),
             ),
             followed_from: Vec::new(),
-        }
+        })
     }
 
     #[test]
@@ -3800,12 +3823,8 @@ mod tests {
             &mut subject,
             &mut pinned_head_seen,
             &mut None,
-            "domains.wait.pr_head_policy from the compiled test profile",
             &mut line,
-            7,
-            &Ok("owner/repo".into()),
-            SubjectPolicy::Pinned,
-            WallTime::from_micros(0).expect("fixture time"),
+            &test_sample(SubjectPolicy::Pinned),
         );
         assert!(!moved, "an unseen head is not a move");
         assert_eq!(line.verdict(), None, "its verdict is ignored");
@@ -3824,12 +3843,8 @@ mod tests {
             &mut subject,
             &mut pinned_head_seen,
             &mut None,
-            "domains.wait.pr_head_policy from the compiled test profile",
             &mut first_sample,
-            7,
-            &Ok("owner/repo".into()),
-            SubjectPolicy::Pinned,
-            WallTime::from_micros(0).expect("fixture time"),
+            &test_sample(SubjectPolicy::Pinned),
         ));
         assert!(pinned_head_seen, "the pinned head was observed");
 
@@ -3839,12 +3854,8 @@ mod tests {
                 &mut subject,
                 &mut pinned_head_seen,
                 &mut None,
-                "domains.wait.pr_head_policy from the compiled test profile",
                 &mut moved_line,
-                7,
-                &Ok("owner/repo".into()),
-                SubjectPolicy::Pinned,
-                WallTime::from_micros(0).expect("fixture time"),
+                &test_sample(SubjectPolicy::Pinned),
             )
         });
         assert!(moved, "a pinned_head_seen head that moves settles the wait");
@@ -3886,12 +3897,8 @@ mod tests {
                 &mut subject,
                 &mut pinned_head_seen,
                 &mut head_check_seen,
-                "domains.wait.pr_head_policy from the compiled test profile",
                 &mut line,
-                7,
-                &Ok("owner/repo".into()),
-                SubjectPolicy::FollowLatest,
-                WallTime::from_micros(0).expect("fixture time"),
+                &test_sample(SubjectPolicy::FollowLatest),
             )
         });
         assert!(!moved, "follow_latest never settles head_moved");
@@ -4016,12 +4023,8 @@ mod tests {
             &mut subject,
             &mut pinned_head_seen,
             &mut None,
-            "domains.wait.pr_head_policy from the compiled test profile",
             &mut line,
-            7,
-            &Ok("owner/repo".into()),
-            SubjectPolicy::FollowLatest,
-            WallTime::from_micros(0).expect("fixture time"),
+            &test_sample(SubjectPolicy::FollowLatest),
         );
         assert!(!moved);
         let subject = subject.expect("the first sample pins the subject");

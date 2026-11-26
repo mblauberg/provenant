@@ -1604,10 +1604,13 @@ mod tests {
         let reading = crate::status_wait::reading_pr_event(
             &mut subject,
             &mut seen,
-            7,
-            &Ok("owner/repo".into()),
-            provenant_records::subject::SubjectPolicy::Pinned,
-            "domains.wait.pr_head_policy from the compiled test profile",
+            &crate::status_wait::PrSample {
+                number: 7,
+                repository: &Ok("owner/repo".into()),
+                policy: provenant_records::subject::SubjectPolicy::Pinned,
+                policy_source: "domains.wait.pr_head_policy from the compiled test profile",
+                now: provenant_core::WallTime::UNIX_EPOCH,
+            },
             false,
             detail,
         );
@@ -1673,10 +1676,13 @@ mod tests {
             let reading = crate::status_wait::reading_pr_event(
                 &mut subject,
                 &mut seen,
-                7,
-                &Ok("owner/repo".into()),
-                provenant_records::subject::SubjectPolicy::Pinned,
-                "domains.wait.pr_head_policy from the compiled test profile",
+                &crate::status_wait::PrSample {
+                    number: 7,
+                    repository: &Ok("owner/repo".into()),
+                    policy: provenant_records::subject::SubjectPolicy::Pinned,
+                    policy_source: "domains.wait.pr_head_policy from the compiled test profile",
+                    now: provenant_core::WallTime::UNIX_EPOCH,
+                },
                 false,
                 recovered,
             );
