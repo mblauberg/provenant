@@ -43,7 +43,11 @@ fn caller_is_guardian_descendant_with(
     // the caller and its parent chain. Seed it with the exact caller identity
     // so the walk can include that chain without a host-wide scan. Known PIDs
     // are accepted only when their observed identity still matches.
-    let scoped = observer.live_census(guardian, &[peer_now.identity.clone()], MAX_CENSUS_ENTRIES);
+    let scoped = observer.live_census(
+        guardian,
+        std::slice::from_ref(&peer_now.identity),
+        MAX_CENSUS_ENTRIES,
+    );
     if let Ok(Some(census)) = &scoped
         && descendant_in_census(peer_pid, &peer_now.identity, guardian, census)
     {
