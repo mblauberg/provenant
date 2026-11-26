@@ -133,7 +133,11 @@ from the forge, while the diff narrows to `review_base...head`, matching the
 three-dot range the host writes into its review context. `subject` stays
 exclusive with `--pr`, since both would name the head and `--pr` takes it
 from the forge. Diff evidence and selection use base...head, including branches that
-merged main. Because the forge can report the previous head seconds after a
+merged main. The admitted subject's base is merge-base(head, base), not the
+base tip, so every consumer of the pinned pair, the lane's own two-dot diff
+included, sees only the head's changes even when the head is behind its base.
+When the merge base cannot be computed the base tip is kept and the launch warns,
+naming the missing merge base. Because the forge can report the previous head seconds after a
 push, `--pr N --head SHA` pins the expected head: the host rereads the forge
 within a bounded wait and, if the mismatch persists, refuses naming `--head`,
 saying the supplied head is not the PR's head and showing both SHAs.

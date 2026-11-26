@@ -350,6 +350,7 @@ impl Factory {
                 None => materialise(base_ref.as_str(), pull_subject.base_ref_oid)?,
             };
             let head = materialise(&head_ref, pull_subject.head_ref_oid)?;
+            let (base, range_warning) = review_range_base(&git, &self.cwd, &head, base);
             // Without an expected head, a fresh push can leave the local
             // remote-tracking ref ahead of what the forge still reports. Warn
             // (never refuse) and name both commits so the reviewer can re-run
@@ -366,6 +367,7 @@ impl Factory {
                     )
                 })
                 .flatten();
+            let warning = join_warnings(warning, range_warning);
             let origin = if expected_head.is_some() {
                 // An explicit --head is the authoritative pin, even with --pr.
                 SubjectOrigin::Explicit
@@ -378,7 +380,9 @@ impl Factory {
             (base, head, warning, origin)
         } else if let (Some(subject), Some(base)) = (subject, base) {
             subject_base_ref = Some(base.to_owned());
-            (resolve(base)?, resolve(subject)?, None, ref_origin(subject))
+            let head = resolve(subject)?;
+            let (base, warning) = review_range_base(&git, &self.cwd, &head, resolve(base)?);
+            (base, head, warning, ref_origin(subject))
         } else if subject.is_some() || base.is_some() {
             return Err(graph_subject_error(
                 "review requires both subject and review_base",
@@ -458,6 +462,29 @@ impl Factory {
             },
             warning,
         )))
+    }
+}
+
+/// A review diff starts at merge-base(head, base), never at the base tip: a
+/// head behind its base would otherwise show the newer base commits as
+/// reverts. When the merge base cannot be computed the tip is kept and a
+/// warning names the missing merge base.
+fn review_range_base(git: &Path, cwd: &Path, head: &str, base: String) -> (String, Option<String>) {
+    match provenant_run::review_merge_base_between(git, cwd, head, &base) {
+        Ok(merge_base) => (merge_base, None),
+        Err(_) => {
+            let warning = format!(
+                "cannot compute merge-base({head}, {base}); the review diff starts at the base tip {base}, so base commits newer than the head can read as reverts. Fetch both commits or pin --set review_base=BASE."
+            );
+            (base, Some(warning))
+        }
+    }
+}
+
+fn join_warnings(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first} {second}")),
+        (one, other) => one.or(other),
     }
 }
 
@@ -1076,6 +1103,53 @@ mod tests {
             let warning = result.1.as_deref().ok_or("expected warning")?;
             assert!(warning.contains("--pr was ignored"), "{warning}");
             assert!(warning.contains("review range"), "{warning}");
+        }
+
+        // A head behind its base is reviewed from merge-base(head, base), so
+        // base commits newer than the head never read as reverts; a base with
+        // no merge base keeps its tip and the warning names the merge base.
+        {
+            let fx = fixture()?;
+            git(&fx.rig, &["checkout", "-q", "-b", "base-ahead", &fx.base])?;
+            std::fs::write(fx.rig.project.join("base.txt"), "newer base\n")?;
+            git(&fx.rig, &["add", "."])?;
+            git(&fx.rig, &["commit", "-qm", "newer base"])?;
+            let base_tip = git(&fx.rig, &["rev-parse", "HEAD"])?;
+            git(&fx.rig, &["checkout", "-q", "--orphan", "unrelated"])?;
+            git(&fx.rig, &["commit", "-qm", "unrelated root"])?;
+            let unrelated = git(&fx.rig, &["rev-parse", "HEAD"])?;
+            git(&fx.rig, &["checkout", "-q", "feature"])?;
+            let factory = factory(&fx.rig)?;
+            let base_tip_oid =
+                provenant_core::GitOid::parse(&base_tip).map_err(|_| "base tip oid")?;
+            let input = serde_json::json!({"pr":7,"head":fx.forge_new});
+            let result = run_with(&factory, &input, |_| {
+                Ok(PullSnapshot {
+                    base_ref_oid: base_tip_oid,
+                    ..subject(&fx, &fx.forge_new, None)
+                })
+            })?
+            .ok_or("no PR subject")?;
+            assert_eq!(result.0.head.to_string(), fx.forge_new);
+            assert_eq!(result.0.base.ok_or("no base")?.to_string(), fx.base);
+            assert!(result.1.is_none(), "{:?}", result.1);
+
+            let input = serde_json::json!({
+                "set":{"subject":fx.forge_new, "review_base":base_tip}
+            });
+            let result = run_with(&factory, &input, |_| Err(graph_subject_error("no forge")))?
+                .ok_or("no explicit subject")?;
+            assert_eq!(result.0.base.ok_or("no base")?.to_string(), fx.base);
+            assert_eq!(result.0.base_ref.as_deref(), Some(base_tip.as_str()));
+
+            let input = serde_json::json!({
+                "set":{"subject":fx.forge_new, "review_base":unrelated}
+            });
+            let result = run_with(&factory, &input, |_| Err(graph_subject_error("no forge")))?
+                .ok_or("no unrelated subject")?;
+            assert_eq!(result.0.base.ok_or("no base")?.to_string(), unrelated);
+            let warning = result.1.as_deref().ok_or("expected merge-base warning")?;
+            assert!(warning.contains("merge-base("), "{warning}");
         }
 
         Ok(())
