@@ -4280,12 +4280,24 @@ fn base_15_settlement_fields_migrate_once_without_extra_fields() -> TestResult {
         stop: None,
         outcome: Outcome::Rejected,
         exit_code: None,
-        finished_at: provenant_core::WallTime::from_micros(1)?,
+        finished_at: record.queued_at,
         reason: Some("pre_launch_refusal".into()),
     };
     // A base-15 pre-launch refusal row recorded that no provider started; its
     // migrated pre-launch basis is validated against that custody fact.
     record.provider_launched = Some(false);
+    // A sealed refusal still publishes its (empty) result artifact.
+    record.result = Some(ArtifactRecord {
+        extra: Default::default(),
+        path: crate::artifacts::artifact_path(
+            input.attempt_id,
+            provenant_records::AttemptFile::Result.name(),
+        )?,
+        digest: CanonicalV1::file_digest(b""),
+        bytes: 0,
+        complete: true,
+        redacted: false,
+    });
     let mut value = serde_json::to_value(record)?;
     value["state"]["terminal_cause"] = serde_json::json!("handoff_refused");
     value["state"].as_object_mut().unwrap().remove("cause");
