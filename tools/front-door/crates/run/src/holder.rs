@@ -145,30 +145,24 @@ fn stall_stop_cause(
     }
 }
 
-fn apply_provider_identity(
+/// Provider identity facts, recorded without mutating the host verdict. The
+/// classifier applies their effects in one place, beside every other settlement
+/// input.
+fn provider_identity(
     exit: &ExitObservation,
-    decoded: &mut Decoded,
+    decoded: &Decoded,
     policy: &provenant_records::policy::Policy,
-) {
-    let unsettle = |decoded: &mut Decoded, reason: &str| {
-        decoded.outcome = Outcome::Unsettled;
-        decoded.complete = false;
-        // Replay identified the precise defect already. Identity uncertainty
-        // must retain that safe typed location, not replace it with a generic
-        // message. Conflicting identity still takes priority below.
-        if !matches!(
-            decoded.terminal_cause,
-            Some(TerminalCause::ProviderCaptureDefect { .. })
-        ) {
-            decoded.terminal_cause = None;
-            decoded.reason = Some(reason.into());
-        }
-    };
-    if exit.provider_identity_conflict {
-        decoded.outcome = Outcome::Failed;
-        decoded.complete = false;
-        decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
-        decoded.reason = Some(TerminalCause::IdentityMismatch.detail().into());
+) -> provenant_records::settlement::IdentityEvidence {
+    use provenant_records::settlement::{IdentityEvidence, IdentityPolicyEffect};
+
+    // Live identity checks run before retained-tail truncation. If a
+    // delimiter-complete frame was oversized, undecodable or unreadable, or
+    // capture drain timed out, the terminal owner cannot prove that the
+    // provider stayed in the admitted session. Policy stays configurable
+    // outside the pure classifier.
+    let incomplete = if exit.provider_identity_conflict {
+        // Conflict is the fatal location and takes priority over a policy warn.
+        IdentityPolicyEffect::Complete
     } else if exit.provider_identity_evidence_incomplete
         && matches!(
             decoded.outcome,
@@ -180,54 +174,30 @@ fn apply_provider_identity(
             "PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE",
             Facts::violation("provider identity evidence was incomplete"),
         ) {
-            Effect::Proceed => {}
-            Effect::Warn(warning) => {
-                decoded.reason = Some(match decoded.reason.take() {
-                    Some(reason) => format!("{reason}; {}", warning.message),
-                    None => warning.message,
-                });
-            }
-            // Live identity checks run before retained-tail truncation. If a
-            // delimiter-complete frame was oversized, undecodable or
-            // unreadable, or capture drain timed out, the terminal owner
-            // cannot prove that the provider stayed in the admitted session.
-            Effect::Refuse(_) | Effect::Stop(_) => unsettle(
-                decoded,
-                "provider identity evidence was incomplete; continuation refused by policy",
-            ),
+            Effect::Proceed => IdentityPolicyEffect::Proceed,
+            Effect::Warn(warning) => IdentityPolicyEffect::Warn {
+                message: warning.message,
+            },
+            Effect::Refuse(_) | Effect::Stop(_) => IdentityPolicyEffect::Unsettle,
         }
-    }
-    if exit.provider_identity_eof_fragment
+    } else {
+        IdentityPolicyEffect::Complete
+    };
+    // Only a fragment from an actual EOF is eligible for the intentional-stop
+    // exception. Natural completion and uncertain delivery cannot use it to
+    // claim a complete provider result. Conflicting identity takes priority.
+    let eof_fragment_unsettles = exit.provider_identity_eof_fragment
         && !(exit.cancel_delivered_before_exit == Some(true)
             && matches!(
                 exit.stop_reason,
                 Some(StopReason::ExplicitCancellation | StopReason::Steered)
             ))
-        && decoded.terminal_cause != Some(TerminalCause::IdentityMismatch)
-    {
-        // Only a fragment from an actual EOF is eligible for the
-        // intentional-stop exception. Natural completion and uncertain
-        // delivery cannot use it to claim a complete provider result.
-        unsettle(
-            decoded,
-            "provider ended with an incomplete final frame; continuation refused",
-        );
+        && decoded.terminal_cause != Some(TerminalCause::IdentityMismatch);
+    IdentityEvidence {
+        conflict: exit.provider_identity_conflict,
+        incomplete,
+        eof_fragment_unsettles,
     }
-}
-
-/// A writer's committed head, when settlement can prove the head moved from
-/// the pinned base. Absent or unchanged evidence is not a commit.
-fn writer_committed_head(
-    attempt: &Directory,
-    settlement: Option<&crate::settlement::Driver<'_>>,
-) -> Result<Option<provenant_core::GitOid>> {
-    let sealed = match read_sealed(attempt, "writer-terminal.json", RECORD_LIMIT)? {
-        Some(raw) => Some(crate::db::decode::<crate::writer::WriterTerminal>(&raw)?.head),
-        None => None,
-    };
-    let head = sealed.or_else(|| settlement.and_then(crate::settlement::Driver::head));
-    let base = settlement.and_then(crate::settlement::Driver::base);
-    Ok(head.filter(|head| base.is_none_or(|base| base != *head)))
 }
 
 /// The identities a mismatch warning names, in the route's own terms.
@@ -255,12 +225,14 @@ fn route_identity_label(route: Option<&RouteRecord>) -> String {
     }
 }
 
-/// Apply a contradicted provider identity to settlement. A writer whose head
-/// moved keeps its commit for review, with a warning naming both identities;
-/// it never fails and never discards the work. Every other lane keeps the
-/// fatal mismatch decision.
+/// Apply a contradicted provider identity to the settled fact. A writer whose
+/// head moved keeps its commit for review, with a warning naming both
+/// identities; it never fails and never discards the work. Every other lane
+/// keeps the fatal mismatch decision. This runs after `settle` because the
+/// moved head comes from the sealed progress fact, not from a live Git read.
 fn apply_route_identity(
-    decoded: &mut Decoded,
+    fact: &mut provenant_records::settlement::OutcomeFact,
+    result: &mut String,
     resolved: Option<&RouteRecord>,
     applied: Option<&RouteRecord>,
     observed: Option<&RouteRecord>,
@@ -269,9 +241,7 @@ fn apply_route_identity(
     match crate::reader::route_identity(resolved, applied, observed) {
         crate::reader::RouteIdentity::Observed => {}
         crate::reader::RouteIdentity::Unobserved => {
-            decoded
-                .partial_signals
-                .push(PartialSignal::IdentityUnobserved);
+            fact.signals.push(PartialSignal::IdentityUnobserved);
         }
         crate::reader::RouteIdentity::Mismatch => match committed_head {
             Some(head) => {
@@ -280,23 +250,23 @@ fn apply_route_identity(
                     route_identity_label(observed),
                     route_identity_label(applied),
                 );
-                decoded.outcome = Outcome::ReviewRequired;
-                decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
-                decoded.reason = Some(match decoded.reason.take() {
+                fact.outcome = Outcome::ReviewRequired;
+                fact.cause = Some(TerminalCause::IdentityMismatch);
+                fact.reason = Some(match fact.reason.take() {
                     Some(reason) => format!("{reason}; {warning}"),
                     None => warning,
                 });
-                if decoded.result.is_empty() {
-                    decoded.result = EMPTY_WRITER_RESULT.into();
+                if result.is_empty() {
+                    *result = EMPTY_WRITER_RESULT.into();
                 }
                 // A preserved commit is a review record, not a success: its
                 // sealed result must be complete even when the capture was not.
-                decoded.complete = true;
+                fact.complete = true;
             }
             None => {
-                decoded.outcome = Outcome::Failed;
-                decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
-                decoded.reason = Some(TerminalCause::IdentityMismatch.detail().into());
+                fact.outcome = Outcome::Failed;
+                fact.cause = Some(TerminalCause::IdentityMismatch);
+                fact.reason = Some(TerminalCause::IdentityMismatch.detail().into());
             }
         },
     }
@@ -310,13 +280,14 @@ mod identity_policy_tests {
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
     fn incomplete_identity_evidence_respects_policy_and_conflicts_remain_fatal() {
-        for (strength, conflict, expected) in [
-            (Strength::Warn, false, Outcome::Succeeded),
-            (Strength::Off, false, Outcome::Succeeded),
-            (Strength::Refuse, false, Outcome::Unsettled),
-            (Strength::Warn, true, Outcome::Failed),
-            (Strength::Off, true, Outcome::Failed),
-            (Strength::Refuse, true, Outcome::Failed),
+        use provenant_records::settlement::IdentityPolicyEffect;
+        for (strength, conflict) in [
+            (Strength::Warn, false),
+            (Strength::Off, false),
+            (Strength::Refuse, false),
+            (Strength::Warn, true),
+            (Strength::Off, true),
+            (Strength::Refuse, true),
         ] {
             let mut policy = Policy::default();
             policy.overlay(
@@ -326,7 +297,7 @@ mod identity_policy_tests {
             let mut exit = crate::tests::exit();
             exit.provider_identity_evidence_incomplete = true;
             exit.provider_identity_conflict = conflict;
-            let mut decoded = Decoded {
+            let decoded = Decoded {
                 terminal_cause: None,
                 outcome: Outcome::Succeeded,
                 result: "valid result".into(),
@@ -336,20 +307,27 @@ mod identity_policy_tests {
                 session: Some("session".into()),
                 reason: None,
                 partial_signals: vec![],
-                turns: vec![],
             };
-            apply_provider_identity(&exit, &mut decoded, &policy);
-            assert_eq!(decoded.outcome, expected);
-            if !conflict && strength == Strength::Warn {
-                let reason = decoded.reason.as_deref().unwrap();
-                assert!(reason.contains("PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE"));
-                assert!(reason.contains("Host"));
-            }
-            if conflict {
-                assert_eq!(
-                    decoded.terminal_cause,
-                    Some(TerminalCause::IdentityMismatch)
-                );
+            let evidence = provider_identity(&exit, &decoded, &policy);
+            assert_eq!(evidence.conflict, conflict);
+            assert!(!evidence.eof_fragment_unsettles);
+            match (strength, conflict) {
+                (_, true) => {
+                    assert_eq!(evidence.incomplete, IdentityPolicyEffect::Complete);
+                }
+                (Strength::Off, false) => {
+                    assert_eq!(evidence.incomplete, IdentityPolicyEffect::Proceed);
+                }
+                (Strength::Warn, false) => match evidence.incomplete {
+                    IdentityPolicyEffect::Warn { message } => {
+                        assert!(message.contains("PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE"));
+                        assert!(message.contains("Host"));
+                    }
+                    other => panic!("expected a policy warning, got {other:?}"),
+                },
+                (Strength::Refuse, false) => {
+                    assert_eq!(evidence.incomplete, IdentityPolicyEffect::Unsettle);
+                }
             }
         }
     }
@@ -358,6 +336,7 @@ mod identity_policy_tests {
     #[test]
     fn identity_mismatch_keeps_a_writers_commit_for_review()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::settlement::{LaneRole, SettlementEvidence, classify::settle};
         let requested = crate::tests::route();
         let observed = RouteRecord {
             model: Some("fixture/other".into()),
@@ -368,36 +347,28 @@ mod identity_policy_tests {
             (Some(head), Outcome::ReviewRequired),
             (None, Outcome::Failed),
         ] {
-            let mut decoded = Decoded {
-                terminal_cause: None,
-                outcome: Outcome::Succeeded,
-                result: "committed work".into(),
-                complete: true,
-                observed_route: Some(observed.clone()),
-                usage: UsageRecord::default(),
-                session: None,
-                reason: None,
-                partial_signals: vec![],
-                turns: vec![],
-            };
+            let mut fact = settle(&SettlementEvidence::fixture(
+                LaneRole::Reader,
+                Outcome::Succeeded,
+                None,
+            ));
+            let mut result = "committed work".to_owned();
             apply_route_identity(
-                &mut decoded,
+                &mut fact,
+                &mut result,
                 Some(&requested),
                 Some(&requested),
                 Some(&observed),
                 committed,
             );
-            assert_eq!(decoded.outcome, expected);
-            assert_eq!(
-                decoded.terminal_cause,
-                Some(TerminalCause::IdentityMismatch)
-            );
-            let reason = decoded.reason.as_deref().ok_or("mismatch reason")?;
+            assert_eq!(fact.outcome, expected);
+            assert_eq!(fact.cause, Some(TerminalCause::IdentityMismatch));
+            let reason = fact.reason.as_deref().ok_or("mismatch reason")?;
             if committed.is_some() {
                 assert!(reason.contains("fixture/model"), "{reason}");
                 assert!(reason.contains("fixture/other"), "{reason}");
                 assert!(reason.contains(&head.to_string()), "{reason}");
-                assert!(decoded.complete);
+                assert!(fact.complete);
             } else {
                 // No verified moved head: the fatal decision and its fixed
                 // detail are unchanged.
@@ -2828,7 +2799,11 @@ impl RunStore {
         let mut deferred: Vec<(SettlementEffect, EffectDisposition)> = Vec::new();
         let mut import_failed = false;
         let mut import_stopped = false;
-        let mut stray_work = false;
+        // Host-proven Git facts. The classifier decides what they mean; the
+        // holder only records what the terminal checks observed.
+        let mut uncommitted: Option<String> = None;
+        let mut primary = provenant_records::settlement::PrimaryCheckout::NotChecked;
+        let mut stopped_handoff: Option<provenant_records::handoff::Handoff> = None;
         // A late request alone cannot invalidate a verified clean exit. If the
         // current guardian could not establish ordering, its receipt stays unknown.
         let steered = exit.stop_reason == Some(StopReason::Steered)
@@ -2864,7 +2839,6 @@ impl RunStore {
                 usage: UsageRecord::default(),
                 session: None,
                 partial_signals: Vec::new(),
-                turns: Vec::new(),
                 reason: Some(format!(
                     "cancelled before start: {}",
                     exit.warnings
@@ -2881,7 +2855,6 @@ impl RunStore {
                 usage: UsageRecord::default(),
                 session: None,
                 partial_signals: Vec::new(),
-                turns: Vec::new(),
                 reason: Some(
                     exit.warnings
                         .first()
@@ -2949,12 +2922,20 @@ impl RunStore {
         {
             decoded.terminal_cause = Some(TerminalCause::ProcessCrash);
         }
-        let captured_handoff = self.capture_handoff(attempt, &record, &decoded)?;
-        let trailing_verdict_tolerated = captured_handoff.trailing_verdict_tolerated;
-        let trailing_prose_tolerated = captured_handoff.trailing_prose_tolerated;
-        let (mut handoff, handoff_error) = match captured_handoff.handoff {
-            Ok(handoff) => (handoff, None),
-            Err(error) => (None, Some(error)),
+        // The declaration journal is the only handoff channel. Provider prose,
+        // fences and turn boundaries are never read here.
+        let declared = self.capture_declaration(attempt, &record)?;
+        let mut handoff = match &declared {
+            provenant_records::declaration::DeclarationEvidence::Accepted(sealed) => {
+                Some(sealed.handoff.clone())
+            }
+            _ => None,
+        };
+        let handoff_error = match &declared {
+            provenant_records::declaration::DeclarationEvidence::Rejected { error } => {
+                Some(error.clone())
+            }
+            _ => None,
         };
         // Failed headless tools can leave only stderr. Keep the recognised
         // provider diagnostic alongside any partial answer before sealing it.
@@ -3005,17 +2986,9 @@ impl RunStore {
             )?
             .is_some();
         let completed_budget_handoff = exit.stop_reason == Some(StopReason::TokenBudget)
-            && matches!(
-                provenant_records::run::SettlementReason::derive(
-                    decoded.outcome,
-                    Some(&provenant_records::run::TerminalEvidence::ProcessExit),
-                    &decoded.partial_signals,
-                    Some(TerminalCause::TokenBudget),
-                    handoff_error.as_ref().map_or(Ok(handoff.as_ref()), Err),
-                )
-                .rule()
-                .terminal_outcome,
-                provenant_records::run::SettlementTerminalOutcome::Succeeded
+            && provenant_records::settlement::classify::budget_completed(
+                decoded.outcome,
+                &declared,
             );
         if completed_budget_handoff {
             // The one budget success gate: derivation already required a valid
@@ -3142,7 +3115,7 @@ impl RunStore {
             }
             decoded.result = stopped.fenced();
             decoded.complete = true;
-            handoff = Some(stopped);
+            stopped_handoff = Some(stopped);
             decoded.reason = Some(if blocked {
                 "token budget crossed; the writer's handoff is blocked, so read its blocked_on and note before continuing".into()
             } else {
@@ -3286,7 +3259,6 @@ impl RunStore {
                 });
                 if decoded.result.trim().is_empty() {
                     decoded.result = budget_stop_result(&result, note);
-                    decoded.turns.clear();
                 }
             }
             if let Err(error) = &check
@@ -3459,7 +3431,8 @@ impl RunStore {
                     );
                 }
                 Ok(_) if decoded.outcome == Outcome::Succeeded => {
-                    // Edits with no commit are not a success, and nothing is delivered.
+                    // Dirty work is host evidence, not a host verdict. The
+                    // classifier decides what it means and writes the outcome.
                     let left = self.writer_uncommitted(
                         &record,
                         writer,
@@ -3470,33 +3443,25 @@ impl RunStore {
                             .map_or_else(CancelToken::new, |driver| driver.cancellation()),
                         recovery,
                     );
-                    let note = match left {
-                        Ok(None) => None,
-                        Ok(Some(reason)) => {
-                            decoded.outcome = Outcome::Uncommitted;
-                            Some(reason)
-                        }
+                    match left {
+                        Ok(None) => {}
+                        Ok(Some(reason)) => uncommitted = Some(reason),
                         Err(error) => {
+                            // An unreadable terminal check stays a host failure.
                             decoded.outcome = Outcome::Failed;
-                            Some(format!(
+                            decoded.reason = Some(format!(
                                 "writer terminal check failed for {}: {error}",
                                 writer.worktree.display()
-                            ))
+                            ));
                         }
-                    };
-                    if let Some(note) = note {
-                        decoded.reason = Some(match decoded.reason.take() {
-                            Some(reason) => format!("{reason}; {note}"),
-                            None => note,
-                        });
                     }
                     // An unaccounted move in the primary checkout warns when
                     // the lane committed on its bound branch: that is work in
                     // the right place, and Git cannot attribute the move to the
                     // lane. Without bound-branch commits the work may be in the
-                    // primary checkout, so the lane is held for review. Nothing
-                    // here refuses the lane.
-                    if decoded.outcome == Outcome::Succeeded {
+                    // primary checkout, so the lane is held for review. The
+                    // disposition travels as evidence; settle decides.
+                    if uncommitted.is_none() && decoded.outcome == Outcome::Succeeded {
                         let stray = self.writer_stray(
                             &record,
                             writer,
@@ -3506,40 +3471,41 @@ impl RunStore {
                                 .as_ref()
                                 .map_or_else(CancelToken::new, |driver| driver.cancellation()),
                         );
-                        let finding = match stray {
-                            Ok(None) => None,
+                        match stray {
+                            Ok(None) => {
+                                primary = provenant_records::settlement::PrimaryCheckout::Clean;
+                            }
                             Ok(Some(stray)) => {
                                 use provenant_records::warning::{
                                     PRIMARY_MOVED_UNATTRIBUTED, STRAY_LANE_WORK, Warning, warn,
                                 };
                                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                                let finding = match stray.disposition() {
+                                match stray.disposition() {
                                     crate::writer::StrayDisposition::Warn { note } => {
                                         warn(Warning::new(
                                             PRIMARY_MOVED_UNATTRIBUTED,
                                             note.clone(),
                                         ));
-                                        note
+                                        primary =
+                                            provenant_records::settlement::PrimaryCheckout::Warn {
+                                                note,
+                                            };
                                     }
                                     crate::writer::StrayDisposition::Review { note } => {
-                                        decoded.outcome = Outcome::ReviewRequired;
-                                        stray_work = true;
                                         warn(Warning::new(STRAY_LANE_WORK, note.clone()));
-                                        note
+                                        primary = provenant_records::settlement::PrimaryCheckout::Review {
+                                            note,
+                                        };
                                     }
-                                };
-                                Some(finding)
+                                }
                             }
                             Err(error) => {
                                 warn_stray_check(&error);
-                                None
+                                primary =
+                                    provenant_records::settlement::PrimaryCheckout::Unavailable {
+                                        note: error.to_string(),
+                                    };
                             }
-                        };
-                        if let Some(finding) = finding {
-                            decoded.reason = Some(match decoded.reason.take() {
-                                Some(reason) => format!("{reason}; {finding}"),
-                                None => finding,
-                            });
                         }
                     }
                 }
@@ -3648,12 +3614,11 @@ impl RunStore {
                 "Stopped at the context handoff threshold (lanes.context_handoff_tokens); a fresh attempt continues from this handoff on the same worktree.\n\n{}",
                 stopped.fenced()
             );
-            decoded.turns.clear();
             decoded.complete = true;
             decoded.outcome = Outcome::ReviewRequired;
             decoded.terminal_cause = Some(TerminalCause::ContextHandoff);
             decoded.reason = Some(TerminalCause::ContextHandoff.detail().into());
-            handoff = Some(stopped);
+            stopped_handoff = Some(stopped);
         }
         // A writer whose launch-time token copy was lost settles the same way:
         // a declared stop on its latest handoff, continued on a new token. The
@@ -3673,10 +3638,9 @@ impl RunStore {
                 "Stopped because this lane's access token was revoked or expired; a fresh attempt continues from this handoff on a new token.\n\n{}",
                 stopped.fenced()
             );
-            decoded.turns.clear();
             decoded.complete = true;
             decoded.outcome = Outcome::ReviewRequired;
-            handoff = Some(stopped);
+            stopped_handoff = Some(stopped);
         }
         let answer_limit = RESULT_LIMIT as usize;
         if decoded.result.len() > answer_limit {
@@ -3699,30 +3663,7 @@ impl RunStore {
                 decoded.reason = Some("provider result is empty or incomplete".into());
             }
         }
-        // A writer's head is pinned and sealed by terminal settlement above.
-        // Read it only after that call so the first settlement decides identity
-        // from the head that was actually committed, not from absent
-        // pre-terminal evidence; a mismatch then preserves the work for review.
-        let committed_head = if task.writer.is_some() {
-            writer_committed_head(attempt, settlement.as_ref())?
-        } else {
-            None
-        };
-        if matches!(
-            decoded.outcome,
-            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-        ) || completed_budget_handoff
-        {
-            let observed_route = decoded.observed_route.clone();
-            apply_route_identity(
-                &mut decoded,
-                record.resolved_route.as_ref(),
-                record.applied_route.as_ref(),
-                observed_route.as_ref(),
-                committed_head,
-            );
-        }
-        let mut terminal_note = if exit.never_spawned && !cancelled {
+        let terminal_note = if exit.never_spawned && !cancelled {
             exit.launch_refusal.as_ref().map(|fact| {
                 let diagnostic = fact.project(provenant_records::diagnostic::Diagnostic::new(
                     ErrorKind::Refused.code(),
@@ -3737,30 +3678,16 @@ impl RunStore {
         } else {
             None
         };
-        if decoded.result.is_empty()
+        let result_empty = decoded.result.trim().is_empty();
+        if result_empty
+            && task.writer.is_some()
+            && !matches!(&task.route, RequestedRoute::Adapter { .. })
             && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted)
         {
-            if task.writer.is_some() {
-                // A writer's work is its commit. A provider that exited cleanly
-                // with no final message needs review; it has not failed.
-                decoded.result = EMPTY_WRITER_RESULT.into();
-                decoded.turns.clear();
-                if decoded.outcome == Outcome::Succeeded {
-                    decoded.outcome = Outcome::ReviewRequired;
-                }
-                // Keep any reason already recorded, notably the census of
-                // uncommitted paths from the terminal check. The empty final
-                // message is a separate cause carried by `terminal_cause`;
-                // overwriting the reason would hide the paths from the chair.
-                decoded.reason = Some(match decoded.reason.take() {
-                    Some(reason) => format!("{reason}; {EMPTY_WRITER_REASON}"),
-                    None => EMPTY_WRITER_REASON.into(),
-                });
-                decoded.terminal_cause = Some(TerminalCause::EmptyWriterResult);
-            } else {
-                decoded.outcome = Outcome::Failed;
-                decoded.reason = Some("provider result is empty or incomplete".into());
-            }
+            // A writer's work is its commit. A clean exit with no final message
+            // needs review; it has not failed. The classifier carries the cause
+            // and reason, while the published result stays a readable record.
+            decoded.result = EMPTY_WRITER_RESULT.into();
         }
         let mut result = decoded.result.clone();
         if task.writer.is_some()
@@ -3770,143 +3697,100 @@ impl RunStore {
             decoded.complete &= result.len() + UNDELIVERED_NOTICE.len() <= RESULT_LIMIT as usize;
             result = undelivered_writer_result(&result);
         }
-        // Delivery keys off the outcome before a declared stop, so partial work
-        // is still delivered. The stop changes only the settled state.
-        let succeeded_before_stop = decoded.outcome == Outcome::Succeeded;
-        // A declared stop requires review even when the provider succeeded.
-        let mut partial = std::mem::take(&mut decoded.partial_signals);
-        if let Some(error) = &handoff_error {
-            partial.push(PartialSignal::HandoffMalformed);
-            decoded.reason = Some(error.to_string());
-            if matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {
-                decoded.outcome = Outcome::ReviewRequired;
-            }
-        }
-        if decoded.terminal_cause == Some(TerminalCause::EmptyWriterResult) {
-            partial.push(PartialSignal::HandoffMissing);
-        }
-        if stray_work {
-            partial.push(PartialSignal::StrayWork);
-        }
-        // A read-only lane has no changes to prove, so its complete answer is
-        // the proof. Only a writer must also report its work in a handoff.
-        if matches!(
-            decoded.outcome,
-            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-        ) && task.writer.is_some()
-            && !matches!(&task.route, RequestedRoute::Adapter { .. })
-            && handoff.is_none()
-            && handoff_error.is_none()
-        {
-            partial.push(PartialSignal::HandoffMissing);
-            // A lane that reports nothing has not passed. It needs review,
-            // and the reason names the cause.
-            if decoded.outcome == Outcome::Succeeded {
-                decoded.outcome = Outcome::ReviewRequired;
-                decoded.reason = Some(NO_HANDOFF_REASON.into());
-            }
-        }
-        if matches!(
-            decoded.outcome,
-            Outcome::Cancelled | Outcome::ReviewRequired
-        ) && handoff
-            .as_ref()
-            .is_some_and(|handoff| !handoff.unfinished())
-        {
-            let note = "handoff declared done but settlement was not successful";
-            decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{reason}; {note}"),
-                None => note.into(),
-            });
-        }
-        if matches!(
-            decoded.outcome,
-            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-        ) {
-            let mut notes = Vec::new();
-            if let Some(handoff) = handoff.as_ref().filter(|handoff| handoff.unfinished()) {
-                partial.push(PartialSignal::DeclaredStop);
-                if decoded.outcome == Outcome::Succeeded {
-                    decoded.outcome = Outcome::ReviewRequired;
-                }
-                notes.push(format!(
-                    "lane stopped early: {}",
-                    bounded_note(&handoff.note)
-                ));
-            }
-            if decoded.outcome == Outcome::Uncommitted {
-                partial.push(PartialSignal::UncommittedWork);
-            }
-            partial.sort();
-            partial.dedup();
-            if !partial.is_empty() {
-                let signals: Vec<_> = partial.iter().map(|signal| signal.as_str()).collect();
-                notes.insert(0, format!("partial finish ({})", signals.join(", ")));
-                let note = notes.join(": ");
-                decoded.reason = Some(match decoded.reason.take() {
-                    Some(reason) => format!("{reason}; {note}"),
-                    None => note,
-                });
-            }
-        } else if handoff.as_ref().is_some_and(|handoff| handoff.unfinished()) {
-            partial.push(PartialSignal::DeclaredStop);
-            partial.sort();
-            partial.dedup();
+        // The host phase is complete. Seal one evidence record and let the one
+        // pure classifier write every settled field. A re-drive after a crash
+        // reuses the sealed copy, so a later HEAD or Git read cannot change it.
+        let lane = if task.writer.is_none() {
+            provenant_records::settlement::LaneRole::Reader
+        } else if matches!(&task.route, RequestedRoute::Adapter { .. }) {
+            provenant_records::settlement::LaneRole::AdapterWriter
         } else {
-            partial.clear();
-        }
-        // A blocked writer settles with its own cause and its note. A failure
-        // or another cause already recorded keeps its place.
-        if task.writer.is_some()
-            && (decoded.terminal_cause.is_none()
-                || decoded.terminal_cause == Some(TerminalCause::Blocked))
-            && matches!(
-                decoded.outcome,
-                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-            )
-            && let Some(blocked) = handoff.as_ref().filter(|handoff| {
-                handoff.status == provenant_records::handoff::HandoffStatus::Blocked
-            })
+            provenant_records::settlement::LaneRole::ModelWriter
+        };
+        let stall_marker = read_sealed(attempt, "stall-action.json", RECORD_LIMIT)?
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+        let policy = crate::launch_policy(
+            self.writer_registry(),
+            &record.project_id.to_string(),
+            &task,
+        );
+        let evidence = provenant_records::settlement::SettlementEvidence {
+            schema_version: provenant_records::settlement::SETTLEMENT_EVIDENCE_SCHEMA,
+            lane,
+            host: provenant_records::settlement::HostVerdict {
+                outcome: decoded.outcome,
+                cause: decoded.terminal_cause,
+                complete: decoded.complete,
+                result_empty,
+                reason: decoded.reason.clone(),
+                terminal_note: terminal_note.clone(),
+                signals: decoded.partial_signals.clone(),
+                denial: denial
+                    .as_ref()
+                    .map(|denial| denial.diagnostic().to_string()),
+                stopped_handoff: stopped_handoff.clone(),
+            },
+            handoff: declared,
+            git: (task.writer.is_some()).then(|| provenant_records::settlement::GitEvidence {
+                pinned: crate::evidence::launch_pin(attempt)?,
+                head: crate::evidence::terminal_head(attempt)?,
+                uncommitted: uncommitted.clone(),
+                primary,
+            }),
+            custody: provenant_records::settlement::CustodyFacts {
+                launched: !exit.never_spawned,
+                cancelled,
+                steered,
+                cancellation_delivered: exit.cancel_delivered_before_exit,
+                import_cancelled: crate::store::import_cancelled(attempt, exit.scope)?,
+                process_exit: read_sealed(attempt, "process-exit.json", RECORD_LIMIT)?.is_some(),
+                stall: stall_marker
+                    .as_ref()
+                    .filter(|_| {
+                        !matches!(
+                            decoded.terminal_cause,
+                            Some(
+                                TerminalCause::IdentityMismatch
+                                    | TerminalCause::ProviderCaptureDefect { .. }
+                            )
+                        )
+                    })
+                    .and_then(|marker| stall_stop_cause(exit.stop_reason, cancelled, marker)),
+                identity: provider_identity(exit, &decoded, &policy),
+            },
+        };
+        let (evidence, digest) = match crate::evidence::read_evidence(attempt)? {
+            Some(sealed) => sealed,
+            None => crate::evidence::seal_evidence(attempt, &evidence)?,
+        };
+        let mut fact = provenant_records::settlement::classify::settle(&evidence);
+        // Route identity is a graph-owned override. It reads the sealed progress
+        // so a moved head keeps the writer's commit for review; a re-read of HEAD
+        // cannot move the sealed pin.
+        if matches!(
+            evidence.host.outcome,
+            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+        ) || completed_budget_handoff
         {
-            decoded.terminal_cause = Some(TerminalCause::Blocked);
-            terminal_note = Some(bounded_note(&blocked.note));
-        }
-        // No-work is a host Git fact, never inferred from provider prose or a
-        // missing head. Keep failures and uncommitted work distinct.
-        if task.writer.is_some()
-            && decoded.outcome == Outcome::ReviewRequired
-            && partial.as_slice() == [PartialSignal::DeclaredStop]
-            && decoded.terminal_cause.is_none()
-            && settlement.as_ref().is_some_and(|driver| {
-                driver
-                    .base()
-                    .zip(
-                        read_sealed(attempt, "writer-terminal.json", RECORD_LIMIT)
-                            .ok()
-                            .flatten()
-                            .and_then(|raw| {
-                                crate::db::decode::<crate::writer::WriterTerminal>(&raw).ok()
-                            })
-                            .map(|terminal| terminal.head),
-                    )
-                    .is_some_and(|(base, head)| base == head)
-            })
-        {
-            decoded.terminal_cause = Some(TerminalCause::StoppedNoWork);
-            decoded.reason = Some(format!(
-                "{}; {}",
-                TerminalCause::StoppedNoWork.detail(),
-                decoded.reason.take().unwrap_or_default()
-            ));
-        }
-        // A denial is a diagnostic, not part of the provider's answer: the
-        // handoff, findings and verdict blocks must stay as the provider wrote them.
-        if let Some(denial) = denial {
-            let note = denial.diagnostic();
-            decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{reason}; {note}"),
-                None => note.into(),
-            });
+            let observed_route = decoded.observed_route.clone();
+            let committed_head = if matches!(
+                fact.progress,
+                Some(provenant_records::settlement::Progress::Moved)
+            ) {
+                crate::evidence::terminal_head(attempt)?
+            } else {
+                None
+            };
+            apply_route_identity(
+                &mut fact,
+                &mut result,
+                record.resolved_route.as_ref(),
+                record.applied_route.as_ref(),
+                observed_route.as_ref(),
+                committed_head,
+            );
+            fact.signals.sort();
+            fact.signals.dedup();
         }
         // External delivery runs only from the committed decision below.
         let result_orphan = read_settled(
@@ -3915,7 +3799,7 @@ impl RunStore {
             RESULT_LIMIT,
         )?
         .is_some();
-        let delivery_applicable = succeeded_before_stop
+        let delivery_applicable = fact.delivery_eligible
             && !cancelled
             && exit.stop_reason.is_none()
             && (outcome_only || !exit.unresolved_cleanup)
@@ -3957,89 +3841,25 @@ impl RunStore {
                 },
             ));
         }
-        if !cancelled && decoded.outcome == Outcome::Cancelled {
-            decoded.outcome = Outcome::Unsettled;
-            decoded.reason = Some("cancellation delivery before provider exit is unknown".into());
-        } else if cancelled {
-            decoded.outcome = Outcome::Cancelled;
-            if steered && decoded.terminal_cause != Some(TerminalCause::IdentityMismatch) {
-                decoded.terminal_cause = Some(TerminalCause::Steered);
-                decoded.reason = Some(TerminalCause::Steered.detail().into());
-            }
-        }
-        let policy = crate::launch_policy(
-            self.writer_registry(),
-            &record.project_id.to_string(),
-            &task,
-        );
-        apply_provider_identity(exit, &mut decoded, &policy);
-        // An opt-in stall policy sealed its action before the stop. The typed
-        // cause travels with the exit; provider text never supplies it.
-        if let Some(raw) = read_sealed(attempt, "stall-action.json", RECORD_LIMIT)?
-            && let Ok(marker) = serde_json::from_slice::<serde_json::Value>(&raw)
-            && !matches!(
-                decoded.terminal_cause,
-                Some(TerminalCause::IdentityMismatch | TerminalCause::ProviderCaptureDefect { .. })
-            )
-            && let Some(cause) = stall_stop_cause(exit.stop_reason, cancelled, &marker)
-        {
-            decoded.outcome = Outcome::Failed;
-            decoded.terminal_cause = Some(cause);
-            decoded.reason = Some(cause.detail().into());
-        }
-        if matches!(
-            decoded.outcome,
-            Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
-        ) && !matches!(
-            decoded.terminal_cause,
-            Some(
-                TerminalCause::Steered
-                    | TerminalCause::IdentityMismatch
-                    | TerminalCause::ProviderCaptureDefect { .. }
-                    | TerminalCause::ProviderStalled
-                    | TerminalCause::ProviderStalledRetry
-            )
-        ) {
-            decoded.terminal_cause = None;
-        }
-        if trailing_verdict_tolerated {
-            const ORDER_NOTE: &str = "accepted one standalone verdict after the closed handoff";
-            decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{ORDER_NOTE}; {reason}"),
-                None => ORDER_NOTE.into(),
-            });
-        }
-        if trailing_prose_tolerated {
-            // #3928: a finished writer that adds prose after its single handoff
-            // keeps the declaration, with the drift visible in the status.
-            const PROSE_NOTE: &str = "accepted trailing prose after the closed handoff";
-            decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{PROSE_NOTE}; {reason}"),
-                None => PROSE_NOTE.into(),
-            });
-        }
-        let decoded_reason = decoded.reason.take().map(bounded_reason);
+        // Terminal evidence refuses a longer reason; the classifier's own
+        // strings are bounded the same way the host phase bounded its notes.
+        fact.reason = fact.reason.take().map(bounded_reason);
         let publication = TerminalPublication {
-            handoff: handoff_error.map_or(Ok(handoff.clone()), Err),
-            terminal_cause: decoded.terminal_cause,
-            terminal_note,
-            outcome: decoded.outcome,
+            fact,
+            evidence: Some(digest),
             finished_at,
             started_at: record.started_at,
             provider_ms: record.started_at.and_then(|started| {
                 u64::try_from(finished_at.as_micros().saturating_sub(started.as_micros()) / 1000)
                     .ok()
             }),
-            reason: decoded_reason,
             result: &result,
-            complete: decoded.complete,
             redacted: false,
             resolved_route: record.resolved_route.clone(),
             applied_route: record.applied_route.clone(),
             observed_route: decoded.observed_route,
             usage: decoded.usage,
             session: decoded.session,
-            partial_signals: partial,
         };
         if let Some(raw) = read_sealed(attempt, "terminal-effects.json", RECORD_LIMIT)? {
             let saved: crate::store::TerminalEffects = crate::db::decode(&raw)?;
@@ -4348,11 +4168,6 @@ fn bounded_reason(mut reason: String) -> String {
     reason
 }
 
-/// A lane's own words in a one-line reason: bounded and on one line.
-fn bounded_note(note: &str) -> String {
-    provenant_core::bounded_line(note, 240)
-}
-
 #[cfg(test)]
 mod outcome_release_tests {
     use super::*;
@@ -4571,14 +4386,10 @@ mod budget_result_tests {
         assert!(text.contains("- src/f19.rs") && !text.contains("src/f20.rs"));
         assert!(text.contains("- and 5 more"), "{text}");
         assert!(text.contains("inspect the branch"), "{text}");
-        let handoff = provenant_records::handoff::Handoff::from_result(&text)
-            .unwrap()
-            .expect("a handoff");
-        assert_eq!(
-            handoff.status,
-            provenant_records::handoff::HandoffStatus::StoppedEarly
-        );
-        assert_eq!(handoff.remaining, ["unknown: inspect branch"]);
+        // The placeholder is declaration-ready prose, not a parsed handoff:
+        // settlement reads only the declaration journal.
+        assert!(text.contains("unknown: inspect branch"), "{text}");
+        assert!(text.chars().count() < 4096, "the note must stay bounded");
     }
 
     #[test]
@@ -4637,13 +4448,12 @@ mod budget_result_tests {
             "decisions": [],
             "verify": [],
         });
-        let handoff = provenant_records::handoff::Handoff::from_json(&serde_json::to_vec(&done)?)?;
-        let stored: provenant_records::handoff::HandoffResult = Ok(Some(handoff));
-        crate::artifacts::seal(
-            &attempt,
-            provenant_records::AttemptFile::Handoff.name(),
-            &serde_json::to_vec(&stored)?,
-            provenant_records::handoff::HANDOFF_BYTES as u64 * 4,
+        store.declare(
+            id,
+            &provenant_records::declaration::DeclarationInput {
+                request_id: "budget-done".into(),
+                payload: done,
+            },
         )?;
         if let Some(answer) = answer {
             crate::artifacts::seal(&attempt, "stdout.log", answer.as_bytes(), CAPTURE_LIMIT)?;
@@ -4689,6 +4499,7 @@ mod budget_result_tests {
     fn an_empty_budget_result_keeps_the_done_handoff_as_a_review_record()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let (finished, result) = settle_budget_stop(None, Some(false))?;
+        assert!(result.is_empty() || result.contains("the provider sent no final message"));
         let AttemptState::Terminal { outcome, .. } = &finished.state else {
             return Err("budget stop must settle".into());
         };
@@ -4697,8 +4508,10 @@ mod budget_result_tests {
             Outcome::ReviewRequired,
             "an empty answer needs review, not success"
         );
-        let handoff = provenant_records::handoff::Handoff::from_result(&result)?
-            .ok_or("the fenced handoff substitution")?;
+        let stop = finished.state.stop().ok_or("a typed stop")?;
+        let handoff = stop
+            .handoff()
+            .ok_or("the declared done handoff is the review record")?;
         assert_eq!(
             handoff.status,
             provenant_records::handoff::HandoffStatus::Done
@@ -4707,11 +4520,11 @@ mod budget_result_tests {
     }
 
     // Spec: docs/specs/run-settlement.md#settlement
-    // Issue #3941: the #3928 tolerance must reach the terminal reason and a
-    // done handoff plus prose must settle Completed end to end.
+    // A declaration, never prose, settles the lane: trailing prose and a later
+    // tool call leave both the sealed snapshot and the fact unchanged.
     #[test]
-    fn done_handoff_with_trailing_prose_settles_completed_with_a_reason()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn declared_done_survives_trailing_prose() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         use crate::dispatch_tests::{Fake, seal_exit};
         use crate::tests::{call, clock, context, exit, input, route};
 
@@ -4743,10 +4556,14 @@ mod budget_result_tests {
             "decisions": [],
             "verify": [],
         });
-        let answer = format!(
-            "{}\nCommit pushed. Now updating the PR body ...\n",
-            provenant_records::handoff::Handoff::from_json(&serde_json::to_vec(&done)?)?.fenced()
-        );
+        store.declare(
+            id,
+            &provenant_records::declaration::DeclarationInput {
+                request_id: "declared-done".into(),
+                payload: done,
+            },
+        )?;
+        let answer = "Commit pushed. Now updating the PR body ...\n".to_owned();
         let mut observed = exit();
         observed.scope = RunStore::scope(&store.record(id, &request)?);
         seal_exit(&store, &observed)?;
@@ -4760,10 +4577,10 @@ mod budget_result_tests {
             return Err("settlement must be terminal".into());
         };
         assert_eq!(*outcome, Outcome::Succeeded, "reason: {reason:?}");
-        let reason = reason.as_deref().ok_or("terminal reason")?;
+        let reason = reason.as_deref().unwrap_or_default();
         assert!(
-            reason.contains("accepted trailing prose after the closed handoff"),
-            "reason: {reason}"
+            !reason.contains("accepted trailing prose"),
+            "prose must never settle a lane: {reason}"
         );
         let handoff = store.handoff(&store.record(id, &request)?)?;
         assert!(
@@ -4818,7 +4635,22 @@ mod budget_result_tests {
             attempt.current_path()?.join("handoff.json"),
             &provider_bytes,
         )?;
-        let answer = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"sealed from output\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+        let declared = serde_json::json!({
+            "schema_version": 2,
+            "status": "done",
+            "note": "declared by lane",
+            "remaining": [],
+            "decisions": [],
+            "verify": [],
+        });
+        store.declare(
+            id,
+            &provenant_records::declaration::DeclarationInput {
+                request_id: "provider-snapshot".into(),
+                payload: declared,
+            },
+        )?;
+        let answer = "the lane finished its work";
         let mut observed = crate::tests::exit();
         observed.scope = RunStore::scope(&store.record(id, &request)?);
         seal_exit(&store, &observed)?;
@@ -4840,7 +4672,7 @@ mod budget_result_tests {
             finished.state
         );
         let handoff = store.handoff(&finished)??.ok_or("sealed snapshot")?;
-        assert_eq!(handoff.note, "sealed from output");
+        assert_eq!(handoff.note, "declared by lane");
         assert!(
             warnings
                 .iter()
@@ -5298,6 +5130,210 @@ mod steer_terminal_identity_tests {
             .provider_identity()
             .ok_or("verified provider identity missing")?;
         assert_eq!(observed, &provider);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod settlement_5a_tests {
+    use super::*;
+    use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+    use std::os::unix::fs::DirBuilderExt;
+
+    fn declare(id: AttemptId, store: &RunStore, status: &str, note: &str) -> Result<()> {
+        let payload = serde_json::json!({
+            "schema_version": 2,
+            "status": status,
+            "note": note,
+            "remaining": [],
+            "decisions": [],
+            "verify": [],
+        });
+        store.declare(
+            id,
+            &provenant_records::declaration::DeclarationInput {
+                request_id: format!("5a-{status}"),
+                payload,
+            },
+        )?;
+        Ok(())
+    }
+
+    // Issue #4010: a writer that committed, pushed and declared `blocked` is
+    // Blocked. Progress is launch-pin relative and never turns a blocked lane
+    // into a no-work stop, even though it stopped early and delivered nothing.
+    #[test]
+    fn pushed_then_blocked_stays_blocked_never_stopped_no_work()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (crate::tests::clock(), CancelToken::new());
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut run = crate::tests::input();
+        run.request.task.writer = Some(fixture.writer.clone());
+        store.create(&run, &call)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(id, false)?;
+        let mut launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &Policy::default(),
+        )?;
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&candidate)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        fixture.commit(&fixture.writer.worktree, "writer work")?;
+        let head =
+            crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
+        assert_ne!(head, launch.base, "the writer must move its pinned head");
+        std::fs::write(
+            candidate.join("git-common").join(launch.branch.as_str()),
+            format!("{head}\n"),
+        )?;
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory.try_clone()?,
+            scope,
+            binding,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(provenant_supervisor::fixture::bind_writer_attempt(
+            lease, &attempt,
+        )?);
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &crate::db::bytes(&serde_json::json!({
+                "schema_version": 1, "scope": scope, "requester": execution.actor_id,
+            }))?,
+            RECORD_LIMIT,
+        )?;
+        declare(id, &store, "blocked", "waiting on the owner decision")?;
+        let mut observed = crate::tests::exit();
+        observed.scope = scope;
+        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        let fake = crate::dispatch_tests::Fake::with_observed(
+            Some(crate::tests::route()),
+            Some(Outcome::Succeeded),
+        )
+        .with_answer(Some(crate::dispatch_tests::DONE_ANSWER.into()), Some(true));
+        let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+        let AttemptState::Terminal { terminal_cause, .. } = &finished.state else {
+            return Err("writer must settle".into());
+        };
+        assert_eq!(
+            *terminal_cause,
+            Some(TerminalCause::Blocked),
+            "pushed work must stay blocked: {:?}",
+            finished.state
+        );
+        assert_ne!(*terminal_cause, Some(TerminalCause::StoppedNoWork));
+        assert_eq!(
+            finished.progress,
+            Some(provenant_records::settlement::Progress::Moved)
+        );
+        Ok(())
+    }
+
+    // A crash between seal and publish re-reads the sealed evidence. The fact
+    // is identical: a later HEAD or Git read cannot move the sealed pin.
+    #[test]
+    fn sealed_evidence_is_restart_stable() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::dispatch_tests::{Fake, seal_exit};
+        use crate::tests::{call, clock, context, exit, input, route};
+
+        let temp = tempfile::tempdir()?;
+        let execution = context(temp.path())?;
+        let (test_clock, cancel) = (clock(), CancelToken::new());
+        let request = call(&test_clock, &cancel);
+        let store = RunStore::open(&execution, &request)?;
+        let run = input();
+        store.create(&run, &request)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &request)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &request,
+        )?;
+        store.claim(id, &test_clock, &request)?;
+        let attempt = store.attempt_dir(id, false)?;
+        declare(id, &store, "done", "restart stable")?;
+        let mut observed = exit();
+        observed.scope = RunStore::scope(&store.record(id, &request)?);
+        seal_exit(&store, &observed)?;
+        let fake = Fake::with_observed(Some(route()), Some(Outcome::Succeeded))
+            .with_answer(Some(crate::dispatch_tests::DONE_ANSWER.into()), Some(true));
+        let first = store.finish(id, &attempt, &observed, &fake, &request)?;
+        let (sealed, digest) =
+            crate::evidence::read_evidence(&attempt)?.ok_or("the assembly must seal evidence")?;
+        assert_eq!(first.settlement_evidence, Some(digest));
+        assert_eq!(
+            sealed.schema_version,
+            provenant_records::settlement::SETTLEMENT_EVIDENCE_SCHEMA
+        );
+        let again = store.finish(id, &attempt, &observed, &fake, &request)?;
+        let AttemptState::Terminal {
+            outcome: first_outcome,
+            terminal_cause: first_cause,
+            reason: first_reason,
+            ..
+        } = &first.state
+        else {
+            return Err("first drive must settle".into());
+        };
+        let AttemptState::Terminal {
+            outcome,
+            terminal_cause,
+            reason,
+            ..
+        } = &again.state
+        else {
+            return Err("re-drive must settle".into());
+        };
+        assert_eq!(outcome, first_outcome);
+        assert_eq!(terminal_cause, first_cause);
+        assert_eq!(reason, first_reason);
+        assert_eq!(again.settlement_reason, first.settlement_reason);
+        assert_eq!(again.settlement_evidence, Some(digest));
+        assert_eq!(
+            crate::evidence::read_evidence(&attempt)?.map(|(_, digest)| digest),
+            Some(digest)
+        );
         Ok(())
     }
 }
