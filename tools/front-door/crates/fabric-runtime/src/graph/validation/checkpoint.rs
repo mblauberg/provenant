@@ -415,7 +415,7 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                     .as_ref()
                     .is_some_and(|evidence| !ci::valid_evidence(evidence, condition))
                 || !progress.attempts.is_empty()
-                || progress.advance_error.is_some()
+                || progress.advance_note.is_some()
                 || (progress.ci.is_some()
                     && !matches!(node.condition, Some(GateCondition::Ci { .. })))
                 || (matches!(node.condition, Some(GateCondition::Ci { .. }))
@@ -876,9 +876,9 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                 && attempt.state == AttemptState::Terminal
                 && !attempt.launched
                 && attempt.host_refused_before_acceptance
-                && attempt
-                    .outcome
-                    .is_some_and(|outcome| matches!(outcome, AttemptOutcome::PreparationRefused(_)))
+                && attempt.outcome.is_some_and(|outcome| {
+                    matches!(outcome, GraphAttemptOutcome::PreparationRefused(_))
+                })
         };
         if progress
             .attempts
@@ -978,14 +978,13 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
             NodeState::Blocked => {
                 progress.attempts.is_empty()
                     || (matches!(
-                        progress.advance_error_code.as_deref(),
+                        progress.advance_code.as_deref(),
                         Some("launch_refused" | "launch_retry_exhausted")
                     ) && last.is_some_and(|attempt| {
                         attempt.state != AttemptState::Terminal && attempt.attempt_ref.is_none()
                     }))
-                    || (progress.advance_error_code.as_deref()
-                        == Some("steer_continuation_refused")
-                        && progress.advance_error.is_some()
+                    || (progress.advance_code.as_deref() == Some("steer_continuation_refused")
+                        && progress.advance_note.is_some()
                         && last.is_some_and(|attempt| {
                             attempt.state == AttemptState::Terminal && attempt.attempt_ref.is_some()
                         }))
@@ -1016,7 +1015,7 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                     plans::writer(node)
                         && progress.writer_binding_pending
                         && progress.outputs.is_none()
-                        && progress.advance_error.is_none()
+                        && progress.advance_note.is_none()
                         && progress
                             .advance_owner_code
                             .as_deref()
@@ -1026,7 +1025,7 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                                 && matches!((retry.wake_at, retry.deadline),
                                     (Some(wake), Some(deadline)) if wake <= deadline)
                                 && retry.reason.as_ref().is_some_and(|reason| {
-                                    !reason.is_empty() && reason.len() <= MAX_ADVANCE_ERROR_BYTES
+                                    !reason.is_empty() && reason.len() <= MAX_ADVANCE_NOTE_BYTES
                                 })
                         })
                 }
@@ -1038,25 +1037,28 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                     attempt.state == AttemptState::Terminal
                         && matches!(
                             attempt.outcome,
-                            Some(AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired)
+                            Some(
+                                GraphAttemptOutcome::Succeeded
+                                    | GraphAttemptOutcome::ReviewRequired
+                            )
                         )
                 }) || fallback_settled(node, progress, document, checkpoint)
             }
-            NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {
+            NodeState::Failed if progress.advance_note.is_some() => last.is_none_or(|attempt| {
                 attempt.state == AttemptState::Terminal
                     && attempt
                         .outcome
-                        .is_some_and(|outcome| outcome != AttemptOutcome::Succeeded)
+                        .is_some_and(|outcome| outcome != GraphAttemptOutcome::Succeeded)
             }),
             NodeState::Failed => last.is_some_and(|attempt| {
                 attempt.state == AttemptState::Terminal
                     && match attempt.outcome {
                         Some(
-                            AttemptOutcome::TaskFailed
-                            | AttemptOutcome::OtherFailure
-                            | AttemptOutcome::ReviewRequired,
+                            GraphAttemptOutcome::TaskFailed
+                            | GraphAttemptOutcome::OtherFailure
+                            | GraphAttemptOutcome::ReviewRequired,
                         ) => true,
-                        Some(outcome) if outcome != AttemptOutcome::Succeeded => {
+                        Some(outcome) if outcome != GraphAttemptOutcome::Succeeded => {
                             !fallback_candidate(outcome, node.access, attempt.launched)
                                 || usize::from(attempt.key.route_index) + 1 == node.routes.len()
                         }

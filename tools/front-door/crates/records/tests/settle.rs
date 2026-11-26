@@ -1,0 +1,881 @@
+//! The behavioural oracle for the one settlement decider.
+//!
+//! Each row fixes the sealed evidence and asserts the whole fact at once:
+//! outcome, cause, reason, sealed stop cause, partial signals and progress.
+//! Git evidence is only a launch pin and a terminal head; pushes, remote
+//! refs and a settlement base are not fields and cannot change the fact.
+
+use provenant_core::GitOid;
+use provenant_records::CanonicalV1;
+use provenant_records::declaration::{
+    DECLARATION_SCHEMA, DeclarationCounts, DeclarationEvidence, SealedDeclaration,
+};
+use provenant_records::graph::GraphAttemptOutcome;
+use provenant_records::handoff::{Handoff, HandoffError, HandoffStatus};
+use provenant_records::provenance::{Layer, Source, Sourced};
+use provenant_records::run::{AttemptRecord, AttemptState};
+use provenant_records::run::{CauseKind, Outcome, SettlementClass, SettlementSignal};
+use provenant_records::settlement::project::graph_outcome;
+use provenant_records::settlement::{
+    CustodyFacts, DeclarationSource, GitEvidence, HeadProgress, HostFacts, IdentityEvidence,
+    IdentityPolicyEffect, LaneRole, PrimaryCheckout, SETTLEMENT_EVIDENCE_SCHEMA,
+    SettlementEvidence,
+    classify::budget_completed,
+    classify::settle,
+    policy::{
+        DeclarationAction, EmptyResultAction, NoWork, RouteSettlement, SettlementKey,
+        SettlementPolicy, StrayAction, UncommittedAction,
+    },
+};
+use provenant_records::stop::StopCause;
+use provenant_records::wire::lane::LaneRow;
+
+// Fixture heads are built with the infallible enum constructor: a parse here
+// would put a fallible operation in every helper that pins an attempt.
+const BASE: GitOid = GitOid::Sha1([0x11; 20]);
+const HEAD: GitOid = GitOid::Sha1([0x22; 20]);
+
+fn handoff(status: HandoffStatus, note: &str) -> Handoff {
+    Handoff {
+        schema_version: 2,
+        status,
+        note: note.into(),
+        remaining: vec!["Owner decision".into()],
+        decisions: vec![],
+        verify: vec![],
+        spec_concerns: vec![],
+        write_scope: None,
+        blocked_on: None,
+        extra: Default::default(),
+    }
+}
+
+fn accepted(handoff: Handoff) -> DeclarationEvidence {
+    DeclarationEvidence::Accepted(Box::new(SealedDeclaration {
+        schema_version: DECLARATION_SCHEMA,
+        sequence: 1,
+        request_id: "request".into(),
+        digest: CanonicalV1::file_digest(b"payload"),
+        handoff,
+    }))
+}
+
+fn base(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> SettlementEvidence {
+    SettlementEvidence {
+        schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
+        lane,
+        host: HostFacts {
+            outcome,
+            cause,
+            complete: true,
+            result_empty: false,
+            reason: None,
+            terminal_note: None,
+            signals: vec![],
+            denial: None,
+            host_handoff: None,
+        },
+        handoff: DeclarationEvidence::Missing,
+        declarations: DeclarationCounts::default(),
+        git: None,
+        custody: CustodyFacts {
+            launched: true,
+            cancelled: outcome == Outcome::Cancelled,
+            steered: false,
+            cancellation_delivered: Some(true),
+            import_cancelled: false,
+            process_exit: true,
+            stall: None,
+            identity: IdentityEvidence {
+                conflict: false,
+                incomplete: IdentityPolicyEffect::Complete,
+                eof_fragment_unsettles: false,
+                route: provenant_records::settlement::RouteIdentityFact::Observed,
+            },
+        },
+        policy: SettlementPolicy::shipped(),
+    }
+}
+
+fn git_at(pinned: Option<GitOid>, head: Option<GitOid>) -> Option<GitEvidence> {
+    Some(GitEvidence {
+        input_head: pinned,
+        writer_head: head,
+        uncommitted: None,
+        uncommitted_paths: Vec::new(),
+        pushed_head: None,
+        primary: PrimaryCheckout::Clean,
+    })
+}
+
+struct Row {
+    name: &'static str,
+    evidence: SettlementEvidence,
+    outcome: Outcome,
+    cause: Option<CauseKind>,
+    reason: SettlementClass,
+    stop: Option<StopCause>,
+    signals: Vec<SettlementSignal>,
+    progress: Option<HeadProgress>,
+}
+
+fn rows() -> Vec<Row> {
+    let mut pushed_blocked = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    pushed_blocked.git = git_at(Some(BASE), Some(HEAD));
+    pushed_blocked.handoff = accepted(handoff(HandoffStatus::Blocked, "Needs an owner decision."));
+
+    let mut pushed_done = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    pushed_done.git = git_at(Some(BASE), Some(HEAD));
+    pushed_done.handoff = accepted(handoff(HandoffStatus::Done, "Delivered and pushed"));
+
+    let mut committed_stopped = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    committed_stopped.git = git_at(Some(BASE), Some(HEAD));
+    committed_stopped.handoff =
+        accepted(handoff(HandoffStatus::StoppedEarly, "More work remains."));
+
+    let mut force_pushed = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    force_pushed.host.reason = Some("self-rebased before the stop".into());
+    force_pushed.git = git_at(Some(BASE), Some(HEAD));
+    force_pushed.handoff = accepted(handoff(HandoffStatus::StoppedEarly, "More work remains."));
+
+    let mut restarted = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    restarted.git = git_at(Some(BASE), Some(HEAD));
+    restarted.handoff = accepted(handoff(
+        HandoffStatus::StoppedEarly,
+        "Sealed pin survives restart.",
+    ));
+
+    // Prose after the declaration is only a host note: the sealed handoff
+    // still decides the lane. It must not turn the stop into a completion.
+    let mut prose_after_handoff = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    prose_after_handoff.host.reason =
+        Some("Done: parser.\nThe wait was redundant; nothing changed.".into());
+    prose_after_handoff.git = git_at(Some(BASE), Some(HEAD));
+    prose_after_handoff.handoff = accepted(handoff(
+        HandoffStatus::StoppedEarly,
+        "More work remains in the renderer.",
+    ));
+
+    let mut unchanged = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    unchanged.git = git_at(Some(BASE), Some(BASE));
+    unchanged.handoff = accepted(handoff(HandoffStatus::StoppedEarly, "Nothing left to do."));
+
+    let mut unknown = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    unknown.git = git_at(None, Some(HEAD));
+    unknown.handoff = accepted(handoff(
+        HandoffStatus::StoppedEarly,
+        "Head was not observed.",
+    ));
+
+    let mut stray = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    stray.git = Some(GitEvidence {
+        input_head: Some(BASE),
+        writer_head: Some(HEAD),
+        uncommitted: None,
+        uncommitted_paths: Vec::new(),
+        pushed_head: None,
+        primary: PrimaryCheckout::Review {
+            note: "work made in the primary checkout".into(),
+        },
+    });
+    stray.handoff = accepted(handoff(HandoffStatus::Done, "Done"));
+
+    let mut rejected = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    rejected.handoff = DeclarationEvidence::Rejected {
+        error: HandoffError::new("status", "expected status done, stopped_early or blocked"),
+    };
+
+    let missing = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    let adapter = base(LaneRole::AdapterWriter, Outcome::Succeeded, None);
+    let reader = base(LaneRole::Reader, Outcome::Succeeded, None);
+
+    let mut empty = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    empty.host.result_empty = true;
+
+    let mut uncommitted = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    uncommitted.git = Some(GitEvidence {
+        input_head: Some(BASE),
+        writer_head: Some(HEAD),
+        uncommitted: Some("M src/lib.rs".into()),
+        uncommitted_paths: vec!["src/lib.rs".into()],
+        pushed_head: None,
+        primary: PrimaryCheckout::Clean,
+    });
+    uncommitted.handoff = accepted(handoff(HandoffStatus::Done, "Done"));
+
+    let mut steered = base(LaneRole::ModelWriter, Outcome::Cancelled, None);
+    steered.custody.steered = true;
+
+    let mut unknown_cancel = base(LaneRole::ModelWriter, Outcome::Cancelled, None);
+    unknown_cancel.custody.cancelled = false;
+
+    let mut identity = base(LaneRole::ModelWriter, Outcome::Failed, None);
+    identity.custody.identity.conflict = true;
+
+    let capture = base(
+        LaneRole::ModelWriter,
+        Outcome::Failed,
+        Some(CauseKind::ProviderCaptureDefect { line: 42 }),
+    );
+
+    let mut budget = base(
+        LaneRole::ModelWriter,
+        Outcome::Failed,
+        Some(CauseKind::TokenBudget),
+    );
+    budget.handoff = accepted(handoff(HandoffStatus::Done, "Delivered and pushed"));
+
+    let mut prelaunch = base(LaneRole::ModelWriter, Outcome::Failed, None);
+    prelaunch.custody.launched = false;
+    prelaunch.custody.process_exit = false;
+
+    vec![
+        Row {
+            name: "pushed then blocked",
+            evidence: pushed_blocked,
+            outcome: Outcome::ReviewRequired,
+            cause: Some(CauseKind::Blocked),
+            reason: SettlementClass::DeclaredStop,
+            stop: Some(StopCause::Blocked),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Moved),
+        },
+        Row {
+            name: "pushed then done",
+            evidence: pushed_done,
+            outcome: Outcome::Succeeded,
+            cause: None,
+            reason: SettlementClass::Completed,
+            stop: None,
+            signals: vec![],
+            progress: Some(HeadProgress::Moved),
+        },
+        Row {
+            name: "committed, not pushed, stopped early",
+            evidence: committed_stopped,
+            outcome: Outcome::ReviewRequired,
+            cause: None,
+            reason: SettlementClass::DeclaredStop,
+            stop: Some(StopCause::StoppedEarly),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Moved),
+        },
+        Row {
+            name: "self-rebased force-push",
+            evidence: force_pushed,
+            outcome: Outcome::ReviewRequired,
+            cause: None,
+            reason: SettlementClass::DeclaredStop,
+            stop: Some(StopCause::StoppedEarly),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Moved),
+        },
+        Row {
+            name: "restart after commit with the sealed pin",
+            evidence: restarted,
+            outcome: Outcome::ReviewRequired,
+            cause: None,
+            reason: SettlementClass::DeclaredStop,
+            stop: Some(StopCause::StoppedEarly),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Moved),
+        },
+        Row {
+            name: "prose after handoff",
+            evidence: prose_after_handoff,
+            outcome: Outcome::ReviewRequired,
+            cause: None,
+            reason: SettlementClass::DeclaredStop,
+            stop: Some(StopCause::StoppedEarly),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Moved),
+        },
+        Row {
+            name: "stopped early with an unchanged head",
+            evidence: unchanged,
+            outcome: Outcome::ReviewRequired,
+            cause: Some(CauseKind::StoppedNoWork),
+            reason: SettlementClass::DeclaredStop,
+            stop: Some(StopCause::StoppedEarly),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Unchanged),
+        },
+        Row {
+            name: "stopped early with an unknown head",
+            evidence: unknown,
+            outcome: Outcome::ReviewRequired,
+            cause: None,
+            reason: SettlementClass::DeclaredStop,
+            stop: Some(StopCause::StoppedEarly),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Unknown),
+        },
+        Row {
+            name: "stray primary checkout",
+            evidence: stray,
+            outcome: Outcome::ReviewRequired,
+            cause: None,
+            reason: SettlementClass::StrayWork,
+            stop: None,
+            signals: vec![SettlementSignal::StrayWork],
+            progress: Some(HeadProgress::Moved),
+        },
+        Row {
+            name: "rejected declaration only",
+            evidence: rejected,
+            outcome: Outcome::ReviewRequired,
+            cause: None,
+            reason: SettlementClass::HandoffMalformed,
+            stop: Some(StopCause::HandoffMalformed),
+            signals: vec![SettlementSignal::HandoffMalformed],
+            progress: None,
+        },
+        Row {
+            name: "model writer declared nothing",
+            evidence: missing,
+            outcome: Outcome::ReviewRequired,
+            cause: None,
+            reason: SettlementClass::HandoffMissing,
+            stop: Some(StopCause::HandoffMissing),
+            signals: vec![SettlementSignal::HandoffMissing],
+            progress: None,
+        },
+        Row {
+            name: "adapter writer declares no handoff",
+            evidence: adapter,
+            outcome: Outcome::Succeeded,
+            cause: None,
+            reason: SettlementClass::Completed,
+            stop: None,
+            signals: vec![],
+            progress: None,
+        },
+        Row {
+            name: "reader has no progress",
+            evidence: reader,
+            outcome: Outcome::Succeeded,
+            cause: None,
+            reason: SettlementClass::Completed,
+            stop: None,
+            signals: vec![],
+            progress: None,
+        },
+        Row {
+            name: "empty writer result",
+            evidence: empty,
+            outcome: Outcome::ReviewRequired,
+            cause: Some(CauseKind::EmptyWriterResult),
+            reason: SettlementClass::EmptyResult,
+            stop: Some(StopCause::EmptyResult),
+            signals: vec![SettlementSignal::HandoffMissing],
+            progress: None,
+        },
+        Row {
+            name: "uncommitted edits",
+            evidence: uncommitted,
+            outcome: Outcome::Uncommitted,
+            cause: None,
+            reason: SettlementClass::UncommittedWork,
+            stop: Some(StopCause::Uncommitted),
+            signals: vec![SettlementSignal::UncommittedWork],
+            progress: Some(HeadProgress::Moved),
+        },
+        Row {
+            name: "cancelled and steered",
+            evidence: steered,
+            outcome: Outcome::Cancelled,
+            cause: Some(CauseKind::Steered),
+            reason: SettlementClass::Steered,
+            stop: Some(StopCause::Steered),
+            signals: vec![],
+            progress: None,
+        },
+        Row {
+            name: "cancelled without delivered cancellation",
+            evidence: unknown_cancel,
+            outcome: Outcome::Unsettled,
+            cause: None,
+            reason: SettlementClass::Unsettled,
+            stop: Some(StopCause::Unsettled),
+            signals: vec![],
+            progress: None,
+        },
+        Row {
+            name: "identity mismatch",
+            evidence: identity,
+            outcome: Outcome::Failed,
+            cause: Some(CauseKind::IdentityMismatch),
+            reason: SettlementClass::Failed,
+            stop: Some(StopCause::IdentityMismatch),
+            signals: vec![],
+            progress: None,
+        },
+        Row {
+            name: "capture defect",
+            evidence: capture,
+            outcome: Outcome::Failed,
+            cause: Some(CauseKind::ProviderCaptureDefect { line: 42 }),
+            reason: SettlementClass::Failed,
+            stop: Some(StopCause::Unsettled),
+            signals: vec![],
+            progress: None,
+        },
+        Row {
+            name: "budget completion",
+            evidence: budget,
+            outcome: Outcome::Succeeded,
+            cause: Some(CauseKind::TokenBudget),
+            reason: SettlementClass::CompletedBeforeBudget,
+            stop: Some(StopCause::TokenBudget),
+            signals: vec![],
+            progress: None,
+        },
+        Row {
+            name: "pre-launch refusal",
+            evidence: prelaunch,
+            outcome: Outcome::Failed,
+            cause: None,
+            reason: SettlementClass::PreLaunchRefusal,
+            stop: None,
+            signals: vec![],
+            progress: None,
+        },
+    ]
+}
+
+#[test]
+fn one_decider_settles_every_family_from_one_sealed_record() {
+    for row in rows() {
+        let fact = settle(&row.evidence);
+        assert_eq!(fact.outcome, row.outcome, "{}: outcome", row.name);
+        assert_eq!(fact.cause, row.cause, "{}: cause", row.name);
+        assert_eq!(
+            fact.settlement_class, row.reason,
+            "{}: settlement reason",
+            row.name
+        );
+        assert_eq!(
+            fact.stop.as_ref().map(|stop| stop.cause()),
+            row.stop,
+            "{}: stop cause",
+            row.name
+        );
+        assert_eq!(fact.signals, row.signals, "{}: signals", row.name);
+        assert_eq!(fact.head_progress, row.progress, "{}: progress", row.name);
+        // No-work needs a known, unchanged head. Unknown and Moved never yield it.
+        if row.progress != Some(HeadProgress::Unchanged) {
+            assert_ne!(
+                fact.cause,
+                Some(CauseKind::StoppedNoWork),
+                "{}: no-work without an unchanged head",
+                row.name
+            );
+        }
+    }
+}
+
+#[test]
+fn progress_is_pin_relative_and_never_reads_remote_state() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.git = git_at(Some(BASE), Some(BASE));
+    evidence.handoff = accepted(handoff(HandoffStatus::StoppedEarly, "Nothing left to do."));
+    assert_eq!(settle(&evidence).cause, Some(CauseKind::StoppedNoWork));
+
+    // A push, a moved remote ref or a settlement base is not a field of the
+    // record. Only the sealed head changes when it is re-read after a restart.
+    evidence.git.as_mut().unwrap().writer_head = Some(HEAD);
+    let fact = settle(&evidence);
+    assert_eq!(fact.head_progress, Some(HeadProgress::Moved));
+    assert_ne!(fact.cause, Some(CauseKind::StoppedNoWork));
+
+    // Re-reading HEAD to the same value leaves the sealed fact byte-identical.
+    let again = settle(&evidence);
+    assert_eq!(fact, again);
+}
+
+#[test]
+fn no_work_keeps_the_declared_stop_even_though_the_fact_cause_changes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.git = git_at(Some(BASE), Some(BASE));
+    evidence.handoff = accepted(handoff(HandoffStatus::StoppedEarly, "Nothing left to do."));
+    let fact = settle(&evidence);
+
+    // No-work is a Git fact on the outcome and the graph's advance code.
+    assert_eq!(fact.cause, Some(CauseKind::StoppedNoWork));
+    let record = terminal_record(&fact, true)?;
+    assert_eq!(
+        graph_outcome(&record),
+        Some(GraphAttemptOutcome::StoppedNoWork)
+    );
+    // The writer still declared a stopped_early handoff, and the sealed stop
+    // agrees with it. A fact about the head does not rewrite the declaration.
+    assert_eq!(
+        fact.stop.as_ref().map(|stop| stop.cause()),
+        Some(StopCause::StoppedEarly)
+    );
+    assert_eq!(fact.settlement_class, SettlementClass::DeclaredStop);
+    Ok(())
+}
+
+#[test]
+fn the_budget_gate_requires_a_done_accepted_declaration() {
+    let done = accepted(handoff(HandoffStatus::Done, "Delivered and pushed"));
+    assert!(budget_completed(Outcome::Failed, &done));
+    assert!(budget_completed(Outcome::Succeeded, &done));
+    assert!(budget_completed(Outcome::TimedOut, &done));
+    assert!(!budget_completed(Outcome::Cancelled, &done));
+    assert!(!budget_completed(
+        Outcome::Failed,
+        &DeclarationEvidence::Missing
+    ));
+    assert!(!budget_completed(
+        Outcome::Failed,
+        &DeclarationEvidence::Rejected {
+            error: HandoffError::new("status", "expected status done, stopped_early or blocked"),
+        }
+    ));
+    assert!(!budget_completed(
+        Outcome::Failed,
+        &accepted(handoff(HandoffStatus::StoppedEarly, "More work remains."))
+    ));
+}
+
+#[test]
+fn pushed_head_and_uncommitted_paths_are_not_settlement_evidence() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.git = git_at(Some(BASE), Some(HEAD));
+    evidence.handoff = accepted(handoff(HandoffStatus::Done, "Delivered"));
+    let fact = settle(&evidence);
+
+    let mut varied = evidence.clone();
+    let git = varied.git.as_mut().unwrap();
+    git.pushed_head = Some(HEAD);
+    git.uncommitted_paths = vec!["src/lib.rs".into()];
+    assert_eq!(
+        settle(&varied),
+        fact,
+        "diagnostic Git evidence must not move a fact"
+    );
+}
+
+#[test]
+fn a_host_stop_records_a_host_declaration_source() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::ReviewRequired, None);
+    evidence.host.host_handoff = Some(handoff(
+        HandoffStatus::StoppedEarly,
+        "the host stopped this attempt",
+    ));
+    assert_eq!(
+        settle(&evidence).declaration_source,
+        Some(DeclarationSource::Host)
+    );
+}
+
+#[test]
+fn rejected_then_accepted_reports_both_counts_and_a_declared_source() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.handoff = accepted(handoff(HandoffStatus::Done, "Delivered"));
+    let counts = DeclarationCounts {
+        accepted: 1,
+        rejected: 1,
+    };
+    evidence.declarations = counts;
+    let fact = settle(&evidence);
+    assert_eq!(fact.declaration_source, Some(DeclarationSource::Declared));
+    assert_eq!(fact.declarations, Some(counts));
+}
+
+#[test]
+fn an_adapter_writer_reports_no_declaration_counts() {
+    let evidence = base(LaneRole::AdapterWriter, Outcome::Succeeded, None);
+    assert_eq!(settle(&evidence).declarations, None);
+}
+
+// --- Slice 9: the sealed policy is applied at each ladder step. ---
+
+fn sourced_action<T>(value: T) -> Sourced<T> {
+    Sourced {
+        value,
+        source: Source {
+            layer: Layer::Project,
+            origin: Some(".provenant/config.toml".into()),
+        },
+    }
+}
+
+fn sourced_no_work(value: NoWork) -> Sourced<NoWork> {
+    Sourced {
+        value,
+        source: Source {
+            layer: Layer::Route,
+            origin: Some("model_policy.defaults.lanes.settlement".into()),
+        },
+    }
+}
+
+#[test]
+fn declaration_missing_fail_settles_failed_with_its_source() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.policy.declaration_missing = sourced_action(DeclarationAction::Fail);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Failed);
+    assert_eq!(fact.settlement_class, SettlementClass::Failed);
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMissing));
+    assert_eq!(fact.applied.len(), 1);
+    assert_eq!(fact.applied[0].key, SettlementKey::DeclarationMissing);
+    assert_eq!(fact.applied[0].action, "fail");
+    assert_eq!(fact.applied[0].source.layer, Layer::Project);
+}
+
+#[test]
+fn declaration_missing_off_records_the_signal_but_releases_dependants() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.policy.declaration_missing = sourced_action(DeclarationAction::Off);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Succeeded);
+    assert_eq!(fact.settlement_class, SettlementClass::Completed);
+    assert_eq!(
+        fact.release,
+        provenant_records::run::DependantRelease::Release
+    );
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMissing));
+    assert_eq!(fact.applied.len(), 1);
+    assert_eq!(fact.applied[0].action, "off");
+}
+
+#[test]
+fn declaration_malformed_off_keeps_the_error_but_completes_the_lane() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.handoff = DeclarationEvidence::Rejected {
+        error: HandoffError::new("status", "expected status done, stopped_early or blocked"),
+    };
+    evidence.policy.declaration_malformed = sourced_action(DeclarationAction::Off);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Succeeded);
+    assert_eq!(fact.settlement_class, SettlementClass::Completed);
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMalformed));
+    assert!(fact.handoff.is_err());
+    assert_eq!(fact.applied.len(), 1);
+}
+
+#[test]
+fn declaration_malformed_fail_keeps_the_signal_but_not_the_class() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.handoff = DeclarationEvidence::Rejected {
+        error: HandoffError::new("status", "expected status done, stopped_early or blocked"),
+    };
+    evidence.policy.declaration_malformed = sourced_action(DeclarationAction::Fail);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Failed);
+    assert_eq!(fact.settlement_class, SettlementClass::Failed);
+    // Fail withholds the signal from the class ladder, not from the fact.
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMalformed));
+}
+
+#[test]
+fn empty_result_fail_overrides_the_default_review() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.host.result_empty = true;
+    evidence.policy.empty_result = sourced_action(EmptyResultAction::Fail);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Failed);
+    assert_eq!(fact.settlement_class, SettlementClass::Failed);
+    // The empty result is its own knob, not a missing handoff.
+    assert_eq!(fact.applied.len(), 1);
+    assert_eq!(fact.applied[0].key, SettlementKey::EmptyResult);
+    assert_eq!(fact.applied[0].action, "fail");
+}
+
+#[test]
+fn uncommitted_work_off_does_not_downgrade_a_success() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.git = git_at(Some(BASE), Some(HEAD));
+    evidence.git.as_mut().unwrap().uncommitted = Some("dirty worktree".into());
+    evidence.handoff = accepted(handoff(HandoffStatus::Done, "Delivered"));
+    evidence.policy.uncommitted_work = sourced_action(UncommittedAction::Off);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Succeeded);
+    assert_eq!(fact.settlement_class, SettlementClass::Completed);
+    assert!(fact.signals.contains(&SettlementSignal::UncommittedWork));
+    assert_eq!(fact.applied.len(), 1);
+}
+
+#[test]
+fn no_work_off_keeps_a_declared_stop_on_an_unchanged_head() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.git = git_at(Some(BASE), Some(BASE));
+    evidence.handoff = accepted(handoff(HandoffStatus::StoppedEarly, "More work remains."));
+    evidence.policy.no_work = sourced_no_work(NoWork::Off);
+    let fact = settle(&evidence);
+    assert_eq!(fact.cause, None);
+    assert_eq!(fact.settlement_class, SettlementClass::DeclaredStop);
+    assert_eq!(fact.applied.len(), 1);
+    assert_eq!(fact.applied[0].source.layer, Layer::Route);
+    assert_eq!(fact.applied[0].key, SettlementKey::NoWork);
+    assert_eq!(fact.applied[0].action, "off");
+}
+
+#[test]
+fn a_route_value_is_sealed_with_the_policy() {
+    let route = RouteSettlement {
+        stray_work: Some(StrayAction::Off),
+        ..Default::default()
+    };
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.handoff = accepted(handoff(HandoffStatus::Done, "Delivered"));
+    evidence.git = git_at(Some(BASE), Some(HEAD));
+    evidence.git.as_mut().unwrap().primary = PrimaryCheckout::Review {
+        note: "primary checkout moved".into(),
+    };
+    evidence.policy.stray_work = Sourced {
+        value: route.stray_work.unwrap(),
+        source: Source {
+            layer: Layer::Route,
+            origin: Some("model_policy.defaults.lanes.settlement".into()),
+        },
+    };
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Succeeded);
+    assert_eq!(fact.applied.len(), 1);
+    assert_eq!(fact.applied[0].source.layer, Layer::Route);
+}
+
+// A contradicted route is decided last among the outcome steps, so a stall
+// policy cannot override it, and the class follows the decision.
+#[test]
+fn a_route_mismatch_outranks_a_stall_policy_and_is_never_delivered() {
+    use provenant_records::settlement::RouteIdentityFact;
+    for (head, expected) in [(HEAD, Outcome::ReviewRequired), (BASE, Outcome::Failed)] {
+        let mut evidence = base(LaneRole::AdapterWriter, Outcome::Succeeded, None);
+        evidence.git = git_at(Some(BASE), Some(head));
+        evidence.custody.stall = Some(CauseKind::ProviderStalled);
+        evidence.custody.identity.route = RouteIdentityFact::Mismatch {
+            requested: "model fixture/model".into(),
+            observed: "model other/model".into(),
+        };
+        let fact = settle(&evidence);
+        assert_eq!(fact.outcome, expected, "{head}");
+        assert_eq!(fact.cause, Some(CauseKind::IdentityMismatch), "{head}");
+        assert!(!fact.delivery_eligible, "{head}");
+        assert_eq!(
+            fact.release,
+            provenant_records::run::DependantRelease::Hold,
+            "{head}"
+        );
+    }
+}
+
+/// A terminal record carrying exactly the settled fact, as the store commits it.
+fn terminal_record(
+    fact: &provenant_records::settlement::OutcomeFact,
+    launched: bool,
+) -> Result<AttemptRecord, Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+    let mut record: AttemptRecord = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": AttemptId::from_bytes([1; 16]),
+        "run_id": "02020202020202020202020202020202",
+        "task_id": "04040404040404040404040404040404",
+        "project_id": ProjectId::from_bytes([3; 16]),
+        "key": provenant_records::WorkKey::new(ProjectId::from_bytes([3; 16]), "graph", "node", 1)?,
+        "operation_id": "projection",
+        "attempt_number": 1,
+        "revision": 1,
+        "generation": 0,
+        "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+        "authority_digest": Digest::from_bytes([5; 32]),
+        "queued_at": WallTime::from_micros(1)?,
+        "state": {"state":"running"},
+        "usage": {},
+        "read_only_writable": [],
+        "protected_paths": [], "trace": {},
+        "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
+    }))?;
+    record.state = AttemptState::Terminal {
+        extra: Default::default(),
+        cause: fact.cause,
+        terminal_note: fact.terminal_note.clone(),
+        stop: fact.stop.clone(),
+        outcome: fact.outcome,
+        exit_code: None,
+        finished_at: WallTime::from_micros(2)?,
+        reason: fact.reason.clone(),
+    };
+    record.settlement_class = Some(fact.settlement_class);
+    record.signals = fact.signals.clone();
+    record.provider_launched = Some(launched);
+    Ok(record)
+}
+
+// Spec: docs/specs/run-settlement.md, test 6 (projections agree).
+#[test]
+fn every_projection_of_a_settled_row_agrees() -> Result<(), Box<dyn std::error::Error>> {
+    for row in rows() {
+        let fact = settle(&row.evidence);
+        let record = terminal_record(&fact, row.evidence.custody.launched)?;
+        let graph = graph_outcome(&record).expect("a terminal record projects");
+        let stop = fact.stop.as_ref().map(provenant_records::Stop::cause);
+        let (state, reason) = LaneRow::state_and_reason(&record.state);
+
+        // The CLI row names the settled outcome, never a recomputed one.
+        assert_eq!(
+            Some(state.as_str()),
+            serde_json::to_value(fact.outcome).unwrap().as_str(),
+            "{}: lane row state",
+            row.name
+        );
+        if let Some(cause) = fact.cause
+            && fact
+                .stop
+                .as_ref()
+                .is_none_or(|stop| stop.handoff_result().is_ok())
+        {
+            assert!(
+                reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with(&cause.diagnostic(true))),
+                "{}: lane row reason {reason:?} does not name {cause:?}",
+                row.name
+            );
+        }
+        // The release is the class's release for the sealed stop.
+        assert_eq!(
+            fact.release,
+            fact.settlement_class.release(stop),
+            "{}: release",
+            row.name
+        );
+        // No-work is one fact: the graph projects it exactly when settle
+        // recorded the cause.
+        assert_eq!(
+            graph == GraphAttemptOutcome::StoppedNoWork,
+            fact.cause == Some(CauseKind::StoppedNoWork),
+            "{}: graph no-work {graph:?} against cause {:?}",
+            row.name,
+            fact.cause
+        );
+        let blocked = fact
+            .handoff
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .is_some_and(|handoff| handoff.status == HandoffStatus::Blocked);
+        if blocked {
+            assert_ne!(
+                graph,
+                GraphAttemptOutcome::StoppedNoWork,
+                "{}: graph",
+                row.name
+            );
+            assert_ne!(
+                fact.cause,
+                Some(CauseKind::StoppedNoWork),
+                "{}: cause",
+                row.name
+            );
+            assert_ne!(stop, Some(StopCause::StoppedNoWork), "{}: stop", row.name);
+        }
+    }
+    Ok(())
+}

@@ -310,6 +310,11 @@ pr_paths = [
   "tools/front-door/crates/cli/src/run/provider/project_paths.rs",
   # dispatch: provenant-fabric-runtime writer quota continuation
   "tools/front-door/crates/fabric-runtime/src/graph/graph_tests/composite_and_allowance_tests.rs",
+  # Issue #4070: macOS socket, non-UTF-8 and relay fixtures
+  "tools/front-door/crates/providers/src/tests_launch_access.rs",
+  "tools/front-door/crates/cli/src/run/tests_access.rs",
+  "tools/front-door/crates/cli/src/run/nested_authority.rs",
+  "tools/front-door/src/fabric/lane_read_tests.rs",
   "tools/front-door/.config/**",
   "tools/front-door/Cargo.toml",
   "tools/front-door/crates/*/Cargo.toml",

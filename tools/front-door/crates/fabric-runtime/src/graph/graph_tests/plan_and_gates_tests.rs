@@ -18,7 +18,7 @@ fn plan_fixture_expands_and_replays_without_replanning() {
     let mut owner = FakeOwner {
         observations: [fragment, "first done", "second done"]
             .into_iter()
-            .map(|text| terminal_with_result(AttemptOutcome::Succeeded, text))
+            .map(|text| terminal_with_result(GraphAttemptOutcome::Succeeded, text))
             .collect(),
         ..Default::default()
     };
@@ -49,7 +49,7 @@ fn plan_fragment_target_is_checked_before_expansion_is_published() {
 {"schema_version":1,"nodes":[{"id":"writer","prompt":"Write","access":"worktree_write","worktree":"lane","write_scope":["src"],"acceptance_checks":["check"],"delivery":"integrate:target"}]}
 ```"#;
     let mut owner = FakeOwner {
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, fragment)].into(),
+        observations: [terminal_with_result(GraphAttemptOutcome::Succeeded, fragment)].into(),
         refuse_expansion_target: true,
         ..Default::default()
     };
@@ -111,7 +111,7 @@ fn hygiene_graph() -> GraphDocument {
 
 fn hygiene_writer_observation() -> AttemptObservation {
     let mut observation = terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         r#"```handoff
 {"schema_version":2,"status":"done","note":"Writer output is ready for hygiene","remaining":[],"decisions":[],"verify":["Writer output was completed before hygiene"]}
 ```"#,
@@ -430,7 +430,7 @@ fn gate_verdict_fixture_is_attempt_less_and_replays() {
     .unwrap();
     let mut owner = FakeOwner {
         observations: VecDeque::from([terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             "VERDICT: PASS",
         )]),
         ..Default::default()
@@ -613,7 +613,7 @@ fn gate_budget_fixtures_fail_closed_and_preserve_the_decision_on_resume() {
         });
         gate.depends_on.push("review".into());
         let document = graph(vec![node("review", route("fixture")), gate]);
-        let mut observation = terminal(AttemptOutcome::Succeeded);
+        let mut observation = terminal(GraphAttemptOutcome::Succeeded);
         if let AttemptObservation::Terminal { attempt_ref, .. } = &mut observation {
             *attempt_ref = Some("host/attempt".into());
         }
@@ -675,7 +675,7 @@ fn gate_budget_overrides_warn_only_for_configured_metrics() {
             });
             gate.depends_on.push("review".into());
             let document = graph(vec![node("review", route("fixture")), gate]);
-            let mut observation = terminal(AttemptOutcome::Succeeded);
+            let mut observation = terminal(GraphAttemptOutcome::Succeeded);
             if let AttemptObservation::Terminal { attempt_ref, .. } = &mut observation {
                 *attempt_ref = Some("host/attempt".into());
             }
@@ -893,7 +893,7 @@ fn gate_verdict_accepts_one_line_wherever_it_sits_outside_fences() {
     ] {
         let (document, mut owner) =
             verdict_fixture(VerdictThreshold::All, &[Some("PASS"), Some("PASS")]);
-        owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, text);
+        owner.observations[0] = terminal_with_result(GraphAttemptOutcome::Succeeded, text);
         let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(
             run.checkpoint.nodes[2].state,
@@ -940,7 +940,7 @@ fn gate_verdict_rejects_spoofed_multiple_and_malformed_lines() {
         ] {
             let (document, mut owner) =
                 verdict_fixture(threshold, &[Some("PASS"), Some("PASS"), Some("PASS")]);
-            owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, &text);
+            owner.observations[0] = terminal_with_result(GraphAttemptOutcome::Succeeded, &text);
             let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
             assert_eq!(run.checkpoint.nodes[3].state, NodeState::Failed, "{text:?}");
             assert_eq!(
@@ -965,7 +965,7 @@ fn gate_verdict_accepts_trailing_text_after_a_recognised_word() {
     ] {
         let (document, mut owner) =
             verdict_fixture(VerdictThreshold::All, &[Some("PASS"), Some("PASS")]);
-        owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, &text);
+        owner.observations[0] = terminal_with_result(GraphAttemptOutcome::Succeeded, &text);
         let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(
             run.checkpoint.nodes[2].state,
@@ -996,7 +996,7 @@ fn gate_verdict_ignores_prose_that_only_resembles_a_verdict_line() {
     // A declaration is recognised case-insensitively, so prose here must not
     // take the declaration shape at all.
     owner.observations[0] = terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         "Overall the verdict leans towards a pass once F1 is fixed.",
     );
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -1023,9 +1023,9 @@ fn gate_on_fail_routes_only_the_active_path_and_delivers_after_recovery() {
         document.integration_branch = Some("integration".into());
         document.delivery = Some(provenant_records::run::DeliveryMode::Pr);
         owner.observations.push_back(terminal(if recovery_succeeds {
-            AttemptOutcome::Succeeded
+            GraphAttemptOutcome::Succeeded
         } else {
-            AttemptOutcome::TaskFailed
+            GraphAttemptOutcome::TaskFailed
         }));
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
@@ -1101,7 +1101,7 @@ fn gate_inactive_path_waits_for_other_parents_before_settling() {
         .extend([node("slow", route("fixture")), recovery]);
     owner.observations.extend([
         AttemptObservation::Pending { attempt_ref: None },
-        terminal(AttemptOutcome::TaskFailed),
+        terminal(GraphAttemptOutcome::TaskFailed),
     ]);
     let mut journal = MemoryJournal::default();
     let waiting = advance(&document, &mut owner, &mut journal).unwrap();

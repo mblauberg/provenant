@@ -81,7 +81,8 @@ pub enum ReconciledWire {
     DeadlineStop,
     Settling {
         phase: String,
-        blocking_reason: Option<String>,
+        #[serde(rename = "blocking_reason")]
+        held_reason: Option<String>,
     },
     Abandoned {
         reason: String,

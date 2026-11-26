@@ -18,12 +18,12 @@
       "encoding": "utf8"
     },
     "cache_read_share": null,
-    "cause": "failed",
     "changed_files": null,
     "changed_files_total": null,
     "clipped": false,
     "complete": true,
     "continuation": null,
+    "declaration_source": null,
     "delivery": null,
     "delivery_id": null,
     "digest": null,
@@ -44,7 +44,6 @@
     "offset": 0,
     "overdue": false,
     "part": "result",
-    "partial_signals": [],
     "payload": "evicted",
     "planner_fallback": {
       "reason": "planner route failed; static stage selected",
@@ -56,6 +55,7 @@
     "protected_paths": [],
     "provider_error": "provider exited with an error",
     "publication": null,
+    "pushed_head": null,
     "queued_at": "2026-11-02T01:57:31.075623Z",
     "read_only_writable": [],
     "reason": "the lane failed; inspect its result and local evidence",
@@ -118,6 +118,8 @@
     "settlement": {
       "reason": "the lane failed; inspect its result and local evidence"
     },
+    "settlement_class": "failed",
+    "signals": [],
     "skipped_routes": [],
     "stale": null,
     "started_at": null,

@@ -877,6 +877,10 @@ pub struct RouteRecord {
     /// Human-readable, host-generated warnings retained with the applied route.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launch_warnings: Vec<String>,
+    /// The route layer of settlement policy the matched model policy set,
+    /// sealed at launch so the holder resolves the same value `--explain` showed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement: Vec<crate::settlement::policy::RouteLayerValue>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub provider: Option<String>,
@@ -1539,7 +1543,7 @@ pub struct OperationRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal_chair: Option<crate::custody::Chair>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Succeeded,
@@ -1605,33 +1609,10 @@ impl Outcome {
     }
 }
 
-impl From<Outcome> for crate::AttemptOutcome {
-    fn from(outcome: Outcome) -> Self {
-        match outcome {
-            Outcome::Succeeded => Self::Succeeded,
-            Outcome::ReviewRequired => Self::ReviewRequired,
-            Outcome::Failed => Self::Failed,
-            Outcome::Rejected => Self::Rejected,
-            Outcome::Cancelled => Self::Cancelled,
-            Outcome::TimedOut => Self::TimedOut,
-            Outcome::RateLimited => Self::RateLimited,
-            Outcome::QuotaLimited => Self::QuotaLimited,
-            Outcome::AuthRequired => Self::AuthRequired,
-            Outcome::ModelUnavailable => Self::ModelUnavailable,
-            Outcome::PermissionDenied => Self::PermissionDenied,
-            Outcome::Quarantined => Self::Quarantined,
-            Outcome::Lost => Self::Lost,
-            Outcome::Unsettled => Self::Unsettled,
-            Outcome::Uncommitted => Self::Uncommitted,
-            Outcome::InputRequired => Self::InputRequired,
-            Outcome::Unclassified => Self::Unclassified,
-        }
-    }
-}
 /// Safe cause of a terminal decision, independent of provider text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TerminalCause {
+pub enum CauseKind {
     /// The pinned source view of an isolated lane could not be built.
     SourceViewRefused,
     /// A project-binding state directory failed its local owner or mode guard.
@@ -1647,11 +1628,11 @@ pub enum TerminalCause {
     CloudPlacementRemoved,
     WriteGrantsRefused,
     WorktreeBusy,
-    HandoffRefused,
+    LaunchHandoffRefused,
     /// A local launch preparation step refused the attempt before custody.
     /// The attempt's `preparation_failure` names the step; its note carries the
     /// host's bounded reason and the correction that reason implies. A real
-    /// host handoff refusal keeps [`Self::HandoffRefused`] and its reconcile remedy.
+    /// host handoff refusal keeps [`Self::LaunchHandoffRefused`] and its reconcile remedy.
     PreparationRefused,
     /// A retry's writer head does not match the graph's pinned source commit.
     /// It is a pin problem, not a failed launch handoff.
@@ -1702,7 +1683,7 @@ pub enum TerminalCause {
     Unrecorded,
 }
 
-impl TerminalCause {
+impl CauseKind {
     /// Bounded label for human status rows. Structured results use `detail`.
     pub fn reason(self) -> &'static str {
         match self {
@@ -1719,7 +1700,7 @@ impl TerminalCause {
             Self::CloudPlacementRemoved => "cloud placement removed; provenant output ID",
             Self::WriteGrantsRefused => "write grants refused; provenant output ID",
             Self::WorktreeBusy => "worktree busy; provenant output ID",
-            Self::HandoffRefused => "launch handoff refused; provenant output ID",
+            Self::LaunchHandoffRefused => "launch handoff refused; provenant output ID",
             Self::PreparationRefused => "launch preparation refused; provenant output ID",
             Self::WriterPinMismatch { .. } => "writer source pin mismatch; provenant output ID",
             Self::RetainedWriterImport => "writer import retained; provenant output ID",
@@ -1802,7 +1783,7 @@ impl TerminalCause {
             Self::WorktreeBusy => {
                 "the worktree is busy; wait for its writer to finish or run `provenant reconcile`"
             }
-            Self::HandoffRefused => {
+            Self::LaunchHandoffRefused => {
                 "the host refused the launch handoff; run `provenant reconcile` before retrying"
             }
             Self::PreparationRefused => {
@@ -1932,7 +1913,7 @@ pub enum AttemptState {
         #[serde(flatten)]
         extra: crate::ExtraFields,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        terminal_cause: Option<TerminalCause>,
+        cause: Option<CauseKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_note: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1953,9 +1934,9 @@ impl AttemptState {
         }
     }
 
-    pub fn terminal_cause(&self) -> Option<TerminalCause> {
+    pub fn cause(&self) -> Option<CauseKind> {
         match self {
-            Self::Terminal { terminal_cause, .. } => *terminal_cause,
+            Self::Terminal { cause, .. } => *cause,
             _ => None,
         }
     }
@@ -2341,7 +2322,7 @@ pub enum WriteSource {
 /// Evidence on which a terminal decision was based.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TerminalEvidence {
+pub enum TerminalBasis {
     ProcessExit,
     PreLaunchRefusal,
     EffectiveCancellation,
@@ -2368,18 +2349,19 @@ pub enum CauseSource {
 }
 
 /// Whether a settled attempt may release its graph dependants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SettlementNodeOutcome {
-    Succeeded,
-    Failed,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependantRelease {
+    Release,
+    Hold,
 }
 
 /// The source and graph result for one settlement reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettlementRule {
-    pub reason: SettlementReason,
+    pub class: SettlementClass,
     pub source: CauseSource,
-    pub node_outcome: SettlementNodeOutcome,
+    pub release: DependantRelease,
     pub terminal_outcome: SettlementTerminalOutcome,
     pub stop_cause: Option<crate::stop::StopCause>,
 }
@@ -2394,7 +2376,7 @@ pub enum SettlementTerminalOutcome {
 }
 
 impl SettlementTerminalOutcome {
-    fn apply(self, observed: Outcome) -> Outcome {
+    pub(crate) fn apply(self, observed: Outcome) -> Outcome {
         match self {
             Self::Preserve => observed,
             Self::Succeeded => Outcome::Succeeded,
@@ -2412,15 +2394,15 @@ impl SettlementTerminalOutcome {
 
 /// One declaration owns the durable reasons and their cross-cutting policy.
 /// Generated enum, ALL and table cannot drift apart.
-macro_rules! settlement_reasons {
-    ($($(#[$meta:meta])* $reason:ident { code: $code:literal, source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
+macro_rules! settlement_classes {
+    ($($(#[$meta:meta])* $reason:ident { code: $code:literal, source: $source:ident, release: $release:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
-        pub enum SettlementReason {
+        pub enum SettlementClass {
             $($(#[$meta])* $reason),+
         }
 
-        impl SettlementReason {
+        impl SettlementClass {
             pub const ALL: &'static [Self] = &[$(Self::$reason),+];
 
             /// Stable snake_case code for status and advance diagnostics. It is
@@ -2434,9 +2416,9 @@ macro_rules! settlement_reasons {
             pub const fn rule(self) -> SettlementRule {
                 match self {
                     $(Self::$reason => SettlementRule {
-                        reason: Self::$reason,
+                        class: Self::$reason,
                         source: CauseSource::$source,
-                        node_outcome: SettlementNodeOutcome::$node,
+                        release: DependantRelease::$release,
                         terminal_outcome: SettlementTerminalOutcome::$outcome,
                         stop_cause: $stop,
                     }),+
@@ -2444,11 +2426,11 @@ macro_rules! settlement_reasons {
             }
         }
 
-        pub const SETTLEMENT_TABLE: &[SettlementRule] = &[
+        pub const SETTLEMENT_CLASS_TABLE: &[SettlementRule] = &[
             $(SettlementRule {
-                reason: SettlementReason::$reason,
+                class: SettlementClass::$reason,
                 source: CauseSource::$source,
-                node_outcome: SettlementNodeOutcome::$node,
+                release: DependantRelease::$release,
                 terminal_outcome: SettlementTerminalOutcome::$outcome,
                 stop_cause: $stop,
             }),+
@@ -2456,161 +2438,53 @@ macro_rules! settlement_reasons {
     };
 }
 
-settlement_reasons! {
+settlement_classes! {
     /// The provider finished and reported its results.
-    Completed { code: "completed", source: Provider, node: Succeeded, outcome: Preserve, stop: None },
+    Completed { code: "completed", source: Provider, release: Release, outcome: Preserve, stop: None },
     /// A complete handoff preceded the host token-budget stop.
-    CompletedBeforeBudget { code: "completed_before_budget", source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
+    CompletedBeforeBudget { code: "completed_before_budget", source: Host, release: Release, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
     /// The provider finished without a final handoff, so nothing was reported.
-    HandoffMissing { code: "handoff_missing", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
+    HandoffMissing { code: "handoff_missing", source: Provider, release: Hold, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
     /// A final handoff was present but malformed; retain its field diagnostics.
-    HandoffMalformed { code: "handoff_malformed", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
+    HandoffMalformed { code: "handoff_malformed", source: Provider, release: Hold, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
     /// The writer exited without a final message.
-    EmptyResult { code: "empty_result", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
+    EmptyResult { code: "empty_result", source: Provider, release: Hold, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
     /// The lane declared that work remains.
-    DeclaredStop { code: "declared_stop", source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
+    DeclaredStop { code: "declared_stop", source: Provider, release: Hold, outcome: ReviewRequired, stop: None },
     /// The provider stopped for a reason other than a finished turn.
-    ProviderStop { code: "provider_stop", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
+    ProviderStop { code: "provider_stop", source: Provider, release: Hold, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
     /// A writer left edits it did not commit.
-    UncommittedWork { code: "uncommitted_work", source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    UncommittedWork { code: "uncommitted_work", source: Provider, release: Hold, outcome: Uncommitted, stop: None },
     /// The bound branch stayed at base while the primary checkout moved with
     /// unaccounted work: the lane's work went to the wrong checkout (#3611).
-    StrayWork { code: "stray_work", source: Host, node: Failed, outcome: ReviewRequired, stop: None },
+    StrayWork { code: "stray_work", source: Host, release: Hold, outcome: ReviewRequired, stop: None },
     /// Refused before any process started.
-    PreLaunchRefusal { code: "pre_launch_refusal", source: Host, node: Failed, outcome: Preserve, stop: None },
-    Cancelled { code: "cancelled", source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
+    PreLaunchRefusal { code: "pre_launch_refusal", source: Host, release: Hold, outcome: Preserve, stop: None },
+    Cancelled { code: "cancelled", source: Owner, release: Hold, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
     /// The host interrupted a run to deliver its queued continuation turn.
-    Steered { code: "steered", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
-    Lost { code: "lost", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
-    Unsettled { code: "unsettled", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
+    Steered { code: "steered", source: Host, release: Hold, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
+    Lost { code: "lost", source: Host, release: Hold, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
+    Unsettled { code: "unsettled", source: Host, release: Hold, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
     /// The provider reported an unclassified error.
-    Unclassified { code: "unclassified", source: Provider, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
+    Unclassified { code: "unclassified", source: Provider, release: Hold, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
     /// The provider ran and ended in a non-success outcome.
-    Failed { code: "failed", source: Provider, node: Failed, outcome: Preserve, stop: None },
+    Failed { code: "failed", source: Provider, release: Hold, outcome: Preserve, stop: None },
 }
-impl SettlementReason {
-    /// Derive the reason from the complete terminal facts before any reader
-    /// interprets the outcome, stop or next step independently.
-    pub fn derive(
-        outcome: Outcome,
-        evidence: Option<&TerminalEvidence>,
-        partial: &[PartialSignal],
-        terminal_cause: Option<TerminalCause>,
-        handoff: Result<Option<&crate::handoff::Handoff>, &crate::handoff::HandoffError>,
-    ) -> Self {
-        match (evidence, outcome) {
-            (_, Outcome::Lost) => Self::Lost,
-            (_, Outcome::Unsettled) => Self::Unsettled,
-            (_, Outcome::Unclassified) => Self::Unclassified,
-            (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
-            (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
-            (_, Outcome::Cancelled) if terminal_cause == Some(TerminalCause::Steered) => {
-                Self::Steered
-            }
-            (_, Outcome::Cancelled) => Self::Cancelled,
-            (Some(TerminalEvidence::PreLaunchRefusal), _) => Self::PreLaunchRefusal,
-            _ if handoff.is_err() => Self::HandoffMalformed,
-            _ => match terminal_cause {
-                Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
-                Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
-                Some(
-                    TerminalCause::ProviderEarlyStop
-                    | TerminalCause::ProviderStalled
-                    | TerminalCause::ProviderStalledRetry,
-                ) => Self::ProviderStop,
-                _ if partial.contains(&PartialSignal::StrayWork) => Self::StrayWork,
-                _ if handoff
-                    .is_ok_and(|handoff| handoff.is_some_and(|handoff| handoff.unfinished())) =>
-                {
-                    Self::DeclaredStop
-                }
-                _ if partial.contains(&PartialSignal::DeclaredStop) => Self::DeclaredStop,
-                _ if partial.contains(&PartialSignal::HandoffMissing) => Self::HandoffMissing,
-                _ if partial.contains(&PartialSignal::ProviderStop) => Self::ProviderStop,
-                _ if partial.contains(&PartialSignal::UncommittedWork)
-                    || outcome == Outcome::Uncommitted =>
-                {
-                    Self::UncommittedWork
-                }
-                Some(TerminalCause::TokenBudget)
-                    if matches!(
-                        outcome,
-                        Outcome::Succeeded
-                            | Outcome::ReviewRequired
-                            | Outcome::Failed
-                            | Outcome::TimedOut
-                    ) && handoff.is_ok_and(|handoff| {
-                        handoff.is_some_and(|handoff| {
-                            !handoff.unfinished() && handoff.validate().is_ok()
-                        })
-                    }) =>
-                {
-                    Self::CompletedBeforeBudget
-                }
-                _ if matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired) => {
-                    Self::Completed
-                }
-                _ => Self::Failed,
-            },
-        }
-    }
-
+impl SettlementClass {
     /// A completed budget boundary retains its host stop without closing
     /// dependants. Other typed stops keep dependants closed.
-    pub const fn node_outcome(self, stop: Option<crate::stop::StopCause>) -> SettlementNodeOutcome {
+    pub const fn release(self, stop: Option<crate::stop::StopCause>) -> DependantRelease {
         if stop.is_some()
             && !matches!(
                 self.rule().terminal_outcome,
                 SettlementTerminalOutcome::Succeeded
             )
         {
-            SettlementNodeOutcome::Failed
+            DependantRelease::Hold
         } else {
-            self.rule().node_outcome
+            self.rule().release
         }
     }
-
-    /// Derive the persisted reason, sealed stop, source and graph result from
-    /// the same complete terminal facts.
-    pub fn classify(
-        outcome: Outcome,
-        evidence: Option<&TerminalEvidence>,
-        partial: &[PartialSignal],
-        terminal_cause: Option<TerminalCause>,
-        handoff: Result<Option<&crate::handoff::Handoff>, &crate::handoff::HandoffError>,
-    ) -> Result<SettlementClassification, crate::stop::StopError> {
-        let reason = Self::derive(outcome, evidence, partial, terminal_cause, handoff);
-        let outcome = reason.rule().terminal_outcome.apply(outcome);
-        let stop = crate::stop::Stop::sealed(
-            terminal_cause,
-            outcome,
-            reason,
-            handoff
-                .map(|handoff| handoff.cloned())
-                .map_err(Clone::clone),
-        )?;
-        let stop_cause = stop.as_ref().map(crate::stop::Stop::cause);
-        let source = stop_cause.map_or(reason.rule().source, crate::stop::StopCause::source);
-        let node_outcome = reason.node_outcome(stop_cause);
-        Ok(SettlementClassification {
-            outcome,
-            reason,
-            stop,
-            source,
-            node_outcome,
-        })
-    }
-}
-
-/// Complete terminal classification shared by persistence, graph transitions
-/// and route quality.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SettlementClassification {
-    pub outcome: Outcome,
-    pub reason: SettlementReason,
-    pub stop: Option<crate::stop::Stop>,
-    pub source: CauseSource,
-    pub node_outcome: SettlementNodeOutcome,
 }
 
 /// Independently retried work after a terminal decision.
@@ -2818,7 +2692,7 @@ pub struct PeerGraphAttempt {
     pub route: PeerGraphRoute,
     pub state: crate::graph::AttemptState,
     pub attempt_ref: Option<String>,
-    pub outcome: Option<crate::graph::AttemptOutcome>,
+    pub outcome: Option<crate::graph::GraphAttemptOutcome>,
     pub launch_actor: String,
 }
 
@@ -2976,15 +2850,28 @@ pub struct AttemptRecord {
     /// Signals that the lane finished only part of its brief. Empty for a lane
     /// with none, which is not proof that it finished everything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub partial_signals: Vec<PartialSignal>,
+    pub signals: Vec<SettlementSignal>,
     pub state: AttemptState,
     /// Absent on records written before terminal decisions were recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_evidence: Option<TerminalEvidence>,
+    pub terminal_basis: Option<TerminalBasis>,
     /// Why the attempt ended, as a closed set a waiter can match on. Stamped
     /// with every terminal decision, including refusals before launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settlement_reason: Option<SettlementReason>,
+    pub settlement_class: Option<SettlementClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_progress: Option<crate::settlement::HeadProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_evidence: Option<crate::FileDigest>,
+    /// Declaration counts for lanes that owe a handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declarations: Option<crate::declaration::DeclarationCounts>,
+    /// Whether the settled handoff was declared by the lane or made by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration_source: Option<crate::settlement::DeclarationSource>,
+    /// Non-default settlement policy actions that changed the decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_policy_applied: Vec<crate::settlement::policy::AppliedPolicy>,
     /// The cancellation disposition known when the decision was sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation_disposition: Option<CancellationDisposition>,
@@ -3176,7 +3063,7 @@ impl<T> Eq for Transient<T> {}
 /// the chair, who decides whether to resume; it never changes the outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PartialSignal {
+pub enum SettlementSignal {
     /// Identity evidence is incomplete; usage stays attributed to the requested account.
     IdentityUnobserved,
     /// A successful final answer did not include a final handoff.
@@ -3195,7 +3082,7 @@ pub enum PartialSignal {
     /// bound worktree.
     StrayWork,
 }
-impl PartialSignal {
+impl SettlementSignal {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::IdentityUnobserved => "identity_unobserved",
@@ -3483,12 +3370,12 @@ mod tests {
     fn a_pin_mismatch_has_its_own_honest_cause_text() {
         let pinned = GitOid::parse(&"a".repeat(40)).expect("pinned");
         let head = GitOid::parse(&"b".repeat(40)).expect("head");
-        let cause = TerminalCause::WriterPinMismatch { pinned, head };
+        let cause = CauseKind::WriterPinMismatch { pinned, head };
         let text = cause.diagnostic(true);
         assert!(text.contains(&pinned.to_string()), "{text}");
         assert!(text.contains(&head.to_string()), "{text}");
         assert!(
-            !text.contains(TerminalCause::HandoffRefused.detail()),
+            !text.contains(CauseKind::LaunchHandoffRefused.detail()),
             "a pin mismatch must not blame the launch handoff: {text}"
         );
         let detail = cause.detail();
@@ -3508,7 +3395,7 @@ mod tests {
         for (base, field, value, malformed) in [
             (
                 base.clone(),
-                "terminal_cause",
+                "cause",
                 serde_json::json!("token_budget"),
                 serde_json::json!("unknown"),
             ),
@@ -4101,27 +3988,6 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_or_unsettled_outcome_names_its_reason_with_any_evidence() {
-        // The process ran, but custody or reporting was not proven.
-        for evidence in [
-            TerminalEvidence::ProcessExit,
-            TerminalEvidence::PreLaunchRefusal,
-            TerminalEvidence::Lost {
-                reason: "gone".into(),
-            },
-        ] {
-            assert_eq!(
-                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[], None, Ok(None)),
-                SettlementReason::Lost
-            );
-            assert_eq!(
-                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[], None, Ok(None)),
-                SettlementReason::Unsettled
-            );
-        }
-    }
-
-    #[test]
     fn lane_access_network_defaults_to_open() {
         let access = LaneAccessRequest::default();
         assert!(!access.database_ipc);
@@ -4333,6 +4199,16 @@ mod tests {
                 "graph_handoff",
                 serde_json::json!({"Ok":{"schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}}),
                 serde_json::json!({"Ok":{"schema_version":1,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}}),
+            ),
+            (
+                "head_progress",
+                serde_json::json!("moved"),
+                serde_json::json!("not_a_progress"),
+            ),
+            (
+                "settlement_evidence",
+                serde_json::json!(format!("sha256:{}", "a".repeat(64))),
+                serde_json::json!("not-a-digest"),
             ),
         ];
         for (field, value, malformed_value) in field_values {

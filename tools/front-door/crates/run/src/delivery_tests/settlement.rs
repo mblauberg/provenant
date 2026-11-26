@@ -106,6 +106,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
@@ -122,8 +123,8 @@ fn review_delivery_requires_acceptance_and_exact_head()
     )?;
     drop(lock);
     let mut publication = tests::publication();
-    publication.outcome = Outcome::ReviewRequired;
-    publication.reason = Some("protected changes require review".into());
+    publication.fact.outcome = Outcome::ReviewRequired;
+    publication.fact.reason = Some("protected changes require review".into());
     store.publish_terminal(id, 1, &publication, &exit, &call)?;
     let deliver = |accept_review| {
         store.deliver(
@@ -291,6 +292,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,

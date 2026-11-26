@@ -796,6 +796,7 @@ mod fixtures {
                 "The overview now joins the inbox so every needs-you row carries its kind and blocking flag.\n\nCoverage warnings show above the tiles.",
             ),
         );
+        p::output_git_evidence(&mut output_result, &Value::Null, None, &Value::Null);
         p::output_result_evidence(
             &mut output_result,
             &Value::Null,
@@ -839,7 +840,7 @@ mod fixtures {
         .map_err(|error| format!("output stop work: {error}"))?;
         let cancelled_state = provenant_records::run::AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: provenant_records::run::Outcome::Cancelled,
@@ -906,7 +907,7 @@ mod fixtures {
         );
         let failed_state = provenant_records::run::AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: provenant_records::run::Outcome::Failed,
@@ -925,19 +926,9 @@ mod fixtures {
         output_result_artifact(&mut output_result_failed_record, 29, true)?;
         let (failed_label, failed_reason) =
             provenant_records::wire::LaneRow::state_and_reason(&failed_state);
-        let failed_settlement = provenant_records::run::SettlementReason::derive(
-            provenant_records::run::Outcome::Failed,
-            None,
-            &[],
-            None,
-            Ok(None),
-        );
-        let failed_settlement = serde_json::to_value(failed_settlement)
-            .map_err(|error| format!("output failure settlement: {error}"))?;
-        output_result_failed_record.settlement_reason = Some(
-            serde_json::from_value(failed_settlement.clone())
-                .map_err(|error| format!("synthetic output settlement: {error}"))?,
-        );
+        let failed_settlement = json!(provenant_records::run::SettlementClass::Failed);
+        output_result_failed_record.settlement_class =
+            Some(provenant_records::run::SettlementClass::Failed);
         let mut output_result_failed = p::output(
             "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
             &failed_label,
@@ -953,6 +944,7 @@ mod fixtures {
             &Value::Null,
             &output_bytes("provider exited with an error"),
         );
+        p::output_git_evidence(&mut output_result_failed, &Value::Null, None, &Value::Null);
         p::output_result_evidence(
             &mut output_result_failed,
             &Value::Null,
@@ -985,7 +977,7 @@ mod fixtures {
         );
         let succeeded_state = provenant_records::run::AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: provenant_records::run::Outcome::Succeeded,
@@ -1178,6 +1170,7 @@ mod fixtures {
             &Value::Null,
             &output_bytes(result_write),
         );
+        p::output_git_evidence(&mut output_result_written, &Value::Null, None, &Value::Null);
         p::output_result_evidence(
             &mut output_result_written,
             &Value::Null,

@@ -48,7 +48,7 @@ pub(super) fn reconcile_blocks(state: &run::Reconciled) -> bool {
         state,
         run::Reconciled::Escaped { .. }
             | run::Reconciled::Settling {
-                blocking_reason: Some(_),
+                held_reason: Some(_),
                 ..
             }
     )

@@ -26,7 +26,7 @@ on with the rest.
 
 A spec is the best current statement of the outcome and can be wrong. An
 implementer may not silently weaken it; it raises a flaw with evidence in the
-handoff `decisions`. The chair may amend or drop an agent-written criterion on
+declaration `decisions`. The chair may amend or drop an agent-written criterion on
 that evidence by editing the spec in place and recording the evidence in an
 issue comment. Owner-written criteria, one-way doors, widened authority and
 tightened acceptance still need the owner; when authorship is unclear, treat a

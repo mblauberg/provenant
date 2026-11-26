@@ -38,11 +38,8 @@ impl CommitSourcePreparation {
             ..provenant_core::RootInputs::new(home.clone(), project.clone())
         }
         .resolve(&provenant_os::fs::SystemPathResolver)?;
-        let utility = provenant_confinement::UtilityRuntime::new(
-            &git,
-            &git_home,
-            roots.state.as_path(),
-        )?;
+        let utility =
+            provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
         let repo = utility.open_repo(
             &executor,
             &project,
@@ -95,15 +92,12 @@ impl CommitSourcePreparation {
             base_ref: None,
             profile: provenant_records::run::HarnessProfile {
                 knobs: [("lanes.access".into(), serde_json::json!("isolated"))].into(),
-                knob_sources: [(
-                    "lanes.access".into(),
-                    provenant_records::Layer::Launch,
-                )]
-                .into(),
+                knob_sources: [("lanes.access".into(), provenant_records::Layer::Launch)].into(),
                 ..Default::default()
             },
             prompt_digest: provenant_records::CanonicalV1::file_digest(b"review fixture"),
-            route: run::RequestedRoute::Model { required_family: None,
+            route: run::RequestedRoute::Model {
+                required_family: None,
                 extra: Default::default(),
                 provider: "cursor".into(),
                 model: "cursor/composer-2.5".into(),
@@ -176,7 +170,8 @@ fn commit_source_preparation_grants_an_immutable_materialised_view()
         fixture.state.join("config.toml"),
         "schema_version=1\n[[domains.routing.pools.senior]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n",
     )?;
-    fixture.task.route = run::RequestedRoute::Review { required_family: None,
+    fixture.task.route = run::RequestedRoute::Review {
+        required_family: None,
         extra: Default::default(),
         name: "senior".into(),
         effort: None,
@@ -210,16 +205,47 @@ fn commit_source_preparation_grants_an_immutable_materialised_view()
             .iter()
             .any(|grant| grant.path == fixture.project)
     );
-    let private = permissions.private_state.as_ref().ok_or("missing private state")?;
-    let handoff = private.path.join("handoff.json");
-    let prompt = launch.argv.iter().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>().join(" ");
+    let private = permissions
+        .private_state
+        .as_ref()
+        .ok_or("missing private state")?;
+    let prompt = launch
+        .argv
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
     let stdin = String::from_utf8_lossy(&launch.stdin);
-    assert!(prompt.contains(&handoff.display().to_string()) || stdin.contains(&handoff.display().to_string()));
-    let policy = provenant_confinement::permissions::snapshot::render(permissions, &confinement.profile, &fixture.home)?;
-    assert!(policy.contains(&format!("(allow file-write* (subpath \"{}\"))", private.path.display())));
-    let denial = policy.lines().find(|line| line.starts_with("(deny file-write* (require-all") && line.contains(fixture.state.to_str().unwrap())).ok_or("state denial")?;
-    assert!(denial.contains(&format!("(require-not (subpath \"{}\"))", private.path.display())));
-    assert!(policy.contains(&format!("(deny file-write* (subpath \"{}\"))", launch.cwd.display())));
+    // Settlement now travels through the typed declaration channel: the brief
+    // teaches `provenant declare --stdin` instead of naming a handoff file in
+    // the host-owned private state.
+    assert!(
+        prompt.contains("provenant declare --stdin") || stdin.contains("provenant declare --stdin")
+    );
+    let policy = provenant_confinement::permissions::snapshot::render(
+        permissions,
+        &confinement.profile,
+        &fixture.home,
+    )?;
+    assert!(policy.contains(&format!(
+        "(allow file-write* (subpath \"{}\"))",
+        private.path.display()
+    )));
+    let denial = policy
+        .lines()
+        .find(|line| {
+            line.starts_with("(deny file-write* (require-all")
+                && line.contains(fixture.state.to_str().unwrap())
+        })
+        .ok_or("state denial")?;
+    assert!(denial.contains(&format!(
+        "(require-not (subpath \"{}\"))",
+        private.path.display()
+    )));
+    assert!(policy.contains(&format!(
+        "(deny file-write* (subpath \"{}\"))",
+        launch.cwd.display()
+    )));
     let writes = provenant_confinement::write_grants(permissions, &confinement.profile);
     source_tree::ensure_view_read_only(&launch.cwd, &writes)?;
     Ok(())
@@ -271,8 +297,8 @@ fn review_lane_working_directory_is_the_pinned_head_not_the_primary()
 
 #[test]
 // Spec: docs/specs/run-launch.md#inputs-and-resources
-fn review_view_ships_a_named_ref_at_the_host_pinned_base()
--> Result<(), Box<dyn std::error::Error>> {
+fn review_view_ships_a_named_ref_at_the_host_pinned_base() -> Result<(), Box<dyn std::error::Error>>
+{
     let mut fixture = CommitSourcePreparation::new()?;
     // The fixture checkout has no remote default ref. Pin a base and a later
     // head so the two are distinguishable inside the detached view.
@@ -314,14 +340,33 @@ fn review_view_ships_a_named_ref_at_the_host_pinned_base()
 #[test]
 fn host_denied_handoff_remains_best_effort() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = CommitSourcePreparation::new()?;
-    std::fs::write(fixture.state.join("config.toml"), format!(
-        "schema_version=1\n[domains.run.host_policy]\ndeny_write=[{:?}]\n", fixture.state.to_str().ok_or("state path")?
-    ))?;
+    std::fs::write(
+        fixture.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.run.host_policy]\ndeny_write=[{:?}]\n",
+            fixture.state.to_str().ok_or("state path")?
+        ),
+    )?;
     let launch = fixture.prepare()?;
-    let prompt = launch.argv.iter().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>().join(" ");
-    let permissions = launch.confinement.as_ref().ok_or("missing confinement")?.plan.permissions();
+    let prompt = launch
+        .argv
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let permissions = launch
+        .confinement
+        .as_ref()
+        .ok_or("missing confinement")?
+        .plan
+        .permissions();
     assert!(permissions.private_state.is_some());
-    assert!(prompt.contains("Progress handoff JSON:") || String::from_utf8_lossy(&launch.stdin).contains("Progress handoff JSON:"));
+    // The host denial is best effort: even when writes to state are denied,
+    // the brief still teaches the typed declaration the lane settles with.
+    assert!(
+        prompt.contains("provenant declare --stdin")
+            || String::from_utf8_lossy(&launch.stdin).contains("provenant declare --stdin")
+    );
     Ok(())
 }
 
@@ -353,7 +398,8 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
                 fixture.state.join("config.toml"),
                 "schema_version=1\n[[domains.routing.pools.preparation-fixture]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n",
             )?;
-            fixture.task.route = run::RequestedRoute::Review { required_family: None,
+            fixture.task.route = run::RequestedRoute::Review {
+                required_family: None,
                 extra: Default::default(),
                 name: "preparation-fixture".into(),
                 effort: None,
@@ -372,8 +418,8 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
         let refusal = error.into_refusal();
         if plan_error == "resolver" {
             assert_eq!(
-                refusal.terminal_cause,
-                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                refusal.cause,
+                provenant_records::run::CauseKind::RouteResolutionRefused,
             );
             assert_eq!(
                 refusal.terminal_note.as_deref(),
@@ -395,10 +441,7 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
             .iter()
             .find(|route| route.route.starts_with("cursor"))
             .ok_or("preselection refusal discarded the adapter plan error")?;
-        assert_eq!(
-            skipped.guard_boundary,
-            Some(boundary),
-        );
+        assert_eq!(skipped.guard_boundary, Some(boundary),);
         assert!(!skipped.detail.is_empty());
         assert!(
             !skipped
@@ -420,7 +463,10 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
             skipped.cause,
             Some(provenant_records::RouteExclusionReason::ConfinementUnavailable),
         );
-        assert_eq!(skipped.diagnostic().detail.as_deref(), Some(failure.detail()));
+        assert_eq!(
+            skipped.diagnostic().detail.as_deref(),
+            Some(failure.detail())
+        );
         assert_eq!(
             skipped.confinement_guard,
             Some(if plan_error == "invalid_roots" {
@@ -520,7 +566,13 @@ fn successful_login_probe_recovers_an_expired_preparation_failure()
         route: provenant_quota::ReadinessRoute::from_text("cursor/composer-2.5"),
     };
     assert_eq!(
-        crate::quota::read_readiness(&fixture.state, &scope, now, &provenant_quota::DEFAULT_FRESHNESS).state,
+        crate::quota::read_readiness(
+            &fixture.state,
+            &scope,
+            now,
+            &provenant_quota::DEFAULT_FRESHNESS
+        )
+        .state,
         provenant_quota::ReadinessState::Unavailable
     );
     let launch = fixture.prepare()?;

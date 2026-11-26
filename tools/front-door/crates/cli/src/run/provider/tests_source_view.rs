@@ -170,14 +170,14 @@ fn source_view_names_the_failing_step_and_cause() -> Result<(), Box<dyn std::err
     assert!(matches!(error.cause, SourceCause::GitExit(_)), "{error}");
     let refusal = PrepareError::from(error).into_refusal();
     assert_eq!(
-        refusal.terminal_cause,
-        provenant_records::run::TerminalCause::SourceViewRefused
+        refusal.cause,
+        provenant_records::run::CauseKind::SourceViewRefused
     );
     let note = refusal.terminal_note.ok_or("note")?;
     assert!(note.contains("tree listing") && note.contains("Git exited with status"));
     assert!(!note.contains("secret"));
     assert!(
-        !provenant_records::run::TerminalCause::SourceViewRefused
+        !provenant_records::run::CauseKind::SourceViewRefused
             .detail()
             .contains("route and account configuration")
     );
@@ -212,8 +212,8 @@ fn unsafe_project_binding_source_refusal_keeps_typed_peer_guard() {
         Some(provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe)
     );
     assert_eq!(
-        refusal.terminal_cause,
-        provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+        refusal.cause,
+        provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe
     );
     assert_eq!(
         refusal.boundary_class,

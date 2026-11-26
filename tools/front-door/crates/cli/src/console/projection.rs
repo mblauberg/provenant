@@ -533,6 +533,20 @@ pub fn output_result_evidence(
     data["changed_files_total"] = changed_files_total.clone();
 }
 
+/// Attach sealed Git diagnostics to a full result page.
+pub fn output_git_evidence(
+    data: &mut Value,
+    pushed_head: &Value,
+    uncommitted_paths: Option<Value>,
+    declaration_source: &Value,
+) {
+    data["pushed_head"] = pushed_head.clone();
+    if let Some(paths) = uncommitted_paths {
+        data["uncommitted_paths"] = paths;
+    }
+    data["declaration_source"] = declaration_source.clone();
+}
+
 /// Attach the lane owner row and its typed result claims to an output page.
 /// The local command and fixture generator both pass an already projected
 /// lane, so state, evidence and future fields stay aligned.
@@ -543,7 +557,7 @@ pub fn output_lane_fields(
 ) {
     let row = json!(lane);
     if let (Some(data), Some(row)) = (data.as_object_mut(), row.as_object()) {
-        data.remove("settlement_reason");
+        data.remove("settlement_class");
         if let Some(grants) = data.get_mut("grants").and_then(Value::as_object_mut) {
             for field in ["write_grants", "read_only_writable"] {
                 if let Some(value) = row.get(field) {
@@ -1307,7 +1321,7 @@ pub fn output(
     attempt_id: &str,
     state: &str,
     reason: Option<Value>,
-    settlement_reason: Option<Value>,
+    settlement_class: Option<Value>,
     part: &str,
     offset: u64,
     next_offset: u64,
@@ -1334,8 +1348,8 @@ pub fn output(
     if let Some(reason) = reason {
         data["reason"] = reason;
     }
-    if let Some(settlement_reason) = settlement_reason {
-        data["settlement_reason"] = settlement_reason;
+    if let Some(settlement_class) = settlement_class {
+        data["settlement_class"] = settlement_class;
     }
     data
 }
@@ -1486,6 +1500,27 @@ mod tests {
         assert_eq!(
             search_artifact_error(&json!("attempt-1"), "fixture read error"),
             json!({"attempt_id":"attempt-1","reason":"fixture read error"})
+        );
+    }
+
+    #[test]
+    fn output_git_evidence_preserves_sealed_diagnostics() {
+        let mut data = json!({});
+        output_git_evidence(
+            &mut data,
+            &json!("abc"),
+            Some(json!(["src/lib.rs"])),
+            &json!("handoff"),
+        );
+        assert_eq!(
+            data,
+            json!({"pushed_head":"abc", "uncommitted_paths":["src/lib.rs"], "declaration_source":"handoff"})
+        );
+        let mut empty = json!({});
+        output_git_evidence(&mut empty, &Value::Null, None, &Value::Null);
+        assert_eq!(
+            empty,
+            json!({"pushed_head":null, "declaration_source":null})
         );
     }
 

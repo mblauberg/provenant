@@ -1178,27 +1178,29 @@ pub(crate) mod peer_tests {
             model: Some(model.into()),
             ..Default::default()
         };
+        let fact = provenant_records::settlement::classify::settle(
+            &provenant_records::settlement::SettlementEvidence::fixture(
+                provenant_records::settlement::LaneRole::Reader,
+                outcome,
+                None,
+            ),
+        );
         store.publish_terminal(
             record.attempt_id,
             record.revision,
             &provenant_run::TerminalPublication {
-                handoff: Ok(None),
-                terminal_cause: None,
-                terminal_note: None,
-                outcome,
+                fact,
+                evidence: None,
                 finished_at: call.clock.wall_now()?,
                 started_at: None,
                 provider_ms: None,
-                reason: None,
                 result: "OK",
-                complete: true,
                 redacted: false,
                 resolved_route: Some(route.clone()),
                 applied_route: Some(route.clone()),
                 observed_route: Some(route),
                 usage: Default::default(),
                 session: None,
-                partial_signals: Vec::new(),
             },
             &exit,
             call,

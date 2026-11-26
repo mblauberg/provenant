@@ -198,7 +198,7 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(partial["result"] as? String, "partial")
         XCTAssertNotNil(partial["result_projection"])
         XCTAssertEqual(partial["project_id"] as? String, "01010101010101010101010101010101")
-        XCTAssertNil(partial["settlement_reason"])
+        XCTAssertTrue(partial["settlement_class"] is NSNull)
         let partialNext = try XCTUnwrap(envelope("output-result")["next"] as? [[String: Any]])
         XCTAssertEqual(
             partialNext.first?["argv"] as? [String],

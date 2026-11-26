@@ -3,3 +3,4 @@ mod contracts;
 mod forward_compatibility;
 mod host_run_fields;
 mod persisted_enum_names;
+mod settle;

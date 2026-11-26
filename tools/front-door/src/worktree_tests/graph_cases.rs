@@ -114,7 +114,7 @@ pub(super) fn graph_run_refuses_unavailable_reader_route() -> Result {
         "{reader_value}"
     );
     assert_eq!(
-        reader_node["advance_error_code"], "preparation_refused",
+        reader_node["advance_code"], "preparation_refused",
         "{reader_value}"
     );
     assert_eq!(

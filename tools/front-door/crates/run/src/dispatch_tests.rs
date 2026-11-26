@@ -222,7 +222,7 @@ pub(super) struct Fake {
     /// The outcome a decode reports; success when unset.
     pub(super) outcome: Option<Outcome>,
     /// The terminal cause a decode reports.
-    pub(super) terminal_cause: Option<TerminalCause>,
+    pub(super) cause: Option<CauseKind>,
     /// Evidence diagnostic for outcomes such as `Unsettled` that require one.
     pub(super) reason: Option<String>,
     /// Provider session the decode reports, for terminal continuation tests.
@@ -230,12 +230,10 @@ pub(super) struct Fake {
     /// The answer a decode reports, instead of the captured stdout.
     pub(super) answer: Option<String>,
     /// Partial-finish signals a decode reports.
-    partial: Vec<PartialSignal>,
+    partial: Vec<SettlementSignal>,
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.
     quota_stderr: Option<&'static [u8]>,
     failure_note: Option<String>,
-    /// Turn boundaries a decode reports in its answer.
-    turns: Vec<provenant_records::handoff::TurnEnd>,
 }
 
 impl Fake {
@@ -264,7 +262,7 @@ impl Providers for Fake {
     fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), Box<PrepareRefusal>> {
         if self.refuse_policy {
             let mut refusal = crate::PrepareRefusal::boxed(
-                TerminalCause::DiskFloor,
+                CauseKind::DiskFloor,
                 "insufficient disk space; run `provenant gc`",
             );
             refusal.resource = self.policy_resource.clone();
@@ -289,7 +287,7 @@ impl Providers for Fake {
         self.resumed.set(resume.map(|r| r.attempt_id));
         if self.refuse {
             return Err(crate::PrepareRefusal::boxed(
-                TerminalCause::RouteResolutionRefused,
+                CauseKind::RouteResolutionRefused,
                 "fixture adapter is disabled",
             ));
         }
@@ -314,7 +312,7 @@ impl Providers for Fake {
         assert_eq!(applied.effort, route().effort);
         self.decoded.set(self.decoded.get() + 1);
         Ok(Decoded {
-            terminal_cause: self.terminal_cause,
+            cause: self.cause,
             outcome: self.outcome.unwrap_or(Outcome::Succeeded),
             result: self
                 .answer
@@ -329,8 +327,7 @@ impl Providers for Fake {
             usage: self.codex_usage.clone().unwrap_or_default(),
             session: self.session.clone(),
             reason: self.reason.clone(),
-            partial_signals: self.partial.clone(),
-            turns: self.turns.clone(),
+            signals: self.partial.clone(),
         })
     }
     fn decode_captures(
@@ -351,32 +348,51 @@ impl Providers for Fake {
     }
 }
 
+/// Declare one handoff on the attempt's journal: the lane's only handoff
+/// channel. Handoff prose in an answer is captured output, never a declaration.
+pub(super) fn declare_handoff(
+    store: &RunStore,
+    id: AttemptId,
+    request_id: &str,
+    payload: serde_json::Value,
+) -> TestResult {
+    store.declare(
+        id,
+        &provenant_records::declaration::DeclarationInput {
+            request_id: request_id.into(),
+            payload,
+        },
+        &provenant_records::declaration::DeclarationLimit::shipped(),
+    )?;
+    Ok(())
+}
+
 /// Settle one attempt whose provider reported `outcome` and `signals`, with
 /// `answer` as its final answer, and return the committed record.
 fn settle_with(
     answer: &str,
     outcome: Option<Outcome>,
-    signals: Vec<PartialSignal>,
+    signals: Vec<SettlementSignal>,
 ) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
-    settle_with_role(answer, outcome, signals, None)
+    settle_with_role(answer, outcome, signals, None, None)
+}
+
+/// The same, with a typed declaration rather than handoff prose in `answer`.
+fn settle_with_declared(
+    handoff: serde_json::Value,
+    answer: &str,
+    outcome: Option<Outcome>,
+    signals: Vec<SettlementSignal>,
+) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
+    settle_with_role(answer, outcome, signals, None, Some(handoff))
 }
 
 fn settle_with_role(
     answer: &str,
     outcome: Option<Outcome>,
-    signals: Vec<PartialSignal>,
+    signals: Vec<SettlementSignal>,
     role: Option<&str>,
-) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
-    settle_with_turns(answer, outcome, signals, role, Vec::new())
-}
-
-/// As `settle_with_role`, with the provider's turn boundaries in `answer`.
-fn settle_with_turns(
-    answer: &str,
-    outcome: Option<Outcome>,
-    signals: Vec<PartialSignal>,
-    role: Option<&str>,
-    turns: Vec<provenant_records::handoff::TurnEnd>,
+    declaration: Option<serde_json::Value>,
 ) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -402,6 +418,9 @@ fn settle_with_turns(
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
     let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    if let Some(payload) = declaration {
+        declare_handoff(&store, id, "settled-declaration", payload)?;
+    }
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     // A cancelled outcome requires proof that the stop preceded the exit.
@@ -412,7 +431,6 @@ fn settle_with_turns(
         outcome,
         answer: Some(answer.into()),
         partial: signals,
-        turns,
         ..Fake::default()
     };
     Ok(store.finish(id, &dir, &observed, &fake, &call)?)
@@ -737,7 +755,7 @@ fn assert_unreadable_prompt_rejected(
     let fact = store.attempt(id, &call)?;
     assert_eq!(
         fact.terminal_state,
-        provenant_records::AttemptOutcome::Rejected
+        provenant_records::run::Outcome::Rejected
     );
     assert!(fact.started_at.is_none());
     let [Started::Refused { reason, .. }] = &started[..] else {
@@ -1438,7 +1456,7 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
         );
     }
     let fact = store.attempt(id, &call)?;
-    assert_eq!(fact.terminal_state, Outcome::Lost.into());
+    assert_eq!(fact.terminal_state, Outcome::Lost);
     assert!(fact.output_refs.is_empty());
     let after = store.record(id, &call)?;
     assert_eq!(after.started_at, before.started_at);

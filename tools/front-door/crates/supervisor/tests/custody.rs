@@ -194,6 +194,58 @@ impl ProcessObserver for CensusGateObserver {
                 }
             }
         }
+        // The detached-service case needs a real post-reparent snapshot. A
+        // zombie provider alone is insufficient: its child can still name it
+        // as parent until the kernel completes reparenting.
+        if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from)
+            && state.join("s2-wait-for-reparent").is_file()
+        {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let read_pid = |name: &str| -> std::result::Result<i64, CensusError> {
+                loop {
+                    match std::fs::read_to_string(state.join(name)) {
+                        Ok(pid) => {
+                            return pid.trim().parse::<i64>().map_err(|error| {
+                                CensusError::ProcessList(io::Error::other(error))
+                            });
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(CensusError::ProcessList(error)),
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(CensusError::ProcessList(io::Error::other(format!(
+                            "fixture did not publish {name}"
+                        ))));
+                    }
+                    std::thread::yield_now();
+                }
+            };
+            let provider_pid = read_pid("s2-detach-provider-pid")?;
+            let service_pid = read_pid("s2-detach-service-pid")?;
+            if !matches!(self.observe(provider_pid), ProcessObservation::Absent) {
+                return Err(CensusError::ProcessList(io::Error::other(
+                    "detached provider exit could not be observed",
+                )));
+            }
+            loop {
+                let census = fixture::RecordedBootObserver.census(max_entries)?;
+                if matches!(
+                    census.process(service_pid),
+                    provenant_supervisor::census::ProcessLookup::Present(fact)
+                        if !fact.zombie && fact.parent_pid != provider_pid
+                ) {
+                    std::fs::write(state.join("s2-reparent-observed"), b"reparented")
+                        .map_err(CensusError::ProcessList)?;
+                    return Ok(census);
+                }
+                if Instant::now() >= deadline {
+                    return Err(CensusError::ProcessList(io::Error::other(
+                        "detached service was not reparented",
+                    )));
+                }
+                std::thread::yield_now();
+            }
+        }
         let census = fixture::RecordedBootObserver.census(max_entries)?;
         let census = if std::env::var_os("PROVENANT_STATE_DIR")
             .is_some_and(|root| PathBuf::from(root).join("s2-provider-exit-first").exists())
@@ -2143,9 +2195,16 @@ fn retained_custody_releases_the_writer_soon_after_the_last_blocker_exits(
 }
 #[cfg(target_os = "macos")]
 fn unsandboxed_detached_service_does_not_block_settlement(root: &Path) -> Result<()> {
-    std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(root.join("PROVENANT_STATE_DIR"))?;
     std::fs::write(
         root.join("PROVENANT_STATE_DIR/s2-provider-exit-first"),
+        b"gate",
+    )?;
+    std::fs::write(
+        root.join("PROVENANT_STATE_DIR/s2-wait-for-reparent"),
         b"gate",
     )?;
     let ready_path = root.join("native-detached.sock");
@@ -2161,7 +2220,20 @@ fn unsandboxed_detached_service_does_not_block_settlement(root: &Path) -> Result
     byte(&mut stream, b'R')?;
     let service = process_identity(read_pid_line(&mut stream)?)?;
     assert_eq!(service.session_id, service.pid);
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::write(
+        state.join("s2-detach-service-pid.tmp"),
+        service.pid.to_string(),
+    )?;
+    std::fs::rename(
+        state.join("s2-detach-service-pid.tmp"),
+        state.join("s2-detach-service-pid"),
+    )?;
     let exit = exited(&handle)?;
+    assert!(
+        root.join("PROVENANT_STATE_DIR/s2-reparent-observed")
+            .is_file()
+    );
     assert!(!exit.unresolved_cleanup, "{exit:?}");
     // No sandbox mark or ancestry gives cleanup authority over this service.
     assert_eq!(process_identity(service.pid)?, service);

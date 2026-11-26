@@ -39,17 +39,17 @@ pub struct Journal {
     pub retry_after_ms: u64,
     #[serde(default)]
     pub recovery_failures: u32,
-    #[serde(default)]
-    pub blocking_reason: Option<String>,
-    /// Wall-clock milliseconds when `blocking_reason` was recorded; 0 for a
+    #[serde(default, rename = "blocking_reason")]
+    pub held_reason: Option<String>,
+    /// Wall-clock milliseconds when `held_reason` was recorded; 0 for a
     /// reason recorded before stamping existed. A reason is past evidence:
     /// readers report it with this time, never as a current observation.
-    #[serde(default)]
-    pub blocking_recorded_ms: u64,
+    #[serde(default, rename = "blocking_recorded_ms")]
+    pub held_recorded_ms: u64,
     /// Process ID of the settlement worker or reconcile that recorded
-    /// `blocking_reason`; 0 when unknown.
-    #[serde(default)]
-    pub blocking_recorded_by: u32,
+    /// `held_reason`; 0 when unknown.
+    #[serde(default, rename = "blocking_recorded_by")]
+    pub held_by: u32,
     /// When settlement began waiting on a contended writer lock; 0 when it is
     /// not waiting. Bounds how long a lock with no live holder is waited on.
     #[serde(default)]
@@ -76,10 +76,10 @@ pub struct Abandonment {
 impl Journal {
     /// Record why settlement is blocked, stamped with when and by which
     /// process, so later readers report it as past evidence.
-    pub fn record_blocking(&mut self, reason: String, now_ms: u64) {
-        self.blocking_reason = Some(reason);
-        self.blocking_recorded_ms = now_ms;
-        self.blocking_recorded_by = std::process::id();
+    pub fn record_held(&mut self, reason: String, now_ms: u64) {
+        self.held_reason = Some(reason);
+        self.held_recorded_ms = now_ms;
+        self.held_by = std::process::id();
     }
 
     pub fn new(scope: Scope) -> Self {
@@ -95,9 +95,9 @@ impl Journal {
             owner_since_ms: 0,
             retry_after_ms: 0,
             recovery_failures: 0,
-            blocking_reason: None,
-            blocking_recorded_ms: 0,
-            blocking_recorded_by: 0,
+            held_reason: None,
+            held_recorded_ms: 0,
+            held_by: 0,
             lock_wait_since_ms: 0,
             abandonment: None,
             extra: Default::default(),
@@ -140,7 +140,7 @@ pub(crate) fn terminal_failed(attempt: &Directory, scope: Scope, reason: &str) -
         .ok()
         .and_then(|time| u64::try_from(time.unix_millis()).ok())
         .unwrap_or(0);
-    journal.record_blocking(reason, now_ms);
+    journal.record_held(reason, now_ms);
     custody::write_record(attempt, FILE, &journal, PublishMode::Replace)?.require_durable()?;
     Ok(())
 }
@@ -161,7 +161,7 @@ mod tests {
         };
         terminal_failed(&attempt, scope, "first failure")?;
         let mut journal = custody::read_record::<Journal>(&attempt, FILE, custody::RECORD_LIMIT)?;
-        assert_eq!(journal.blocking_reason.as_deref(), Some("first failure"));
+        assert_eq!(journal.held_reason.as_deref(), Some("first failure"));
         journal.phase = Phase::Record;
         journal.attempts = 2;
         journal.retry_after_ms = 123;
@@ -171,7 +171,7 @@ mod tests {
         custody::write_record(&attempt, FILE, &journal, PublishMode::Replace)?.require_durable()?;
         terminal_failed(&attempt, scope, "terminal\nfailed")?;
         let saved = custody::read_record::<Journal>(&attempt, FILE, custody::RECORD_LIMIT)?;
-        assert_eq!(saved.blocking_reason.as_deref(), Some("terminal failed"));
+        assert_eq!(saved.held_reason.as_deref(), Some("terminal failed"));
         assert_eq!(saved.phase, journal.phase);
         assert_eq!(saved.attempts, journal.attempts);
         assert_eq!(saved.retry_after_ms, journal.retry_after_ms);
@@ -188,8 +188,8 @@ mod tests {
             .is_err()
         );
         assert_eq!(
-            custody::read_record::<Journal>(&attempt, FILE, custody::RECORD_LIMIT)?.blocking_reason,
-            saved.blocking_reason
+            custody::read_record::<Journal>(&attempt, FILE, custody::RECORD_LIMIT)?.held_reason,
+            saved.held_reason
         );
         Ok(())
     }

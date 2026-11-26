@@ -467,7 +467,7 @@ pub fn project_lane_with_loaded_facts(
 
     let mut projected = provenant_records::wire::LaneRow::project(lane, facts);
     if let run::AttemptState::Terminal {
-        terminal_cause: Some(run::TerminalCause::HandoffRefused),
+        cause: Some(run::CauseKind::LaunchHandoffRefused),
         reason: Some(reason),
         ..
     } = &lane.state

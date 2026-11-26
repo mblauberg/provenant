@@ -245,10 +245,7 @@ fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
         false,
     )?;
     assert_eq!(decoded.session.as_deref(), Some("s1"));
-    assert_ne!(
-        decoded.terminal_cause,
-        Some(run::TerminalCause::IdentityMismatch)
-    );
+    assert_ne!(decoded.cause, Some(run::CauseKind::IdentityMismatch));
 
     let wrong_model = concat!(
         r#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#,
@@ -266,10 +263,7 @@ fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
         Path::new("/nonexistent"),
         false,
     )?;
-    assert_eq!(
-        mismatch.terminal_cause,
-        Some(run::TerminalCause::IdentityMismatch)
-    );
+    assert_eq!(mismatch.cause, Some(run::CauseKind::IdentityMismatch));
     Ok(())
 }
 
@@ -307,10 +301,7 @@ fn resumed_provider_requires_matching_observed_session() -> Result<(), Box<dyn s
         "{\"event\":\"result\",\"result\":{\"conversation_id\":\"fresh-session\",\"status\":\"SUCCESS\",\"response\":\"continued\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n"
     );
     let decoded = decode(fresh.as_bytes())?;
-    assert_eq!(
-        decoded.terminal_cause,
-        Some(run::TerminalCause::IdentityMismatch)
-    );
+    assert_eq!(decoded.cause, Some(run::CauseKind::IdentityMismatch));
 
     let missing = br#"{"event":"result","result":{"conversation_id":"","status":"SUCCESS","response":"continued","usage":{"input_tokens":1,"output_tokens":1}}}"#;
     let decoded = decode(missing)?;
@@ -322,10 +313,7 @@ fn resumed_provider_requires_matching_observed_session() -> Result<(), Box<dyn s
         "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"fresh-session\",\"step_type\":\"agent_response\",\"text_delta\":\"continued\"}}\n"
     );
     let decoded = decode(conflict.as_bytes())?;
-    assert_eq!(
-        decoded.terminal_cause,
-        Some(run::TerminalCause::IdentityMismatch)
-    );
+    assert_eq!(decoded.cause, Some(run::CauseKind::IdentityMismatch));
     Ok(())
 }
 
@@ -1012,23 +1000,35 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     id,
                     session.store.record(id, &call)?.revision,
                     &run::TerminalPublication {
-                        handoff: Ok(None),
-                        terminal_cause: None,
-                        terminal_note: None,
-                        outcome: run::Outcome::Unsettled,
+                        fact: {
+                            let mut fact = provenant_records::settlement::classify::settle(
+                                &provenant_records::settlement::SettlementEvidence::fixture(
+                                    provenant_records::settlement::LaneRole::Reader,
+                                    run::Outcome::Unsettled,
+                                    None,
+                                ),
+                            );
+                            // A terminal record's reason and its unsettled basis are
+                            // one fact: change both so the fixture stays internally
+                            // consistent under reader validation.
+                            fact.reason = Some("publish refused".into());
+                            fact.terminal_basis =
+                                provenant_records::run::TerminalBasis::Unsettled {
+                                    reason: "publish refused".into(),
+                                };
+                            fact
+                        },
+                        evidence: None,
                         finished_at: clock.wall_now()?,
                         started_at: None,
                         provider_ms: None,
-                        reason: Some("publish refused".into()),
                         result: "retained provider evidence",
-                        complete: true,
                         redacted: false,
                         resolved_route: None,
                         applied_route: None,
                         observed_route: None,
                         usage: Default::default(),
                         session: None,
-                        partial_signals: vec![],
                     },
                     &exit,
                     &call,
@@ -1238,7 +1238,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     );
                     // An unstamped journal reason is still past evidence.
                     assert_eq!(
-                        json["data"]["runs"][0]["attempts"][0]["found"]["blocking_reason"],
+                        json["data"]["runs"][0]["attempts"][0]["found"]["held_reason"],
                         "recorded earlier: lane Git import failed"
                     );
                     assert!(reported.human.contains("lane Git import failed"));

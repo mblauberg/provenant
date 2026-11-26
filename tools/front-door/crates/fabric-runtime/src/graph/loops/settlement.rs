@@ -11,7 +11,7 @@ pub(in crate::graph) fn validate_progress(
     if checkpoint.ask_actor.is_none()
         || !progress.attempts.is_empty()
         || progress.gate.is_some() && !repair::is_repair(node)
-        || progress.advance_error.is_some()
+        || progress.advance_note.is_some()
     {
         return Err(());
     }
@@ -201,7 +201,7 @@ pub(in crate::graph) fn settle<R: AttemptOwner, J: GraphJournal>(
         && decision.as_deref() != Some("accept");
     let mut loop_evidence: Vec<String> = if queue_exhausted {
         body.iter()
-            .filter_map(|progress| progress.advance_error.clone())
+            .filter_map(|progress| progress.advance_note.clone())
             .take(8)
             .collect()
     } else {
@@ -466,7 +466,7 @@ pub(in crate::graph) fn pause_invalid_decision<R: Error + 'static, J: GraphJourn
         progress.loop_cause = Some(NodeDecisionCause::InvalidLoopDecision);
         progress.loop_pause = Some(format!(
             "loop {node} exhausted; decision cannot be applied: {}; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept",
-            bounded(reason, MAX_ADVANCE_ERROR_BYTES)
+            bounded(reason, MAX_ADVANCE_NOTE_BYTES)
         ));
     }
     refresh_pause(checkpoint);

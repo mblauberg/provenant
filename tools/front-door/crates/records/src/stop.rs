@@ -28,6 +28,11 @@ pub enum StopCause {
     /// The handoff says `stopped_early`: work remains and the writer could
     /// not finish it in this attempt.
     StoppedEarly,
+    /// A declared stop with no work to show for it: the launch-pinned head did
+    /// not move. No-work is a fact on the outcome, not a stop the writer
+    /// declared, so the sealed stop keeps the handoff's `stopped_early` cause;
+    /// the graph projects no-work from the fact cause instead.
+    StoppedNoWork,
     /// The handoff says `blocked` and names an owner decision or a missing
     /// capability in `blocked_on`, or names no kind. The stop carries the
     /// handoff, so its note names what blocks it.
@@ -269,6 +274,7 @@ pub const STOP_TABLE: &[StopRule] = {
     use StopCause::*;
     &[
         rule(StoppedEarly, NEW, crate::run::CauseSource::Provider),
+        rule(StoppedNoWork, NEW, crate::run::CauseSource::Provider),
         pinned(Blocked, crate::run::CauseSource::Owner),
         once(BlockedEnvironment, CHAIR, crate::run::CauseSource::Provider),
         rule(BlockedDependency, CHAIR, crate::run::CauseSource::Provider),
@@ -321,7 +327,7 @@ pub const STOP_TABLE: &[StopRule] = {
 impl StopCause {
     /// Every cause. `ordinal` matches exhaustively, so a new variant fails to
     /// compile there, and the assertion below keeps this list in step.
-    pub const ALL: [StopCause; 47] = {
+    pub const ALL: [StopCause; 48] = {
         use StopCause::*;
         [
             StoppedEarly,
@@ -371,6 +377,7 @@ impl StopCause {
             Steered,
             Unclassified,
             PreparationRefused,
+            StoppedNoWork,
         ]
     };
 
@@ -424,6 +431,7 @@ impl StopCause {
             Steered => 44,
             Unclassified => 45,
             PreparationRefused => 46,
+            StoppedNoWork => 47,
         }
     }
 
@@ -464,13 +472,14 @@ impl StopCause {
     }
 
     /// A stop the work can recover from on its own route: the writer stopped
-    /// early, or the host ended the attempt on a lost lane token or a context
-    /// handoff. With no different route to take, such a stop continues on the
-    /// same route in a fresh session rather than pausing the graph.
+    /// early (with or without work to show for it), or the host ended the
+    /// attempt on a lost lane token or a context handoff. With no different
+    /// route to take, such a stop continues on the same route in a fresh
+    /// session rather than pausing the graph.
     pub const fn continues_on_same_route(self) -> bool {
         matches!(
             self,
-            Self::StoppedEarly | Self::LaneTokenLost | Self::ContextHandoff
+            Self::StoppedEarly | Self::StoppedNoWork | Self::LaneTokenLost | Self::ContextHandoff
         )
     }
 
@@ -550,6 +559,7 @@ impl StopCause {
         use StopCause::*;
         match self {
             StoppedEarly => "stopped_early",
+            StoppedNoWork => "stopped_no_work",
             Blocked => "blocked",
             BlockedEnvironment => "blocked_environment",
             BlockedDependency => "blocked_dependency",
@@ -611,9 +621,9 @@ const _: () = {
 /// The stop cause of a terminal cause. Exhaustive, so a new terminal cause
 /// must name its stop cause. A host refusal without a more specific cause has
 /// no entry: preparation names the cause that refused.
-impl From<crate::run::TerminalCause> for StopCause {
-    fn from(cause: crate::run::TerminalCause) -> Self {
-        use crate::run::TerminalCause as T;
+impl From<crate::run::CauseKind> for StopCause {
+    fn from(cause: crate::run::CauseKind) -> Self {
+        use crate::run::CauseKind as T;
         match cause {
             T::SourceViewRefused => Self::SourceViewRefused,
             T::ProjectBindingDirectoryUnsafe => Self::AccessPolicyRefused,
@@ -626,7 +636,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::CloudPlacementRemoved => Self::CloudPlacementRemoved,
             T::WriteGrantsRefused => Self::WriteGrantsRefused,
             T::WorktreeBusy => Self::WorktreeBusy,
-            T::HandoffRefused => Self::LaunchHandoffRefused,
+            T::LaunchHandoffRefused => Self::LaunchHandoffRefused,
             T::PreparationRefused => Self::PreparationRefused,
             T::WriterPinMismatch { .. } => Self::LaunchHandoffRefused,
             T::RetainedWriterImport => Self::RetainedWriterImport,
@@ -646,7 +656,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::HostNativeUnconfigured => Self::HostNativeUnconfigured,
             T::IdentityMismatch => Self::IdentityMismatch,
             T::ProviderCaptureDefect { .. } => Self::Unsettled,
-            T::StoppedNoWork => Self::StoppedEarly,
+            T::StoppedNoWork => Self::StoppedNoWork,
             T::EmptyWriterResult => Self::EmptyResult,
             T::ContextHandoff => Self::ContextHandoff,
             T::Blocked => Self::Blocked,
@@ -745,18 +755,25 @@ impl Stop {
     /// how the work was left, and a declared stop already covers edits left on
     /// the worktree, so the declared cause wins over it.
     pub fn sealed(
-        cause: Option<crate::run::TerminalCause>,
+        cause: Option<crate::run::CauseKind>,
         outcome: crate::run::Outcome,
-        reason: crate::run::SettlementReason,
+        reason: crate::run::SettlementClass,
         handoff: HandoffResult,
     ) -> Result<Option<Self>, StopError> {
         let declared = handoff
             .as_ref()
             .is_ok_and(|handoff| handoff.as_ref().is_some_and(Handoff::unfinished));
-        let host = if reason == crate::run::SettlementReason::HandoffMalformed {
+        let host = if reason == crate::run::SettlementClass::HandoffMalformed {
             Some(StopCause::HandoffMalformed)
         } else {
-            cause.map(Into::into).or(reason.rule().stop_cause)
+            cause
+                // `stopped_no_work` is a fact about the launch-pinned head,
+                // not a cause the writer declared. Keep it on the outcome
+                // fact; the sealed stop keeps the handoff's declared cause
+                // (`stopped_early`) so the two agree on the stop itself.
+                .filter(|cause| *cause != crate::run::CauseKind::StoppedNoWork)
+                .map(Into::into)
+                .or(reason.rule().stop_cause)
         }
         .or_else(|| {
             StopCause::of_outcome(outcome)

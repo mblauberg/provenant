@@ -28,7 +28,6 @@
       "encoding": "utf8"
     },
     "cache_read_share": null,
-    "cause": null,
     "clipped": null,
     "complete": null,
     "continuation": null,
@@ -59,7 +58,6 @@
     "offset": 0,
     "overdue": false,
     "part": "result",
-    "partial_signals": [],
     "presence": null,
     "priority": null,
     "project_id": "01010101010101010101010101010101",
@@ -120,6 +118,8 @@
     "settlement": {
       "reason": "the lane was cancelled; inspect its result and local evidence"
     },
+    "settlement_class": null,
+    "signals": [],
     "skipped_routes": [],
     "stale": null,
     "started_at": null,

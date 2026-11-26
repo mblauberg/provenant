@@ -723,7 +723,7 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let run = factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
     let node = &run.checkpoint.nodes[0];
-    assert!(node.advance_error.as_deref().is_some_and(|error| error.contains("writer needs a branch")), "{node:#?}");
+    assert!(node.advance_note.as_deref().is_some_and(|error| error.contains("writer needs a branch")), "{node:#?}");
     let detached_factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.worktree)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.worktree.clone(), assets: fixture.rig.project.clone(), host_launch: None, workers: &FreeWorkers };
     let head = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "rev-parse", "HEAD"], None)?;
     let head = String::from_utf8(head.stdout.bytes)?.trim().to_owned();
@@ -734,9 +734,9 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     let node = &run.checkpoint.nodes[0];
     // The fixture has no runnable provider. Admission of the detached reader
     // reaches preparation, whose refusal now has an explicit graph cause.
-    assert_eq!(node.advance_error_code.as_deref(), Some("preparation_refused"), "{node:#?}");
+    assert_eq!(node.advance_code.as_deref(), Some("preparation_refused"), "{node:#?}");
     let attempt = node.attempts.first().ok_or("review attempt missing")?;
-    assert_eq!(attempt.outcome, Some(provenant_fabric_runtime::graph::AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::AccessPolicyRefused)), "{node:#?}");
+    assert_eq!(attempt.outcome, Some(provenant_fabric_runtime::graph::GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::AccessPolicyRefused)), "{node:#?}");
     assert!(!attempt.launched, "{node:#?}");
     let key = &attempt.key;
     let operation = graph_operation("graph-attempt-operation", key)?;

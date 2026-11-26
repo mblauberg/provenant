@@ -1109,9 +1109,9 @@ fn unavailable(
                 .as_deref()
                 .map(|lens| format!(" (lens {lens})"))
                 .unwrap_or_default();
-            let reason = progress.advance_error.as_deref().unwrap_or_else(|| {
+            let reason = progress.advance_note.as_deref().unwrap_or_else(|| {
                 match progress.attempts.last().and_then(|a| a.outcome.as_ref()) {
-                    Some(AttemptOutcome::AdapterUnavailable) => "adapter unavailable",
+                    Some(GraphAttemptOutcome::AdapterUnavailable) => "adapter unavailable",
                     _ => "member failed",
                 }
             });
@@ -1169,7 +1169,7 @@ fn review_lens_statuses(
             let available = progress.state == NodeState::Succeeded;
             let reason = (!available).then(|| {
                 let detail = progress
-                    .advance_error
+                    .advance_note
                     .as_deref()
                     .unwrap_or(match progress.state {
                         NodeState::Failed => "review did not succeed",
@@ -1357,28 +1357,27 @@ fn reconcile_progress(
     }
     let (exported, truncation_cause) =
         exported.map_or((None, None), |(output, cause)| (Some(output), cause));
-    let (advance_error_code, advance_error) =
-        if let Some(reason) = shortfall.filter(|_| hard_shortfall) {
-            (
-                Some("coverage_below_minimum".into()),
-                Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES)),
-            )
-        } else if let Some(reason) = export_error {
-            (Some("composite_findings_exceed_cap".into()), Some(reason))
-        } else {
-            (None, None)
-        };
+    let (advance_code, advance_note) = if let Some(reason) = shortfall.filter(|_| hard_shortfall) {
+        (
+            Some("coverage_below_minimum".into()),
+            Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES)),
+        )
+    } else if let Some(reason) = export_error {
+        (Some("composite_findings_exceed_cap".into()), Some(reason))
+    } else {
+        (None, None)
+    };
     let progress = &mut checkpoint.nodes[index];
     let changed = progress.state != state
         || progress.outputs != exported
         || progress.truncation_cause != truncation_cause
-        || progress.advance_error_code != advance_error_code
-        || progress.advance_error != advance_error;
+        || progress.advance_code != advance_code
+        || progress.advance_note != advance_note;
     progress.state = state;
     progress.outputs = exported;
     progress.truncation_cause = truncation_cause;
-    progress.advance_error_code = advance_error_code;
-    progress.advance_error = advance_error;
+    progress.advance_code = advance_code;
+    progress.advance_note = advance_note;
     changed
 }
 
@@ -1497,7 +1496,7 @@ pub(super) fn validate_progress(
         .composite
         .as_ref()
         .and_then(|spec| coverage_shortfall(positions[&node.id], spec, plan, checkpoint, positions))
-        .map(|reason| bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+        .map(|reason| bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
     let hard_shortfall = shortfall.is_some()
         && node
             .composite
@@ -1506,8 +1505,8 @@ pub(super) fn validate_progress(
     let failed_for_coverage = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && hard_shortfall
-        && progress.advance_error_code.as_deref() == Some("coverage_below_minimum")
-        && progress.advance_error == shortfall;
+        && progress.advance_code.as_deref() == Some("coverage_below_minimum")
+        && progress.advance_note == shortfall;
     let mut export = node
         .composite
         .as_ref()
@@ -1534,15 +1533,15 @@ pub(super) fn validate_progress(
     let failed_for_export = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && !hard_shortfall
-        && progress.advance_error_code.as_deref() == Some("composite_findings_exceed_cap")
-        && matches!(&export, Some(Err(reason)) if progress.advance_error.as_ref() == Some(reason));
+        && progress.advance_code.as_deref() == Some("composite_findings_exceed_cap")
+        && matches!(&export, Some(Err(reason)) if progress.advance_note.as_ref() == Some(reason));
     let valid = progress.attempts.is_empty()
         && (progress.state == NodeState::Succeeded
             || failed_for_coverage
             || progress.truncation_cause.is_none())
         && progress.gate.is_none()
         && progress.ci.is_none()
-        && (progress.advance_error.is_none() || failed_for_coverage || failed_for_export)
+        && (progress.advance_note.is_none() || failed_for_coverage || failed_for_export)
         && progress.source_commit.is_none()
         && match progress.state {
             NodeState::Failed => {

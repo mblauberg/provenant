@@ -18,7 +18,6 @@
       "encoding": "utf8"
     },
     "cache_read_share": null,
-    "cause": null,
     "clipped": null,
     "complete": null,
     "continuation": null,
@@ -42,7 +41,6 @@
     "offset": 0,
     "overdue": false,
     "part": "transcript",
-    "partial_signals": [],
     "payload": "evicted",
     "presence": null,
     "priority": null,
@@ -102,6 +100,8 @@
     "settlement": {
       "reason": null
     },
+    "settlement_class": null,
+    "signals": [],
     "skipped_routes": [],
     "stale": null,
     "started_at": null,
