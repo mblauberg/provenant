@@ -699,8 +699,8 @@ pub struct WriterReviewAcceptance {
     pub protected_paths: Vec<PathWire>,
 }
 
-/// The receipt's destination is typed; a legacy record whose remote is an
-/// empty string is malformed on decode, not a local destination.
+/// The receipt's destination is typed; the run-store migration rewrites
+/// legacy empty local destinations before decoding stored attempt records.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriterDeliveryReceipt {
     #[serde(flatten)]
