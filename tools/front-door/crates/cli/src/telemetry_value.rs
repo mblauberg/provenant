@@ -332,12 +332,11 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
                     })
                     .collect();
                 let unused = value::unused_at_reset(&window_readings);
-                let mut at_reset = Vec::new();
-                for index in 0..window_readings.len() {
-                    if window_readings[index].reset && index > 0 {
-                        at_reset.push(window_readings[index - 1].used_basis_points);
-                    }
-                }
+                let at_reset: Vec<u64> = window_readings
+                    .windows(2)
+                    .filter(|pair| pair[1].reset)
+                    .map(|pair| pair[0].used_basis_points)
+                    .collect();
                 let trend = value::trend(&at_reset);
                 // Cost is taken from the quota window when the reading carries
                 // its bounds; otherwise from --since, and the basis says so.

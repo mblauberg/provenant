@@ -271,8 +271,10 @@ pub fn credit_runway(points: &[CreditPoint]) -> CreditRunway {
     if last_balance >= first_balance {
         return runway_unavailable(Unavailable::CreditNotDrawn, samples);
     }
-    let seconds = last_at - first_at;
-    if seconds <= 0 {
+    // Elapsed time is a duration, so convert before the rate arithmetic: a
+    // negative or zero span is named unavailable, never a zero-day division.
+    let seconds = u64::try_from(last_at.saturating_sub(first_at)).unwrap_or(0);
+    if seconds == 0 {
         return runway_unavailable(Unavailable::NoElapsedTime, samples);
     }
     let drawn = first_balance - last_balance;
@@ -371,6 +373,38 @@ mod tests {
         assert_eq!(
             window_value(Some(1), 100, None, true).unavailable,
             Some(Unavailable::NoPriceInForce)
+        );
+    }
+
+    #[test]
+    fn a_credit_runway_needs_positive_elapsed_time() {
+        let same_instant = [
+            CreditPoint {
+                observed_unix_seconds: 100,
+                balance_microdollars: Some(9_000),
+            },
+            CreditPoint {
+                observed_unix_seconds: 100,
+                balance_microdollars: Some(5_000),
+            },
+        ];
+        assert_eq!(
+            credit_runway(&same_instant).unavailable,
+            Some(Unavailable::NoElapsedTime)
+        );
+        let backwards = [
+            CreditPoint {
+                observed_unix_seconds: 200,
+                balance_microdollars: Some(9_000),
+            },
+            CreditPoint {
+                observed_unix_seconds: 100,
+                balance_microdollars: Some(5_000),
+            },
+        ];
+        assert_eq!(
+            credit_runway(&backwards).unavailable,
+            Some(Unavailable::NoElapsedTime)
         );
     }
 
