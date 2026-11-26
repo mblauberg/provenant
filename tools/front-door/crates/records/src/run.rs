@@ -2701,7 +2701,7 @@ pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_class: Option<SettlementClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<crate::settlement::Progress>,
+    pub head_progress: Option<crate::settlement::HeadProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_evidence: Option<crate::FileDigest>,
     /// Declaration counts for lanes that owe a handoff.

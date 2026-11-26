@@ -3822,8 +3822,8 @@ impl RunStore {
         {
             let observed_route = decoded.observed_route.clone();
             let committed_head = if matches!(
-                fact.progress,
-                Some(provenant_records::settlement::Progress::Moved)
+                fact.head_progress,
+                Some(provenant_records::settlement::HeadProgress::Moved)
             ) {
                 crate::evidence::terminal_head(attempt)?
             } else {
@@ -5314,7 +5314,7 @@ mod settlement_5a_tests {
         assert_ne!(*cause, Some(CauseKind::StoppedNoWork));
         assert_eq!(
             finished.progress,
-            Some(provenant_records::settlement::Progress::Moved)
+            Some(provenant_records::settlement::HeadProgress::Moved)
         );
         Ok(())
     }

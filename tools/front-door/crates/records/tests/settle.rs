@@ -15,7 +15,7 @@ use provenant_records::provenance::{Layer, Source, Sourced};
 use provenant_records::run::{Outcome, SettlementSignal, SettlementClass, CauseKind};
 use provenant_records::settlement::{
     CustodyFacts, GitEvidence, HandoffSource, HostVerdict, IdentityEvidence, IdentityPolicyEffect,
-    LaneRole, PrimaryCheckout, Progress, SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
+    LaneRole, PrimaryCheckout, HeadProgress, SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
     classify::budget_completed,
     classify::settle,
     policy::{NoWork, RouteSettlement, SettlementPolicy, SignalAction},
@@ -105,7 +105,7 @@ struct Row {
     reason: SettlementClass,
     stop: Option<StopCause>,
     signals: Vec<SettlementSignal>,
-    progress: Option<Progress>,
+    progress: Option<HeadProgress>,
 }
 
 fn rows() -> Vec<Row> {
@@ -216,7 +216,7 @@ fn rows() -> Vec<Row> {
             reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::Blocked),
             signals: vec![SettlementSignal::DeclaredStop],
-            progress: Some(Progress::Moved),
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "pushed then done",
@@ -226,7 +226,7 @@ fn rows() -> Vec<Row> {
             reason: SettlementClass::Completed,
             stop: None,
             signals: vec![],
-            progress: Some(Progress::Moved),
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "committed, not pushed, stopped early",
@@ -236,7 +236,7 @@ fn rows() -> Vec<Row> {
             reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
             signals: vec![SettlementSignal::DeclaredStop],
-            progress: Some(Progress::Moved),
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "self-rebased force-push",
@@ -246,7 +246,7 @@ fn rows() -> Vec<Row> {
             reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
             signals: vec![SettlementSignal::DeclaredStop],
-            progress: Some(Progress::Moved),
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "restart after commit with the sealed pin",
@@ -256,7 +256,7 @@ fn rows() -> Vec<Row> {
             reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
             signals: vec![SettlementSignal::DeclaredStop],
-            progress: Some(Progress::Moved),
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "stopped early with an unchanged head",
@@ -266,7 +266,7 @@ fn rows() -> Vec<Row> {
             reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
             signals: vec![SettlementSignal::DeclaredStop],
-            progress: Some(Progress::Unchanged),
+            progress: Some(HeadProgress::Unchanged),
         },
         Row {
             name: "stopped early with an unknown head",
@@ -276,7 +276,7 @@ fn rows() -> Vec<Row> {
             reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
             signals: vec![SettlementSignal::DeclaredStop],
-            progress: Some(Progress::Unknown),
+            progress: Some(HeadProgress::Unknown),
         },
         Row {
             name: "stray primary checkout",
@@ -286,7 +286,7 @@ fn rows() -> Vec<Row> {
             reason: SettlementClass::StrayWork,
             stop: None,
             signals: vec![SettlementSignal::StrayWork],
-            progress: Some(Progress::Moved),
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "rejected declaration only",
@@ -346,7 +346,7 @@ fn rows() -> Vec<Row> {
             reason: SettlementClass::UncommittedWork,
             stop: Some(StopCause::Uncommitted),
             signals: vec![SettlementSignal::UncommittedWork],
-            progress: Some(Progress::Moved),
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "cancelled and steered",
@@ -429,9 +429,9 @@ fn one_decider_settles_every_family_from_one_sealed_record() {
             row.name
         );
         assert_eq!(fact.signals, row.signals, "{}: signals", row.name);
-        assert_eq!(fact.progress, row.progress, "{}: progress", row.name);
+        assert_eq!(fact.head_progress, row.progress, "{}: progress", row.name);
         // No-work needs a known, unchanged head. Unknown and Moved never yield it.
-        if row.progress != Some(Progress::Unchanged) {
+        if row.progress != Some(HeadProgress::Unchanged) {
             assert_ne!(
                 fact.cause,
                 Some(CauseKind::StoppedNoWork),
@@ -453,7 +453,7 @@ fn progress_is_pin_relative_and_never_reads_remote_state() {
     // record. Only the sealed head changes when it is re-read after a restart.
     evidence.git.as_mut().unwrap().head = Some(GitOid::parse(HEAD).unwrap());
     let fact = settle(&evidence);
-    assert_eq!(fact.progress, Some(Progress::Moved));
+    assert_eq!(fact.head_progress, Some(HeadProgress::Moved));
     assert_ne!(fact.cause, Some(CauseKind::StoppedNoWork));
 
     // Re-reading HEAD to the same value leaves the sealed fact byte-identical.

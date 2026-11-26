@@ -16,7 +16,7 @@ use crate::run::{
 };
 use crate::settlement::policy::{AppliedPolicy, NoWork, SettlementPolicy, SignalAction};
 use crate::settlement::{
-    HandoffSource, IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout, Progress,
+    HandoffSource, IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout, HeadProgress,
     SettlementEvidence,
 };
 use crate::stop::{Stop, StopCause};
@@ -411,7 +411,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         && evidence
             .git
             .as_ref()
-            .is_some_and(|git| git.progress() == Progress::Unchanged)
+            .is_some_and(|git| git.head_progress() == HeadProgress::Unchanged)
         && !signals.contains(&SettlementSignal::StrayWork)
         && !signals.contains(&SettlementSignal::UncommittedWork)
         && !signals.contains(&SettlementSignal::HandoffMalformed);
@@ -582,8 +582,8 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     let source = stop_cause.map_or(settlement_class.rule().source, StopCause::source);
     let release: DependantRelease = settlement_class.release(stop_cause);
 
-    // 15. Progress is the sealed head against the sealed launch pin only.
-    let progress = evidence.git.as_ref().map(|git| git.progress());
+    // 15. HeadProgress is the sealed head against the sealed launch pin only.
+    let head_progress = evidence.git.as_ref().map(|git| git.head_progress());
     signals.sort();
     signals.dedup();
 
@@ -608,7 +608,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         release,
         terminal_basis,
         signals,
-        progress,
+        head_progress,
         handoff: declaration,
         handoff_source,
         declarations,

@@ -112,11 +112,11 @@ pub struct GitEvidence {
     pub primary: PrimaryCheckout,
 }
 impl GitEvidence {
-    pub fn progress(&self) -> Progress {
+    pub fn head_progress(&self) -> HeadProgress {
         match (&self.pinned, &self.head) {
-            (Some(pinned), Some(head)) if pinned == head => Progress::Unchanged,
-            (Some(_), Some(_)) => Progress::Moved,
-            _ => Progress::Unknown,
+            (Some(pinned), Some(head)) if pinned == head => HeadProgress::Unchanged,
+            (Some(_), Some(_)) => HeadProgress::Moved,
+            _ => HeadProgress::Unknown,
         }
     }
 }
@@ -133,7 +133,7 @@ pub enum PrimaryCheckout {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Progress {
+pub enum HeadProgress {
     Moved,
     Unchanged,
     Unknown,
@@ -150,7 +150,7 @@ pub struct OutcomeFact {
     pub release: DependantRelease,
     pub terminal_basis: TerminalBasis,
     pub signals: Vec<SettlementSignal>,
-    pub progress: Option<Progress>,
+    pub head_progress: Option<HeadProgress>,
     pub handoff: crate::handoff::HandoffResult,
     pub handoff_source: Option<HandoffSource>,
     /// Declaration counts, absent for lanes that owe no handoff.
