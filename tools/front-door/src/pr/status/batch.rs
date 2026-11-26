@@ -490,6 +490,7 @@ pub(crate) fn line_from_entry(entry: &Entry) -> Line {
             url: entry.url.clone(),
         },
         (!entry.truncated && entry.state != "UNAVAILABLE").then_some(checks.as_slice()),
+        &[],
     );
     if entry.state == "UNAVAILABLE" {
         line.error = Some("pull request was missing from the batch response".into());

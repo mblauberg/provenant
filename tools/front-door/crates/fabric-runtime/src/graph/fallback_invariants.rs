@@ -47,6 +47,7 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
                         node,
                         0,
                         outcome,
+                        None,
                         false,
                         FallbackEvidence {
                             preparation: Some(evidence),
@@ -88,4 +89,70 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
             }
         }
     }
+}
+
+/// A cause the work can recover on its own route keeps its own identity: a
+/// pinned read-only node never reports a lost lane token (or any other
+/// same-route cause) as an authentication failure or a pinned-route dead end.
+/// Derived from the stop table, so a new same-route cause joins the rule.
+#[test]
+fn a_recoverable_stop_keeps_its_code_and_never_reports_auth_required() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"g", "nodes":[{
+            "id":"n", "prompt":"work", "access":"read_only",
+            "routes":[{"adapter":"a","model":"a/m","account":"acct"}]
+        }]
+    }))
+    .unwrap();
+    let (plan, _) = validate_plan(&document).unwrap();
+    let node = &plan.nodes[0];
+    let recoverable = provenant_records::StopCause::ALL
+        .iter()
+        .copied()
+        .filter(|cause| cause.continues_on_same_route())
+        .collect::<Vec<_>>();
+    assert!(!recoverable.is_empty(), "the rule needs at least one cause");
+    for cause in recoverable {
+        // Even when the provider labelled the stop `auth_required`, the sealed
+        // cause wins and the node retries on its route instead of failing.
+        let decision = next_step::settlement_fallback_decision(
+            node,
+            0,
+            AttemptOutcome::AuthRequired,
+            Some(cause),
+            true,
+            FallbackEvidence {
+                preparation: None,
+                unreadable: false,
+                review_limit_reached: false,
+                cause: None,
+                skipped_accounts: &[],
+            },
+        );
+        assert_eq!(decision, SettlementFallback::Continue, "{cause}");
+        assert_ne!(cause.advance_code(), "auth_required", "{cause}");
+    }
+    // A route-specific cause still reports the pinned-route dead end: the
+    // guard was narrowed, not removed.
+    let pinned = next_step::settlement_fallback_decision(
+        node,
+        0,
+        AttemptOutcome::AuthRequired,
+        Some(provenant_records::StopCause::AuthRequired),
+        true,
+        FallbackEvidence {
+            preparation: None,
+            unreadable: false,
+            review_limit_reached: false,
+            cause: None,
+            skipped_accounts: &[],
+        },
+    );
+    assert!(matches!(
+        pinned,
+        SettlementFallback::Fail {
+            code: Some("fallback_route_pinned"),
+            ..
+        }
+    ));
 }

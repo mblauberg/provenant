@@ -38,6 +38,8 @@ pub struct FakeForge {
     pub fail_fetch_on_refusal: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub fail_approvals: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub fail_checks: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    /// Review-gate contexts a test declares, read from the port in production.
+    pub review_gate_contexts: Vec<String>,
     pub valid_merge_ids: bool,
     pub merges: Vec<(u64, String, MergeMethod)>,
     pub merge_attempts: Vec<u64>,
@@ -46,6 +48,9 @@ pub struct FakeForge {
     pub reverts: Vec<(u64, String, String, String)>,
 }
 impl Forge for FakeForge {
+    fn review_gate_contexts(&self) -> &[String] {
+        &self.review_gate_contexts
+    }
     fn observation_interval(&self) -> Option<std::time::Duration> {
         self.next_observation_interval
     }

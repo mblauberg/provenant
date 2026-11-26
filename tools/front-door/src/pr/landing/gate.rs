@@ -539,7 +539,21 @@ fn ci_outstanding(
             app: None,
         })
         .collect();
-    let pending = ci_completion(&pr.head, &checks, &required) == CiCompletion::Pending;
+    // The same completion definition wait and status use decides the gate. A
+    // terminal PR settles before a pending check, and contexts the project
+    // declares as a review gate are not CI.
+    let state = match forge.pull_request(pr.number)?.state {
+        super::ports::PullRequestState::Open => "OPEN",
+        super::ports::PullRequestState::Merged => "MERGED",
+        super::ports::PullRequestState::Closed => "CLOSED",
+    };
+    let pending = ci_completion(
+        state,
+        &pr.head,
+        &checks,
+        &required,
+        forge.review_gate_contexts(),
+    ) == CiCompletion::Pending;
     // `always` waits for a run to appear; `affected` waits only for runs that exist.
     Ok(
         pending
@@ -700,8 +714,22 @@ fn await_pr_ci_with(
 mod tests {
     use super::*;
     use crate::pr::landing::fakes::FakeForge;
+    use crate::pr::landing::ports::{PullRequestInfo, PullRequestState};
     use crate::pr::landing::test_support::LandingFixture;
     use std::cell::Cell;
+
+    fn open_info(number: u64, head: &str) -> PullRequestInfo {
+        PullRequestInfo {
+            number,
+            head: head.into(),
+            base_branch: "main".into(),
+            author: "author".into(),
+            state: PullRequestState::Open,
+            merged_commit: None,
+            stack: None,
+            draft: false,
+        }
+    }
 
     fn validate_evidence(
         candidate: &Candidate,
@@ -819,6 +847,7 @@ mod tests {
     }
     fn pending_forge() -> FakeForge {
         let mut forge = FakeForge::default();
+        forge.pull_requests.insert(1, open_info(1, "h1"));
         forge
             .check_runs
             .insert("h1".into(), vec![evidence(GateResult::Pending, None)]);
@@ -934,6 +963,7 @@ mod tests {
     #[test]
     fn configured_check_that_has_not_reported_keeps_land_waiting() {
         let mut forge = FakeForge::default();
+        forge.pull_requests.insert(1, open_info(1, "h1"));
         let mut passing_other_check = evidence(GateResult::Passed, None);
         passing_other_check.commit = "h1".into();
         passing_other_check.checks[0].name = "optional".into();

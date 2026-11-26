@@ -233,10 +233,32 @@ pub struct StopRule {
     /// Fresh attempts on the same route before the default applies. A
     /// transient cause takes one.
     pub retries: u8,
+    /// The advance code a stop reports when no route takes it over. Derived
+    /// from the sealed cause, never re-projected from the provider outcome.
+    pub advance_code: &'static str,
 }
 
 const NEW: NextStep = NextStep::NewRoute;
 const CHAIR: NextStep = NextStep::Chair;
+
+/// The one table from a sealed cause to its advance code. A lost lane token is
+/// a token problem, not an authentication failure: it keeps its own code.
+/// Exhaustive, so a new cause must name its code here.
+const fn default_advance_code(cause: StopCause) -> &'static str {
+    use StopCause::*;
+    match cause {
+        AuthRequired => "auth_required",
+        UsageLimited => "usage_limited",
+        ModelUnavailable => "model_unavailable",
+        AdapterUnavailable => "adapter_unavailable",
+        Unclassified => "unclassified",
+        SpawnFailure => "spawn_failure",
+        LaneTokenLost => "lane_token_lost",
+        StoppedEarly => "stopped_early",
+        ContextHandoff => "context_handoff",
+        other => other.as_str(),
+    }
+}
 
 const fn rule(cause: StopCause, default: NextStep, source: crate::run::CauseSource) -> StopRule {
     StopRule {
@@ -245,6 +267,7 @@ const fn rule(cause: StopCause, default: NextStep, source: crate::run::CauseSour
         default,
         pinned: false,
         retries: 0,
+        advance_code: default_advance_code(cause),
     }
 }
 
@@ -256,6 +279,7 @@ const fn once(cause: StopCause, default: NextStep, source: crate::run::CauseSour
         default,
         pinned: false,
         retries: 1,
+        advance_code: default_advance_code(cause),
     }
 }
 
@@ -266,6 +290,7 @@ const fn pinned(cause: StopCause, source: crate::run::CauseSource) -> StopRule {
         default: CHAIR,
         pinned: true,
         retries: 0,
+        advance_code: default_advance_code(cause),
     }
 }
 
@@ -451,6 +476,13 @@ impl StopCause {
 
     pub fn default_next(self) -> NextStep {
         self.rule().default
+    }
+
+    /// The advance code this cause reports when no route can take it over.
+    /// Every graph reader uses this one table, so a cause can never be
+    /// reported under a different name than the one it sealed.
+    pub fn advance_code(self) -> &'static str {
+        self.rule().advance_code
     }
 
     /// What follows a stop with this cause: the chair while custody is not

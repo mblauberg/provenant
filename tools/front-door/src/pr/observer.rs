@@ -1777,7 +1777,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let mut observer = shared.observer(dir.path());
         let request = Request::within(Duration::from_secs(60));
         let (line, checks) =
-            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO)
+            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO, &[])
                 .unwrap();
         assert!(checks.is_empty(), "fake forge reports no checks");
         assert!(line.cause_suffix().contains(line.cause.as_deref().unwrap()));
@@ -1876,12 +1876,12 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let mut observer = shared.observer(dir.path());
         let request = Request::within(Duration::from_secs(60));
         let first =
-            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO)
+            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO, &[])
                 .unwrap();
         let full = shared.with(|world| world.full_reads);
         let calls = shared.requests();
         let again =
-            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO)
+            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO, &[])
                 .unwrap();
         assert_eq!(first, again);
         assert_eq!(

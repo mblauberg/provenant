@@ -765,6 +765,7 @@ pub(super) fn apply_attempt_observation(
                                 node,
                                 route_index,
                                 outcome,
+                                attempt.stop,
                                 launched,
                                 FallbackEvidence {
                                     preparation: fallback_evidence,
