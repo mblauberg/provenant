@@ -5018,11 +5018,11 @@ impl RunStore {
     }
 
     /// Reclaim a writer lease fenced by an undecodable attempt record. The
-    /// release is gated on strict liveness disproof held under writer exclusion:
-    /// a recorded holder must be proved gone, the reservation must classify as
-    /// absent, and no exit may still be settling. The bytes are preserved under
-    /// `quarantine/` before the reservation is cleared; the database row keeps
-    /// its original bytes so no evidence is deleted.
+    /// release is gated on a supervisor quiescence proof held under writer
+    /// exclusion, an absent reservation, and no unresolved exit cleanup. A
+    /// completed exit can prove same-boot quiescence; an exit still settling
+    /// cannot. The bytes are preserved under `quarantine/` before the
+    /// reservation is cleared; the database row keeps its original bytes.
     fn reconcile_unreadable(
         &self,
         unreadable: &UnreadableAttempt,
@@ -5069,18 +5069,8 @@ impl RunStore {
             Ok(recovery) => recovery,
             Err(_) => return retained(),
         };
-        let holder_gone = match read_sealed(&attempt, "process.json", RECORD_LIMIT) {
-            Ok(Some(_)) => custody::holder_gone(&attempt, fence.scope, observer),
-            Ok(None) => true,
-            Err(_) => false,
-        };
-        let exit_pending = !matches!(
-            read_sealed(&attempt, "process-exit.json", RECORD_LIMIT),
-            Ok(None)
-        );
         if recovery.scope() != fence.scope
-            || !holder_gone
-            || exit_pending
+            || !custody::attempt_quiescent(&attempt, fence.scope, observer)
             || recovery.observe_with(observer) != RecoveryState::Absent
         {
             return retained();

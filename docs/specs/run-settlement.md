@@ -221,9 +221,11 @@ settlement checks still apply.
 - Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`
 
 A record that no longer decodes is classified as unreadable, not as proof that custody is held.
-Reconciliation acquires writer exclusion and releases the lease only on a strict liveness disproof:
-the reservation classifies as absent, any recorded holder is proved gone, and no exit is still
-settling. The raw bytes and their typed source (path, schema, error) are sealed under
+Reconciliation acquires writer exclusion and releases the lease only when the reservation
+classifies as absent and supervisor evidence proves quiescence. A completed exit with no unresolved
+cleanup or retained custody proves same-boot quiescence; an exit still settling does not. Without a
+completed exit, a recorded holder must be proved gone (or no holder record may exist). The raw bytes
+and their typed source (path, schema, error) are sealed under
 `quarantine/` before the reservation is cleared; the database row keeps its original bytes and is
 never deleted. Both reconciliation and `release attempt:ID` emit the same host-side typed warning
 carrying that source. An unknown holder keeps the fence, so a decode failure alone never releases

@@ -55,8 +55,10 @@ landed, superseded or abandoned worktrees and branches under the global Git
 rule; record removed tips and preserve live writers and uncommitted edits. For
 collection and retention, see [GC](runbooks/gc.md); for uncertain custody, use
 [lane recovery](runbooks/lane-lifecycle.md#recovery). When an attempt record no longer decodes,
-`provenant reconcile` or `release attempt:ID` reclaims its dead lease only after liveness is
-disproved, preserving the bytes under `quarantine/`. Never delete a lock or
+`provenant reconcile` or `release attempt:ID` reclaims its dead lease only after supervisor
+evidence proves quiescence under writer exclusion, preserving the bytes under `quarantine/`.
+Completed exit evidence can prove same-boot quiescence; an exit still settling keeps the fence.
+Never delete a lock or
 reservation to bypass custody.
 
 Creation takes exclusive custody of its destination before checking the path,

@@ -126,6 +126,181 @@ fn an_unreadable_dead_attempt_releases_its_writer_lease() -> TestResult {
     Ok(())
 }
 
+/// Spec: docs/specs/run-settlement.md#settlement — completed supervisor exit
+/// evidence proves a started attempt quiescent on the same boot under exclusion.
+#[test]
+fn a_started_same_boot_attempt_releases_only_after_exit_cleanup_completes() -> TestResult {
+    use provenant_supervisor::census::{
+        Census, ProcessIdentity, ProcessObservation, ProcessObserver,
+    };
+
+    struct DeadSameBoot;
+    impl ProcessObserver for DeadSameBoot {
+        fn boot_identity(
+            &self,
+        ) -> std::result::Result<String, provenant_supervisor::census::CensusError> {
+            Ok("test-boot".into())
+        }
+        fn observe(&self, _: i64) -> ProcessObservation {
+            ProcessObservation::Absent
+        }
+        fn census(
+            &self,
+            max_entries: usize,
+        ) -> std::result::Result<Census, provenant_supervisor::census::CensusError> {
+            Census::from_observations([], [], [], true, false, max_entries)
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = crate::tests::input();
+    run.request.task.writer = Some(WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
+        project: temp.path().join("checkout"),
+        worktree: temp.path().join("checkout/.worktrees/started-unreadable"),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let custody_dir = context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join("started-unreadable");
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&custody_dir)?;
+    let attempt = store.attempt_dir(id, false)?;
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        provenant_os::fs::Directory::open_anchor(&custody_dir)?,
+        RunStore::scope(&store.record(id, &call)?),
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+    let mut lease = lease;
+    let guardian = ProcessIdentity {
+        boot: "test-boot".into(),
+        pid: 910_001,
+        native_start: 1,
+        group_id: 910_001,
+        session_id: 910_001,
+    };
+    let provider = ProcessIdentity {
+        boot: "test-boot".into(),
+        pid: 910_002,
+        native_start: 2,
+        group_id: 910_002,
+        session_id: 910_001,
+    };
+    provenant_supervisor::fixture::record_spawned_provider(
+        &mut lease,
+        &attempt,
+        guardian.clone(),
+        provider.clone(),
+    )?;
+    let observation = serde_json::json!({
+        "schema_version": 1,
+        "scope": RunStore::scope(&store.record(id, &call)?),
+        "guardian": guardian,
+        "provider": provider,
+        "descendants": [],
+        "census_complete": true,
+        "publication_pending": false,
+    });
+    crate::artifacts::seal(
+        &attempt,
+        "process.json",
+        &serde_json::to_vec(&observation)?,
+        RECORD_LIMIT,
+    )?;
+    drop(lease);
+    assert_eq!(store.writer_fences()?.len(), 1);
+
+    store.db.execute(
+        "UPDATE attempts SET record=?1 WHERE id=?2",
+        rusqlite::params![
+            br#"{"schema_version":2,"attempt_id":"stale"}"#.as_slice(),
+            id.to_string(),
+        ],
+    )?;
+    assert!(store.record(id, &call).is_err());
+
+    let seal_exit = |exit: &provenant_supervisor::custody::ExitObservation| -> TestResult {
+        let mut value = serde_json::to_value(exit)?;
+        let object = value.as_object_mut().ok_or("exit fixture")?;
+        object.remove("publication");
+        object.insert("schema_version".into(), 1.into());
+        crate::artifacts::replace(
+            &attempt,
+            "process-exit.json",
+            &serde_json::to_vec(&value)?,
+            RECORD_LIMIT,
+        )?;
+        Ok(())
+    };
+    let observer = DeadSameBoot;
+    let mut exit = crate::tests::exit();
+    exit.scope = RunStore::scope(&store.record(id, &call)?);
+    exit.unresolved_cleanup = true;
+    exit.settlement_evidence = provenant_supervisor::custody::SettlementEvidence::Unresolved;
+    seal_exit(&exit)?;
+    let pending = store.reconcile_with_observer(
+        id,
+        &crate::dispatch_tests::Fake::default(),
+        &call,
+        &observer,
+    )?;
+    assert!(matches!(
+        pending.as_slice(),
+        [(_, Reconciled::Uncertain { .. })]
+    ));
+    assert_eq!(store.writer_fences()?.len(), 1);
+
+    exit.unresolved_cleanup = false;
+    exit.settlement_evidence =
+        provenant_supervisor::custody::SettlementEvidence::DarwinCensusAndCustodyLease;
+    seal_exit(&exit)?;
+    let found = store.reconcile_with_observer(
+        id,
+        &crate::dispatch_tests::Fake::default(),
+        &call,
+        &observer,
+    )?;
+    assert!(
+        matches!(
+            found.as_slice(),
+            [(found, Reconciled::UnreadableReleased { source, locks })]
+                if *found == id
+                    && source.attempt == id
+                    && source.schema_version == Some(2)
+                    && locks.contains(&custody_dir.join("writer.lock"))
+        ),
+        "{found:?}"
+    );
+    assert!(store.writer_fences()?.is_empty());
+    Ok(())
+}
+
 #[test]
 fn interrupted_writer_preparation_projects_typed_rejection()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
