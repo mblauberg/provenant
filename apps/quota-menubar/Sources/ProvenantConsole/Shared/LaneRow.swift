@@ -47,7 +47,7 @@ struct LaneRow: View {
 extension LaneRow {
     init(_ lane: BoardLane, depth: Int = 0) {
         self.init(title: lane.title, state: lane.metadata.attempt.state, route: lane.metadata.attempt.requestedRoute,
-                  waiting: lane.wait?.waitingFor, attention: lane.attention, depth: depth)
+                  waiting: lane.wait?.waitingFor?.label, attention: lane.attention, depth: depth)
     }
 
     init(_ lane: OverviewLane) {

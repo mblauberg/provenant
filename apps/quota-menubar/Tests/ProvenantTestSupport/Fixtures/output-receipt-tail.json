@@ -1,0 +1,156 @@
+{
+  "command": "output",
+  "data": {
+    "account": null,
+    "adapter": "fixture",
+    "applied_route": {
+      "account_label": null,
+      "effort": "high",
+      "model": "fixture/model",
+      "provider": "fixture",
+      "source": "pin"
+    },
+    "attempt_directory": {
+      "kind": "path",
+      "relative": {
+        "encoding": "utf8",
+        "path": "fixture/attempts/c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7"
+      },
+      "root": "/"
+    },
+    "attempt_id": "c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+    "attempt_number": 1,
+    "cache_read_share": null,
+    "continuation": null,
+    "delivery": null,
+    "delivery_id": null,
+    "effort": "high",
+    "effort_source": "applied_route.effort",
+    "exit_code": 0,
+    "family": "unknown",
+    "finished_at": "2026-11-02T02:05:00.000000Z",
+    "git_grants_digest": null,
+    "graph": "output-receipt",
+    "head": null,
+    "key": {
+      "attempt": 1,
+      "graph": "output-receipt",
+      "node": "task",
+      "project": "01010101010101010101010101010101"
+    },
+    "lane_class": null,
+    "last_event_at": "2026-11-02T01:57:31.075623Z",
+    "last_event_source": "queued",
+    "last_output_at": null,
+    "model": "fixture/model",
+    "node": "task",
+    "observed_route": null,
+    "overdue": false,
+    "presence": null,
+    "priority": null,
+    "project_id": "01010101010101010101010101010101",
+    "protected_paths": [],
+    "queued_at": "2026-11-02T01:57:31.075623Z",
+    "read_only_writable": [],
+    "reason": null,
+    "receipt": "Reviewer: fixture/model@high (unknown; resolved from explicit; effort source applied_route.effort), attempt output-receipt/task#1 c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+    "recorded_state": null,
+    "requested_route": {
+      "effort": "high",
+      "kind": "model",
+      "model": "fixture/model",
+      "provider": "fixture"
+    },
+    "resolved_from": "explicit",
+    "result_path": {
+      "kind": "path",
+      "relative": {
+        "encoding": "utf8",
+        "path": "fixture/attempts/c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7/result.md"
+      },
+      "root": "/"
+    },
+    "result_projection": {
+      "attempt": "c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+      "header": {
+        "schema_version": 1
+      },
+      "host_facts": {
+        "ci": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        },
+        "commands": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        },
+        "git": {
+          "completeness": "unknown",
+          "source": "host-observation",
+          "value": {
+            "base": null,
+            "commits": [],
+            "diffstat": null,
+            "head": null,
+            "shared_worktree": false
+          }
+        },
+        "scope": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        }
+      },
+      "lane_claims": {
+        "handoff": null,
+        "verify": null
+      }
+    },
+    "retry_of": null,
+    "reviewer": {
+      "actor_id": "2397e8a2d23f72cef6c203f72b38e6ea",
+      "family": "unknown",
+      "model": "unknown",
+      "provenance": "unknown"
+    },
+    "reviewer_provenance": "Reviewer provenance: unknown, actor 2397e8a2d23f72cef6c203f72b38e6ea, model unknown, family unknown",
+    "role": "reviewer",
+    "runtime_deadline": null,
+    "settlement": {
+      "reason": null
+    },
+    "settlement_class": null,
+    "signals": [],
+    "skipped_routes": [],
+    "stale": null,
+    "started_at": null,
+    "state": "succeeded",
+    "superseded_by": null,
+    "tail_clamped": false,
+    "tail_lines": 1,
+    "tail_text": "Reviewer provenance: unknown, actor 2397e8a2d23f72cef6c203f72b38e6ea, model unknown, family unknown\n",
+    "title": "Receipt fixture",
+    "transcript": null,
+    "usage": {
+      "context_basis_points": null,
+      "source": "stream",
+      "tokens": {
+        "cache_read": null,
+        "cache_write": null,
+        "cache_write_1h": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
+    },
+    "waiting_for": null,
+    "write_grants": []
+  },
+  "error": null,
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}

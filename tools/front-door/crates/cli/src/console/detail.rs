@@ -19,9 +19,12 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
         Err(error) => return Err(error.into()),
     };
     if host.is_some_and(|host| Some(host) != local_host.map(|h| h.to_string()).as_deref()) {
-        return Ok(
-            json!({"schema_version":1,"lane_id":{"host":host,"attempt_id":attempt_id},"status":"unavailable","reason":"remote_detail_requires_host_read"}),
-        );
+        return Ok(super::projection::detail_unavailable(
+            &json!(host),
+            &json!(attempt_id),
+            "remote_detail_requires_host_read",
+            None,
+        ));
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -50,9 +53,12 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
             }
             Err(provenant_run::RunError::NotFound) => continue,
             Err(error) => {
-                return Ok(
-                    json!({"schema_version":1,"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"unavailable","reason":error.to_string()}),
-                );
+                return Ok(super::projection::detail_unavailable(
+                    &json!(local_host),
+                    &json!(attempt_id),
+                    &error.to_string(),
+                    None,
+                ));
             }
         }
     }
@@ -61,9 +67,12 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
         let tree = match super::tree::read_inner(roots, None, 16, 100, true, true) {
             Ok(tree) => tree,
             Err(error) => {
-                return Ok(
-                    json!({"schema_version":1,"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"unavailable","reason":error.to_string(),"coverage":{"nested":"unavailable","peer":"not_searched"}}),
-                );
+                return Ok(super::projection::detail_unavailable(
+                    &json!(local_host),
+                    &json!(attempt_id),
+                    &error.to_string(),
+                    Some("unavailable"),
+                ));
             }
         };
         found = tree["nodes"]
@@ -94,36 +103,29 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
             });
     }
     let Some(record) = found else {
-        return Ok(
-            json!({"schema_version":1,"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"missing","coverage":{"nested":"bounded_tree_search","peer":"not_searched"}}),
-        );
+        return Ok(super::projection::detail_missing(
+            &super::projection::detail_lookup_lane_id(&json!(local_host), &json!(attempt_id)),
+            "bounded_tree_search",
+        ));
     };
     let key = &record.key;
     let effective = record.effective_usage();
-    let usage = serde_json::to_value(&effective).map_err(|_| Error::Encode)?;
-    let tokens = &effective.tokens;
-    let mut known = Vec::new();
-    let mut missing = Vec::new();
-    for (name, count) in [
-        ("input", tokens.input),
-        ("cache_read", tokens.cache_read),
-        ("cache_write", tokens.cache_write),
-        ("output", tokens.output),
-        ("reasoning", tokens.reasoning),
-    ] {
-        if count.is_some() {
-            known.push(name)
-        } else {
-            missing.push(name)
-        }
-    }
+    let (usage, known, missing) =
+        super::projection::detail_usage(&effective).map_err(|_| Error::Encode)?;
     let artifact = |name: &str, item: Option<&provenant_run::ArtifactRecord>| {
         item.map(|item| {
             let present = item.path.to_relative_path().ok().is_some_and(|path| {
                 std::fs::symlink_metadata(state_path.join(path.as_path()))
                     .is_ok_and(|metadata| metadata.is_file())
             });
-            json!({"name":name,"bytes":item.bytes,"digest":item.digest,"complete":item.complete,"redacted":item.redacted,"present":present})
+            super::projection::detail_artifact(
+                name,
+                item.bytes,
+                &json!(item.digest),
+                item.complete,
+                item.redacted,
+                present,
+            )
         })
     };
     let mut artifacts: Vec<Value> = artifact("prompt", Some(&record.prompt))
@@ -138,8 +140,43 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
         .flatten(),
     );
     let (linked_inbox_requests, inbox_coverage) = super::detail_inbox::read(roots, &record);
-    let timing = json!({"queued_at":record.queued_at,"started_at":record.started_at,"provider_ms":record.provider_ms,"finished_at":match &record.state { provenant_run::AttemptState::Terminal { finished_at, .. } => Some(finished_at), _ => None }});
-    Ok(
-        json!({"schema_version":1,"lane_id":{"host":local_host,"project_id":record.project_id,"key":key,"attempt_id":record.attempt_id},"status":"found","requested_route":record.requested_route,"resolved_route":record.resolved_route,"applied_route":record.applied_route,"observed_route":record.observed_route,"usage":usage,"usage_coverage":{"known":known,"missing":missing},"trace":record.trace,"timings":timing,"artifacts":artifacts,"delivery":record.delivery,"linked_inbox_requests":linked_inbox_requests,"coverage":{"nested":nested_coverage,"peer":"not_searched","linked_inbox_requests":inbox_coverage}}),
-    )
+    let finished_at = match &record.state {
+        provenant_run::AttemptState::Terminal { finished_at, .. } => {
+            serde_json::to_value(finished_at).map_err(|_| Error::Encode)?
+        }
+        _ => Value::Null,
+    };
+    let timing = super::projection::detail_timings(
+        &serde_json::to_value(record.queued_at).map_err(|_| Error::Encode)?,
+        &serde_json::to_value(record.started_at).map_err(|_| Error::Encode)?,
+        &serde_json::to_value(record.provider_ms).map_err(|_| Error::Encode)?,
+        &finished_at,
+    );
+    Ok(super::projection::detail(
+        &super::projection::lane_id(
+            &serde_json::to_value(local_host).map_err(|_| Error::Encode)?,
+            &serde_json::to_value(record.project_id).map_err(|_| Error::Encode)?,
+            &serde_json::to_value(key).map_err(|_| Error::Encode)?,
+            &serde_json::to_value(record.attempt_id).map_err(|_| Error::Encode)?,
+        ),
+        "found",
+        &as_value(&record.requested_route)?,
+        &as_value(&record.resolved_route)?,
+        &as_value(&record.applied_route)?,
+        &as_value(&record.observed_route)?,
+        &usage,
+        &known,
+        &missing,
+        &as_value(&record.trace)?,
+        &timing,
+        &artifacts,
+        &as_value(&record.delivery)?,
+        &linked_inbox_requests,
+        nested_coverage,
+        inbox_coverage,
+    ))
+}
+
+fn as_value<T: serde::Serialize>(value: &T) -> Result<Value, Error> {
+    serde_json::to_value(value).map_err(|_| Error::Encode)
 }

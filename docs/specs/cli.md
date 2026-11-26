@@ -98,13 +98,20 @@ in place and is reported as incomplete coverage, never as complete.
 
 A graph status refresh is read-only. While a wait observes remote attempts, a
 successful reading that confirms terminal remote work re-drives an unsettled
-graph through the journal-locked advancement owner. A recovered endpoint can
-therefore settle work in the same wait; a successful advance also clears the
-transport error held from an earlier failed attempt to settle it. Unavailable
-remote readings remain pending and are retried within the wait budget; if the
-wait ends pending, it reports the last failed reading. A peer read failure
-also projects the attempt as unknown in status; that projection does not erase
-the failure from wait history.
+graph through the journal-locked advancement owner. The plain `wait` verb uses
+this path too, so it settles a graph whose peer attempt has finished without
+waiting for the next host tick or a manual advance. A successful advance also
+clears the transport error held from an earlier failed attempt to settle it.
+Unavailable remote readings remain pending and are retried within the wait
+budget; if the wait ends pending, it reports the last failed reading. A peer
+read failure also projects the attempt as unknown in status; that projection
+does not erase the failure from wait history.
+
+Graph advancement is a separate pass in `tick` and completes before forge
+polling starts, so a slow forge page cannot put graph settlement behind a long
+poll. The wait's terminal-remote recovery covers the remaining case where the
+scheduled tick itself is delayed by that poll: a waiting client settles the
+graph on its own next reread.
 
 - Why: terminal remote work must settle as soon as its home endpoint can be
   reached again, without requiring a second wait or a manual advance.
@@ -210,6 +217,25 @@ repair action. A kind-only failure never loses its local diagnostic detail.
 - Why: the operator can see and fix the cause instead of chasing an opaque
   confinement refusal.
 
+### Upgrade verify failures name the root cause
+
+A failed `provenant upgrade --verify` reports the smoke graph id, the node that
+actually failed, that node's advance code and message, and a next command
+`provenant status GRAPH` carrying the same graph id. The cause is read from a
+checkpoint envelope in the failing child's report: a dependant marked
+`upstream_blocked` whose note begins `blocked by` is not a cause, even when its
+envelope is the innermost typed error. The node with a concrete owner or
+advance code wins, owner code first. The cause's message is bounded before the
+graph, node, code and next command are assembled, so a long checker note cannot
+clip the parts the operator needs from the one-line host reason. A report with
+no recorded cause keeps the innermost typed code and message. The smoke graph
+is ephemeral: its scratch project binding is removed when verification ends,
+including on failure, so the next command names the graph recorded in the
+report and a live reread requires re-running `provenant upgrade --verify`.
+- Why: a blocked dependant names its blocker but not why the blocker failed;
+  the operator needs the failing node and the command to inspect its graph.
+- Owner: `tools/front-door/src/install_report.rs`, `tools/front-door/src/install.rs`
+
 ### Template name errors
 
 An unknown template or flavour names the supplied value and lists the matching
@@ -221,7 +247,10 @@ input errors keep their generic message.
 
 ### Waits are readers
 
-Waiting observes work; a timeout or cancellation does not stop it. `wait`
+Waiting observes work; a timeout or cancellation does not stop it. The one
+exception is graph terminal-remote recovery below: a successful terminal remote
+reading re-drives the journal-locked advance, but the wait never claims a
+settlement it has not observed. `wait`
 defaults to `--all` (worst final result of every target); `--any` and
 `--fail-fast` return early, and output names the mode. A target settles by its
 own state, so an older settlement cannot satisfy a wait for new work.

@@ -2196,16 +2196,18 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         // The #4064 reused-worktree review-base binding, typed writer-base
         // report and node-sourced panel helpers, plus #4066's authored repair
         // writer resolution and per-node route preview, grew this owner. The
-        // A-adapters integration (#4062, #4080) then added sourced gap
-        // explanations and settlement knobs, and #4107 supplied structured
-        // warning sources: 4504 lines. The 4750 ceiling is the next 250-band
-        // above size + 100, with headroom.
+        // A-adapters integration (#4062, #4080) then added capability-gap
+        // reporting, sourced gap explanations and settlement knobs, and #4107
+        // supplied structured warning sources: 4504 lines. The 4750 ceiling is
+        // the next 250-line band above size + 100, with headroom.
         ("src/fabric/interface.rs", 4750),
         // Peer fixture transport and writer boundary coverage (#3979).
         ("src/fabric/owner.rs", 6000),
         ("src/fabric/peer.rs", 2500),
         ("src/fabric/run_owner.rs", 3000),
-        ("src/fabric/unified.rs", 4500),
+        // #4104's terminal remote-attempt recovery export grew this owner to
+        // 4503 lines; 4750 is the next 250-line band above size + 100.
+        ("src/fabric/unified.rs", 4750),
         ("src/session_handoff.rs", 1750),
         // The #4028 hook budget, overrun warning and diagnostic reader grew this
         // owner deliberately: 2770 lines on the CI merge base. Next 250-band

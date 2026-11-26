@@ -4,16 +4,14 @@ use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_fabric_runtime::chairs::{ChairIndex, Request as ChairRequest};
 use provenant_os::clock::SystemClock;
 use provenant_records::CanonicalV1;
-use provenant_run::{AttemptState, ExecutionContext, Outcome, RunStore};
+#[cfg(test)]
+use provenant_run::{AttemptState, Outcome};
+use provenant_run::{ExecutionContext, RunStore};
 use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
 
 fn binding(high_water: u64, filters: &Value) -> Result<String, Error> {
-    Ok(
-        CanonicalV1::record_digest("console-board", 2, &(high_water, filters))
-            .map_err(|_| Error::Encode)?
-            .to_string(),
-    )
+    super::projection::board_snapshot(high_water, filters).map_err(|_| Error::Encode)
 }
 
 fn token(snapshot: &str, high_water: u64, before: u64) -> Result<String, Error> {
@@ -72,7 +70,7 @@ pub(super) fn read(
     };
     let root = CanonicalV1::file_digest(roots.state.as_path().as_os_str().as_bytes());
     let filters =
-        json!({"state_root":root,"host":host,"project_id":selected,"all":all,"limit":limit});
+        super::projection::board_filters(&json!(root), &json!(host), &json!(selected), all, limit);
     let position = cursor
         .map(|cursor| cursor_position(cursor, &filters))
         .transpose()?;
@@ -167,6 +165,7 @@ pub(super) fn read(
         }
         for lane in page.lanes {
             let attempt = &lane.attempt;
+            let attempt_id = attempt.attempt_id;
             let work_key = &attempt.key;
             let chair = match &chairs {
                 Ok(Some(index)) => {
@@ -185,25 +184,8 @@ pub(super) fn read(
                 }
                 _ => None,
             };
-            let effective = attempt.effective_usage();
-            let tokens = &effective.tokens;
-            let mut known = Vec::new();
-            let mut missing = Vec::new();
-            for (name, count) in [
-                ("input", tokens.input),
-                ("cache_read", tokens.cache_read),
-                ("cache_write", tokens.cache_write),
-                ("output", tokens.output),
-                ("reasoning", tokens.reasoning),
-            ] {
-                if count.is_some() {
-                    known.push(name)
-                } else {
-                    missing.push(name)
-                }
-            }
-            let terminal_attention = matches!(attempt.state, AttemptState::Terminal { outcome, .. }
-                if !matches!(outcome, Outcome::Succeeded | Outcome::Cancelled));
+            let (_, known, missing) = super::projection::detail_usage(&attempt.effective_usage())
+                .map_err(|_| Error::Encode)?;
             let projected = crate::run::project_lane_with_census(
                 attempt,
                 &waits,
@@ -212,30 +194,58 @@ pub(super) fn read(
                 attempt.superseded_by.is_none(),
                 census.as_ref().ok_or(()),
             );
-            let liveness_attention = matches!(
-                projected.presence,
-                Some(
-                    provenant_records::wire::LanePresence::Unattended
-                        | provenant_records::wire::LanePresence::Unknown
-                        | provenant_records::wire::LanePresence::Settling
-                )
+            let attention = super::projection::board_attention(&attempt.state, projected.presence);
+            let attempt = serde_json::to_value(projected).map_err(|_| Error::Encode)?;
+            let lane_id = super::projection::board_lane_id(
+                &json!(host),
+                &serde_json::to_value(work_key).map_err(|_| Error::Encode)?,
+                &attempt["attempt_id"],
             );
-            let attention = terminal_attention || liveness_attention;
-            lanes.push(json!({"lane_id":{"host":host,"key":work_key,
-                "attempt_id":projected.attempt_id},
-                "chair":chair,"metadata":{"operation":lane.operation, "attempt":projected},"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),
-                "attention":attention,"usage_coverage":{"known":known,"missing":missing},
-                "observation_coverage":if observed.contains(&attempt.attempt_id) { "complete" } else { "unavailable" }}));
+            let operation = serde_json::to_value(&lane.operation).map_err(|_| Error::Encode)?;
+            let chair = serde_json::to_value(&chair).map_err(|_| Error::Encode)?;
+            let wait = serde_json::to_value(waits.iter().find(|w| w.attempt_id == attempt_id))
+                .map_err(|_| Error::Encode)?;
+            lanes.push(super::projection::board_lane(
+                super::projection::BoardLaneInput {
+                    lane_id: &lane_id,
+                    chair: &chair,
+                    operation: &operation,
+                    attempt: &attempt,
+                    wait: &wait,
+                    attention,
+                    known: &known,
+                    missing: &missing,
+                    observation: if observed.contains(&attempt_id) {
+                        "complete"
+                    } else {
+                        "unavailable"
+                    },
+                },
+            ));
         }
     }
-    Ok(
-        json!({"schema_version":3,"snapshot":snapshot,"high_water":high_water,"generation":generation,
-        "observed_at":clock.wall_now().map_err(|_| Error::Encode)?,"filters":filters,
-        "lanes":lanes,"next_cursor":next,"truncated":next.is_some(),
-        "coverage":{"scope":"local","host":host,"runs":if store.is_some() { "complete" } else { "empty" },"chairs":chair_coverage,
-            "observations":if observed.len() == lanes.len() { "complete" } else if observed.is_empty() { "unavailable" } else { "partial" },
-            "nested_runs":"unavailable"}}),
-    )
+    let observed_at = serde_json::to_value(clock.wall_now().map_err(|_| Error::Encode)?)
+        .map_err(|_| Error::Encode)?;
+    let observations = if observed.len() == lanes.len() {
+        "complete"
+    } else if observed.is_empty() {
+        "unavailable"
+    } else {
+        "partial"
+    };
+    Ok(super::projection::board(
+        &snapshot,
+        high_water,
+        &generation,
+        &observed_at,
+        &filters,
+        &lanes,
+        next.as_deref(),
+        &serde_json::to_value(host).map_err(|_| Error::Encode)?,
+        if store.is_some() { "complete" } else { "empty" },
+        chair_coverage,
+        observations,
+    ))
 }
 
 #[cfg(test)]
