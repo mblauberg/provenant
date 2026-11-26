@@ -1922,9 +1922,14 @@ fn smoke_review_uses_existing_branch_checkout_head_as_its_base() -> Result {
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let cancel = CancelToken::new();
     let branch = "smoke/existing";
-    let worktree = ".worktrees/smoke/existing";
-    std::fs::create_dir_all(rig.project.join(".worktrees/smoke"))?;
-    git(&rig, &["worktree", "add", "-qb", branch, worktree])?;
+    let worktree = factory
+        .context
+        .port_table
+        .managed_writer_path(branch)?
+        .to_string_lossy()
+        .into_owned();
+    std::fs::create_dir_all(rig.project.join(&worktree).parent().unwrap())?;
+    git(&rig, &["worktree", "add", "-qb", branch, &worktree])?;
     git(
         &rig,
         &[
