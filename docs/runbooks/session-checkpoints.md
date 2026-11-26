@@ -35,7 +35,7 @@ provenant workflow session save SESSION --file notes.md --from-template
 The chair's standing grants — maintainer ownership, release, admin-merge, no
 local builds and the CI cap — belong in `provenant_standing` with their source
 and expiry, not in memory prose; see the
-[continuity contract](../../skills/session/references/continuity.md). Hooks
+[session skill](../../skills/session/SKILL.md). Hooks
 restore only sourced, unexpired grants.
 
 ## Identity
