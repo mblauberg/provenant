@@ -58,11 +58,16 @@ terminal record, so a resume does not repeat them and `status` can show them.
 The guardian transfers its writer exclusion to recovery, and import and cleanup reuse that guard
 for the same scope. Failed steps before import share a durable budget of three failures. A resumed
 worker honours `retry_after_ms` before its first pass and paces every later pass. Exhausted
-retries keep their cause and stop automatic recovery: status reports settlement blocked and calls
-for explicit reconciliation. A retry deadline overdue by three minutes is flagged stalled in the
-status reason, and a stalled custody-path refusal names the remedy (replace a symlink or restore a
-path inside the attempt directory).
-- Why: a retained writer must not contend with itself or retry an unchanged failure forever.
+retries keep their cause and stop automatic recovery: status reports settlement blocked and names
+both `provenant reconcile <lane>` and `provenant reconcile --abandon <lane> --reason <text>` as the
+ways an owner clears it. Every other status that leaves recovery outstanding — a paced retry or a
+retry deadline overdue by three minutes — names the same commands alongside the cause, so a lane
+never reads as automatically pending without a way out. A stalled custody-path refusal also names
+its remedy (replace a symlink or restore a path inside the attempt directory), and a status for a
+writer that has exited says settlement recovery is outstanding rather than promising an automatic
+retry that an exhausted budget will never make.
+- Why: a retained writer must not contend with itself or retry an unchanged failure forever, and
+  a lane whose automatic retries have stopped must still tell the owner what to run next.
 
 A lane's temporary scratch directory is never a child of the attempt record directory:
 it lives at `<state>/attempt-scratch/<attempt id>/tmp`. GC, writer-Git reads, disk

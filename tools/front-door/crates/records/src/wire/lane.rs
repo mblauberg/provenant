@@ -338,8 +338,12 @@ impl LaneRow {
                     LanePresence::Unknown => format!(
                         "the writer process state cannot be verified; run `provenant reconcile {target}` to inspect recovery before retrying"
                     ),
+                    // Recovery may still be pacing a retry, or it may have
+                    // stopped at the recorded failure budget. Never promise an
+                    // automatic retry here; the settlement diagnostic below
+                    // says which case holds and names the clearing command.
                     LanePresence::Settling => {
-                        "the writer exited; automatic settlement recovery is pending".to_owned()
+                        "the writer exited; settlement recovery is outstanding".to_owned()
                     }
                     LanePresence::Live => unreachable!(),
                 });

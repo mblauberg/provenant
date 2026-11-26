@@ -106,22 +106,31 @@ impl<'a> Cli<'a> {
             .executor
             .execute(options)
             .map_err(|error| format!("could not start: {error}"))?;
-        if out.timed_out {
-            return Err("timed out".into());
-        }
+        // Read the answer before the timeout flag. A child that wrote its
+        // complete envelope and was killed before it could exit still leaves
+        // a usable section; dropping that output turns a bounded partial
+        // summary into an `unavailable` section the agent cannot act on.
         let envelope: Option<Value> = if out.stdout.truncated {
             None
         } else {
             serde_json::from_slice(&out.stdout.bytes).ok()
         };
         let Some(envelope) = envelope else {
-            return Err(match out.termination {
-                Termination::Exit(0) => "unreadable output".into(),
-                Termination::Exit(code) => format!("exit {code}"),
-                _ => "terminated".into(),
+            return Err(if out.timed_out {
+                "timed out".into()
+            } else {
+                match out.termination {
+                    Termination::Exit(0) => "unreadable output".into(),
+                    Termination::Exit(code) => format!("exit {code}"),
+                    _ => "terminated".into(),
+                }
             });
         };
-        if envelope["status"] == "ok" && out.termination == Termination::Exit(0) {
+        // A complete success envelope is authoritative. A child killed at its
+        // deadline ends on a signal, not `Exit(0)`, but its answer is still
+        // complete; only an unreadable or refused envelope is a failure.
+        if envelope["status"] == "ok" && (out.termination == Termination::Exit(0) || out.timed_out)
+        {
             return Ok(envelope["data"].clone());
         }
         let message = envelope["error"]["message"].as_str().unwrap_or("refused");
@@ -749,6 +758,56 @@ mod tests {
         assert_eq!(trees.len(), 1);
         assert_eq!(trees[0].path, "/one");
         assert_eq!(skipped, 2);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn custody_answer_written_before_the_deadline_survives_a_timeout() {
+        use super::*;
+        use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome};
+
+        struct KilledAfterAnswer;
+        impl Executor for KilledAfterAnswer {
+            fn execute(&self, _options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let bytes = br#"{"status":"ok","data":{"items":[{"record":{"subject":"g/a#1","project":"p"},"presence":"unattended","mine":true}],"next":null}}"#;
+                Ok(ExecOutcome {
+                    termination: Termination::Signal(15),
+                    stdout: CapturedStream {
+                        bytes: bytes.to_vec(),
+                        total_bytes: bytes.len() as u64,
+                        ..Default::default()
+                    },
+                    stderr: CapturedStream::default(),
+                    timed_out: true,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let executor = KilledAfterAnswer;
+        let cli = Cli {
+            exe: PathBuf::from("provenant"),
+            state_dir: None,
+            cwd: temp.path(),
+            executor: &executor,
+            clock: &SYSTEM_CLOCK,
+        };
+        let data = cli
+            .data(
+                &["status", "--mine", "--limit", "100"],
+                LISTING_TIME,
+                cli.deadline_after(Duration::from_secs(1)),
+            )
+            .expect("a complete custody answer is kept even though the child was killed");
+        assert_eq!(data["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            data["items"][0]["record"]["subject"].as_str(),
+            Some("g/a#1")
+        );
     }
 
     #[test]
