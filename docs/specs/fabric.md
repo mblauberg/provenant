@@ -512,6 +512,8 @@ A split verdict on one head goes to one adjudication node that returns a single
 verdict; the read-only adjudicator runs as an agent on the configured `senior`
 route on the panel members' pinned head when one is recorded. Each gate consumes only the adjudicator
 associated with its own panel and head; later panels receive their own adjudicator.
+Once admitted, an adjudicator must succeed with a verdict before its panel can
+pass; the original panel verdict cannot substitute for a failed or missing result.
 A split in a nested lens group remains visible when a panel synthesises its output;
 the adjudicator receives the outer panel's synthesised findings.
 A panel whose members have different pinned heads cannot be adjudicated as one
