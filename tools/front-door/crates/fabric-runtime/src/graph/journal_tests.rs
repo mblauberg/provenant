@@ -85,6 +85,18 @@ fn fixture_plan_digest(document: &GraphDocument) -> String {
     plan_digest(&plan).unwrap().to_string()
 }
 
+/// A pending checkpoint must keep a non-terminal attempt. Tick reads now run
+/// the validation an advance applies, so a `Running` row whose last attempt
+/// already settled is a quarantined `bad_checkpoint`, not a pending graph
+/// (#4105).
+fn make_pending(fixture: &mut StoredCheckpoint) {
+    let node = &mut fixture.checkpoint.nodes[0];
+    node.state = NodeState::Running;
+    let attempt = &mut node.attempts[0];
+    attempt.state = AttemptState::Starting;
+    attempt.outcome = None;
+}
+
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn save_decodes_each_checkpoint_at_most_once_and_checks_blobs() {
@@ -1007,17 +1019,26 @@ fn checkpoint_scale_fixture(
         .as_path()
         .join("fabric/graphs")
         .join(project.to_string());
-    let mut stored: StoredCheckpoint = stored_fixture();
     for number in 0..completed + pending {
+        let mut stored: StoredCheckpoint = stored_fixture();
         let id = format!("graph-{number:04}");
         stored.checkpoint.graph_id = id.clone();
         stored.execution.document.graph_id = id.clone();
         stored.checkpoint.plan_digest = fixture_plan_digest(&stored.execution.document);
-        stored.checkpoint.nodes[0].state = if number < completed {
-            NodeState::Succeeded
-        } else {
-            NodeState::Running
-        };
+        // The rewrite changes graph identity, so the recorded WorkKeys must
+        // follow; otherwise validation rejects the attempts as foreign.
+        for node in &mut stored.checkpoint.nodes {
+            for attempt in node
+                .attempts
+                .iter_mut()
+                .chain(node.previous_attempts.iter_mut())
+            {
+                attempt.key.graph_id = id.clone();
+            }
+        }
+        if number >= completed {
+            make_pending(&mut stored);
+        }
         stored.digest = checkpoint_digest(&stored.checkpoint, &stored.execution)
             .unwrap()
             .to_string();
@@ -1293,7 +1314,7 @@ fn rebuild_keeps_healthy_graph_pending_beside_oversized_checkpoint() {
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     let mut fixture: StoredCheckpoint = stored_fixture();
-    fixture.checkpoint.nodes[0].state = NodeState::Running;
+    make_pending(&mut fixture);
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
@@ -1572,8 +1593,9 @@ fn tick_reports_corrupt_checkpoints_once_until_bytes_change_or_retired() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    // Keep the stored checkpoint valid: only the bytes are corrupted below, so
+    // a tick must report a decode failure, not a quarantined bad checkpoint.
     let mut fixture: StoredCheckpoint = stored_fixture();
-    fixture.checkpoint.nodes[0].state = NodeState::Running;
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();

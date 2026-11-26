@@ -2295,10 +2295,7 @@ fn semantic_validation_error(
             return Some(GraphError::BadCheckpoint { node, invariant });
         }
     };
-    match validate_checkpoint::<JournalError, JournalError>(document, &view, &plan, &digest) {
-        Ok(()) => None,
-        Err(error) => Some(error),
-    }
+    validate_checkpoint::<JournalError, JournalError>(document, &view, &plan, &digest).err()
 }
 
 /// Load a checkpoint for a host tick read. Unreadable records are quarantined

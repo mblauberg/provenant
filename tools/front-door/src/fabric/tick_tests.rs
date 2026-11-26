@@ -20,10 +20,8 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
     let now = clock.wall_now()?;
     let actor = context.identity.inbox.actor.to_string();
     let seed_at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?;
-    let seed_clock = provenant_core::TestClock::new(
-        seed_at,
-        provenant_core::MonoTime::from_micros(0),
-    );
+    let seed_clock =
+        provenant_core::TestClock::new(seed_at, provenant_core::MonoTime::from_micros(0));
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
     let inbox = provenant_fabric_runtime::inbox::InboxService::open(
@@ -122,15 +120,21 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
 }
 
 /// Seed a graph whose nodes have settled but which still carries an open ask,
-/// so tick discovers it with a missing worktree.
+/// so tick discovers it with a missing worktree. The checkpoint is produced by
+/// the production advance path: tick reads now validate the same shape, so a
+/// hand-written ask without an identity, deadline or matching settlement is
+/// quarantined instead of discovered (#4105).
 fn seed_settled_missing_graph(
     roots: &provenant_core::Roots,
+    identity: &provenant_fabric_runtime::identity::Identity,
     project: provenant_core::ProjectId,
     id: &str,
     node_state: &str,
     worktree: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_fabric_runtime::graph::{self, GraphJournal, NodeState};
+    use provenant_fabric_runtime::graph::{
+        self, DecideOutcome, GraphJournal, NodeOutputs, NodeState,
+    };
 
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1, "graph_id":id, "decision_session":"chair-session",
@@ -138,14 +142,18 @@ fn seed_settled_missing_graph(
             "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
             "default":"hold", "timeout_seconds":60}}]
     }))?;
-    let plan_digest = graph::graph_plan_digest(&document)?.to_string();
-    let checkpoint: graph::GraphCheckpoint = serde_json::from_value(serde_json::json!({
-        "schema_version":2, "graph_id":id, "plan_digest":plan_digest,
-        "asks":[{"ask_id":"ask","kind":"decide","node":"choose","session":"chair","request":"hrq-ask"}],
-        "nodes":[{"id":"choose","state":node_state,"worktree":null,"attempts":[]}]
-    }))?;
     let clock = SystemClock;
     let cancel = CancelToken::new();
+    let now = clock.wall_now()?;
+    let actor = identity.inbox.actor.to_string();
+    let seed_clock = provenant_core::TestClock::new(now, provenant_core::MonoTime::from_micros(0));
+    let inbox = provenant_fabric_runtime::inbox::InboxService::open(
+        &roots.state,
+        identity,
+        &seed_clock,
+        &cancel,
+    )?;
+    let mut seed = super::InboxSeedOwner::new(actor, now, &inbox, &cancel);
     let mut journal = graph::FileJournal::open(
         &roots.state,
         project,
@@ -161,11 +169,41 @@ fn seed_settled_missing_graph(
         extra: Default::default(),
         bases: None,
         directory: worktree.to_owned(),
-        document,
+        document: document.clone(),
     })?;
-    journal.save(&checkpoint)?;
+    let mut run = graph::advance_with_budget(
+        &document,
+        &mut seed,
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    // Settle the node without closing its ask. A settled decide row that still
+    // has an open ask is valid only when its outputs name the answer it made.
     let expected: NodeState = serde_json::from_value(serde_json::json!(node_state))?;
-    assert_eq!(checkpoint.nodes[0].state, expected);
+    let node = &mut run.checkpoint.nodes[0];
+    node.state = expected;
+    node.outputs = Some(match expected {
+        NodeState::Succeeded => NodeOutputs {
+            schema_version: 2,
+            decide_outcome: Some(DecideOutcome::AnsweredByDefault {
+                option: "hold".into(),
+            }),
+            verdict: Some("hold".into()),
+            ..Default::default()
+        },
+        NodeState::Failed => NodeOutputs {
+            schema_version: 2,
+            decide_outcome: Some(DecideOutcome::Unanswered),
+            ..Default::default()
+        },
+        _ => return Err("a settled node state is required".into()),
+    });
+    assert!(
+        !run.checkpoint.asks.is_empty(),
+        "ask must stay open for tick"
+    );
+    journal.save(&run.checkpoint)?;
     Ok(())
 }
 
@@ -182,8 +220,22 @@ fn tick_auto_settles_finished_graphs_with_removed_worktrees()
     let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
     let project = context.identity.project;
     let gone = rig.root.join("removed-worktree");
-    seed_settled_missing_graph(&roots, project, "settled-ok", "succeeded", &gone)?;
-    seed_settled_missing_graph(&roots, project, "settled-bad", "failed", &gone)?;
+    seed_settled_missing_graph(
+        &roots,
+        &context.identity,
+        project,
+        "settled-ok",
+        "succeeded",
+        &gone,
+    )?;
+    seed_settled_missing_graph(
+        &roots,
+        &context.identity,
+        project,
+        "settled-bad",
+        "failed",
+        &gone,
+    )?;
     let resolved = crate::roots::Resolved {
         assets: rig.project.clone(),
         home: rig.home.clone(),
@@ -231,11 +283,8 @@ fn tick_auto_settles_finished_graphs_with_removed_worktrees()
 }
 
 #[test]
-fn live_custody_lease_blocks_auto_settlement()
--> Result<(), Box<dyn std::error::Error>> {
-    if host_test(
-        "fabric::peer_tests::tick_tests::live_custody_lease_blocks_auto_settlement",
-    )? {
+fn live_custody_lease_blocks_auto_settlement() -> Result<(), Box<dyn std::error::Error>> {
+    if host_test("fabric::peer_tests::tick_tests::live_custody_lease_blocks_auto_settlement")? {
         return Ok(());
     }
     let rig = crate::worktree_tests::support::TestRig::new()?;
@@ -244,7 +293,7 @@ fn live_custody_lease_blocks_auto_settlement()
     let project = context.identity.project;
     let gone = rig.root.join("removed-worktree-held");
     let id = "held-lease";
-    seed_settled_missing_graph(&roots, project, id, "succeeded", &gone)?;
+    seed_settled_missing_graph(&roots, &context.identity, project, id, "succeeded", &gone)?;
 
     let clock = SystemClock;
     let cancel = CancelToken::new();
@@ -285,8 +334,8 @@ fn live_custody_lease_blocks_auto_settlement()
         "{:?}",
         report.warnings
     );
-    let checkpoint = graph::FileJournal::read_checkpoint(&roots.state, project, id)?
-        .ok_or("held graph")?;
+    let checkpoint =
+        graph::FileJournal::read_checkpoint(&roots.state, project, id)?.ok_or("held graph")?;
     assert!(!checkpoint.asks.is_empty());
     assert!(!checkpoint.cancelled);
     Ok(())
