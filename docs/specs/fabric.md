@@ -606,8 +606,12 @@ and custody is released; settlement advances only the matching graph.
 ## Peer hosts
 
 Each host owns its records and liveness; an unreachable peer is unknown, not
-dead. An uncertain remote mutation is resolved by the owner's receipt, never
-resent. Remote attempts bind the origin identity, transferred Git objects are
+dead. A reachable peer relays its own census-observed writer presence with the
+attempt record, so the launching host reports the same running, unattended or
+settling row the owner sees; the age of relayed output events never proves
+liveness. When such a row needs recovery, its `next:` hint names the peer's own
+graph target and the host that owns it, where `reconcile` can resolve it. An
+uncertain remote mutation is resolved by the owner's receipt, never resent. Remote attempts bind the origin identity, transferred Git objects are
 verified before use, and a protocol mismatch is refused before decoding;
 cross-host text follows the configured disclosure policy. A peer locator
 identifies a registered Git common directory, Git's verified worktree inventory
