@@ -98,6 +98,12 @@ and every other 405 cause are never bypassed. The receipt records the grant
 and its source. This changes how the owner's authority is exercised, not who
 holds it.
 
+An admin merge under the CI-bypass grant is not an exemption from deferred
+coverage: before exercising it, run the deferred groups for every touched crate
+with `ci:full` (or `dispatch tier=full`) and wait for that run. The grant answers
+a review-requirement refusal only; it never answers a red check or a missing
+full-tier run for a code delta.
+
 `ci-status` is the single required check: the aggregate job at the end of
 [`ci.yml`](../../.github/workflows/ci.yml). `Protect main` does not require
 heads up to date with `main`, so land each pull request on its own green head and
@@ -115,7 +121,7 @@ Review must be independent of the writer and cover the exact head; a changed
 head needs fresh evidence.
 
 - `LAND_PENDING` and `LAND_BUSY` exit as `pending`: rerun the same `land`.
-  `LAND_CONFLICT` means the PR conflicts with the target: rebase or merge, then
+  `LAND_CONFLICT` means the PR conflicts with the target: merge the base into the branch, then
   push. `LAND_PUBLICATION_UNKNOWN`: see the recovery below.
 - A killed land leaves its candidate ref until the pull request is merged or
   closed; the next land collects it. Changing `domains.pr.land.candidate_ref_prefix`

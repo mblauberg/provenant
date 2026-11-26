@@ -1,0 +1,5 @@
+## Fixes
+
+### Lanes and settlement
+
+- A provider's exec gate now stays closed until its process identity and attempt attribution are durably published in the reservation; failed publication rejects the launch. The guardian passes the attempt id as an internal environment mark, inherited across fork, exec and setsid. Recovery reads this mark through `/proc/<pid>/environ` on Linux and `KERN_PROCARGS2` on macOS. When the guardian dies before publishing `process-exit.json`, reconcile can name a detached unsandboxed process in status as an escaped PID (and in a settled exit's `unresolved_pids`) instead of leaving it invisible; an `ORPHAN_PROCESS_ATTRIBUTED` warning on the attempt keeps it visible in `status` while the fence holds. Group/session and inherited-mark attribution grant no signal authority, so such a process is reported and never signalled; lanes with an OS mark still reap escapees as before. Hosts without containment warn once per change with the setting source (`policy.LAUNCH_PROCESS_ATTRIBUTION_NONE`, default `warn`, set `off` to suppress). (#4006)

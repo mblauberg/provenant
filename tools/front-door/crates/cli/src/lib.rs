@@ -1432,6 +1432,11 @@ mod tests {
             "accepted brief, prior handoff and queued steering text",
             "refuse rejects unsupported routes up front",
             "leaves unavailable sessions without a successor",
+            "--now",
+            "interrupt through custody once the session identity is durable",
+            "resume that same session with the text",
+            "domains.fabric.steer.delivery",
+            "--explain",
         ] {
             assert!(
                 help.contains(contract),
@@ -3419,6 +3424,8 @@ mod tests {
             "s-1",
         ]);
         valid(&["steer", attempt, "--brief-file", "-"]);
+        valid(&["steer", attempt, "--now", "--brief", "Please continue"]);
+        valid(&["steer", attempt, "--explain"]);
         invalid(&["steer", attempt]);
         invalid(&["steer", attempt, "--brief", "a", "--brief-file", "b"]);
         invalid(&[

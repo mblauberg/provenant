@@ -15,8 +15,6 @@ pub use completion::{
     LaneLocation, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with,
     route_label,
 };
-mod verification;
-pub use verification::{VerificationResolution, conflict_cause};
 mod controls;
 pub use controls::release_progress;
 mod correlation;
@@ -37,6 +35,8 @@ pub use pr_contribution::{Contribution, Contributions, PullRequest, WEIGHT_ONE};
 pub mod reactions;
 pub use reactions::Reaction;
 mod reader;
+mod verification;
+pub use verification::{VerificationResolution, conflict_cause};
 mod retention;
 mod service;
 #[cfg(test)]
@@ -66,12 +66,16 @@ pub use admission::{
 };
 pub use controls::{
     AttemptPresence, CancelReceipt, Reconciled, Resume, SteerIntent, SteerReceipt, TemporaryReason,
-    TemporaryReasonKind, UncertainReason, attempt_presence, attempt_presence_with_census,
-    attempt_presence_with_unavailable_census, holder_absent, overdue_at, stalled_at,
+    TemporaryReasonKind, UncertainReason, UnreadableAttempt, UnreadableSource, attempt_presence,
+    attempt_presence_with_census, attempt_presence_with_unavailable_census, holder_absent,
+    overdue_at, stalled_at, unreadable_record_warning,
 };
 #[cfg(any(test, feature = "fixture"))]
 pub use delivery::forge_for;
-pub use delivery::{FilteredLanePath, ForgeOnce, HostDeliveryContext, resolve_forge};
+pub use delivery::{
+    FilteredLanePath, ForgeOnce, GraphAdoptionTarget, GraphPublicationReceipt, HostDeliveryContext,
+    resolve_forge,
+};
 pub use git_context::{
     GitContext, ReviewDiffContext, continuation_history, ensure_local_branch,
     ensure_recorded_local_branch, resolve_git_base, resolve_git_base_with_facts,

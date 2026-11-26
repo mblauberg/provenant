@@ -79,6 +79,8 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<Hosts>,
     },
+    /// Report host health, installed hook settings and recent hook timeouts
+    Doctor,
     /// Show and edit configuration
     #[command(subcommand)]
     Config(Config),
@@ -106,7 +108,7 @@ pub enum Command {
     Adopt {
         subject: provenant_records::custody::Subject,
     },
-    /// Release an item from custody (KIND:ID)
+    /// Release an item from custody (KIND:ID); an attempt whose record no longer decodes also has its dead writer lease reclaimed
     Release {
         subject: provenant_records::custody::Subject,
     },
@@ -177,9 +179,9 @@ pub enum Command {
     /// Retry a graph, node or attempt
     #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry fix-login"))]
     Retry(Resume),
-    /// Deliver a steering note; resume the session where the provider supports it
+    /// Deliver a steering note; queue by default, interrupt with --now
     #[command(
-        long_about = "Queue a steering note for the next turn without interrupting the running attempt. Settlement resumes the retained session or applies the configured fallback. The default fresh_with_handoff starts fresh with the accepted brief, prior handoff and queued steering text; refuse rejects unsupported routes up front and leaves unavailable sessions without a successor.",
+        long_about = "Queue a steering note for the next turn without interrupting the running attempt. Settlement resumes the retained session or applies the configured fallback. The default fresh_with_handoff starts fresh with the accepted brief, prior handoff and queued steering text; refuse rejects unsupported routes up front and leaves unavailable sessions without a successor. Pass --now to interrupt through custody once the session identity is durable and resume that same session with the text; it refuses a running attempt with no retained session. Delivery defaults to queued from domains.fabric.steer.delivery (queued|now), and --now overrides it for one call. Use --explain to show the effective delivery mode and its source without steering.",
         add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md")
     )]
     Steer(crate::inbox::Steer),
@@ -192,7 +194,7 @@ pub enum Command {
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
-    /// Settle open attempts and report uncertain custody
+    /// Settle open attempts, reclaim dead leases behind undecodable records, and report uncertain custody
     Reconcile(Reconcile),
     /// Report local usage and cost
     #[command(subcommand)]
@@ -752,7 +754,7 @@ pub struct GraphRunArgs {
     /// keep their higher precedence
     #[arg(long)]
     pub no_sandbox: bool,
-    /// Explain the compiled graph without starting work
+    /// Explain the compiled graph and each node's route without starting work
     #[arg(long)]
     pub explain: bool,
 }
@@ -862,6 +864,15 @@ pub struct Cancel {
     /// Reason to record (up to 256 bytes)
     #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
     pub reason: Option<String>,
+    /// Apply this existing stop operation as a revisioned delivery queue control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Stable ID for replaying this queue control
+    #[arg(long, requires = "queue_control", value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Resume {
@@ -877,6 +888,23 @@ pub struct Resume {
     /// Raise a graph limit or budget (KEY=VALUE) on a graph target; may be repeated
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,
+    /// Apply this existing retry operation as a revisioned delivery queue control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Stable ID for replaying this queue control
+    #[arg(long, requires = "queue_control", value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum QueueControlAction {
+    Accept,
+    Fix,
+    Retry,
+    Drop,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Reconcile {
@@ -1018,6 +1046,9 @@ pub struct Ingest {
     /// Ingest transcripts written, and messages stamped, from this date or timestamp, or a span such as 1d ago
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
+    /// Resume from the durable cursor instead of rescanning a time window
+    #[arg(long)]
+    pub incremental: bool,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Mileage {
@@ -1422,6 +1453,9 @@ pub struct Status {
     /// paged with --all, --limit and --cursor like the graph listing.
     #[arg(long, hide = true, conflicts_with = "targets")]
     pub session_stream: bool,
+    /// Stream custody rows for the session collector.
+    #[arg(long, hide = true, requires = "mine")]
+    pub custody_stream: bool,
     /// Graphs, nodes or attempts to show (NAME[/NODE[#N]]); every graph when omitted
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub targets: Vec<Target>,

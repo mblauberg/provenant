@@ -1,7 +1,9 @@
 //! Exact-head observations for deterministic graph gates.
 use super::{Check, encode, mark_conflict, required_checks, summarise_ci};
-use crate::pr::observer::{Check as Observed, Observer};
-use provenant_fabric_runtime::graph::{CiFailedCheck, CiObservation, CiState};
+use crate::pr::observer::{Check as Observed, ObserveError, Observer};
+use provenant_fabric_runtime::graph::{
+    CiFailedCheck, CiObservation, CiState, ConflictObservation, ConflictState,
+};
 use serde::Deserialize;
 use std::{path::Path, time::Duration};
 
@@ -19,6 +21,7 @@ pub(super) fn observe(
     project: &Path,
     target: &str,
     names: &[String],
+    delivery_queue: bool,
     failed_checks_max_bytes: usize,
     max_failed_checks: usize,
 ) -> CiObservation {
@@ -36,17 +39,110 @@ pub(super) fn observe(
         )
         .ok()
     };
+    let rate_limit = std::cell::RefCell::new(None);
     let evidence = |head: &Head| {
         let request = provenant_config::ports::Request::within(READ_BUDGET);
         let mut observer = Observer::open(state, project, &head.repository, &request).ok()?;
         let max_age = observer.fast_interval();
-        observer.checks(&head.sha, max_age, &request).ok()
+        match observer.checks(&head.sha, max_age, &request) {
+            Ok(checks) => Some(checks),
+            Err(ObserveError::RateLimited { reset }) => {
+                *rate_limit.borrow_mut() = Some(reset);
+                None
+            }
+            Err(_) => None,
+        }
     };
-    let mut result = observe_with(target, names, &read, evidence, |head| {
+    let mut result = observe_with(target, names, delivery_queue, &read, evidence, |head| {
         required_checks(state, project, &policy_target(target, head, &read)?)
     });
+    if let Some(reset) = rate_limit.into_inner() {
+        wait_for_rate_limit(&mut result, reset);
+    }
     result.bound_failed_checks(failed_checks_max_bytes, max_failed_checks);
     result
+}
+
+/// Quota is a retryable observation, not a CI verdict. The shared observer
+/// suppresses further forge reads until the recorded reset.
+fn wait_for_rate_limit(result: &mut CiObservation, reset: jiff::Timestamp) {
+    result.state = CiState::Pending;
+    result.summary = format!("forge rate limit; waiting until {reset}");
+    if let Ok(reset) = provenant_core::WallTime::from_micros(reset.as_microsecond()) {
+        result.set_quota_reset(reset);
+    }
+    result.failed_checks.clear();
+}
+
+/// Read mergeability before CI so a conflict is routed to merge the base immediately.
+pub(super) fn observe_conflict(state: &Path, project: &Path, target: &str) -> ConflictObservation {
+    let read = |args: &[&str]| {
+        super::super::successful(
+            super::super::forge_execute(
+                state,
+                project,
+                args,
+                &provenant_config::ports::Request::within(READ_BUDGET),
+                false,
+                None,
+            )
+            .ok()?,
+        )
+        .ok()
+    };
+    observe_conflict_with(target, &read)
+}
+
+fn observe_conflict_with(
+    target: &str,
+    read: &dyn Fn(&[&str]) -> Option<Vec<u8>>,
+) -> ConflictObservation {
+    let unavailable = || ConflictObservation {
+        state: ConflictState::Unavailable,
+        head_sha: None,
+        summary: "mergeability observation unavailable".into(),
+    };
+    let Some(before) = resolve_head(target, read) else {
+        return unavailable();
+    };
+    let Some(mergeability) = mergeable(target, &before, read) else {
+        return ConflictObservation {
+            head_sha: Some(before.sha),
+            summary: "mergeability observation unavailable".into(),
+            ..unavailable()
+        };
+    };
+    let Some(after) = resolve_head(target, read) else {
+        return ConflictObservation {
+            head_sha: Some(before.sha),
+            summary: "target head unavailable after reading mergeability".into(),
+            ..unavailable()
+        };
+    };
+    if after != before {
+        return ConflictObservation {
+            state: ConflictState::Pending,
+            summary: format!(
+                "head superseded {} -> {}; waiting for mergeability",
+                before.sha, after.sha
+            ),
+            head_sha: Some(after.sha),
+        };
+    }
+    let (state, summary) = match mergeability.as_str() {
+        "MERGEABLE" => (ConflictState::Clear, "pull request is mergeable"),
+        "CONFLICTING" => (
+            ConflictState::Conflicting,
+            "pull request conflicts with its base",
+        ),
+        "UNKNOWN" => (ConflictState::Pending, "mergeability is still unknown"),
+        _ => return unavailable(),
+    };
+    ConflictObservation {
+        state,
+        head_sha: Some(before.sha),
+        summary: summary.into(),
+    }
 }
 
 fn policy_target(
@@ -113,6 +209,7 @@ fn policy_target(
 fn observe_with(
     target: &str,
     names: &[String],
+    delivery_queue: bool,
     read: &dyn Fn(&[&str]) -> Option<Vec<u8>>,
     evidence: impl FnOnce(&Head) -> Option<Vec<Observed>>,
     policy: impl FnOnce(&Head) -> Option<Vec<String>>,
@@ -120,8 +217,14 @@ fn observe_with(
     let Some(before) = resolve_head(target, read) else {
         return summarise_ci(None, None);
     };
+    let resolved = names.is_empty().then(|| policy(&before));
+    let policy_unavailable =
+        delivery_queue && names.is_empty() && resolved.as_ref().is_some_and(Option::is_none);
     let required = if names.is_empty() {
-        policy(&before).map(|names| ("branch-required", names))
+        resolved
+            .flatten()
+            .filter(|names| !names.is_empty())
+            .map(|names| ("branch-required", names))
     } else {
         Some(("configured", names.to_vec()))
     };
@@ -140,6 +243,11 @@ fn observe_with(
             .as_ref()
             .map(|(policy, names)| (*policy, names.as_slice())),
     );
+    if policy_unavailable {
+        result.state = CiState::Pending;
+        result.summary = "policy=required-unavailable; waiting for the branch check policy".into();
+        result.failed_checks.clear();
+    }
     // A fresh head may not have registered its checks yet. Wait for them;
     // the gate timeout reports a head whose checks never registered.
     if matches!(result.state, CiState::Unavailable | CiState::NotScheduled)
@@ -173,7 +281,7 @@ fn observe_with(
         result.summary.push_str(&next);
     }
     result.head_sha = Some(before.sha.clone());
-    if let Some(evidence) = evidence {
+    if let Some(evidence) = evidence.filter(|_| !policy_unavailable) {
         result.failed_checks = evidence
             .into_iter()
             .filter(|evidence| {
@@ -184,6 +292,7 @@ fn observe_with(
             })
             .map(|evidence| CiFailedCheck {
                 extra: Default::default(),
+                job_id: evidence.job_id,
                 name: evidence.name,
                 url: evidence.url,
                 excerpt: evidence.excerpt,
@@ -196,6 +305,7 @@ fn observe_with(
     match resolve_head(target, read) {
         Some(after) if after == before => result,
         Some(after) => CiObservation {
+            quota_reset_at: None,
             state: CiState::Pending,
             summary: format!(
                 "head superseded {} -> {}; waiting for checks",
@@ -208,6 +318,7 @@ fn observe_with(
             extra: Default::default(),
         },
         None => CiObservation {
+            quota_reset_at: None,
             state: CiState::Unavailable,
             summary: "target head unavailable after reading checks".into(),
             head_sha: Some(before.sha),
@@ -324,10 +435,26 @@ mod tests {
 
     fn checks(sha: &str, status: &str, conclusion: Option<&str>) -> serde_json::Value {
         json!([{"check_runs":[{
-            "name":"build","head_sha":sha,"status":status,"conclusion":conclusion,
+            "id":1234,"name":"build","head_sha":sha,"status":status,"conclusion":conclusion,
             "details_url":"https://github.com/owner/repo/actions/runs/1",
             "output":{"title":"Build failed","summary":"error: expected a value","text":"src/main.rs:12"}
         }]}])
+    }
+
+    #[test]
+    fn rate_limit_is_a_wait_with_its_reset_not_a_ci_verdict() {
+        let mut observation = summarise_ci(None, None);
+        observation.head_sha = Some(OLD.into());
+        let reset = jiff::Timestamp::from_second(2_000_000_000).unwrap();
+        wait_for_rate_limit(&mut observation, reset);
+        assert_eq!(observation.state, CiState::Pending);
+        assert_eq!(observation.head_sha.as_deref(), Some(OLD));
+        assert!(observation.summary.contains(&reset.to_string()));
+        assert_eq!(
+            observation.quota_reset_at,
+            Some(provenant_core::WallTime::from_micros(reset.as_microsecond()).unwrap())
+        );
+        assert!(observation.failed_checks.is_empty());
     }
 
     #[test]
@@ -349,6 +476,7 @@ mod tests {
         let observation = observe_with(
             "feature",
             &["build".into()],
+            false,
             &read,
             |head| evidence(&read, head),
             |_| None,
@@ -358,6 +486,7 @@ mod tests {
         assert_eq!(observation.check_names, ["build"]);
         assert_eq!(observation.failed_checks.len(), 1);
         assert_eq!(observation.failed_checks[0].name, "build");
+        assert_eq!(observation.failed_checks[0].job_id.as_deref(), Some("1234"));
         assert!(
             observation.failed_checks[0]
                 .url
@@ -402,6 +531,7 @@ mod tests {
         let observation = observe_with(
             "feature",
             &["build".into()],
+            false,
             &read,
             |head| evidence(&read, head),
             |_| None,
@@ -433,6 +563,7 @@ mod tests {
             let observation = observe_with(
                 "feature",
                 &["build".into()],
+                false,
                 &read,
                 |head| evidence(&read, head),
                 |_| None,
@@ -464,6 +595,7 @@ mod tests {
         let observation = observe_with(
             "feature/repair",
             &["build".into()],
+            false,
             &read,
             |head| evidence(&read, head),
             |_| None,
@@ -476,6 +608,44 @@ mod tests {
                 .iter()
                 .any(|call| call.contains("branches/feature%2Frepair"))
         );
+    }
+
+    #[test]
+    fn queue_ci_waits_when_required_policy_is_unreadable_but_accepts_known_empty_policy() {
+        let read = |args: &[&str]| {
+            let value = if args[1] == "pr" {
+                pull(OLD)
+            } else if args.last()?.contains("check-runs") {
+                checks(OLD, "completed", Some("success"))
+            } else {
+                json!([[]])
+            };
+            serde_json::to_vec(&value).ok()
+        };
+        let unavailable = observe_with(
+            "feature",
+            &[],
+            true,
+            &read,
+            |head| evidence(&read, head),
+            |_| None,
+        );
+        assert_eq!(unavailable.state, CiState::Pending);
+        assert_eq!(unavailable.head_sha.as_deref(), Some(OLD));
+        assert!(unavailable.failed_checks.is_empty());
+        assert!(unavailable.summary.contains("policy=required-unavailable"));
+
+        let known_empty = observe_with(
+            "feature",
+            &[],
+            true,
+            &read,
+            |head| evidence(&read, head),
+            |_| Some(Vec::new()),
+        );
+        assert_eq!(known_empty.state, CiState::Passed);
+        assert_eq!(known_empty.head_sha.as_deref(), Some(OLD));
+        assert!(known_empty.summary.contains("policy=all-reported"));
     }
 
     #[test]
@@ -499,6 +669,7 @@ mod tests {
         let observation = observe_with(
             "refs/heads/123",
             &["build".into()],
+            false,
             &read,
             |head| evidence(&read, head),
             |_| None,
@@ -543,6 +714,7 @@ mod tests {
             let observation = observe_with(
                 "feature",
                 &["build".into(), "lint".into()],
+                false,
                 &read,
                 |head| evidence(&read, head),
                 |_| None,
@@ -555,14 +727,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_probe_reports_a_conflicting_pr_instead_of_waiting_for_checks() {
+    fn ci_probe_reports_a_conflicting_pr_before_using_check_results() {
         for (check_pages, mergeable, expected) in [
             (json!([{"check_runs":[]}]), "CONFLICTING", CiState::Conflict),
             (json!([{"check_runs":[]}]), "MERGEABLE", CiState::Pending),
             (
                 checks(OLD, "completed", Some("failure")),
                 "CONFLICTING",
-                CiState::Failed,
+                CiState::Conflict,
             ),
         ] {
             let read = |args: &[&str]| {
@@ -580,6 +752,7 @@ mod tests {
             let observation = observe_with(
                 "feature",
                 &[],
+                false,
                 &read,
                 |head| evidence(&read, head),
                 |_| None,
@@ -587,13 +760,68 @@ mod tests {
             assert_eq!(observation.state, expected, "{check_pages} {mergeable}");
             assert_eq!(observation.head_sha.as_deref(), Some(OLD));
             match expected {
-                CiState::Conflict => assert!(observation.summary.contains("next: rebase")),
+                CiState::Conflict => assert!(observation.summary.contains("next: merge the base into the branch; never rebase pushed history")),
                 CiState::Pending => assert!(observation.summary.ends_with(
                     "awaiting check registration next: check the workflow triggers or push an empty commit to start CI"
                 )),
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn conflict_probe_maps_unknown_to_pending_and_binds_the_read_head() {
+        for (mergeability, expected) in [
+            ("CONFLICTING", ConflictState::Conflicting),
+            ("MERGEABLE", ConflictState::Clear),
+            ("UNKNOWN", ConflictState::Pending),
+        ] {
+            let reads = RefCell::new(Vec::new());
+            let read = |args: &[&str]| {
+                reads.borrow_mut().push(args.join(" "));
+                let value = if args
+                    .ends_with(&["--json", "headRefOid,headRepository,headRepositoryOwner"])
+                {
+                    pull(OLD)
+                } else if args.ends_with(&["--json", "mergeable"]) {
+                    json!({"mergeable":mergeability})
+                } else {
+                    return None;
+                };
+                serde_json::to_vec(&value).ok()
+            };
+            let observation = observe_conflict_with("123", &read);
+            assert_eq!(observation.state, expected);
+            assert_eq!(observation.head_sha.as_deref(), Some(OLD));
+            assert!(
+                !reads
+                    .borrow()
+                    .iter()
+                    .any(|call| call.contains("check-runs"))
+            );
+        }
+    }
+
+    #[test]
+    fn conflict_probe_waits_for_mergeability_on_a_moved_head() {
+        let heads = Cell::new(0);
+        let read = |args: &[&str]| {
+            let value =
+                if args.ends_with(&["--json", "headRefOid,headRepository,headRepositoryOwner"]) {
+                    let count = heads.get();
+                    heads.set(count + 1);
+                    pull(if count == 0 { OLD } else { NEW })
+                } else if args.ends_with(&["--json", "mergeable"]) {
+                    json!({"mergeable":"CONFLICTING"})
+                } else {
+                    return None;
+                };
+            serde_json::to_vec(&value).ok()
+        };
+        let moved = observe_conflict_with("123", &read);
+        assert_eq!(moved.state, ConflictState::Pending);
+        assert_eq!(moved.head_sha.as_deref(), Some(NEW));
+        assert!(moved.summary.contains(OLD) && moved.summary.contains(NEW));
     }
 
     #[test]

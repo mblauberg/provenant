@@ -267,6 +267,78 @@ fn install_roots(
     }
     Ok(roots.clone())
 }
+/// Build-port findings rendered by `check config`: the effective `build.target`
+/// layout with its source layer, and a warning when a warm slot's toolchain no
+/// longer matches the repository pin.
+fn build_port_findings(
+    home: &Path,
+    state: &Path,
+    project: &Path,
+) -> Result<Vec<Finding>, CheckError> {
+    let relative = |path: &str| {
+        let parsed = provenant_core::RelativePath::parse(path)
+            .map_err(provenant_records::PathWireError::from)?;
+        PathWire::from_relative(&parsed).map_err(CheckError::from)
+    };
+    let mut findings = Vec::new();
+    let config_path = relative("config.toml")?;
+    let Ok(ports) = PortTable::read_for(Some(project), state) else {
+        return Ok(findings);
+    };
+    let layout = ports.build.target_layout();
+    // The default needs no note: `config show` already reports its layer. A
+    // layered override does, so `check` names the source that changed keying.
+    if layout.source != Layer::Default {
+        let components: Vec<&str> = layout.value.iter().map(|key| key.as_str()).collect();
+        let description = if components.is_empty() {
+            "a single shared directory".to_owned()
+        } else {
+            components.join(", ")
+        };
+        findings.push(Finding {
+            rule: "build.target.source".into(),
+            path: config_path,
+            line: 1,
+            message: format!(
+                "build.target keys the warm Cargo target by {description} (source: {})",
+                provenant_config::port_source_layer(layout.source)
+            ),
+        });
+    }
+    let Some(pin) = provenant_run::build::rust::pinned_toolchain(project) else {
+        return Ok(findings);
+    };
+    let key = provenant_config::project_key_for(project)
+        .unwrap_or_else(|| provenant_config::project_key(project));
+    let root = provenant_run::build::paths::project_slots(home, &key);
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Ok(findings);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path().join("slot.json");
+        let Ok(Some(record)) = provenant_run::build::slots::SlotRecord::read(&path) else {
+            continue;
+        };
+        if let Some((pin, warm)) =
+            provenant_run::build::rust::toolchain_drift(&pin, record.warm_toolchain.as_deref())
+        {
+            let label = format!(
+                "Library/Caches/provenant-slots/{key}/{}/slot.json",
+                record.index
+            );
+            findings.push(Finding {
+                rule: "build.toolchain_drift".into(),
+                path: relative(&label)?,
+                line: 1,
+                message: format!(
+                    "warm build cache uses rustc {warm} but the repository pins {pin}; the pinned build starts cold until its own target is warm"
+                ),
+            });
+        }
+    }
+    Ok(findings)
+}
+
 pub fn run(
     check: Check,
     globals: &Globals,
@@ -424,6 +496,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
         Inspectable::Config(page) => {
             let mut inspection =
                 provenant_config::inspect_config(&roots, &provenant_cli::domains::SECTIONS)?;
+            let build_findings = build_port_findings(&home, roots.state.as_path(), &project)?;
+            inspection.check.count += build_findings.len();
+            inspection.check.findings.extend(build_findings);
             if let Ok(config) = provenant_cli::config_reads::show_for(&roots, "check config") {
                 for message in
                     provenant_cli::accounts::directory_findings(&config.domains.accounts, &home)
@@ -497,6 +572,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 provenant_cli::config_reads::read_for(&install_roots, "check install")
             {
                 targets.accounts = provenant_cli::accounts::homes(&config.domains.accounts);
+                targets.hook_timeout_secs = config.domains.hooks.timeout_secs;
                 targets.shared_settings =
                     crate::install::shared_settings(&config.domains.accounts, &targets.home)
                         .ok()

@@ -194,6 +194,78 @@ pub fn locate_request(
     Ok(None)
 }
 
+/// Construct the inbox operation for one persisted delivery parking transition.
+/// The caller must persist and reuse `operation_id` and the complete input on
+/// replay; the inbox binds that ID to the content and returns the same receipt.
+/// TODO(#3972-queue): attach a sealed tracker item when queue admission supplies one.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "parking records the complete delivery context"
+)]
+pub fn delivery_park(
+    session: String,
+    operation_id: OperationId,
+    work: RequestWork,
+    item: Option<&str>,
+    attempt_key: Option<&provenant_records::graph::AttemptKey>,
+    reason: provenant_records::graph::ParkReason,
+    handoff: &str,
+    evidence: &[String],
+) -> Result<InboxInput, InboxError> {
+    // The request body is the durable, bounded handoff. Refuse oversized
+    // identities or evidence rather than silently changing their meaning.
+    if work.graph.trim().is_empty()
+        || work
+            .node
+            .as_deref()
+            .is_none_or(|node| node.trim().is_empty())
+        || (work.attempt_id.is_none() && attempt_key.is_none())
+        || attempt_key.is_some_and(|key| {
+            key.graph_id != work.graph || key.node_id.trim().is_empty() || key.attempt == 0
+        })
+        || item.is_some_and(|item| item.trim().is_empty())
+    {
+        return Err(InboxError::Invalid("delivery park identity"));
+    }
+    let mut end = handoff.len().min(1024);
+    while !handoff.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = end < handoff.len();
+    let handoff = &handoff[..end];
+    let body = serde_json::json!({
+        "item": item,
+        "item_pending": item.is_none(),
+        "graph_id": work.graph,
+        "attempt_key": attempt_key,
+        "reason": reason,
+        "handoff": handoff,
+        "handoff_truncated": truncated,
+        "evidence": evidence,
+    })
+    .to_string();
+    let input = InboxInput::Ask {
+        extra: Default::default(),
+        session,
+        request: Box::new(RequestDraft {
+            extra: Default::default(),
+            supersedes: None,
+            deadline: None,
+            work: Some(work),
+            kind: RequestKind::Decision,
+            title: "Delivery parked".into(),
+            body,
+            blocking: true,
+            options: Vec::new(),
+            recommended_option_id: None,
+            proceeding_with: None,
+        }),
+        operation_id: Some(operation_id),
+    };
+    input.validate()?;
+    Ok(input)
+}
+
 /// Verified provenance for a graph attempt that is steered across hosts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphSteerContext {
@@ -226,6 +298,8 @@ pub enum InboxInput {
     Answer {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_control: Option<crate::graph::queue_control::Metadata>,
         id: HumanRequestId,
         action: AnswerAction,
         option_id: Option<String>,
@@ -260,6 +334,10 @@ pub enum InboxInput {
         attempt: AttemptId,
         text: String,
         operation_id: Option<OperationId>,
+        /// Request the session-preserving restart (the `--now` delivery mode).
+        /// Queued delivery leaves the attempt running; old peers default to it.
+        #[serde(default)]
+        now: bool,
     },
     /// Message an exact registered chair session through Fabric mail.
     ChairMessage {
@@ -327,6 +405,8 @@ impl From<InboxCursor> for String {
 pub struct InboxReceipt {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_control: Option<QueueControlReceipt>,
     pub operation_id: OperationId,
     pub request_id: HumanRequestId,
     pub revision: u64,
@@ -335,6 +415,21 @@ pub struct InboxReceipt {
     pub delivery: Option<AnswerDelivery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_coverage: Option<WorkCoverage>,
+}
+
+/// Typed receipt attached to a completed durable delivery-queue control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueControlReceipt {
+    pub action: crate::graph::queue_control::Action,
+    pub operation_id: OperationId,
+    pub graph_id: String,
+    pub target_node: Option<String>,
+    pub expected_revision: u64,
+    pub applied_revision: Option<u64>,
+    pub state: crate::graph::queue_control::Phase,
+    pub replayed: bool,
+    pub request_id: Option<HumanRequestId>,
+    pub answer_id: Option<HumanAnswerId>,
 }
 
 // Flattened into `InboxResult::Saved`: a single-pass reader keeps that chain at
@@ -351,6 +446,7 @@ provenant_records::deserialize_with_extra!(InboxReceipt {
         answer_id: Option<HumanAnswerId>,
         delivery: Option<AnswerDelivery>,
         work_coverage: Option<WorkCoverage>,
+        queue_control: Option<QueueControlReceipt>,
     }
 });
 
@@ -434,7 +530,7 @@ pub struct InboxPeerCoverage {
 pub enum InboxResult {
     Saved {
         #[serde(flatten)]
-        receipt: InboxReceipt,
+        receipt: Box<InboxReceipt>,
     },
     Item {
         #[serde(flatten)]
@@ -516,6 +612,10 @@ pub enum InboxError {
     Steer(String),
     #[error("steering has no graph continuation turn for this attempt")]
     SteerNoTurn,
+    #[error(
+        "this running attempt has no retained provider session for its route; the attempt was left running; start a new round on the same worktree with `provenant run implement --worktree WORKTREE --brief-file FILE`"
+    )]
+    SteerSessionUnavailable,
     #[error("work repository or head mismatch")]
     WorkMismatch,
     #[error(
@@ -656,6 +756,7 @@ impl InboxError {
             Self::WorkLookup(_) => "work_lookup_failed",
             Self::Steer(_) => "steer_failed",
             Self::SteerNoTurn => "steer_no_turn",
+            Self::SteerSessionUnavailable => "steer_session_unavailable",
             Self::WorkMismatch => "work_mismatch",
             Self::Store(provenant_fabric_store::Error::NotFound) => "not_found",
             Self::Store(provenant_fabric_store::Error::Busy) => "busy",
@@ -954,7 +1055,7 @@ pub struct ControlRoute {
 pub type ControlLookup<'a> =
     dyn Fn(&InboxInput, &Request<'_>) -> Result<ControlRoute, InboxError> + 'a;
 pub type SteerDelivery<'a> =
-    dyn Fn(AttemptId, &OperationId, &str, &Request<'_>) -> Result<MessageId, InboxError> + 'a;
+    dyn Fn(AttemptId, &OperationId, &str, bool, &Request<'_>) -> Result<MessageId, InboxError> + 'a;
 
 pub struct InboxService<'a> {
     store: Store,
@@ -1181,14 +1282,17 @@ impl<'a> InboxService<'a> {
         support: ControlSupport,
         request: &Request<'_>,
     ) -> Result<InboxResult, InboxError> {
-        let InboxInput::Steer { attempt, text, .. } = input else {
+        let InboxInput::Steer {
+            attempt, text, now, ..
+        } = input
+        else {
             return Err(InboxError::Invalid("control target"));
         };
         if route.launch != LaunchKind::Lane {
             return Err(InboxError::Invalid("steer continuation route"));
         }
         let message_id = self.steer_delivery.ok_or(InboxError::OwnerUnavailable)?(
-            *attempt, operation, text, request,
+            *attempt, operation, text, *now, request,
         )?;
         Ok(self.control_receipt(input, operation, route, support, Some(message_id)))
     }
@@ -1518,8 +1622,9 @@ impl<'a> InboxService<'a> {
             }
         };
         Ok(InboxResult::Saved {
-            receipt: InboxReceipt {
+            receipt: Box::new(InboxReceipt {
                 extra: Default::default(),
+                queue_control: None,
                 operation_id: operation.clone(),
                 request_id: value.id,
                 revision: value.revision,
@@ -1527,7 +1632,7 @@ impl<'a> InboxService<'a> {
                 answer_id: value.answer_id,
                 work_coverage: value.work_coverage,
                 delivery,
-            },
+            }),
         })
     }
 }

@@ -89,3 +89,71 @@ fn planned_delivery_links_resolve_to_its_exported_writer() {
     }
     assert!(continuations > 0 && head_sources > 0 && node_sources > 0);
 }
+
+#[test]
+fn an_authored_writer_id_resolves_to_its_expanded_leaf() {
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"authored-writer","nodes":[
+            {"id":"task","kind":"composite","access":"read_only",
+             "composite":{"nodes":[],"exports":[{"node":"task--fix","outputs":["branch","commit","result"]}]}},
+            {"id":"task--fix","access":"worktree_write","worktree":"/fixture/writer",
+             "write_scope":["src"],"delivery":"pr","prompt":"implement","route":{"alias":"senior"}},
+            {"id":"assurance--continue","access":"read_only","prompt":"plan",
+             "plan":{"max_nodes":4,"patterns":[{"name":"repair-slice","brief":"fix","node":{
+                 "id":"fix","access":"worktree_write","worktree":"/fixture/writer",
+                 "continues":"fix","prompt":"fix"
+             }}]}}
+        ]
+    }))
+    .unwrap();
+    composites::resolve_writer_targets(&mut document);
+    let planner = document
+        .nodes
+        .iter()
+        .find(|node| node.id == "assurance--continue")
+        .unwrap();
+    assert_eq!(
+        planner.plan.as_ref().unwrap().templates[0].node["continues"].as_str(),
+        Some("task--fix")
+    );
+}
+
+#[test]
+fn repair_loop_continues_the_authored_upstream_writer_after_expansion() {
+    let library = TemplateLibrary::bundled();
+    let resolvers = std::collections::BTreeMap::from([
+        ("review-frame".into(), vec!["false".into()]),
+        ("review-verify".into(), vec!["false".into()]),
+        ("review-synthesis".into(), vec!["false".into()]),
+        ("review-verifiers".into(), vec!["1".into()]),
+        ("review-panel".into(), vec!["correctness".into()]),
+        ("review-advice-correctness".into(), vec![String::new()]),
+    ]);
+    let assurance = Compiler { library: &library, resolvers: &resolvers }.compile(&json!({
+        "id":"assurance", "use":"review-repair", "after":["initial"],
+        "inputs":[{"node":"initial","outputs":["findings","verdict"]}],
+        "with":{"writer":"fix","worktree":"/fixture/writer","write_scope":["src"],"lenses":["correctness"],"max_repair_cycles":1}
+    })).unwrap();
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"authored-repair","nodes":[
+            {"id":"task","kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":"fix","access":"worktree_write","worktree":"/fixture/writer",
+                    "write_scope":["src"],"delivery":"pr","prompt":"implement","route":{"alias":"senior"}}],
+                "exports":[{"node":"fix","outputs":["branch","commit","result"]}]}},
+            {"id":"initial","access":"read_only","depends_on":["task"],"prompt":"review",
+                "route":{"alias":"senior"},"require_findings":true},
+            assurance
+        ]
+    })).unwrap();
+    let limits = crate::config::GraphLimits::default();
+    document.validate(&limits).unwrap();
+    let mut expanded = loops::expand(&document, &[], &limits).unwrap();
+    composites::resolve_writer_targets(&mut expanded);
+    validate_flat_plan(&expanded, &limits).unwrap();
+    let repair = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "assurance--cycles--r1--fix")
+        .unwrap();
+    assert_eq!(repair.continues.as_deref(), Some("task--fix"));
+}

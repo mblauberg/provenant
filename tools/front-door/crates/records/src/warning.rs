@@ -60,6 +60,8 @@ pub const SETTING_LAYER_IGNORED: WarningCode = WarningCode("SETTING_LAYER_IGNORE
 pub const NAME_CASE_FOLDED: WarningCode = WarningCode("NAME_CASE_FOLDED");
 /// A name matched a declared alias rather than its canonical spelling.
 pub const NAME_ALIAS_USED: WarningCode = WarningCode("NAME_ALIAS_USED");
+/// A target was found in a registered project other than the caller's.
+pub const CROSS_PROJECT_TARGET_FOUND: WarningCode = WarningCode("CROSS_PROJECT_TARGET_FOUND");
 /// The lane's branch is behind its base and will be updated.
 pub const BRANCH_BEHIND_BASE: WarningCode = WarningCode("BRANCH_BEHIND_BASE");
 /// An existing worktree was adopted although it had uncommitted changes.
@@ -179,6 +181,9 @@ pub const WRITER_FENCE_LIST_FAILED: WarningCode = WarningCode("WRITER_FENCE_LIST
 /// A settled writer attempt named a retained fence that is missing; abandon proceeds.
 pub const ABANDON_RETAINED_FENCE_MISSING: WarningCode =
     WarningCode("ABANDON_RETAINED_FENCE_MISSING");
+/// A dead lane's attributed process was found but cannot be proven enough to
+/// reap; it is named in status for the chair.
+pub const ORPHAN_PROCESS_ATTRIBUTED: WarningCode = WarningCode("ORPHAN_PROCESS_ATTRIBUTED");
 /// An abandoned lane left a stale Git worktree registration; the lane settled.
 pub const ABANDON_STALE_WORKTREE_REGISTRATION: WarningCode =
     WarningCode("ABANDON_STALE_WORKTREE_REGISTRATION");
@@ -223,6 +228,10 @@ pub const PRIMARY_POSITION_UNRECORDED: WarningCode = WarningCode("PRIMARY_POSITI
 pub const ADMISSION_RECORD_MALFORMED: WarningCode = WarningCode("ADMISSION_RECORD_MALFORMED");
 /// A steer targeted a settled lane and was handled by the sourced setting.
 pub const STEER_TARGET_SETTLED: WarningCode = WarningCode("STEER_TARGET_SETTLED");
+/// A dead attempt's undecodable record was preserved and its writer lease released.
+pub const UNREADABLE_RECORD_RELEASED: WarningCode = WarningCode("UNREADABLE_RECORD_RELEASED");
+/// A dead attempt's undecodable record still fences custody; liveness is unproved.
+pub const UNREADABLE_RECORD_HELD: WarningCode = WarningCode("UNREADABLE_RECORD_HELD");
 
 // Event-specific codes added when the warning slices named each site.
 // A violated policy rule warns under its own rule code (see policy.rs), so the
@@ -244,6 +253,7 @@ pub const PORT_DECLARATION_IGNORED: WarningCode = WarningCode("PORT_DECLARATION_
 /// An invalid verify port full-after duration fell back to the builtin.
 pub const PORT_DURATION_INVALID: WarningCode = WarningCode("PORT_DURATION_INVALID");
 /// An invalid `verify.static_checks` entry was dropped from the writer preamble.
+pub const PORT_LANE_CHECK_INVALID: WarningCode = WarningCode("PORT_LANE_CHECK_INVALID");
 pub const PORT_STATIC_CHECK_INVALID: WarningCode = WarningCode("PORT_STATIC_CHECK_INVALID");
 /// An installed agent's PATH would fall back from the trusted Rust toolchain.
 pub const AGENT_TOOLCHAIN_PATH: WarningCode = WarningCode("AGENT_TOOLCHAIN_PATH");
@@ -315,6 +325,8 @@ pub const ARGUMENT_VALUE_SUSPECT: WarningCode = WarningCode("ARGUMENT_VALUE_SUSP
 pub const PRIVATE_CHECK_DIR_UNCLEAN: WarningCode = WarningCode("PRIVATE_CHECK_DIR_UNCLEAN");
 /// A project or its roots could not be resolved for a hook.
 pub const PROJECT_UNAVAILABLE: WarningCode = WarningCode("PROJECT_UNAVAILABLE");
+/// A hook ran past its local budget and was cut short before the host timeout.
+pub const HOOK_BUDGET_OVERRUN: WarningCode = WarningCode("HOOK_BUDGET_OVERRUN");
 /// A check or local gate could not be run.
 pub const CHECK_UNAVAILABLE: WarningCode = WarningCode("CHECK_UNAVAILABLE");
 /// Import pins could not be collected for a project.

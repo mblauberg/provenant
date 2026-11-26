@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::{
     Result, TestRig, code, install_fake_claude_auth, register_account, set_claude_config_dir,
@@ -76,6 +76,19 @@ fn start_chair_session(rig: &TestRig, session: &str) -> Result {
     Ok(())
 }
 
+/// Every stored ingest row, one JSON line each, across the dated segments.
+fn stored(rig: &TestRig) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    let mut names: Vec<_> = fs::read_dir(rig.state.join("ingest"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::result::Result<_, _>>()?;
+    names.sort();
+    let mut text = String::new();
+    for name in names {
+        text.push_str(&fs::read_to_string(name)?);
+    }
+    Ok(text)
+}
+
 fn fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
     install_fake_claude_auth(&mut rig)?;
@@ -107,8 +120,8 @@ fn fixture() -> Result<TestRig> {
         format!("{history}\n"),
     )?;
     // $20 of output priced usage across the first 20 points and $30 across the
-    // next 30. Output is $20 per million tokens. Feed the public native ingest
-    // boundary so this fixture follows the current segmented store format.
+    // next 30. Output is $20 per million tokens. The chair SessionStart worker
+    // ingests this transcript into the production segmented store.
     let config_path = rig.state.join("config.toml");
     let mut config = fs::read_to_string(&config_path)?;
     config.push_str(
@@ -127,14 +140,60 @@ fn fixture() -> Result<TestRig> {
     .join("\n");
     fs::write(&session, format!("{transcript}\n"))?;
     start_chair_session(&rig, "s1")?;
-    let ingested = rig.command(&["telemetry", "ingest", "--provider", "claude", "--json"])?;
-    assert_eq!(
-        code(&ingested),
-        0,
-        "{}",
-        String::from_utf8_lossy(&ingested.stderr.bytes)
-    );
+    // Chair start queues a detached incremental ingest worker and returns.
+    // Wait for its verified rows instead of starting a second ingest against
+    // the same store, which races the child on a fast runner. This is the
+    // production path, where mileage reads usage the hook already recorded.
+    provenant_test_support::wait_for(
+        "detached chair ingest rows",
+        Duration::from_secs(30),
+        || {
+            stored(&rig)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>()
+        },
+        |rows| {
+            rows.len() >= 2
+                && rows.iter().all(|row| {
+                    row["identity"]["identity"]["state"] == "known"
+                        && row["identity"]["identity"]["account_key"] == identity_key
+                })
+        },
+    )?;
     Ok(rig)
+}
+
+/// The detached chair-start worker, not a second explicit ingest, supplies the
+/// usage that mileage prices. Without the wait this fixture races the worker
+/// for the exclusive store lock and the explicit ingest exits with code 3.
+#[test]
+fn chair_start_worker_supplies_the_usage_that_mileage_prices() -> Result {
+    let rig = fixture()?;
+    let messages = stored(&rig)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|row| row["message"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(messages, ["m1", "m2"]);
+    Ok(())
+}
+
+#[test]
+fn chair_start_ingest_is_recorded_before_mileage_reads_it() -> Result {
+    let rig = fixture()?;
+    let rows: Vec<Value> = stored(&rig)?
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    // The hook's detached worker, not a competing explicit ingest, recorded
+    // both transcript messages with the chair's verified identity.
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| {
+        row["source"] == "chair" && row["identity"]["identity"]["state"] == "known"
+    }));
+    Ok(())
 }
 
 #[test]

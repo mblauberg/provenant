@@ -1280,7 +1280,10 @@ fn delivery_receipts_record_the_destination_tips_from_the_bound_endpoint()
         .push(&fixture.writer, &fixture.request, first, "fixture")?
         .integration
         .ok_or("push recorded no integration")?;
-    assert_eq!(created.remote, "origin");
+    assert_eq!(
+        created.remote,
+        provenant_records::run::Destination::from_name("origin").expect("fixture remote")
+    );
     assert_eq!(
         created.push_url.as_deref(),
         fixture.root.join("remote.git").to_str()
@@ -1312,7 +1315,10 @@ fn delivery_receipts_record_the_destination_tips_from_the_bound_endpoint()
         second,
         Some(&crate::forge_for("origin", "main", &[])),
     )?;
-    assert_eq!(integrated.remote, "");
+    assert_eq!(
+        integrated.remote,
+        provenant_records::run::Destination::Local
+    );
     assert_eq!(integrated.push_url, None);
     assert_eq!(integrated.target, "refs/heads/integration");
     assert_eq!(integrated.previous, Some(first));

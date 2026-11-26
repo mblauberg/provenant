@@ -308,6 +308,31 @@ pub struct OutputChunk {
 }
 /// Optional lane filters: the submitting actor, and terminal lanes already seen.
 const UNSEEN_OWNED: &str = " AND (?5 IS NULL OR actor=?5) AND (?6 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?6))";
+
+fn inventory_page_sql(all: bool, newest_first: bool, has_cursor: bool) -> String {
+    let direction = if newest_first { "DESC" } else { "ASC" };
+    let bound = if newest_first && has_cursor {
+        "sequence<?2"
+    } else if newest_first {
+        "?2=0"
+    } else {
+        "sequence>?2"
+    };
+    let select = |terminal: u8| {
+        format!(
+            "SELECT sequence,id FROM attempts INDEXED BY terminal_attempts WHERE project=?1 AND refused=0 AND {bound} AND terminal={terminal}{UNSEEN_OWNED}"
+        )
+    };
+    if all {
+        format!(
+            "{} UNION ALL {} ORDER BY sequence {direction} LIMIT ?4",
+            select(0),
+            select(1)
+        )
+    } else {
+        format!("{} ORDER BY sequence {direction} LIMIT ?4", select(0))
+    }
+}
 const UNSEEN_TARGET: &str = " AND (?5 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?5))";
 #[derive(Clone, Debug)]
 pub struct LaneQuery {
@@ -338,6 +363,15 @@ enum RecordRead {
     Durable,
     Observed,
 }
+
+/// The two outcomes of a recovery read of an attempt record.
+pub(crate) enum AttemptRecordRead {
+    // Boxed to keep the enum small: AttemptRecord is large while the unreadable
+    // outcome is small (clippy::large_enum_variant).
+    Decoded(Box<AttemptRecord>),
+    Unreadable(UnreadableAttempt),
+}
+
 impl RunStore {
     /// Read only the stored prompt or result for a console search. Other
     /// artifact classes can contain credentials or provider state and are
@@ -694,6 +728,65 @@ impl RunStore {
     ) -> Result<AttemptRecord> {
         self.read_record(id, call, RecordRead::Observed)
     }
+    /// Read an attempt record for recovery. A record whose bytes no longer
+    /// decode is classified as unreadable instead of being mistaken for an
+    /// undecidable custody error: its bytes are kept with the source so the
+    /// caller can preserve them and judge the owner's liveness separately.
+    pub(crate) fn recovery_record(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecordRead> {
+        let raw: Vec<u8> = self
+            .db
+            .query_row(
+                "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                params![id.to_string(), self.context.project_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(RunError::NotFound)?;
+        match crate::db::decode_attempt(&raw) {
+            Ok(_) => self
+                .record(id, call)
+                .map(|record| AttemptRecordRead::Decoded(Box::new(record))),
+            Err(error) => {
+                let (schema_version, message) = match error {
+                    RunError::Decode(error) => {
+                        let schema_version = match error.root_cause() {
+                            provenant_records::DecodeError::Typed { schema_version, .. } => {
+                                *schema_version
+                            }
+                            provenant_records::DecodeError::UnsupportedVersion {
+                                found, ..
+                            } => Some(*found),
+                            _ => None,
+                        };
+                        (schema_version, error.to_string())
+                    }
+                    RunError::Version(version) => (
+                        Some(version as u64),
+                        format!("unsupported schema version {version}"),
+                    ),
+                    other => return Err(other),
+                };
+                Ok(AttemptRecordRead::Unreadable(UnreadableAttempt {
+                    source: UnreadableSource {
+                        attempt: id,
+                        path: self
+                            .context
+                            .state_root
+                            .as_path()
+                            .join("attempts")
+                            .join(id.to_string()),
+                        schema_version,
+                        error: message,
+                    },
+                    raw,
+                }))
+            }
+        }
+    }
     fn read_record(
         &self,
         id: AttemptId,
@@ -1024,6 +1117,18 @@ impl RunStore {
                 record.warnings.push(warning);
             }
         }
+        if let Ok(attempt) = self.attempt_dir(id, false)
+            && let Some(raw) = crate::artifacts::read_sealed_observed(
+                &attempt,
+                "orphan-warning.json",
+                RECORD_LIMIT,
+            )?
+        {
+            let warning: String = crate::db::decode(&raw)?;
+            if !record.warnings.contains(&warning) {
+                record.warnings.push(warning);
+            }
+        }
         let (checkpoint, checkpoint_readable) = match self.attempt_dir(id, false) {
             Ok(directory) => {
                 let read_checkpoint = match read {
@@ -1293,11 +1398,8 @@ impl RunStore {
         let mut rows: Vec<(i64, String)> = {
             let mut found = Vec::new();
             if query.targets.is_empty() {
-                let sql = if query.newest_first {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence DESC LIMIT ?4"
-                } else {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND sequence>?2 AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence LIMIT ?4"
-                };
+                // Merge ordered terminal partitions using the existing index.
+                let sql = inventory_page_sql(query.all, query.newest_first, query.after != 0);
                 let mut statement = self.db.prepare(&sql)?;
                 let page = statement.query_map(
                     params![project, after, query.all, fetch, owner, unseen],
@@ -1719,6 +1821,46 @@ fn usage_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_pages_use_ordered_index_scans_without_project_sort() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("schema.sql")).unwrap();
+        for all in [false, true] {
+            for newest in [false, true] {
+                for cursor in [false, true] {
+                    let sql = format!(
+                        "EXPLAIN QUERY PLAN {}",
+                        inventory_page_sql(all, newest, cursor)
+                    );
+                    let mut stmt = db.prepare(&sql).unwrap();
+                    let plan: Vec<String> = stmt
+                        .query_map(
+                            rusqlite::params![
+                                "project",
+                                if cursor { 42 } else { 0 },
+                                all,
+                                101,
+                                Option::<String>::None,
+                                Option::<i64>::None
+                            ],
+                            |row| row.get(3),
+                        )
+                        .unwrap()
+                        .map(|row| row.unwrap())
+                        .collect();
+                    assert!(
+                        !plan.iter().any(|line| line.contains("TEMP B-TREE")),
+                        "{plan:?}"
+                    );
+                    assert!(
+                        plan.iter().any(|line| line.contains("terminal_attempts")),
+                        "{plan:?}"
+                    );
+                }
+            }
+        }
+    }
 
     // Spec: docs/specs/lane-contracts.md#result-projection
     #[test]

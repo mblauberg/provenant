@@ -158,7 +158,12 @@ fn review_delivery_requires_acceptance_and_exact_head()
     assert_eq!(integration.previous, None);
     assert_eq!(integration.integrated, head);
     let endpoint = provenant_records::custody::RefEndpoint::Remote {
-        remote: integration.remote.clone(),
+        remote: integration
+            .remote
+            .remote_name()
+            .ok_or("local integration has no remote")?
+            .as_str()
+            .to_owned(),
         push_url: integration.push_url.clone().ok_or("push URL")?,
     };
     let reference = provenant_confinement::repo::GitRefName::new(&integration.target)?;
@@ -562,6 +567,10 @@ fn prepare_candidate_git(
 fn terminal_warns_and_publishes_a_cherry_pick_in_the_candidate_git()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
+    let native_index = fixture.writer.project.join(".git/worktrees/lane/index");
+    std::fs::write(fixture.writer.worktree.join("unfinished.txt"), "keep\n")?;
+    fixture.lane_git(&["add", "unfinished.txt"])?;
+    let native_index_before = std::fs::read(&native_index)?;
     std::fs::write(fixture.writer.project.join("picked.txt"), "picked\n")?;
     fixture.git(&["add", "picked.txt"])?;
     fixture.commit(&fixture.writer.project, "picked")?;
@@ -573,15 +582,32 @@ fn terminal_warns_and_publishes_a_cherry_pick_in_the_candidate_git()
         // does not set CHERRY_PICK_HEAD under --no-commit, so write the
         // resolved-but-uncommitted state the owner rule covers directly.
         std::fs::write(
-            scratch.join("git-common").join("CHERRY_PICK_HEAD"),
+            scratch
+                .join("git-common")
+                .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+                .join(provenant_core::LANE_GIT_REGISTRATION)
+                .join("CHERRY_PICK_HEAD"),
             format!("{picked}\n"),
         )?;
         Ok(())
     })?);
     let candidate = fixture.attempt_layout()?.1.join("candidate-0/git-common");
+    let registration = candidate
+        .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+        .join(provenant_core::LANE_GIT_REGISTRATION);
     assert!(
-        candidate.join("CHERRY_PICK_HEAD").is_file(),
+        registration.join("CHERRY_PICK_HEAD").is_file(),
         "the in-progress cherry-pick must be left in place"
+    );
+    assert_eq!(
+        std::fs::read(fixture.writer.worktree.join("unfinished.txt"))?,
+        b"keep\n",
+        "settlement must not converge worktree files over a registered operation"
+    );
+    assert_eq!(
+        std::fs::read(&native_index)?,
+        native_index_before,
+        "settlement must not converge the native index over a registered operation"
     );
     let tip = fixture.git_text(&["rev-parse", "refs/heads/lane"])?;
     let warnings = crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow().clone());
@@ -590,7 +616,8 @@ fn terminal_warns_and_publishes_a_cherry_pick_in_the_candidate_git()
             .iter()
             .any(|warning| warning.contains("cherry-pick")
                 && warning.contains(&tip)
-                && warning.contains("git-common")),
+                && warning.contains("worktrees")
+                && warning.contains("lane")),
         "{warnings:?}"
     );
     Ok(())
@@ -784,6 +811,32 @@ fn terminal_allows_a_detached_head_only_under_a_lane_rebase()
     })?;
     assert!(!settled);
     assert!(marker.is_dir(), "the lane rebase is left intact");
+    let warnings = crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow().clone());
+    assert!(
+        warnings.iter().any(|warning| warning.contains("rebase")),
+        "{warnings:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_allows_a_detached_head_under_the_candidate_registration_rebase()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+    let settled = fixture.terminal(|| {
+        let scratch = prepare_candidate_git(&fixture)?;
+        let marker = scratch
+            .join("git-common")
+            .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+            .join(provenant_core::LANE_GIT_REGISTRATION)
+            .join("rebase-merge");
+        std::fs::create_dir_all(&marker)?;
+        std::fs::write(marker.join("head-name"), "refs/heads/lane\n")?;
+        fixture.lane_git(&["checkout", "-q", "--detach"])?;
+        Ok(())
+    })?;
+    assert!(!settled);
     let warnings = crate::writer::GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow().clone());
     assert!(
         warnings.iter().any(|warning| warning.contains("rebase")),

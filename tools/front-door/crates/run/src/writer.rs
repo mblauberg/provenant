@@ -352,19 +352,19 @@ pub(crate) struct StopWorkPolicy<'a> {
 }
 
 /// The remote bound for stop publication wins over the launch destination: a
-/// local-integration launch deliberately records no remote, while its
-/// stop-publication binding names the real remote the stopped head must use.
-/// The launch binding is read only when the stop binding has no remote, and an
-/// empty recorded launch remote is an absence, not a corrupt name.
+/// local-integration launch has no remote, while its stop-publication binding
+/// names the real remote the stopped head must use. The launch binding is read
+/// only when the stop binding has no remote. Both destinations were typed on
+/// decode, so neither can carry an empty name.
 pub(super) fn bound_stop_remote(
     publish: Option<&crate::HostDeliveryContext>,
 ) -> Result<Option<provenant_config::RemoteName>> {
     let Some(host) = publish else {
         return Ok(None);
     };
-    match host.stop_publish_remote()? {
+    match host.stop_publish_remote() {
         Some(remote) => Ok(Some(remote)),
-        None => host.delivery_remote(),
+        None => Ok(host.delivery_remote()),
     }
 }
 
@@ -772,7 +772,7 @@ impl WriterLaunch {
         let source = crate::objects::bound_source(attempt)?
             .ok_or(RunError::Validation("clean point needs private Git state"))?;
         let index_dir = &source.refs;
-        if worktrees::incomplete_git_operation(index_dir, None)?.is_some() {
+        if crate::objects::incomplete_git_operation(&source, None)?.is_some() {
             return Ok(false);
         }
         index_dir.read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
@@ -924,8 +924,8 @@ impl WriterLaunch {
         let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
         // Never stage away conflict stages or finish an in-progress Git
         // operation on the lane's behalf. Its state stays private for recovery.
-        if let Some(operation) = worktrees::incomplete_git_operation(&source.refs, None)? {
-            return Ok(BudgetCommit::note(in_progress_note(operation.label)));
+        if let Some(operation) = crate::objects::incomplete_git_operation(&source, None)? {
+            return Ok(BudgetCommit::note(in_progress_note(operation.marker.label)));
         }
         let objects = crate::objects::prepare_budget_objects(&source.objects, repo)?;
         // Reuse stable, no-follow reading before passing the index path to Git.
@@ -1246,6 +1246,30 @@ fn lane_git_operation_warning(
         Ok(Some(operation)) => operation,
         _ => return None,
     };
+    lane_git_operation_warning_for_marker(directory, path, operation, resolve)
+}
+
+fn candidate_git_operation_warning(
+    source: &crate::objects::ObjectSource,
+    fallback_path: &Path,
+    resolve: impl FnOnce(&str) -> Result<GitOid>,
+) -> Option<String> {
+    let operation = crate::objects::incomplete_git_operation(source, None)
+        .ok()
+        .flatten()?;
+    let path = operation
+        .directory
+        .current_path()
+        .unwrap_or_else(|_| fallback_path.to_path_buf());
+    lane_git_operation_warning_for_marker(&operation.directory, &path, operation.marker, resolve)
+}
+
+fn lane_git_operation_warning_for_marker(
+    directory: &Directory,
+    path: &Path,
+    operation: worktrees::GitOperationMarker,
+    resolve: impl FnOnce(&str) -> Result<GitOid>,
+) -> Option<String> {
     let commit = (|| {
         let raw = directory.read_stable(OsStr::new("HEAD"), 1024).ok()?;
         let head = std::str::from_utf8(&raw).ok()?.trim();
@@ -3231,7 +3255,7 @@ impl WriterLaunch {
         // phase is already Publish or Record. Only a host operation that touches
         // a ref settlement moves (or settlement writing that very checkout)
         // refuses; every other operation, including the lane's own in its
-        // private Git or candidate common directory, is named and left intact
+        // private Git or candidate Git store, is named and left intact
         // while the committed tip is published.
         let repo = self.worktree.repo();
         let delivery_destination = sealed_delivery_destination(attempt)?;
@@ -3274,7 +3298,7 @@ impl WriterLaunch {
             .unwrap_or_else(|| PathBuf::from("an unknown path"));
         if let Some(source) = &source
             && let Some(warning) =
-                lane_git_operation_warning(&source.refs, &candidate_path, |reference| {
+                candidate_git_operation_warning(source, &candidate_path, |reference| {
                     crate::objects::private_tip(source, reference)
                 })
         {
@@ -3288,9 +3312,16 @@ impl WriterLaunch {
         // the rebase's head-name is this lane's branch; any other HEAD (a
         // conflicted merge on main, a random detach, an unborn HEAD) still has
         // to name the lane branch.
+        let candidate_rebase = source
+            .as_ref()
+            .map(crate::objects::rebase_operation_ref)
+            .transpose()?
+            .flatten();
         let detached_under_lane_rebase = GitOid::parse(head).is_ok()
-            && worktrees::rebase_operation_ref(repo.private_dir()).as_deref()
-                == Some(self.branch.as_str());
+            && (candidate_rebase
+                .or_else(|| worktrees::rebase_operation_ref(repo.private_dir()))
+                .as_deref()
+                == Some(self.branch.as_str()));
         if !on_lane_branch && !detached_under_lane_rebase {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
@@ -3602,7 +3633,7 @@ impl WriterLaunch {
                         let request = crate::HostDeliveryContext::destination_for_remote(
                             crate::DeliveryMode::Push,
                             branch,
-                            remote.as_str(),
+                            Some(remote.clone()),
                         )?
                         .ok_or(RunError::Validation("stop publication destination missing"))?;
                         crate::HostDeliveryContext::capture()

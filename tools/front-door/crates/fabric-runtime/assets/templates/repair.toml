@@ -26,7 +26,7 @@ doc = "Candidate lenses; the host selects those that raised findings"
 [parameters.writer]
 type = "string"
 default = ""
-doc = "Delivering writer to continue when repairing a pull request"
+doc = "Delivering writer to continue when repairing a pull request; an authored writer id resolves to its expanded node id"
 
 [parameters.integration_branch]
 type = "string"

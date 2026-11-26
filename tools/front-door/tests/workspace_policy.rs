@@ -1,5 +1,6 @@
 //! Fast manifest and source policy checks. No Cargo subprocess required.
 use std::{
+    collections::HashMap,
     error::Error,
     fs,
     path::{Path, PathBuf},
@@ -500,7 +501,260 @@ fn is_test_source(name: &str) -> bool {
 
 // Method-level bans (including direct sleep) live in clippy.toml. The remaining
 // scanners express contextual rules: Git arguments/environment, reserved OS
-// namespaces, and adapter identity comparisons; Clippy cannot model those.
+// namespaces, adapter identity comparisons and fixed waits in tests; Clippy
+// cannot model those.
+//
+// Fixed waits in tests hide ordering bugs: they pass on an idle host and flake
+// under load. This rule warns first, so existing fixtures are not broken by a
+// policy change. `PROVENANT_STRICT_TEST_WAITS=1` turns the warning into a
+// refusal once the named waits have moved to `wait_until` or an event. A scope
+// that names `disallowed_methods` is an explicit real-time boundary and is
+// exempt: the wait primitives themselves must still be allowed to sleep.
+fn fixed_wait_violations(source: &str, test_file: bool) -> Vec<String> {
+    test_scopes(source, test_file)
+        .into_iter()
+        .filter_map(|scope| {
+            let tokens = rust_tokens(scope);
+            // A crate-wide `#![allow]` is a blanket suppression, not a named
+            // boundary; it cannot exempt every test in the file.
+            let blanket = tokens.starts_with(&["#", "!", "["]);
+            if !blanket && tokens.contains(&"disallowed_methods") {
+                return None;
+            }
+            // A fixed `Duration` is a wait only when the statement also names
+            // a sleep or timeout primitive. A deadline passed to a bounded
+            // helper such as `wait_until` or `fixture_accept` is not a fixed
+            // wait: its owner decides when it expires.
+            let is_wait_statement = |index: usize| {
+                let start = (0..index)
+                    .rev()
+                    .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                    .map_or(0, |position| position + 1);
+                let end = (index..tokens.len())
+                    .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                    .unwrap_or(tokens.len());
+                tokens[start..end].iter().any(|token| {
+                    matches!(
+                        *token,
+                        "sleep" | "park_timeout" | "recv_timeout" | "wait_timeout"
+                    )
+                })
+            };
+            let mut violations = Vec::new();
+            // Track local bindings by lexical block, including aliases and reassignment.
+            // A shadowing binding replaces the outer value until its block ends.
+            let mut bindings: Vec<HashMap<&str, bool>> = vec![HashMap::new()];
+            let is_fixed = |expression: &[&str], bindings: &[HashMap<&str, bool>]| {
+                expression.windows(3).any(|window| {
+                    window[0] == "Duration"
+                        && window[1] == "::"
+                        && matches!(
+                            window[2],
+                            "from_secs" | "from_millis" | "from_micros" | "from_nanos"
+                        )
+                }) || expression.iter().any(|name| {
+                    bindings
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name))
+                        .copied()
+                        .unwrap_or(false)
+                })
+            };
+            for (index, token) in tokens.iter().enumerate() {
+                match *token {
+                    "{" => bindings.push(HashMap::new()),
+                    "}" if bindings.len() > 1 => {
+                        bindings.pop();
+                    }
+                    _ => {}
+                }
+                let declaration = *token == "let";
+                let name_index = index + 1 + usize::from(tokens.get(index + 1) == Some(&"mut"));
+                let assignment = !declaration
+                    && tokens.get(index + 1) == Some(&"=")
+                    && (index == 0 || matches!(tokens[index - 1], ";" | "{" | "}"));
+                if declaration || assignment {
+                    let name_index = if declaration { name_index } else { index };
+                    if let Some(name) = tokens.get(name_index).copied() {
+                        let end = (name_index + 1..tokens.len())
+                            .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                            .unwrap_or(tokens.len());
+                        if let Some(equal) =
+                            (name_index + 1..end).find(|position| tokens[*position] == "=")
+                        {
+                            let fixed = is_fixed(&tokens[equal + 1..end], &bindings);
+                            if declaration {
+                                bindings.last_mut().expect("root scope").insert(name, fixed);
+                            } else if let Some(scope) = bindings
+                                .iter_mut()
+                                .rev()
+                                .find(|scope| scope.contains_key(name))
+                            {
+                                scope.insert(name, fixed);
+                            }
+                        }
+                    }
+                }
+                if matches!(*token, "recv_timeout" | "wait_timeout")
+                    && tokens.get(index + 1) == Some(&"(")
+                {
+                    let mut depth = 0usize;
+                    let end = (index + 1..tokens.len()).find(|position| {
+                        match tokens[*position] {
+                            "(" => depth += 1,
+                            ")" => depth = depth.saturating_sub(1),
+                            _ => {}
+                        }
+                        depth == 0
+                    });
+                    if end.is_some_and(|end| is_fixed(&tokens[index + 2..end], &bindings)) {
+                        violations.push(format!("{token}, fixed duration wait in a test"));
+                    }
+                }
+                if matches!(*token, "sleep" | "park_timeout") && tokens.get(index + 1) == Some(&"(")
+                {
+                    violations.push(format!("{token}, fixed wait in a test"));
+                }
+                if *token == "Duration"
+                    && tokens.get(index + 1) == Some(&"::")
+                    && matches!(
+                        tokens.get(index + 2).copied(),
+                        Some("from_secs" | "from_millis" | "from_micros" | "from_nanos")
+                    )
+                    && is_wait_statement(index)
+                {
+                    violations.push(format!(
+                        "Duration::{}, fixed wait in a test",
+                        tokens[index + 2]
+                    ));
+                }
+            }
+            (!violations.is_empty()).then_some(violations.join(", "))
+        })
+        .collect()
+}
+
+#[test]
+fn fixed_wait_rule_distinguishes_explicit_boundaries_from_test_waits() {
+    let direct = r#"
+        #[test]
+        fn flaky() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    "#;
+    let found = fixed_wait_violations(direct, false);
+    assert!(found.iter().any(|item| item.contains("sleep")), "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|item| item.contains("Duration::from_millis")),
+        "{found:?}"
+    );
+    let allowed = r#"
+        #[allow(clippy::disallowed_methods)]
+        #[test]
+        fn bounded() {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    "#;
+    assert!(fixed_wait_violations(allowed, true).is_empty());
+    let blanket = r#"
+        #![allow(clippy::disallowed_methods)]
+        #[test]
+        fn flaky() {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    "#;
+    assert!(!fixed_wait_violations(blanket, true).is_empty());
+    let bounded = r#"
+        #[test]
+        fn patient() {
+            wait_until("ready", deadline, observe, reached);
+            wait_for("ready", Duration::from_secs(1), observe, reached);
+        }
+    "#;
+    assert!(fixed_wait_violations(bounded, false).is_empty());
+    let production = "fn busy() { std::thread::sleep(Duration::from_millis(50)); }";
+    assert!(fixed_wait_violations(production, false).is_empty());
+}
+
+#[test]
+fn fixed_duration_bindings_to_timeouts_warn_and_refuse_in_strict_mode() {
+    let split = r#"
+        #[test]
+        fn flaky() {
+            let timeout = Duration::from_millis(50);
+            receiver.recv_timeout(timeout);
+        }
+    "#;
+    let found = fixed_wait_violations(split, false);
+    assert!(!found.is_empty(), "split fixed duration must be reported");
+    assert!(!fixed_waits_refused(&found, false));
+    assert!(fixed_waits_refused(&found, true));
+    let aliases_and_shadowing = r#"
+        #[test]
+        fn waits() {
+            let mut timeout = deadline;
+            timeout = Duration::from_secs(1);
+            let alias = timeout;
+            { let alias = deadline; receiver.recv_timeout(alias); }
+            receiver.recv_timeout(alias);
+        }
+    "#;
+    assert!(!fixed_wait_violations(aliases_and_shadowing, false).is_empty());
+    let shadowed = r#"
+        #[test]
+        fn bounded() {
+            let timeout = Duration::from_secs(1);
+            { let timeout = deadline; receiver.recv_timeout(timeout); }
+            wait_for("ready", timeout, observe, reached);
+        }
+    "#;
+    assert!(fixed_wait_violations(shadowed, false).is_empty());
+}
+
+fn fixed_waits_refused(violations: &[String], strict: bool) -> bool {
+    strict && !violations.is_empty()
+}
+
+#[test]
+#[allow(
+    clippy::print_stderr,
+    reason = "warn-first policy reports fixed waits on stderr"
+)]
+fn test_waits_warn_before_refusal() -> Result<(), Box<dyn Error>> {
+    let strict = std::env::var("PROVENANT_STRICT_TEST_WAITS").is_ok_and(|value| value == "1");
+    let mut violations = Vec::new();
+    for path in source_roots() {
+        let mut sources = Vec::new();
+        rust_sources(&path, &mut sources)?;
+        for source_path in sources {
+            let source = fs::read_to_string(&source_path)?;
+            let test_file = is_test_source(&source_path.to_string_lossy());
+            for violation in fixed_wait_violations(&source, test_file) {
+                violations.push(format!("{}: {violation}", source_path.display()));
+            }
+        }
+    }
+    if !violations.is_empty() {
+        eprintln!(
+            "fixed waits in tests (warn first; set PROVENANT_STRICT_TEST_WAITS=1 to refuse):"
+        );
+        for violation in violations.iter().take(20) {
+            eprintln!("  {violation}");
+        }
+        if violations.len() > 20 {
+            eprintln!("  ... and {} more", violations.len() - 20);
+        }
+    }
+    assert!(
+        !fixed_waits_refused(&violations, strict),
+        "fixed waits in tests under PROVENANT_STRICT_TEST_WAITS=1:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
 
 // Counts for the tokens owned by one function body (innermost function wins).
 #[derive(Default)]
@@ -984,7 +1238,15 @@ fn check_table(table: &dyn TableLike, kind: &str, workspace: &DocumentMut) -> Re
             .get("package")
             .and_then(Item::as_str)
             .unwrap_or(alias);
-        if !DIRECT.contains(&name) && !(name == "tempfile" && kind == "dev-dependencies") {
+        // tempfile stays test-only: either a dev-dependency or an optional
+        // dependency behind the fixture feature for the linked test harness.
+        let optional_tempfile = name == "tempfile"
+            && kind == "dependencies"
+            && declared.get("optional").and_then(Item::as_bool) == Some(true);
+        if !DIRECT.contains(&name)
+            && !(name == "tempfile" && kind == "dev-dependencies")
+            && !optional_tempfile
+        {
             return Err(format!(
                 "{kind}: {alias} ({name}) is not permitted by ADR 0028/R6"
             ));
@@ -1219,7 +1481,8 @@ fn transitive_crates_and_renamed_dependencies_are_rejected() -> Result<(), Box<d
 }
 
 #[test]
-fn tempfile_is_allowed_only_for_dev_dependencies() -> Result<(), Box<dyn Error>> {
+fn tempfile_stays_test_only_in_dev_and_optional_fixture_dependencies() -> Result<(), Box<dyn Error>>
+{
     let workspace: DocumentMut = "[workspace.dependencies]\ntempfile = '3'".parse()?;
     for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
         for declaration in [
@@ -1230,10 +1493,19 @@ fn tempfile_is_allowed_only_for_dev_dependencies() -> Result<(), Box<dyn Error>>
             let manifest: DocumentMut = format!("[{kind}]\n{declaration}").parse()?;
             assert_eq!(
                 check_dependencies(manifest.as_table(), &workspace).is_ok(),
-                kind == "dev-dependencies"
+                kind == "dev-dependencies",
+                "[{kind}] {declaration}"
             );
         }
     }
+    // #3486 links the fixture-gated worktree harness from the library, so
+    // tempfile is also an optional regular dependency there.
+    let manifest: DocumentMut =
+        "[dependencies]\ntempfile = { workspace = true, optional = true }".parse()?;
+    assert!(check_dependencies(manifest.as_table(), &workspace).is_ok());
+    let manifest: DocumentMut =
+        "[build-dependencies]\ntempfile = { workspace = true, optional = true }".parse()?;
+    assert!(check_dependencies(manifest.as_table(), &workspace).is_err());
     Ok(())
 }
 
@@ -1687,6 +1959,9 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "console sessions",
         "console tree",
         "disk report",
+        // #4028 adds a real top-level doctor beside `hosts doctor`; the unit
+        // string is part of the persisted verb set, so declare the new spelling.
+        "doctor",
         "edit",
         "events",
         "fabric claim acquire",
@@ -1859,13 +2134,16 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/records/src/run.rs", 4500),
         ("crates/redact/src/lib.rs", 2500),
         ("crates/routing/src/catalog.rs", 2500),
-        // Pinned-account offer judgement and the same-reason refusal detail (#3892).
-        ("crates/routing/src/resolve.rs", 4500),
+        // One owner for offer evidence, pinned-account judgement and the
+        // same-reason refusal detail (#3892, #3933).
+        ("crates/routing/src/resolve.rs", 4750),
         ("crates/routing/src/review.rs", 3000),
         ("crates/run/src/build_dir_gc.rs", 6250),
-        ("crates/run/src/completion.rs", 2500),
-        // Stall detection and its opt-in policy (#3903).
-        ("crates/run/src/controls.rs", 5250),
+        // Static-check launch guidance and receipt provenance (#3652).
+        ("crates/run/src/completion.rs", 2750),
+        // Stall detection and its opt-in policy (#3903); unreadable-record
+        // writer-lease reclaim under writer exclusion (#3829).
+        ("crates/run/src/controls.rs", 5500),
         ("crates/run/src/delivery.rs", 4750),
         ("crates/run/src/git_context.rs", 3000),
         // The #3941 end-to-end settlement test for trailing prose.
@@ -1882,14 +2160,21 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/workflow/src/session.rs", 3500),
         ("src/ci.rs", 2500),
         ("src/fabric/graph_execution.rs", 2750),
-        ("src/fabric/interface.rs", 4250),
+        // The #4064 reused-worktree review-base binding, typed writer-base
+        // report and node-sourced panel helpers, plus #4066's authored repair
+        // writer resolution and per-node route preview, grew this owner. The
+        // 4500 ceiling is the next 250-band above size + 100, with headroom.
+        ("src/fabric/interface.rs", 4500),
         // Peer fixture transport and writer boundary coverage (#3979).
         ("src/fabric/owner.rs", 6000),
         ("src/fabric/peer.rs", 2500),
         ("src/fabric/run_owner.rs", 3000),
         ("src/fabric/unified.rs", 4500),
         ("src/handoff.rs", 1750),
-        ("src/hooks.rs", 2750),
+        // The #4028 hook budget, overrun warning and diagnostic reader grew this
+        // owner deliberately: 2770 lines on the CI merge base. Next 250-band
+        // above size + 100, with headroom for routine growth.
+        ("src/hooks.rs", 3000),
         ("src/install.rs", 3250),
         ("src/lane_cleanup.rs", 3250),
         ("src/pr/landing/adapters.rs", 3250),
@@ -1942,6 +2227,156 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         violations.is_empty(),
         "production files grew past their line ceilings:\n{}",
         violations.join("\n")
+    );
+    Ok(())
+}
+
+/// True when the declaration at `index` is guarded by `gate` in its own
+/// attribute stack. Other attributes may be stacked above it (including a
+/// multi-line clippy allow) and function bodies indent them; neither changes
+/// which cfg governs the declaration.
+fn declaration_is_gated(lines: &[&str], index: usize, gate: &str) -> bool {
+    let mut cursor = index;
+    let mut depth = 0usize;
+    while cursor > 0 {
+        cursor -= 1;
+        let line = lines[cursor].trim();
+        if line == gate {
+            return true;
+        }
+        // Walking up, a closing bracket opens an attribute body and an
+        // opening bracket closes it; a one-line attribute nets to zero.
+        let opens = line.chars().filter(|character| *character == '[').count();
+        let closes = line.chars().filter(|character| *character == ']').count();
+        depth = depth.saturating_add(closes).saturating_sub(opens);
+        if depth > 0 || line.starts_with("#[") {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+#[test]
+fn worktree_driver_links_the_library_instead_of_including_source() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture_gate = "#[cfg(any(test, feature = \"fixture\"))]";
+    let driver = fs::read_to_string(root.join("tests/worktree_driver.rs"))?;
+    assert!(
+        !driver.contains("include!"),
+        "tests/worktree_driver.rs compiles source inline; link the library instead"
+    );
+    assert!(
+        driver.contains("use provenant::worktree_tests;"),
+        "tests/worktree_driver.rs must dispatch through the library's worktree harness"
+    );
+    for entry in fs::read_dir(root.join("tests"))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "rs") {
+            let source = fs::read_to_string(&path)?;
+            assert!(
+                !source.contains("include!(\"../src/"),
+                "{} compiles crate source inline; link the library instead",
+                path.display()
+            );
+        }
+    }
+    let lib = fs::read_to_string(root.join("src/lib.rs"))?;
+    let lib_lines = lib.lines().collect::<Vec<_>>();
+    let worktree_module = lib_lines
+        .iter()
+        .position(|line| line.trim() == "pub mod worktree_tests;");
+    assert!(
+        worktree_module.is_some_and(|index| declaration_is_gated(&lib_lines, index, fixture_gate)),
+        "worktree_tests must stay fixture-gated so native worker observations never reach release builds"
+    );
+    let manifest = fs::read_to_string(root.join("Cargo.toml"))?;
+    let document = manifest.parse::<DocumentMut>()?;
+    let target = document["test"]
+        .as_array_of_tables()
+        .ok_or("Cargo.toml has no [[test]] targets")?
+        .iter()
+        .find(|table| table["name"].as_str() == Some("worktrees"))
+        .ok_or("Cargo.toml has no worktrees test target")?;
+    let required = target["required-features"]
+        .as_array()
+        .ok_or("worktrees target has no required-features")?
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        required.as_slice(),
+        &["fixture"],
+        "worktrees must build the fixture-gated library"
+    );
+    Ok(())
+}
+
+#[test]
+fn linked_harness_keeps_its_native_observation_seams_under_fixture() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture_gate = "#[cfg(any(test, feature = \"fixture\"))]";
+    let production_gate = "#[cfg(not(any(test, feature = \"fixture\")))]";
+
+    let gc = fs::read_to_string(root.join("src/fabric/gc_cleanup.rs"))?;
+    let gc_lines = gc.lines().collect::<Vec<_>>();
+    assert!(
+        gc_lines.windows(2).any(|pair| {
+            pair[0].trim() == fixture_gate && pair[1].trim_start() == "thread_local! {"
+        }),
+        "SPAWNED must exist in fixture builds so the harness can inject collection failures"
+    );
+    let spawned = gc_lines.iter().position(|line| {
+        line.trim_start()
+            .starts_with("return SPAWNED.with_borrow_mut")
+    });
+    assert!(
+        spawned.is_some_and(|index| declaration_is_gated(&gc_lines, index, fixture_gate)),
+        "detached collection must record its request in the fixture-linked library"
+    );
+    assert!(
+        gc_lines
+            .windows(2)
+            .any(|pair| pair[0].trim() == production_gate && pair[1].trim() == "{"),
+        "real detached collection must stay disabled whenever the harness is linked"
+    );
+
+    let land = fs::read_to_string(root.join("src/pr/land.rs"))?;
+    let land_lines = land.lines().collect::<Vec<_>>();
+    let delete = land_lines
+        .iter()
+        .position(|line| line.trim() == "pub(crate) fn delete_after_check(");
+    assert!(
+        delete.is_some_and(|index| declaration_is_gated(&land_lines, index, fixture_gate)),
+        "delete_after_check must compile into the fixture-linked library"
+    );
+    Ok(())
+}
+
+#[test]
+fn linked_harness_receives_the_production_binary_from_its_driver() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let driver = fs::read_to_string(root.join("tests/worktree_driver.rs"))?;
+    assert!(
+        driver.contains("option_env!(\"CARGO_BIN_EXE_provenant\")")
+            && driver.contains("worktree_tests::main("),
+        "the linked driver must pass Cargo's production binary path to the harness"
+    );
+    let harness = fs::read_to_string(root.join("src/worktree_tests.rs"))?;
+    assert!(
+        harness.contains("set_production_binary(production_binary)"),
+        "the harness entry must install the supplied path before dispatch"
+    );
+    let support = fs::read_to_string(root.join("tests/support/mod.rs"))?;
+    assert!(
+        support.contains("pub fn production_binary()") && support.contains("OnceLock<PathBuf>"),
+        "fixtures must read the explicit path before Cargo's integration-only default"
+    );
+    let compose = fs::read_to_string(root.join("src/compose_tests.rs"))?;
+    assert!(
+        compose.contains("production_binary()?")
+            && !compose.contains("option_env!(\"CARGO_BIN_EXE_provenant\")"),
+        "fixture-linked dispatch must use the handed-off binary path"
     );
     Ok(())
 }

@@ -1277,7 +1277,8 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             let receipt = WriterDeliveryReceipt {
                 extra: Default::default(),
                 schema_version: 1,
-                remote: "origin".into(),
+                remote: provenant_records::run::Destination::from_name("origin")
+                    .expect("fixture remote"),
                 branch: "lane".into(),
                 head: finished.head,
                 review_acceptance: None,

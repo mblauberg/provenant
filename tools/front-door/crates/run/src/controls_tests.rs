@@ -16,7 +16,10 @@ fn a_writer_lock_holder_with_a_live_settlement_owner_is_never_escalated() {
         (true, "guardian unobservable")
     );
     // Another attempt's settle worker can hold the lock after its
-    // guardian exits; an unreadable owner is not proof of absence.
+    // guardian exits; an unreadable owner is not proof of absence. This is the
+    // conservative admission question ("may someone still release it?"), not
+    // the reclaim gate: releasing an undecodable record's lease needs a
+    // positive liveness disproof, which `unreadable` recovery tests below.
     assert_eq!(
         reservation_may_release(false, Some(false), owner(Some(true))),
         (true, "guardian exited, settlement owner live")
@@ -34,6 +37,271 @@ fn a_writer_lock_holder_with_a_live_settlement_owner_is_never_escalated() {
         reservation_may_release(true, Some(false), unreachable),
         (false, "guardian exited")
     );
+}
+
+/// Spec: docs/specs/run-settlement.md#settlement — a dead attempt whose record
+/// no longer decodes holds no custody once liveness is disproved.
+#[test]
+fn an_unreadable_dead_attempt_releases_its_writer_lease() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = crate::tests::input();
+    run.request.task.writer = Some(WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
+        project: temp.path().join("checkout"),
+        worktree: temp.path().join("checkout/.worktrees/unreadable"),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let custody = context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join("unreadable");
+    std::fs::create_dir_all(&custody)?;
+    let attempt = store.attempt_dir(id, false)?;
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        provenant_os::fs::Directory::open_anchor(&custody)?,
+        RunStore::scope(&store.record(id, &call)?),
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+    // NeverSpawned with no recorded guardian: liveness is positively disproved.
+    let lease = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?;
+    drop(lease);
+    assert_eq!(store.writer_fences()?.len(), 1);
+
+    // Persisted-format drift: the row no longer decodes at schema version 2.
+    store.db.execute(
+        "UPDATE attempts SET record=?1 WHERE id=?2",
+        rusqlite::params![
+            br#"{"schema_version":2,"attempt_id":"stale"}"#.as_slice(),
+            id.to_string(),
+        ],
+    )?;
+    assert!(store.record(id, &call).is_err());
+
+    let found = store.reconcile_with_observer(
+        run.attempt_id,
+        &crate::dispatch_tests::Fake::default(),
+        &call,
+        &provenant_supervisor::census::SystemProcessObserver,
+    )?;
+    assert!(
+        matches!(
+            found.as_slice(),
+            [(found, Reconciled::UnreadableReleased { source, locks })]
+                if *found == id
+                    && source.attempt == id
+                    && source.schema_version == Some(2)
+                    && locks.contains(&custody.join("writer.lock"))
+        ),
+        "{found:?}"
+    );
+    assert!(store.writer_fences()?.is_empty());
+    let quarantine = attempt.open_verified_directory(std::ffi::OsStr::new("quarantine"))?;
+    assert!(
+        crate::artifacts::read_sealed(
+            &quarantine,
+            "unreadable-attempt-record.json",
+            TERMINAL_RECORD_LIMIT
+        )?
+        .is_some()
+    );
+    Ok(())
+}
+
+/// Spec: docs/specs/run-settlement.md#settlement — completed supervisor exit
+/// evidence proves a started attempt quiescent on the same boot under exclusion.
+#[test]
+fn a_started_same_boot_attempt_releases_only_after_exit_cleanup_completes() -> TestResult {
+    use provenant_supervisor::census::{
+        Census, ProcessIdentity, ProcessObservation, ProcessObserver,
+    };
+
+    const BOOT: &str = "fixture-recorded-boot-v1";
+
+    struct DeadSameBoot;
+    impl ProcessObserver for DeadSameBoot {
+        fn boot_identity(
+            &self,
+        ) -> std::result::Result<String, provenant_supervisor::census::CensusError> {
+            Ok(BOOT.into())
+        }
+        fn observe(&self, _: i64) -> ProcessObservation {
+            ProcessObservation::Absent
+        }
+        fn census(
+            &self,
+            max_entries: usize,
+        ) -> std::result::Result<Census, provenant_supervisor::census::CensusError> {
+            Census::from_observations([], [], [], true, false, max_entries)
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = crate::tests::input();
+    run.request.task.writer = Some(WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
+        project: temp.path().join("checkout"),
+        worktree: temp.path().join("checkout/.worktrees/started-unreadable"),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let scope = RunStore::scope(&store.record(id, &call)?);
+    let custody_dir = context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join("started-unreadable");
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&custody_dir)?;
+    let attempt = store.attempt_dir(id, false)?;
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        provenant_os::fs::Directory::open_anchor(&custody_dir)?,
+        scope,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+    let mut lease = lease;
+    let guardian = ProcessIdentity {
+        boot: BOOT.into(),
+        pid: 910_001,
+        native_start: 1,
+        group_id: 910_001,
+        session_id: 910_001,
+    };
+    let provider = ProcessIdentity {
+        boot: BOOT.into(),
+        pid: 910_002,
+        native_start: 2,
+        group_id: 910_002,
+        session_id: 910_001,
+    };
+    provenant_supervisor::fixture::record_spawned_provider(
+        &mut lease,
+        &attempt,
+        guardian.clone(),
+        provider.clone(),
+    )?;
+    let observation = serde_json::json!({
+        "schema_version": 1,
+        "scope": scope,
+        "guardian": guardian,
+        "provider": provider,
+        "descendants": [],
+        "census_complete": true,
+        "publication_pending": false,
+    });
+    crate::artifacts::seal(
+        &attempt,
+        "process.json",
+        &serde_json::to_vec(&observation)?,
+        RECORD_LIMIT,
+    )?;
+    drop(lease);
+    assert_eq!(store.writer_fences()?.len(), 1);
+
+    store.db.execute(
+        "UPDATE attempts SET record=?1 WHERE id=?2",
+        rusqlite::params![
+            br#"{"schema_version":2,"attempt_id":"stale"}"#.as_slice(),
+            id.to_string(),
+        ],
+    )?;
+    assert!(store.record(id, &call).is_err());
+
+    let seal_exit = |exit: &provenant_supervisor::custody::ExitObservation| -> TestResult {
+        let mut value = serde_json::to_value(exit)?;
+        let object = value.as_object_mut().ok_or("exit fixture")?;
+        object.remove("publication");
+        object.insert("schema_version".into(), 1.into());
+        crate::artifacts::replace(
+            &attempt,
+            "process-exit.json",
+            &serde_json::to_vec(&value)?,
+            RECORD_LIMIT,
+        )?;
+        Ok(())
+    };
+    let observer = DeadSameBoot;
+    let mut exit = crate::tests::exit();
+    exit.scope = scope;
+    exit.unresolved_cleanup = true;
+    exit.settlement_evidence = provenant_supervisor::custody::SettlementEvidence::Unresolved;
+    seal_exit(&exit)?;
+    let pending = store.reconcile_with_observer(
+        id,
+        &crate::dispatch_tests::Fake::default(),
+        &call,
+        &observer,
+    )?;
+    assert!(matches!(
+        pending.as_slice(),
+        [(_, Reconciled::Uncertain { .. })]
+    ));
+    assert_eq!(store.writer_fences()?.len(), 1);
+
+    exit.unresolved_cleanup = false;
+    exit.settlement_evidence =
+        provenant_supervisor::custody::SettlementEvidence::DarwinCensusAndCustodyLease;
+    seal_exit(&exit)?;
+    let found = store.reconcile_with_observer(
+        id,
+        &crate::dispatch_tests::Fake::default(),
+        &call,
+        &observer,
+    )?;
+    assert!(
+        matches!(
+            found.as_slice(),
+            [(found, Reconciled::UnreadableReleased { source, locks })]
+                if *found == id
+                    && source.attempt == id
+                    && source.schema_version == Some(2)
+                    && locks.contains(&custody_dir.join("writer.lock"))
+        ),
+        "{found:?}"
+    );
+    assert!(store.writer_fences()?.is_empty());
+    Ok(())
 }
 
 #[test]
@@ -1922,6 +2190,100 @@ fn a_steer_to_a_running_lane_queues_the_turn_without_stopping_the_attempt() -> T
         let intents = store.steer_intent(id, &call)?;
         assert_eq!(intents.len(), 1);
         assert_eq!(intents[0].text, text);
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+// Invariant: `--now` requests a Steered stop only once a durable session
+// exists; the queued default never interrupts, in either session state.
+#[test]
+fn steer_now_interrupts_only_with_a_durable_session() -> TestResult {
+    use provenant_supervisor::census::ProcessObservation;
+
+    for with_session in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let route = running
+            .applied_route
+            .as_ref()
+            .ok_or("applied route")?
+            .clone();
+
+        if with_session {
+            let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+                ProcessObservation::Present(fact) if !fact.zombie => {
+                    provenant_os::capture::CaptureSourceIdentity {
+                        attempt: id.to_string(),
+                        generation: RunStore::scope(&running).generation,
+                        boot: fact.identity.boot,
+                        pid: fact.identity.pid,
+                        native_start: fact.identity.native_start,
+                    }
+                }
+                observation => {
+                    return Err(
+                        format!("test process identity unavailable: {observation:?}").into(),
+                    );
+                }
+            };
+            assert!(store.record_provider_session_ready(
+                id,
+                &route,
+                "fixture-session",
+                &source,
+                &call
+            )?);
+            assert!(store.steer_session_available(id, &call)?);
+        } else {
+            assert!(!store.steer_session_available(id, &call)?);
+        }
+
+        // The default still queues without a stop even when a session is live.
+        let queued = OperationId::parse(&format!("steer-queued-{with_session}"))?;
+        assert!(matches!(
+            store.steer(id, queued, "next turn", &call)?,
+            SteerReceipt::Queued { .. }
+        ));
+        let attempt = store.attempt_dir(id, false)?;
+        let scope = RunStore::scope(&store.record(id, &call)?);
+        assert!(matches!(
+            custody::read_stop_intent(&attempt, scope)?,
+            custody::StopIntentState::Absent
+        ));
+
+        let now = OperationId::parse(&format!("steer-now-{with_session}"))?;
+        assert!(matches!(
+            store.steer_now(id, now, "interrupt and resume", &call)?,
+            SteerReceipt::Queued { .. }
+        ));
+        match custody::read_stop_intent(&attempt, scope)? {
+            custody::StopIntentState::Requested(intent) if with_session => {
+                assert_eq!(intent.reason, StopReason::Steered);
+            }
+            custody::StopIntentState::Absent if !with_session => {}
+            other => return Err(format!("unexpected stop intent: {other:?}").into()),
+        }
+        assert!(
+            matches!(store.record(id, &call)?.state, AttemptState::Running { .. }),
+            "the interrupt is a request; settlement owns the transition"
+        );
     }
     Ok(())
 }

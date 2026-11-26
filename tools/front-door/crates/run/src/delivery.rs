@@ -20,8 +20,16 @@ use std::{
     time::Duration,
 };
 
+mod attempt;
 /// An advisory that keeps delivery usable rather than refusing it.
 /// Spec: docs/specs/cli.md#warnings-are-typed-values
+mod origin_refresh;
+pub(crate) use attempt::deliver_once;
+
+#[cfg(test)]
+pub(super) use origin_refresh::coalesced_origin_refresh_with_budget;
+pub(super) use origin_refresh::{OriginRefreshRequest, coalesced_origin_refresh};
+
 fn delivery_advisory(message: impl Into<String>) {
     use provenant_records::warning::{DELIVERY_REFRESH_FAILED, Warning, warn};
     warn(Warning::new(DELIVERY_REFRESH_FAILED, message.into()));
@@ -230,7 +238,9 @@ pub(crate) fn recovery_refused(error: &RunError) -> bool {
     )
 }
 
-/// The destination the host bound before the lane ran.
+/// The destination the host bound before the lane ran. The destination is
+/// typed: a binding written before `Destination` existed that carries an empty
+/// remote fails strict decode rather than being silently read as local.
 #[derive(Serialize, Deserialize)]
 struct LaunchBinding {
     #[serde(flatten)]
@@ -275,6 +285,30 @@ struct StopPublishHost {
     lane_roots: Vec<PathBuf>,
     #[serde(skip)]
     lane_path: Option<FilteredLanePath>,
+}
+
+/// Exact host receipt for one graph PR publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphPublicationReceipt {
+    pub branch: String,
+    pub head: GitOid,
+    pub pull_request: String,
+}
+
+/// Authenticated target details for updating an adopted pull request in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphAdoptionTarget<'a> {
+    pub repository: &'a str,
+    pub pull_request: u64,
+    pub pull_request_url: &'a str,
+    pub branch: &'a str,
+    pub base_repository: &'a str,
+    pub base_branch: &'a str,
+}
+
+struct AdoptedPullRequestObservation {
+    url: String,
+    head: GitOid,
 }
 impl PartialEq for StopPublishHost {
     fn eq(&self, other: &Self) -> bool {
@@ -582,10 +616,10 @@ impl HostDeliveryContext {
     #[cfg(test)]
     pub(crate) fn with_bound_remotes_for_test(
         mut self,
-        delivery_remote: &str,
-        stop_publish_remote: Option<&str>,
+        delivery: crate::Destination,
+        stop_publish: Option<crate::Destination>,
     ) -> Self {
-        let bound = |remote: &str, mode: crate::DeliveryMode| BoundDelivery {
+        let bound = |remote: crate::Destination, mode: crate::DeliveryMode| BoundDelivery {
             base_head: GitOid::parse(&"1".repeat(40)).expect("a valid stand-in head"),
             push_url: "https://example.invalid/lane.git".to_owned(),
             lane_branch: "lane".to_owned(),
@@ -596,22 +630,20 @@ impl HostDeliveryContext {
             destination: WriterDeliveryRequest {
                 extra: Default::default(),
                 mode,
-                remote: remote.to_owned(),
+                remote,
                 branch: "lane".to_owned(),
                 open_pr: false,
                 fast_forward_only: false,
             },
         };
-        self.bound = Some(bound(
-            delivery_remote,
-            if delivery_remote.is_empty() {
-                crate::DeliveryMode::Integrate("main".into())
-            } else {
-                crate::DeliveryMode::Push
-            },
-        ));
+        let mode = if delivery.is_local() {
+            crate::DeliveryMode::Integrate("main".into())
+        } else {
+            crate::DeliveryMode::Push
+        };
+        self.bound = Some(bound(delivery, mode));
         self.stop_publish_bound =
-            stop_publish_remote.map(|remote| bound(remote, crate::DeliveryMode::Push));
+            stop_publish.map(|remote| bound(remote, crate::DeliveryMode::Push));
         self
     }
     fn attach_stop_publish(&mut self, prepared: Self) {
@@ -786,28 +818,18 @@ impl HostDeliveryContext {
         self.forge = Some(forge.clone());
         self
     }
-    /// A validated sealed remote: a malformed record refuses, naming its value.
-    /// An empty recorded remote is the deliberate local-integration sentinel,
-    /// not a corrupt name: it maps to the same absence as an unbound remote.
-    fn sealed_remote(name: Option<&str>) -> Result<Option<provenant_config::RemoteName>> {
-        name.filter(|name| !name.is_empty())
-            .map(|name| {
-                provenant_config::RemoteName::new(name)
-                    .map_err(|_| RunError::InvalidSealedRemote(name.to_owned()))
-            })
-            .transpose()
-    }
-    /// The remote named by the sealed launch destination.
-    pub(crate) fn delivery_remote(&self) -> Result<Option<provenant_config::RemoteName>> {
-        Self::sealed_remote(self.bound.as_ref().map(|b| b.destination.remote.as_str()))
+    /// The remote named by the sealed launch destination. The destination was
+    /// parsed once on decode, so this is a pure projection of the typed binding.
+    pub(crate) fn delivery_remote(&self) -> Option<provenant_config::RemoteName> {
+        self.bound
+            .as_ref()
+            .and_then(|bound| bound.destination.remote.remote_name().cloned())
     }
     /// The remote named by the sealed stop-publication destination.
-    pub(crate) fn stop_publish_remote(&self) -> Result<Option<provenant_config::RemoteName>> {
-        Self::sealed_remote(
-            self.stop_publish_bound
-                .as_ref()
-                .map(|b| b.destination.remote.as_str()),
-        )
+    pub(crate) fn stop_publish_remote(&self) -> Option<provenant_config::RemoteName> {
+        self.stop_publish_bound
+            .as_ref()
+            .and_then(|bound| bound.destination.remote.remote_name().cloned())
     }
     /// The explicit state root, else the captured PROVENANT_STATE_DIR, else
     /// the default root under the captured HOME.
@@ -1151,6 +1173,160 @@ impl HostDeliveryContext {
         body: &str,
         forge: &provenant_config::ForgeContext,
     ) -> Result<String> {
+        self.deliver_graph_pr_inner(project, branch, base, None, None, None, body, forge)
+            .map(|receipt| receipt.pull_request)
+    }
+
+    /// Publish an exact writer head on one stable graph-owned branch. The
+    /// writer ref and expected old remote value are checked before the push;
+    /// replay reconciles an already-pushed head and its existing PR.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deliver_graph_pr_at_head(
+        self,
+        project: &Path,
+        writer_branch: &str,
+        base: GitOid,
+        expected_head: GitOid,
+        publication_identity: &str,
+        expected_remote_head: Option<GitOid>,
+        body: &str,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<GraphPublicationReceipt> {
+        self.deliver_graph_pr_inner(
+            project,
+            writer_branch,
+            base,
+            Some(expected_head),
+            Some(publication_identity),
+            expected_remote_head,
+            body,
+            forge,
+        )
+    }
+
+    /// Update the authenticated adopted PR's existing head branch. The
+    /// persisted old head is an exact remote lease; replay accepts only that
+    /// old head or the already-pushed intended head and never creates a PR.
+    pub fn update_adopted_graph_pr_at_head(
+        self,
+        project: &Path,
+        expected_head: GitOid,
+        expected_remote_head: GitOid,
+        target: &GraphAdoptionTarget<'_>,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<GraphPublicationReceipt> {
+        let branch = GitRefName::branch(target.branch)
+            .map_err(|_| RunError::Validation("adopted PR branch"))?;
+        if target.pull_request == 0
+            || target.repository.trim().is_empty()
+            || target.base_repository.trim().is_empty()
+            || !target
+                .repository
+                .eq_ignore_ascii_case(target.base_repository)
+            || target.base_branch.trim().is_empty()
+            || !target.pull_request_url.starts_with("https://")
+            || target.pull_request_url.chars().any(char::is_whitespace)
+            || target.pull_request_url.chars().any(char::is_control)
+        {
+            return Err(delivery_refusal(
+                Stage::Prepare,
+                "adopted pull request identity is invalid",
+            ));
+        }
+        let request = Self::destination(crate::DeliveryMode::Pr, branch.short_name(), forge)?
+            .ok_or(RunError::Validation("adopted PR destination"))?;
+        let writer = WriterRequest {
+            extra: Default::default(),
+            custody_project: None,
+            project: project.into(),
+            worktree: project.into(),
+        };
+        let host = self.prepare_with_fetch(&writer, &request, false)?;
+        let bound = host.bound.as_ref().ok_or_else(|| {
+            delivery_refusal(Stage::Prepare, "delivery launch binding was not sealed")
+        })?;
+        let repo = bound.pull_request_repo.as_deref().ok_or_else(|| {
+            delivery_refusal(Stage::PullRequest, "pull request repository was not bound")
+        })?;
+        let bound_repository = repo.split_once('/').map(|(_, path)| path);
+        let expected_url = format!("https://{repo}/pull/{}", target.pull_request);
+        if bound_repository.is_none_or(|path| !path.eq_ignore_ascii_case(target.repository))
+            || !expected_url.eq_ignore_ascii_case(target.pull_request_url)
+        {
+            return Err(delivery_refusal(
+                Stage::PullRequest,
+                "adopted pull request repository differs from the bound repository",
+            ));
+        }
+        host.verify_objects(&writer, expected_remote_head, Stage::Head)?;
+        host.verify_objects(&writer, expected_head, Stage::Head)?;
+        host.refuse_protected_target(&writer, branch.short_name(), Stage::Push, Some(forge))?;
+        host.refuse_remote_symbolic_target(
+            project,
+            &bound.push_url,
+            branch.short_name(),
+            Stage::Push,
+        )?;
+
+        let observed =
+            host.adopted_pull_request(project, target, &[expected_remote_head, expected_head])?;
+        if observed.head != expected_remote_head && observed.head != expected_head {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "adopted pull request moved from the persisted expected head",
+            ));
+        }
+        host.publish_graph_ref(
+            project,
+            &bound.push_url,
+            branch.short_name(),
+            expected_head,
+            Some(expected_remote_head),
+        )?;
+        let remote = host.command(
+            project,
+            "git",
+            &[
+                "ls-remote",
+                "--exit-code",
+                "--",
+                &bound.push_url,
+                &format!("refs/heads/{}", branch.short_name()),
+            ],
+            Stage::Verify,
+        )?;
+        if remote.split_whitespace().next() != Some(expected_head.to_string().as_str()) {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "adopted PR branch differs from the intended head",
+            ));
+        }
+        let observed = host.adopted_pull_request(project, target, &[expected_head])?;
+        if observed.head != expected_head {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "adopted pull request did not retain the intended head",
+            ));
+        }
+        Ok(GraphPublicationReceipt {
+            branch: branch.short_name().to_owned(),
+            head: expected_head,
+            pull_request: observed.url,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_graph_pr_inner(
+        self,
+        project: &Path,
+        branch: &str,
+        base: GitOid,
+        expected_head: Option<GitOid>,
+        publication_identity: Option<&str>,
+        expected_remote_head: Option<GitOid>,
+        body: &str,
+        forge: &provenant_config::ForgeContext,
+    ) -> Result<GraphPublicationReceipt> {
         let qualified = format!("{}/", forge.remote.value);
         let target = branch.strip_prefix(&qualified).unwrap_or(branch);
         self.check_delivery_branch_with_facts(project, target, forge)?;
@@ -1185,11 +1361,19 @@ impl HostDeliveryContext {
         };
         let head = GitOid::parse(&head)
             .map_err(|error| RunError::delivery(Stage::Head, DeliveryCause::parse(error)))?;
+        if expected_head.is_some_and(|expected| expected != head) {
+            return Err(delivery_refusal(
+                Stage::Head,
+                "graph publication source differs from the sealed hygiene head",
+            ));
+        }
         host.verify_objects(&writer, head, Stage::Head)?;
         host.verify_objects(&writer, base, Stage::Head)?;
         // A local integration ref may belong to a human. Publish a separate
         // graph-owned ref; never push that existing local branch by name.
-        let publication = if local {
+        let publication = if let Some(identity) = publication_identity {
+            Some(host.graph_publication_branch_for(project, identity)?)
+        } else if local {
             Some(host.graph_publication_branch(project, head)?)
         } else {
             None
@@ -1197,7 +1381,9 @@ impl HostDeliveryContext {
         let branch = publication.as_deref().unwrap_or(branch);
         host.refuse_protected_target(&writer, branch, Stage::Push, Some(forge))?;
         let reference = format!("refs/heads/{branch}");
-        if local {
+        if publication_identity.is_some() {
+            host.publish_graph_ref(project, &bound.push_url, branch, head, expected_remote_head)?;
+        } else if local {
             host.refuse_remote_symbolic_target(project, &bound.push_url, branch, Stage::Push)?;
             host.command(
                 project,
@@ -1235,37 +1421,50 @@ impl HostDeliveryContext {
             delivery_refusal(Stage::PullRequest, "pull request repository was not bound")
         })?;
         let base_branch = host.pr_base(project, repo)?;
-        if let Some(url) = host.existing_pr(project, repo, branch, head, &base_branch)? {
-            return Ok(url);
-        }
-        let commits = host.commit_range_body(&writer, &format!("{base}..{head}"), body)?;
-        let url = host.command_with_input(
-            project,
-            "gh",
-            &[
-                "pr",
-                "create",
-                "--repo",
-                repo,
-                "--head",
-                branch,
-                "--base",
-                &base_branch,
-                "--title",
-                &format!("Graph delivery {branch}"),
-                "--body-file",
-                "-",
-            ],
-            Stage::PullRequest,
-            commits.as_bytes(),
-        )?;
+        let url = if let Some(url) = host.existing_pr(project, repo, branch, head, &base_branch)? {
+            url
+        } else {
+            let commits = host.commit_range_body(&writer, &format!("{base}..{head}"), body)?;
+            match host.command_with_input(
+                project,
+                "gh",
+                &[
+                    "pr",
+                    "create",
+                    "--repo",
+                    repo,
+                    "--head",
+                    branch,
+                    "--base",
+                    &base_branch,
+                    "--title",
+                    &format!("Graph delivery {branch}"),
+                    "--body-file",
+                    "-",
+                ],
+                Stage::PullRequest,
+                commits.as_bytes(),
+            ) {
+                Ok(url) => url,
+                Err(create_error) => {
+                    match host.existing_pr(project, repo, branch, head, &base_branch) {
+                        Ok(Some(url)) => url,
+                        Ok(None) | Err(_) => return Err(create_error),
+                    }
+                }
+            }
+        };
         if !url.starts_with("https://") || url.lines().count() != 1 {
             return Err(delivery_refusal(
                 Stage::PullRequest,
                 "gh did not return a single https pull request URL",
             ));
         }
-        Ok(url)
+        Ok(GraphPublicationReceipt {
+            branch: branch.to_owned(),
+            head,
+            pull_request: url,
+        })
     }
 
     pub(super) fn graph_publication_branch(&self, project: &Path, head: GitOid) -> Result<String> {
@@ -1339,6 +1538,130 @@ impl HostDeliveryContext {
         crate::artifacts::seal(&directory, &marker, branch.as_bytes(), crate::RECORD_LIMIT)?;
         Ok(branch)
     }
+
+    pub(super) fn graph_publication_branch_for(
+        &self,
+        project: &Path,
+        identity: &str,
+    ) -> Result<String> {
+        use provenant_core::{CancelToken, Clock, WaitBudget};
+        use provenant_os::{clock::SystemClock, fs::LockMode};
+        use sha2::{Digest, Sha256};
+
+        if identity.trim().is_empty() {
+            return Err(delivery_refusal(
+                Stage::Prepare,
+                "stable graph publication identity is empty",
+            ));
+        }
+        let common = self.common_git_dir(project, Stage::Prepare)?;
+        let directory = Directory::open_anchor(&common)?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let _lock = directory.lock(
+            OsStr::new("provenant-graph-publication.lock"),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 60)
+                .map_err(|error| RunError::delivery(Stage::Prepare, DeliveryCause::parse(error)))?,
+            &cancel,
+            &clock,
+        )?;
+        let digest = provenant_core::hex(&Sha256::digest(identity.as_bytes()));
+        let branch = format!("provenant/graph/{digest}");
+        let marker = format!("provenant-graph-owner-{digest}.json");
+        if let Some(raw) = crate::artifacts::read_sealed(&directory, &marker, crate::RECORD_LIMIT)?
+            && raw != identity.as_bytes()
+        {
+            return Err(delivery_refusal(
+                Stage::Prepare,
+                "stable graph publication identity marker differs",
+            ));
+        }
+        crate::artifacts::seal(
+            &directory,
+            &marker,
+            identity.as_bytes(),
+            crate::RECORD_LIMIT,
+        )?;
+        Ok(branch)
+    }
+
+    fn publish_graph_ref(
+        &self,
+        project: &Path,
+        push_url: &str,
+        branch: &str,
+        head: GitOid,
+        expected_remote_head: Option<GitOid>,
+    ) -> Result<()> {
+        let stage = Stage::Push;
+        self.refuse_remote_symbolic_target(project, push_url, branch, stage)?;
+        let reference = format!("refs/heads/{branch}");
+        let read_remote = || -> Result<Option<GitOid>> {
+            let raw = self.command(
+                project,
+                "git",
+                &["ls-remote", "--", push_url, &reference],
+                Stage::Verify,
+            )?;
+            let mut refs = raw.lines().filter(|line| !line.trim().is_empty());
+            let Some(line) = refs.next() else {
+                return Ok(None);
+            };
+            if refs.next().is_some() {
+                return Err(delivery_refusal(
+                    Stage::Verify,
+                    "graph publication ref resolved to multiple remote values",
+                ));
+            }
+            let oid = line
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| delivery_refusal(Stage::Verify, "remote ref has no object id"))?;
+            GitOid::parse(oid)
+                .map(Some)
+                .map_err(|error| RunError::delivery(Stage::Verify, DeliveryCause::parse(error)))
+        };
+
+        let current = read_remote()?;
+        if current == Some(head) {
+            return Ok(());
+        }
+        if current != expected_remote_head {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "graph publication ref differs from the persisted expected remote head",
+            ));
+        }
+        let expected = expected_remote_head.map_or_else(String::new, |oid| oid.to_string());
+        let push = self.command(
+            project,
+            "git",
+            &[
+                "push",
+                "--no-follow-tags",
+                "--recurse-submodules=no",
+                &format!("--force-with-lease={reference}:{expected}"),
+                "--",
+                push_url,
+                &format!("{head}:{reference}"),
+            ],
+            stage,
+        );
+        if let Err(error) = push {
+            if read_remote()? == Some(head) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        if read_remote()? != Some(head) {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "verified graph publication ref differs from the intended head",
+            ));
+        }
+        Ok(())
+    }
     /// Resolve the concise mode into the existing explicit destination contract.
     /// Integration names are local unless qualified as `<remote>/<branch>`.
     pub fn destination(
@@ -1346,33 +1669,47 @@ impl HostDeliveryContext {
         branch: &str,
         forge: &provenant_config::ForgeContext,
     ) -> Result<Option<WriterDeliveryRequest>> {
-        Self::destination_for_remote(mode, branch, &forge.remote.value)
+        Self::destination_for_remote(mode, branch, Some(forge.remote_name()?))
     }
 
-    /// Resolve a destination from an already-known remote name. Callers that
-    /// carry the resolved remote but have no full context (a sealed request, a
+    /// Resolve a destination from an already-known remote. Callers that carry
+    /// the resolved remote but have no full context (a sealed request, a
     /// stop-publication recovery) use this instead of rebuilding a context.
-    /// An absent remote is represented by the caller, never invented here.
+    /// Absence is a typed `None`, never an empty name invented here.
     pub fn destination_for_remote(
         mode: crate::DeliveryMode,
         branch: &str,
-        remote: &str,
+        remote: Option<provenant_config::RemoteName>,
     ) -> Result<Option<WriterDeliveryRequest>> {
-        let qualified = format!("{remote}/");
-        let (remote, destination, open_pr) = match &mode {
+        let (destination, target, open_pr) = match &mode {
             crate::DeliveryMode::None => return Ok(None),
-            crate::DeliveryMode::Push => (remote.to_owned(), branch.to_owned(), false),
-            crate::DeliveryMode::Pr => (remote.to_owned(), branch.to_owned(), true),
-            crate::DeliveryMode::Integrate(target) => match target.strip_prefix(&qualified) {
-                Some(branch) => (remote.to_owned(), branch.to_owned(), false),
-                None => (String::new(), target.clone(), false),
+            crate::DeliveryMode::Integrate(integration) => {
+                if let Some(name) = &remote
+                    && let Some(unqualified) = integration.strip_prefix(&format!("{name}/"))
+                {
+                    (
+                        crate::Destination::Remote(name.clone()),
+                        unqualified.to_owned(),
+                        false,
+                    )
+                } else {
+                    (crate::Destination::Local, integration.clone(), false)
+                }
+            }
+            other => match remote {
+                Some(name) => (
+                    crate::Destination::Remote(name),
+                    branch.to_owned(),
+                    matches!(other, crate::DeliveryMode::Pr),
+                ),
+                None => (crate::Destination::Local, branch.to_owned(), false),
             },
         };
         let request = WriterDeliveryRequest {
             extra: Default::default(),
             mode,
-            remote,
-            branch: destination,
+            remote: destination,
+            branch: target,
             open_pr,
             fast_forward_only: false,
         };
@@ -1548,7 +1885,7 @@ impl HostDeliveryContext {
             self.forge = resolved;
         }
         self.refuse_protected_target(writer, &request.branch, stage, self.forge.as_ref())?;
-        if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
+        if request.remote.is_local() {
             let branch = self.command(
                 &writer.worktree,
                 "git",
@@ -1575,10 +1912,15 @@ impl HostDeliveryContext {
             });
             return Ok(self);
         }
+        // `validate` has already refused a local destination for push/PR, so
+        // the bound remote exists and carries the one validated grammar.
+        let remote_name = request.remote.remote_name().ok_or(RunError::Validation(
+            "delivery needs a configured remote name",
+        ))?;
         let urls = self.command(
             &writer.worktree,
             "git",
-            &["remote", "get-url", "--push", "--all", &request.remote],
+            &["remote", "get-url", "--push", "--all", remote_name.as_str()],
             stage,
         )?;
         let mut urls = urls.lines();
@@ -1671,7 +2013,7 @@ impl HostDeliveryContext {
                 &common,
                 &requested,
                 self.cancellation.as_ref().unwrap_or(&cancel),
-                || self.refresh_remote(writer, &[], &request.remote),
+                || self.refresh_remote(writer, &[], remote_name.as_str()),
             )?;
         }
         Ok(self)
@@ -2869,12 +3211,13 @@ impl HostDeliveryContext {
             ));
         }
         let destination = format!("refs/heads/{}", request.branch);
-        let remote = !request.remote.is_empty();
-        let resolved_remote = forge.is_some_and(|forge| request.remote == forge.remote.value);
-        let remote_name =
-            Self::sealed_remote((!request.remote.is_empty()).then_some(request.remote.as_str()))?;
-        let target = if remote {
-            let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
+        let remote_name = request.remote.remote_name();
+        let remote = remote_name.is_some();
+        let resolved_remote = forge.is_some_and(|forge| {
+            remote_name.is_some_and(|name| name.as_str() == forge.remote.value)
+        });
+        let target = if let Some(name) = remote_name {
+            let tracking = format!("refs/remotes/{}/{}", name, request.branch);
             if !resolved_remote {
                 self.refuse_symref_destination(&writer.worktree, &tracking, Stage::Fetch)?;
                 self.command(
@@ -2895,7 +3238,7 @@ impl HostDeliveryContext {
         } else {
             destination.clone()
         };
-        let expected = if let Some(remote) = remote_name.as_ref().filter(|_| resolved_remote) {
+        let expected = if let Some(remote) = remote_name.filter(|_| resolved_remote) {
             self.refresh_target_and_resolve(writer, &request.branch, stage, remote)?
         } else {
             self.command(
@@ -3064,7 +3407,7 @@ impl HostDeliveryContext {
                 ],
                 stage,
             )?;
-            let verified = if let Some(remote) = remote_name.as_ref().filter(|_| resolved_remote) {
+            let verified = if let Some(remote) = remote_name.filter(|_| resolved_remote) {
                 self.refresh_target_and_resolve(writer, &request.branch, Stage::Verify, remote)?
             } else {
                 self.refuse_symref_destination(&writer.worktree, &target, Stage::Verify)?;
@@ -3232,6 +3575,69 @@ impl HostDeliveryContext {
         }
         Ok(Some(url.to_owned()))
     }
+
+    fn adopted_pull_request(
+        &self,
+        cwd: &Path,
+        target: &GraphAdoptionTarget<'_>,
+        allowed_heads: &[GitOid],
+    ) -> Result<AdoptedPullRequestObservation> {
+        let number = target.pull_request.to_string();
+        let raw = self
+            .command(
+                cwd,
+                "gh",
+                &[
+                    "pr",
+                    "view",
+                    &number,
+                    "--repo",
+                    target.repository,
+                    "--json",
+                    "url,state,headRefName,headRefOid,headRepository,baseRefName,baseRepository",
+                ],
+                Stage::PullRequest,
+            )
+            .map_err(pr_lookup_error)?;
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|error| RunError::delivery(Stage::PullRequest, DeliveryCause::parse(error)))?;
+        let url = value["url"]
+            .as_str()
+            .filter(|url| {
+                url.starts_with("https://")
+                    && !url.chars().any(char::is_whitespace)
+                    && !url.chars().any(char::is_control)
+            })
+            .ok_or_else(|| {
+                delivery_refusal(Stage::PullRequest, "pull request has no usable URL")
+            })?;
+        let head_ref = value["headRefName"].as_str();
+        let head = value["headRefOid"]
+            .as_str()
+            .ok_or_else(|| delivery_refusal(Stage::Verify, "pull request has no head commit"))?
+            .parse::<GitOid>()
+            .map_err(|error| RunError::delivery(Stage::Verify, DeliveryCause::parse(error)))?;
+        let head_repository = value["headRepository"]["nameWithOwner"].as_str();
+        let base_repository = value["baseRepository"]["nameWithOwner"].as_str();
+        if url != target.pull_request_url
+            || value["state"].as_str() != Some("OPEN")
+            || head_ref != Some(target.branch)
+            || !allowed_heads.contains(&head)
+            || value["baseRefName"].as_str() != Some(target.base_branch)
+            || head_repository.is_none_or(|repo| !repo.eq_ignore_ascii_case(target.repository))
+            || base_repository.is_none_or(|repo| !repo.eq_ignore_ascii_case(target.base_repository))
+        {
+            return Err(delivery_refusal(
+                Stage::Verify,
+                "live pull request differs from the authenticated adoption target",
+            ));
+        }
+        Ok(AdoptedPullRequestObservation {
+            url: url.to_owned(),
+            head,
+        })
+    }
+
     pub(super) fn push(
         &self,
         writer: &WriterRequest,
@@ -3279,6 +3685,10 @@ impl HostDeliveryContext {
                 integration: Some(self.integrate(writer, request, head, forge.as_ref())?),
             });
         }
+        // Local destinations were integrated above; every push path is remote.
+        let remote_name = request.remote.remote_name().ok_or(RunError::Validation(
+            "delivery needs a configured remote name",
+        ))?;
         let bound = self.bound.as_ref().ok_or_else(|| {
             delivery_refusal(Stage::Prepare, "delivery launch binding was not sealed")
         })?;
@@ -3340,7 +3750,7 @@ impl HostDeliveryContext {
                 Stage::Push,
             )?;
         }
-        let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
+        let tracking = format!("refs/remotes/{remote_name}/{}", request.branch);
         let fetchspec = format!("+{destination}:{tracking}");
         self.refuse_symref_destination(cwd, &tracking, Stage::Fetch)?;
         self.command(
@@ -3381,9 +3791,9 @@ impl HostDeliveryContext {
             integrated: head,
         });
         for (field, value) in [
-            (BranchField::Remote, request.remote.as_str()),
+            (BranchField::Remote, remote_name.as_str()),
             (BranchField::Merge, destination.as_str()),
-            (BranchField::PushRemote, request.remote.as_str()),
+            (BranchField::PushRemote, remote_name.as_str()),
         ] {
             let context = provenant_os::git_config::ConfigContext::new(
                 "set branch upstream configuration",
@@ -3413,9 +3823,9 @@ impl HostDeliveryContext {
         // only resolve when the remote's fetch refspec covers the branch, and a
         // narrowed clone (for example main only) is legitimate.
         for (key, value) in [
-            ("remote", request.remote.as_str()),
+            ("remote", remote_name.as_str()),
             ("merge", destination.as_str()),
-            ("pushRemote", request.remote.as_str()),
+            ("pushRemote", remote_name.as_str()),
         ] {
             let config_key = format!("branch.{}.{key}", bound.lane_branch);
             let stored = provenant_os::git_config::read(
@@ -3581,135 +3991,6 @@ fn spelled(name: &str) -> String {
         }
     }
     format!("\"{name}\" ({out})")
-}
-
-pub(super) fn coalesced_origin_refresh(
-    common: &Directory,
-    requested: &OriginRefreshRequest,
-    cancel: &provenant_core::CancelToken,
-    refresh: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    use provenant_core::{Clock, WaitBudget};
-    use provenant_os::clock::SystemClock;
-    let clock = SystemClock::new();
-    coalesced_origin_refresh_with_budget(
-        common,
-        requested,
-        cancel,
-        WaitBudget::cli(clock.mono_now(), 60)
-            .map_err(|error| prepare_error(DeliveryPrepareStep::OriginRefresh, error))?,
-        refresh,
-    )
-}
-
-pub(super) fn coalesced_origin_refresh_with_budget(
-    common: &Directory,
-    requested: &OriginRefreshRequest,
-    cancel: &provenant_core::CancelToken,
-    lock_budget: provenant_core::WaitBudget,
-    refresh: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    use provenant_os::{
-        clock::SystemClock,
-        fs::{FsError, LockMode},
-    };
-    let _fetch = match common.lock(
-        OsStr::new("provenant-lane-origin-refresh.lock"),
-        LockMode::Exclusive,
-        lock_budget,
-        cancel,
-        &SystemClock::new(),
-    ) {
-        Ok(lock) => lock,
-        Err(FsError::LockTimeout { .. }) => {
-            delivery_advisory(
-                "origin refresh is still busy; launching with existing tracking refs",
-            );
-            return Ok(());
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let latest = origin_refresh_completion(common)?;
-    if latest
-        .as_ref()
-        .is_some_and(|latest| latest.boot == requested.boot && latest.micros >= requested.micros)
-    {
-        return Ok(());
-    }
-    match refresh() {
-        Ok(()) => {
-            let mut marker = OriginRefreshRequest::capture()?;
-            if let Some(latest) = latest {
-                marker.extra = latest.extra;
-            }
-            common
-                .atomic_write(
-                    OsStr::new("provenant-lane-origin-refresh"),
-                    ".origin-refresh-",
-                    &serde_json::to_vec(&marker).map_err(|error| {
-                        prepare_error(DeliveryPrepareStep::OriginRefresh, error)
-                    })?,
-                    provenant_os::fs::PublishMode::Replace,
-                )?
-                .require_durable()?;
-            Ok(())
-        }
-        // Another Git client can win a tracking-ref transaction without
-        // participating in our fetch lock. Do not record failed refreshes.
-        Err(RunError::DeliveryPrepare {
-            step: DeliveryPrepareStep::Fetch,
-            ref reason,
-            ..
-        }) if (reason.contains("cannot lock ref ")
-            && reason.contains(" is at ")
-            && reason.contains(" but expected "))
-            || (reason.contains("Unable to create ")
-                && reason.contains(".lock")
-                && reason.contains("File exists"))
-            || (reason.contains("fetching ref refs/remotes/")
-                && reason.contains(" failed: reference already exists")) =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct OriginRefreshRequest {
-    #[serde(flatten)]
-    extra: provenant_records::ExtraFields,
-    boot: String,
-    micros: u64,
-}
-impl OriginRefreshRequest {
-    pub(super) fn capture() -> Result<Self> {
-        Ok(Self {
-            extra: Default::default(),
-            boot: provenant_os::clock::boot_identity()
-                .map_err(|error| prepare_error(DeliveryPrepareStep::OriginRefresh, error))?,
-            micros: provenant_os::clock::host_monotonic_micros()
-                .map_err(|error| prepare_error(DeliveryPrepareStep::OriginRefresh, error))?,
-        })
-    }
-}
-fn origin_refresh_completion(common: &Directory) -> Result<Option<OriginRefreshRequest>> {
-    match common.read_bounded(
-        OsStr::new("provenant-lane-origin-refresh"),
-        ORIGIN_REFRESH_LIMIT,
-    ) {
-        Ok(bytes) => provenant_records::decode(
-            bytes.as_slice(),
-            provenant_records::Limits {
-                max_bytes: ORIGIN_REFRESH_LIMIT,
-                ..Default::default()
-            },
-        )
-        .map(Some)
-        .map_err(|error| prepare_error(DeliveryPrepareStep::OriginRefresh, error)),
-        Err(error) if error.is_not_found() => Ok(None),
-        Err(error) => Err(error.into()),
-    }
 }
 
 /// The typed leaf cause of a failed host command: its exit or signal and a
@@ -4080,29 +4361,25 @@ pub(crate) fn validate(request: &WriterDeliveryRequest) -> Result<()> {
             "none delivery must omit the destination",
         ));
     }
-    if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
-        GitRefName::branch(&request.branch)
-            .map_err(|_| RunError::Validation("integration branch"))?;
-        if request.open_pr {
-            return Err(RunError::Validation(
-                "integration cannot also open a lane PR",
-            ));
-        }
-        return Ok(());
-    }
-    if request.remote.is_empty()
-        || request.remote.len() > 64
-        || request.remote.starts_with('-')
-        || !request
-            .remote
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-    {
+    // The remote grammar is enforced once by `RemoteName` on decode; there is
+    // no second alphabet here. Only the destination/mode combination is local
+    // policy: a local destination belongs to integration alone.
+    if request.remote.is_local() && !matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
         return Err(RunError::Validation(
             "delivery needs a configured remote name",
         ));
     }
-    GitRefName::branch(&request.branch).map_err(|_| RunError::Validation("delivery branch"))?;
+    if request.remote.is_local() && request.open_pr {
+        return Err(RunError::Validation(
+            "integration cannot also open a lane PR",
+        ));
+    }
+    let label = if request.remote.is_local() {
+        "integration branch"
+    } else {
+        "delivery branch"
+    };
+    GitRefName::branch(&request.branch).map_err(|_| RunError::Validation(label))?;
     Ok(())
 }
 
@@ -4132,6 +4409,9 @@ impl crate::RunStore {
         let Some(push_url) = integration.push_url.as_ref() else {
             return;
         };
+        let Some(remote) = integration.remote.remote_name() else {
+            return;
+        };
         let operation_id = match self.attempt_operation(record.attempt_id, call) {
             Ok(operation) => Some(operation.operation_id),
             Err(error) => {
@@ -4152,7 +4432,7 @@ impl crate::RunStore {
             RefLedger::open(&self.writer_registry, record.project_id)?.record(
                 RefObservation {
                     endpoint: RefEndpoint::Remote {
-                        remote: integration.remote.clone(),
+                        remote: remote.as_str().to_owned(),
                         push_url: push_url.clone(),
                     },
                     reference,
@@ -4441,138 +4721,6 @@ impl crate::RunStore {
         }
         Ok(receipt)
     }
-}
-
-/// The live holder calls this only after success and confinement checks. A
-/// sealed start marker lets recovery reconcile an interrupted external effect.
-pub(crate) fn deliver_once(
-    host: &HostDeliveryContext,
-    writer: &WriterRequest,
-    request: &WriterDeliveryRequest,
-    attempt: &Directory,
-    identity: &str,
-) -> Result<WriterDeliveryReceipt> {
-    if let Some(raw) =
-        crate::artifacts::read_sealed(attempt, "delivery-cancelled.json", crate::RECORD_LIMIT)?
-    {
-        return crate::db::decode(&raw);
-    }
-    if let Some(raw) = crate::artifacts::read_sealed(attempt, "delivery.json", crate::RECORD_LIMIT)?
-    {
-        return crate::db::decode(&raw);
-    }
-    let started =
-        crate::artifacts::read_sealed(attempt, "delivery-started.json", crate::RECORD_LIMIT)?;
-    if host
-        .bound
-        .as_ref()
-        .is_none_or(|bound| bound.destination != *request)
-    {
-        return Err(RunError::Validation(
-            "delivery destination changed after launch",
-        ));
-    }
-    let mut receipt = match &started {
-        Some(raw) => crate::db::decode(raw)?,
-        None => WriterDeliveryReceipt {
-            extra: Default::default(),
-            schema_version: 1,
-            remote: request.remote.clone(),
-            branch: request.branch.clone(),
-            head: host.head(writer).ok(),
-            review_acceptance: None,
-            state: WriterDeliveryState::Failed {
-                reason: None,
-                extra: Default::default(),
-                stage: Stage::Interrupted,
-            },
-            integration: None,
-        },
-    };
-    if started.is_some()
-        && (receipt.remote != request.remote
-            || receipt.branch != request.branch
-            || receipt.head != Some(host.head(writer)?))
-    {
-        return Err(RunError::Validation(HEAD_MISMATCH));
-    }
-    if started.is_none() {
-        crate::artifacts::seal(
-            attempt,
-            "delivery-started.json",
-            &crate::db::bytes(&receipt)?,
-            crate::RECORD_LIMIT,
-        )?;
-    }
-    {
-        let unchanged = receipt
-            .head
-            .zip(host.bound.as_ref())
-            .is_some_and(|(head, bound)| head == bound.base_head);
-        receipt.state = if unchanged {
-            WriterDeliveryState::NoNewCommits {
-                extra: Default::default(),
-            }
-        } else {
-            match receipt
-                .head
-                .ok_or_else(|| delivery_refusal(Stage::Head, "delivery head was not captured"))
-                .and_then(|head| {
-                    let body = host.commit_body(writer, head, identity)?;
-                    crate::artifacts::seal(
-                        attempt,
-                        "pull-request-body.md",
-                        body.as_bytes(),
-                        crate::RESULT_LIMIT,
-                    )?;
-                    host.push(writer, request, head, &body)
-                }) {
-                Ok(published) => {
-                    receipt.integration = published.integration;
-                    WriterDeliveryState::Delivered {
-                        extra: Default::default(),
-                        pull_request: published.pull_request,
-                    }
-                }
-                Err(error)
-                    if matches!(
-                        error,
-                        RunError::Delivery {
-                            stage: Stage::Push,
-                            ..
-                        }
-                    ) && !matches!(request.mode, crate::DeliveryMode::Integrate(_))
-                        && !host
-                            .cancellation
-                            .as_ref()
-                            .is_some_and(|cancel| cancel.is_cancelled()) =>
-                {
-                    // A failed push command may have reached the remote. Leave
-                    // the start marker unresolved for a bound remote lookup.
-                    return Err(error);
-                }
-                Err(error) => failed_state(&error),
-            }
-        };
-    }
-    // Keep the start marker so recovery can reconcile an aborted remote command.
-    let name = if matches!(receipt.state, WriterDeliveryState::Failed { .. })
-        && host
-            .cancellation
-            .as_ref()
-            .is_some_and(|cancel| cancel.is_cancelled())
-    {
-        "delivery-cancelled.json"
-    } else {
-        "delivery.json"
-    };
-    crate::artifacts::seal(
-        attempt,
-        name,
-        &crate::db::bytes(&receipt)?,
-        crate::RECORD_LIMIT,
-    )?;
-    Ok(receipt)
 }
 
 #[cfg(test)]

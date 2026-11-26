@@ -36,6 +36,11 @@ pub use pr_policy::{KNOB as PR_KNOB, PrPolicy, ResolvedPrPolicy};
 mod harness;
 mod hooks;
 pub use hooks::{hook_plugin_source, lane_hook_settings, registrations as hook_registrations};
+pub mod hooks_config;
+pub use hooks_config::{
+    DEFAULT_HOOK_TIMEOUT_SECS, HOOK_BUDGET_PERCENT, SECTION as HOOKS_SECTION,
+    Settings as HookSettings, hook_budget,
+};
 mod inspection;
 mod knobs;
 mod lane_history;
@@ -63,15 +68,16 @@ pub mod ports;
 mod project_binding;
 pub use ports::{
     Adapter, BuildClean, BuildOffload, BuildOverflow, BuildPort, BuildPriority, BuildSoakPort,
-    BuildStrategyName, CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition,
-    Forge, ForgeOperation, ForgePort, ForgeResponse, GitPort, HeadersObservation, Integration,
-    LandBackend, LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend,
-    PortBackendKind, PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
-    PortCommandPublication, PortCommandReceipt, PortCommandReceiptCollectionLock,
-    PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
-    PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortTable,
-    ResolvedBuildValue, TierCommand, VerifyAffectedPort, VerifyFormat, VerifyPort, VerifySelection,
-    VerifyStaticCheck, VerifyTier, WorktreeLayoutPort, dispatch_port_backend, execute_port_command,
+    BuildStrategyName, BuildTargetKey, CommandExitCodes, DEFAULT_BUILD_TARGET_KEYS,
+    DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Forge, ForgeOperation, ForgePort,
+    ForgeResponse, GitPort, HeadersObservation, Integration, LandBackend, LandPort, PORTS_CONFIG,
+    PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind, PortCommand,
+    PortCommandBackend, PortCommandDisposition, PortCommandExecution, PortCommandPublication,
+    PortCommandReceipt, PortCommandReceiptCollectionLock, PortCommandReceiptEntry,
+    PortCommandReceiptInventory, PortCommandReceiptProof, PortError, PortEvidenceError,
+    PortExecution, PortReceiptIssue, PortReceiptLifetime, PortTable, ResolvedBuildValue,
+    TierCommand, VerifyAffectedPort, VerifyFormat, VerifyPort, VerifySelection, VerifyStaticCheck,
+    VerifyTier, WorktreeLayoutPort, dispatch_port_backend, execute_port_command,
     execute_port_command_with_input, infer_verify_base, land_backend, port_command_environment,
     port_command_receipt_proof, port_command_receipts, port_declaration_warnings,
     port_source_layer, project_key, project_key_for, record_port_command,

@@ -801,6 +801,7 @@ fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error
     )?;
     let RunResult::Status {
         mut attempt,
+        presence,
         lane_waits,
         extra,
     } = status
@@ -809,6 +810,7 @@ fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error
     };
     let status = serde_json::to_value(RunResult::Status {
         extra,
+        presence,
         lane_waits,
         attempt: attempt.clone(),
     })?;

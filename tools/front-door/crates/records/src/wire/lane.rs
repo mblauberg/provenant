@@ -2,7 +2,7 @@
 use super::schema::{
     any, array, boolean, choices, integer, nullable, number, object, open_object, string, unsigned,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 // A field and its schema are declared together so generation cannot drift.
@@ -257,7 +257,7 @@ pub struct LaneProjectionFacts {
 }
 
 /// Current native liveness observation for a durable attempt state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LanePresence {
     Live,
@@ -330,16 +330,31 @@ impl LaneRow {
             }
             .to_owned();
             if presence != LanePresence::Live {
+                // A peer-owned graph lives in the peer's state root, so its key
+                // is a target `reconcile` resolves on that host and nowhere
+                // else. Name the host beside the target; a hint that omits it
+                // sends the reader to a NOT_FOUND in their own project.
                 let target = lane.key.to_string();
+                let peer_host = lane
+                    .peer
+                    .peer_graph
+                    .as_ref()
+                    .filter(|graph| graph.graph_id == lane.key.graph())
+                    .map(|graph| format!(" on host {}", graph.host));
+                let on_host = peer_host.as_deref().unwrap_or("");
                 terminal_reason = Some(match presence {
                     LanePresence::Unattended => format!(
-                        "the writer process is gone; run `provenant reconcile {target}` to settle the attempt before retrying"
+                        "the writer process is gone; run `provenant reconcile {target}`{on_host} to settle the attempt before retrying"
                     ),
                     LanePresence::Unknown => format!(
-                        "the writer process state cannot be verified; run `provenant reconcile {target}` to inspect recovery before retrying"
+                        "the writer process state cannot be verified; run `provenant reconcile {target}`{on_host} to inspect recovery before retrying"
                     ),
+                    // Recovery may still be pacing a retry, or it may have
+                    // stopped at the recorded failure budget. Never promise an
+                    // automatic retry here; the settlement diagnostic below
+                    // says which case holds and names the clearing command.
                     LanePresence::Settling => {
-                        "the writer exited; automatic settlement recovery is pending".to_owned()
+                        "the writer exited; settlement recovery is outstanding".to_owned()
                     }
                     LanePresence::Live => unreachable!(),
                 });

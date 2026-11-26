@@ -256,6 +256,12 @@ free-form source to the typed `stream` source, preserving every stated number.
 A malformed row is skipped so it fails only its own decode; a row already in the
 new shape is left byte-identical. No decoder accepts a retired spelling.
 
+The run store's base-14-to-15 migration (`crates/run/src/migration_14_15.sql`)
+rewrites the retired empty local destination to JSON null in an attempt's
+stored delivery receipt and its integration. It leaves named remotes and
+already-current rows alone and skips malformed JSON. The terminal update trigger
+is restored in the migration transaction.
+
 ### One sourced port table
 
 One table declares forge operations, verify, land, CI observation, worktree
@@ -395,8 +401,9 @@ Edits replace only owned values, keeping comments and order; malformed or
 symlinked configs are refused unchanged. Edited hooks are not overwritten. A
 missing container is created only as an object, so an index selector reaches an
 array the document already holds. An upgrade that retires an owned hook action
-hands its ownership to the declared replacement, so installing without
-`--hooks on` keeps the managed set.
+hands its ownership to that action's declared replacement alone, so installing
+without `--hooks on` keeps answer delivery; a managed leaf the user edited or
+removed is never re-added by the transfer.
 - Why: a harness config holds the user's other tools and secrets.
 - Owner: `crates/config/src/splice.rs`, `crates/config/src/hooks.rs`
 

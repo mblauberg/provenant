@@ -173,6 +173,11 @@ pub struct WorkContext {
     /// Graph retry lineage remains independent of run-policy `retry_of`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer_predecessor: Option<AttemptId>,
+    /// Host-stamped permission to adopt a retained writer owned by a prior
+    /// graph while running the delivery queue. The owner still verifies the
+    /// prior attempt, exact writer identity and released custody at launch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delivery_queue_writer_adoption: bool,
 }
 impl WorkContext {
     /// A new request names only the fixed fields; stored records keep unknown ones for forward compatibility.
@@ -180,6 +185,7 @@ impl WorkContext {
         self.extra.is_empty()
             && self.valid()
             && (!self.graph_template_launch || (self.graph_id.is_some() && self.node_id.is_some()))
+            && (!self.delivery_queue_writer_adoption || self.graph_template_launch)
     }
     pub fn valid(&self) -> bool {
         [
@@ -475,6 +481,92 @@ pub struct WriterRequest {
     pub worktree: std::path::PathBuf,
 }
 
+/// Where a delivery publishes: a named remote, or the local repository.
+///
+/// This is the one typed destination for a delivery request and its sealed
+/// binding. It is parsed once on decode with the single `RemoteName` grammar,
+/// so a name the resolver accepts is also a name delivery can use. The wire
+/// form is `null` for `Local` and a name string for `Remote`; an empty string
+/// is malformed and fails decoding rather than spelling a third, nameless
+/// destination.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Option<String>", into = "Option<String>")]
+pub enum Destination {
+    #[default]
+    Local,
+    Remote(provenant_core::RemoteName),
+}
+
+impl Destination {
+    /// A local repository destination, with no remote.
+    pub fn local() -> Self {
+        Self::Local
+    }
+
+    /// A destination named by a validated remote.
+    pub fn remote(name: provenant_core::RemoteName) -> Self {
+        Self::Remote(name)
+    }
+
+    /// Parse a destination from a remote name, refusing a malformed one.
+    pub fn from_name(name: &str) -> Result<Self, provenant_core::RemoteNameError> {
+        Ok(Self::Remote(provenant_core::RemoteName::new(name)?))
+    }
+
+    /// The bound remote, or `None` when the destination is local.
+    pub fn remote_name(&self) -> Option<&provenant_core::RemoteName> {
+        match self {
+            Self::Local => None,
+            Self::Remote(name) => Some(name),
+        }
+    }
+
+    /// The bound remote name as text, or `None` when the destination is local.
+    pub fn as_str(&self) -> Option<&str> {
+        self.remote_name().map(|name| name.as_str())
+    }
+
+    /// Whether this destination names no remote.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+}
+
+impl TryFrom<Option<String>> for Destination {
+    type Error = provenant_core::RemoteNameError;
+
+    fn try_from(value: Option<String>) -> Result<Self, Self::Error> {
+        match value {
+            None => Ok(Self::Local),
+            Some(name) => Ok(Self::Remote(provenant_core::RemoteName::new(name)?)),
+        }
+    }
+}
+
+impl From<Destination> for Option<String> {
+    fn from(destination: Destination) -> Self {
+        match destination {
+            Destination::Local => None,
+            Destination::Remote(name) => Some(name.into_string()),
+        }
+    }
+}
+
+impl From<provenant_core::RemoteName> for Destination {
+    fn from(name: provenant_core::RemoteName) -> Self {
+        Self::Remote(name)
+    }
+}
+
+impl std::fmt::Display for Destination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => f.write_str("local"),
+            Self::Remote(name) => f.write_str(name.as_str()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriterDeliveryRequest {
     #[serde(flatten)]
@@ -482,8 +574,9 @@ pub struct WriterDeliveryRequest {
     /// Push is the default delivery mode; integration never checks out either head.
     #[serde(default, skip_serializing_if = "DeliveryMode::is_push")]
     pub mode: DeliveryMode,
-    /// A configured remote name, never a URL supplied by a provider.
-    pub remote: String,
+    /// The typed destination: a configured remote name, never a URL supplied
+    /// by a provider, or a local repository.
+    pub remote: Destination,
     /// Short destination branch name; the host pushes an explicit full refspec.
     pub branch: String,
     #[serde(default)]
@@ -606,12 +699,14 @@ pub struct WriterReviewAcceptance {
     pub protected_paths: Vec<PathWire>,
 }
 
+/// The receipt's destination is typed; the run-store migration rewrites
+/// legacy empty local destinations before decoding stored attempt records.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriterDeliveryReceipt {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub schema_version: u64,
-    pub remote: String,
+    pub remote: Destination,
     pub branch: String,
     pub head: Option<GitOid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -631,8 +726,8 @@ pub struct WriterDeliveryReceipt {
 pub struct WriterIntegration {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    /// The bound remote name, or empty for a ref in the local repository.
-    pub remote: String,
+    /// The bound destination: a remote name, or local for a repository ref.
+    pub remote: Destination,
     /// Credential-free identity of the bound push URL; absent for a local ref.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_url: Option<String>,
@@ -823,7 +918,13 @@ pub struct RouteRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci_scope: Option<CiScopeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_verification: Option<LaneVerificationReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_policy: Option<PrPolicyReceipt>,
+    /// The project's declared no-build checks and the layer/key that declared
+    /// them, carried on the launch receipt beside `ci_scope` and `pr_policy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_checks: Option<StaticChecksReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxModeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1141,6 +1242,23 @@ pub struct CiScopeReceipt {
     pub extra: crate::ExtraFields,
 }
 
+/// The valid project-declared checks included in a writer's launch brief.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneVerificationReceipt {
+    pub checks: Vec<LaneVerificationCheckReceipt>,
+    pub source: crate::Source,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// One tier and command from `verify.lane`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneVerificationCheckReceipt {
+    pub tier: String,
+    pub argv: Vec<String>,
+    pub scope: String,
+}
+
 /// The lane's effective pull-request policy and the layer that set it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1151,6 +1269,35 @@ pub struct PrPolicyReceipt {
     pub source: crate::Layer,
     #[serde(default)]
     pub key: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// One project-declared no-build check recorded on the launch receipt.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StaticCheckReceipt {
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub timeout_seconds: u64,
+    /// The layer and file/key that declared this check.
+    #[serde(default)]
+    pub source: crate::Layer,
+    #[serde(default)]
+    pub key: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// The no-build checks declared for a writer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StaticChecksReceipt {
+    #[serde(default)]
+    pub checks: Vec<StaticCheckReceipt>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -2266,7 +2413,7 @@ impl SettlementTerminalOutcome {
 /// One declaration owns the durable reasons and their cross-cutting policy.
 /// Generated enum, ALL and table cannot drift apart.
 macro_rules! settlement_reasons {
-    ($($(#[$meta:meta])* $reason:ident { source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
+    ($($(#[$meta:meta])* $reason:ident { code: $code:literal, source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum SettlementReason {
@@ -2275,6 +2422,14 @@ macro_rules! settlement_reasons {
 
         impl SettlementReason {
             pub const ALL: &'static [Self] = &[$(Self::$reason),+];
+
+            /// Stable snake_case code for status and advance diagnostics. It is
+            /// the same value the sealed serde wire name uses.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$reason => $code),+
+                }
+            }
 
             pub const fn rule(self) -> SettlementRule {
                 match self {
@@ -2303,35 +2458,35 @@ macro_rules! settlement_reasons {
 
 settlement_reasons! {
     /// The provider finished and reported its results.
-    Completed { source: Provider, node: Succeeded, outcome: Preserve, stop: None },
+    Completed { code: "completed", source: Provider, node: Succeeded, outcome: Preserve, stop: None },
     /// A complete handoff preceded the host token-budget stop.
-    CompletedBeforeBudget { source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
+    CompletedBeforeBudget { code: "completed_before_budget", source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
     /// The provider finished without a final handoff, so nothing was reported.
-    HandoffMissing { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
+    HandoffMissing { code: "handoff_missing", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
     /// A final handoff was present but malformed; retain its field diagnostics.
-    HandoffMalformed { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
+    HandoffMalformed { code: "handoff_malformed", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
     /// The writer exited without a final message.
-    EmptyResult { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
+    EmptyResult { code: "empty_result", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
     /// The lane declared that work remains.
-    DeclaredStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
+    DeclaredStop { code: "declared_stop", source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
     /// The provider stopped for a reason other than a finished turn.
-    ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
+    ProviderStop { code: "provider_stop", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
     /// A writer left edits it did not commit.
-    UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    UncommittedWork { code: "uncommitted_work", source: Provider, node: Failed, outcome: Uncommitted, stop: None },
     /// The bound branch stayed at base while the primary checkout moved with
     /// unaccounted work: the lane's work went to the wrong checkout (#3611).
-    StrayWork { source: Host, node: Failed, outcome: ReviewRequired, stop: None },
+    StrayWork { code: "stray_work", source: Host, node: Failed, outcome: ReviewRequired, stop: None },
     /// Refused before any process started.
-    PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
-    Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
+    PreLaunchRefusal { code: "pre_launch_refusal", source: Host, node: Failed, outcome: Preserve, stop: None },
+    Cancelled { code: "cancelled", source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
     /// The host interrupted a run to deliver its queued continuation turn.
-    Steered { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
-    Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
-    Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
+    Steered { code: "steered", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
+    Lost { code: "lost", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
+    Unsettled { code: "unsettled", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
     /// The provider reported an unclassified error.
-    Unclassified { source: Provider, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
+    Unclassified { code: "unclassified", source: Provider, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
     /// The provider ran and ended in a non-success outcome.
-    Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
+    Failed { code: "failed", source: Provider, node: Failed, outcome: Preserve, stop: None },
 }
 impl SettlementReason {
     /// Derive the reason from the complete terminal facts before any reader
@@ -3639,6 +3794,24 @@ mod tests {
                 serde_json::json!({"value":"none","source":"default","key":"lanes.ci_scope"}),
             ),
             (
+                "lane_verification",
+                serde_json::json!({
+                    "checks":[{"tier":"T1","argv":["cargo","test"],"scope":"crate tests"}],
+                    "source":{"layer":"project","origin":".provenant/ports.json#verify.lane"}
+                }),
+            ),
+            (
+                "static_checks",
+                serde_json::json!({
+                    "checks":[{
+                        "argv":["scripts/check-extra-fields"],"cwd":".","timeout_seconds":30,
+                        "source":"project","key":".provenant/ports.json#verify.static_checks",
+                        "future_nested":{"kept":true}
+                    }],
+                    "future_nested":{"kept":true}
+                }),
+            ),
+            (
                 "sandbox",
                 serde_json::json!({
                     "requested":true,"effective":true,"source":"route","warning":null
@@ -3775,6 +3948,12 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<WorkContext>(serde_json::to_value(&context)?)?,
             context
+        );
+        context.delivery_queue_writer_adoption = true;
+        assert!(context.accepted());
+        assert_eq!(
+            serde_json::to_value(&context)?["delivery_queue_writer_adoption"],
+            true
         );
         for missing in ["graph_id", "node_id"] {
             let mut value = serde_json::to_value(&context)?;

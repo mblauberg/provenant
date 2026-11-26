@@ -1,9 +1,8 @@
 mod graph_interface;
 mod graph_support;
 // The process edge composes typed owners and owns ordinary result delivery.
-// `main.rs` parses and calls `dispatch`; the worktree driver includes this
-// file and dispatches with its fixture seams. Plain comments only: `include!`
-// refuses inner attributes.
+// `main.rs` parses and calls `dispatch`; the fixture-gated worktree driver
+// links this library and dispatches with its fixture seams.
 mod admit;
 mod apps;
 mod build_cmd;
@@ -13,7 +12,7 @@ mod checks;
 mod ci;
 mod cloud;
 pub mod commands;
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 mod compose_tests;
 mod console;
 mod custody;
@@ -44,7 +43,7 @@ pub mod local_answers;
 mod overflow;
 mod port_receipt_retention;
 mod pr;
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 mod pr_land_tests;
 mod process_tree;
 mod provider_retention;
@@ -62,7 +61,12 @@ mod status_wait;
 mod stranded_work;
 mod usage;
 mod verify;
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test harness linked into the library; clippy's allow-in-tests only applies under cfg(test)"
+)]
 pub mod worktree_tests;
 mod worktrees;
 use provenant_cli::{Command, ParseOutcome};
@@ -1537,7 +1541,7 @@ pub fn dispatch(
     // Whether a status read waited: telemetry separates waits from reads.
     let status_wait = match &parsed {
         ParseOutcome::Invocation(inv) => match &inv.command {
-            Command::Status(args) if !args.session_stream => Some(false),
+            Command::Status(args) if !args.session_stream && !args.custody_stream => Some(false),
             Command::Wait(_) => Some(true),
             _ => None,
         },
@@ -1546,7 +1550,7 @@ pub fn dispatch(
     let read_only_graph = match &parsed {
         ParseOutcome::Invocation(inv) => {
             matches!(&inv.command, Command::Run(args) if args.explain)
-                || matches!(&inv.command, Command::Status(args) if args.session_stream)
+                || matches!(&inv.command, Command::Status(args) if args.session_stream || args.custody_stream)
                 || matches!(&inv.command, Command::Templates(_))
         }
         _ => false,

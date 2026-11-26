@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Extract test outcomes from nextest JUnit XML.
+
+Identities are `classname` (package) plus `name` (test), matching the
+quarantine config. A test present in more than one file fails only if any
+occurrence failed.
+"""
+import argparse
+import json
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+
+def cases(paths):
+    """Return sorted `{package, name, failed}` rows from JUnit files."""
+    found = {}
+    for path in paths:
+        for case in ET.parse(path).getroot().iter("testcase"):
+            package = case.get("classname", "")
+            name = case.get("name", "")
+            if not package or not name:
+                continue
+            failed = case.find("failure") is not None or case.find("error") is not None
+            identity = (package, name)
+            found[identity] = found.get(identity, False) or failed
+    return [
+        {"package": package, "name": name, "failed": failed}
+        for (package, name), failed in sorted(found.items())
+    ]
+
+
+def read_dir(directory):
+    """Read every `.xml` file below a directory, if it exists.
+
+    Artifacts land in one subdirectory per upload, so the walk is recursive.
+    """
+    path = Path(directory)
+    if not path.is_dir():
+        return []
+    return sorted(entry for entry in path.rglob("*.xml") if entry.is_file())
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("junit", nargs="*", type=Path, help="JUnit XML files")
+    parser.add_argument("--dir", type=Path, action="append", default=[], help="Directory of JUnit XML files")
+    parser.add_argument("--filter", action="store_true", help="Print a nextest filterset for failures")
+    args = parser.parse_args()
+    paths = list(args.junit)
+    for directory in args.dir:
+        paths.extend(read_dir(directory))
+    rows = cases(paths)
+    if args.filter:
+        print(" | ".join(
+            f"(package(={row['package']}) & test(={row['name']}))"
+            for row in rows if row["failed"]
+        ))
+    else:
+        print(json.dumps(rows))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (ET.ParseError, OSError) as error:
+        print(f"junit outcomes: {error}", file=sys.stderr)
+        sys.exit(1)

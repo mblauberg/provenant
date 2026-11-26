@@ -199,6 +199,18 @@ Nothing downstream splits, prefixes or re-derives the stored id: preparation,
 successor deduplication and prior-model exclusions parse it directly. This is
 what lets a batch route match `run implement --model` and a declared route
 equal to a ladder hand-off appear once among successors.
+`run --explain` reports a `node_routes` row for each launchable node with the
+effective adapter, model and effort and the source of each (`node field`,
+`policy`, `pool` or `default`). An exact node field or a configured named route
+resolves to one spelling; a pool is shown as candidate entries without
+drawing a pick, because the weighted selection, account and credential decision
+remain launch-only. The row's `selection` names that boundary, so pool routing
+can be checked before launch. Each pool candidate includes its model, adapter,
+effective effort and the source of each value; a node-level effort applies to
+every candidate. Structural and host-managed nodes (gates, loops, composites, decisions, land,
+hygiene and publish) have no route row. A model route reports its declared
+adapter even when its model cannot be canonicalised. Model-less adapter routes report their provider in `adapter`
+and preserve the configured entry separately as `route_name`.
 - Why: a model id may itself contain `/`, so re-parsing a stored id silently
   changes which model runs.
 - Owner: `crates/routing/src/catalog.rs`,
@@ -219,7 +231,13 @@ admission. The CLI catalogue exposes those declarations.
 `after_settled` orders a node after its predecessors settle in any state without
 propagating their failure; they stay visible in the graph outcome. Inputs may
 select outputs from either kind of direct dependency; unavailable optional
-outputs stay absent and required outputs still gate admission.
+outputs stay absent and required outputs still gate admission. When loop
+expansion binds a source or gate target that was inherited as an ordering-only
+edge, the source's success requirement replaces that ordering edge; a retry of
+failed hygiene retains its settled-only source edge. Dependencies inherited
+from an enclosing composite are checked against the full expanded graph and
+remain attached to each round under their original graph identities, rather than
+being renamed into the loop namespace.
 
 ### Implementation planning
 
@@ -297,7 +315,8 @@ own `when` condition holds; a composite skipped by its own condition keeps that
 state whatever its members. An explicit `GraphPatch` skip of a composite stays
 authoritative until a later replacement or retry supersedes it, and a patch that
 replaces or skips a member recomputes the affected active composite boundaries in
-the same checkpoint.
+the same checkpoint. A node whose resolved `when` is false remains visible as
+skipped and needs no launch route; active agent nodes still require one.
 - Why: recovery must validate a checkpoint against the topology it records.
 - Owner: `crates/fabric-runtime/src/graph/composites.rs`,
   `crates/fabric-runtime/src/graph/patch.rs`
@@ -321,11 +340,14 @@ steer covers session identity (provider, model, effort, account, host-native
 lane), not route-selection history, so a same-identity continuation always
 resumes.
 
-Delivery is a queued turn at the next boundary, not live injection and never an
-interrupt. The owner refuses a route that advertises unsupported continuation
-when `domains.fabric.steer.fallback = "refuse"`, with a typed unsupported
-receipt before saving the steer. Otherwise its text is durable at once and the
-live attempt keeps running. The host's shared
+Delivery is a queued turn at the next boundary by default: no live injection
+and no interrupt. `domains.fabric.steer.delivery = "queued" | "now"` sets the
+host default (`queued`), and `provenant steer --now` overrides it for one call.
+`provenant steer --explain` reports the effective delivery mode and the layer
+that set it without steering. The owner refuses a route that advertises
+unsupported continuation when `domains.fabric.steer.fallback = "refuse"`, with
+a typed unsupported receipt before saving the steer. Otherwise its text is
+durable at once and the live attempt keeps running. The host's shared
 adapter stream decoder records the first validated session identity against the
 admitted route and spawned process; after settlement the graph resumes the
 same provider, model, account and session with the saved text as the next user
@@ -349,6 +371,16 @@ same worktree (`provenant run implement --worktree ... --brief-file FILE`). A
 finished task is terminal for this rule: success never admits a follow-up
 attempt, even when the steering was queued while the writer was live; the note
 stays accepted and resolves as not-continued.
+
+`--now` keeps the session-preserving restart. Once the text is durable, it
+requests a `Steered` stop through custody only when the running attempt holds a
+validated, live session bound to its exact route; settlement then resumes that
+same session with the saved text. The typed `STEER_INTERRUPTS_ATTEMPT` warning
+announces the interrupt and names the delivery and fallback sources before it
+happens. Without a retained session the attempt is left running and the call is
+refused with `steer_session_unavailable`, because an interrupt could not resume
+the same session. No other path writes a `Steered` stop for a steer: the queued
+default never interrupts, with or without a session.
 
 A writer's continuation reuses the retained worktree, including edits left
 uncommitted when a turn finishes naturally. Admission waits for
@@ -466,7 +498,10 @@ invalid.
 ### Writer continuation
 
 A writer that `continues` an upstream `pr` or `push` writer reuses its worktree
-and branch, so repairs update the same pull request. The host pushes without
+and branch, so repairs update the same pull request. An authored writer id binds
+to its unique expanded root writer, including inside repair loops whose local
+continuation has the same name; continuing writers do not become new roots.
+The host pushes without
 force and refuses a mismatched branch.
 - Why: a repair must land on the reviewed PR and never rewrite a moved branch.
 
@@ -478,11 +513,16 @@ explicitly. The `domains.wait.pr_*` settings (conditional requests, intervals)
 change forge-observer request cadence only, never a gate verdict.
 - Why: deterministic decisions need durable evidence without a launch.
 
+The [delivery queue target](delivery-queue.md) extends these graph capabilities
+with bounded conditional cycles, escalation and durable item scheduling.
+
 ### Bounded loops
 
 Admission counts every possible round. A body writer integrates by fast-forward
 only and never merges. Exhaustion pauses the graph without delivery, and an
-extension never adds rounds twice.
+extension never adds rounds twice. Admission treats the edge into a later round
+as a retry on the previous outcome, rather than carrying that round's success
+requirements into its failure path.
 - Why: repeated review and repair needs bounded admission and a human decision at
   the bound.
 
@@ -542,7 +582,9 @@ checkpoint missing launch evidence or its actor is refused.
 
 ### Checkpoint envelope
 
-Admission bounds the worst-case checkpoint before saving the plan. Graph text,
+Admission bounds the worst-case checkpoint before saving the plan. The fixed
+checkpoint envelope is 32 MiB, including the full handoff projections and
+pending-steer reserve for graphs at the default node limit. Graph text,
 identity fields and object keys keep their exact bytes in local state and
 execution context, through captured fragments, retries, template substitutions
 and expansions; heuristic content inspection warns with the field and rule
@@ -592,10 +634,15 @@ and custody is released; settlement advances only the matching graph.
 ## Peer hosts
 
 Each host owns its records and liveness; an unreachable peer is unknown, not
-dead. An uncertain remote mutation is resolved by the owner's receipt, never
-resent. Remote attempts bind the origin identity, transferred Git objects are
+dead. A reachable peer relays its own census-observed writer presence with the
+attempt record, so the launching host reports the same running, unattended or
+settling row the owner sees; the age of relayed output events never proves
+liveness. When such a row needs recovery, its `next:` hint names the peer's own
+graph target and the host that owns it, where `reconcile` can resolve it. An
+uncertain remote mutation is resolved by the owner's receipt, never resent. Remote attempts bind the origin identity, transferred Git objects are
 verified before use, and a protocol mismatch is refused before decoding;
-cross-host text follows the configured disclosure policy. A peer locator
+reachable peer status relays the owner's authenticated presence and recovery
+hints name the owning host. Cross-host text follows the configured disclosure policy. A peer locator
 identifies a registered Git common directory, Git's verified worktree inventory
 selects the checkout that owns project configuration, and a bare common directory
 stays its own host-only layout root.

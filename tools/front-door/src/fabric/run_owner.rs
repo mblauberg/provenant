@@ -2036,8 +2036,17 @@ impl BinaryRunOwner<'_> {
                 let attempt = self.snapshot(target, budget, cancel)?;
                 let store = self.store(cancel)?;
                 let waits = store.lane_waits(std::slice::from_ref(&attempt), &self.call(cancel));
+                // A caller on another host cannot observe this host's writers.
+                // Relay our own bounded observation with the record so the
+                // launching host reports the same presence we do, instead of
+                // guessing from the age of relayed output events.
+                let presence = provenant_cli::run::relayed_presence(
+                    self.factory.context.roots.state.as_path(),
+                    &attempt,
+                );
                 Ok(RunResult::Status {
                     extra: Default::default(),
+                    presence,
                     lane_waits: waits,
                     attempt,
                 })
