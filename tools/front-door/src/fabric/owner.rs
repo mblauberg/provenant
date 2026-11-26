@@ -4652,13 +4652,13 @@ impl BoundGraphOwner<'_> {
             &key.graph_id,
         )
         .map_err(graph_journal_error)?;
-        // A graph admitted before subject was recorded behaves as today: no
-        // missing-subject pin. An admitted subject without a base is the same
-        // advisory state the old flag named.
+        // Only the review fallback's empty range leaves a task without a base.
+        // A read subject never carries a base, and its tasks keep the read
+        // path's base below.
         let subject_base_missing = execution
             .as_ref()
             .and_then(|execution| execution.document.subject.as_ref())
-            .is_some_and(|subject| subject.base.is_none());
+            .is_some_and(super::subject::is_empty_review_range);
         let review_launch = node.review_launch;
         let review_base = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
             &self.factory.context.roots.state,

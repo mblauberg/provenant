@@ -392,7 +392,8 @@ and otherwise pins checkout HEAD. `live` reads the live tree locally; on a peer 
 pins HEAD and warns `READ_SOURCE_PINNED_FOR_PEER`. `default_branch` pins the fetched
 default branch; any other value is a Git ref. `--source` accepts the same values
 and overrides configuration. `lanes.read_source_fetch_first` fetches before resolution.
-`bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit. A
+`bind_read_source` is the one binder: it pins each agent leaf, never a gate or composite, to
+the writer base when one resolved and otherwise to the pinned read source. A
 repository file still naming `checkout` warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`;
 it never acts as the live choice. A writer launch instead resolves one base by role before
 sealing its identity: explicit `--base`; else the `--branch` default; else the HEAD of a named

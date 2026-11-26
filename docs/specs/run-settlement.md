@@ -491,4 +491,4 @@ results report the pinned reviewed subject as their head, independent of the che
 - Why: ordinary review vocabulary must preserve usable evidence while warnings expose brief and
   output drift before it becomes a settlement surprise.
 - Owner: `crates/records/src/result_capture.rs`, `crates/fabric-runtime/src/graph/outputs.rs`,
-  `src/fabric/interface.rs`, `src/fabric/review_subject.rs`, `src/fabric/unified.rs`
+  `src/fabric/interface.rs`, `src/fabric/subject.rs`, `src/fabric/unified.rs`

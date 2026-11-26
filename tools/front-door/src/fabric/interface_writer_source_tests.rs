@@ -243,21 +243,34 @@ fn admitted_subject_records_the_resolved_origin() -> Result {
     let head = git(&rig, &["rev-parse", "HEAD"])?;
     let factory = factory(&rig)?;
     let cancel = CancelToken::new();
-    let document: provenant_fabric_runtime::graph::GraphDocument = serde_json::from_value(json!({
-        "schema_version":2, "graph_id":"subject-origin", "nodes":[]
-    }))?;
-    let resolved = factory.admit_subject(&json!({"op":"run"}), None, &document, false, &cancel)?;
-    let subject = resolved.subject.ok_or("an admitted graph has a subject")?;
-    assert_eq!(subject.head.to_string(), head);
-    assert!(matches!(
-        subject.origin,
-        provenant_records::subject::SubjectOrigin::LocalRef { .. }
-    ));
-    assert_eq!(
-        subject.policy,
-        provenant_records::subject::SubjectPolicy::FollowLatest
-    );
-    assert_eq!(resolved.read, super::super::subject::ReadPlan::Live);
+    // The default `auto` source pins the up-to-date checkout HEAD; `live`
+    // records the same HEAD but follows the working tree locally.
+    for (input, policy, read) in [
+        (
+            json!({"op":"run"}),
+            provenant_records::subject::SubjectPolicy::Pinned,
+            super::super::subject::ReadPlan::Pinned,
+        ),
+        (
+            json!({"op":"run", "source":"live"}),
+            provenant_records::subject::SubjectPolicy::FollowLatest,
+            super::super::subject::ReadPlan::Live,
+        ),
+    ] {
+        let resolved = factory.admit_subject(&input, None, false, false, &cancel)?;
+        let subject = resolved.subject.ok_or("an admitted graph has a subject")?;
+        assert_eq!(subject.head.to_string(), head, "{input}");
+        assert!(
+            matches!(
+                subject.origin,
+                provenant_records::subject::SubjectOrigin::LocalRef { .. }
+            ),
+            "{input}: {:?}",
+            subject.origin
+        );
+        assert_eq!(subject.policy, policy, "{input}");
+        assert_eq!(resolved.read, read, "{input}");
+    }
     Ok(())
 }
 

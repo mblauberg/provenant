@@ -1,7 +1,7 @@
 //! Document-based graph service shared by the CLI and the lane relay.
 use super::subject::{
     ReadPlan, SubjectAdmission, WRITER_BASE_KNOB, WriterBaseChoice, WriterBaseSetting,
-    bind_default_read_only_source, bind_writer_base_source,
+    bind_read_source,
 };
 use super::*;
 use provenant_fabric_runtime::graph::{
@@ -547,12 +547,41 @@ pub(super) fn read_source_choice(
     use provenant_cli::run::{ReadSource, ReadSourceChoice};
     use provenant_records::Layer;
 
+    // A value no reader accepts warns and keeps auto; the retired
+    // `checkout` spelling names its rename instead.
+    let parse = |value: &str, origin: &str| match ReadSource::parse(value) {
+        Ok(source) => source,
+        Err(_) => {
+            let (code, message) = if value == "checkout" {
+                (
+                    provenant_records::warning::READ_SOURCE_VALUE_RENAMED,
+                    format!(
+                        "{}=checkout is now live (source: {origin}); using auto",
+                        ReadSourceChoice::KNOB
+                    ),
+                )
+            } else {
+                (
+                    provenant_records::warning::LAUNCH_ADVISORY,
+                    format!(
+                        "{}={value:?} is not auto, live, default_branch or a ref (source: {origin}); using auto",
+                        ReadSourceChoice::KNOB
+                    ),
+                )
+            };
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                code, message,
+            ));
+            ReadSource::Auto
+        }
+    };
     let mut choice = ReadSourceChoice::automatic();
     if let Some(knob) = config.knobs.get(ReadSourceChoice::KNOB) {
         let value = knob.value.as_str().unwrap_or_default();
-        choice.source = ReadSource::parse(value).unwrap_or(ReadSource::Auto);
+        let origin = format!("config.toml#{}", ReadSourceChoice::KNOB);
+        choice.source = parse(value, &origin);
         choice.layer = knob.source.layer;
-        choice.origin = Some(format!("config.toml#{}", ReadSourceChoice::KNOB));
+        choice.origin = Some(origin);
     }
     let mut layers = Vec::new();
     if let Some(project_dir) = provenant_config::host_project_dir(state, project) {
@@ -566,23 +595,10 @@ pub(super) fn read_source_choice(
         else {
             continue;
         };
+        let origin = path.display().to_string();
         choice.layer = layer;
-        choice.origin = Some(path.display().to_string());
-        choice.source = match ReadSource::parse(&value) {
-            Ok(source) => source,
-            Err(_) => {
-                if value == "checkout" {
-                    provenant_records::warning::warn(provenant_records::warning::Warning::new(
-                        provenant_records::warning::READ_SOURCE_VALUE_RENAMED,
-                        format!(
-                            "lanes.read_source=checkout is now live (source: {}); using auto",
-                            path.display()
-                        ),
-                    ));
-                }
-                ReadSource::Auto
-            }
-        };
+        choice.source = parse(&value, &origin);
+        choice.origin = Some(origin);
     }
     if let Some(flag) = config.knobs.get("lanes.read_source_fetch_first") {
         choice.fetch_first = flag.value.as_bool().unwrap_or(false);
@@ -2172,7 +2188,9 @@ impl Factory {
         let input = &input;
         let source_choice = input.get("source").filter(|value| !value.is_null());
         if let Some(choice) = source_choice
-            && !matches!(choice.as_str(), Some("upstream" | "local"))
+            && choice
+                .as_str()
+                .is_none_or(|value| provenant_cli::run::ReadSource::parse(value).is_err())
         {
             return Err(FacadeError::invalid(InvalidInputDetail::Field(
                 "source".into(),
@@ -2181,16 +2199,9 @@ impl Factory {
         // One subject per admission: review ranges, read sources and writer
         // bases are resolved together, once, and bound into this graph's
         // identity. Nothing below re-reads a ref or re-resolves a source.
-        let review_launch = declared.accepts_review_range();
-        let mut subject_document: GraphDocument = decode_input(
-            json!({"schema_version":2,"graph_id":"subject-resolution","nodes":[]}),
-            "document",
-        )?;
-        if review_launch {
-            subject_document.review = Some(Default::default());
-        }
         // The authored document's own review field is not the launch contract;
         // only the selected template's acceptance decides review resolution.
+        let review_launch = declared.accepts_review_range();
         let remote = input
             .get("host")
             .and_then(Value::as_str)
@@ -2214,16 +2225,21 @@ impl Factory {
             read,
             warnings: subject_warnings,
             review_warning,
+            read_source,
+            writer_base_setting,
+            read_pin,
+            writer_warnings,
         } = self.admit_subject(
             input,
             queue_base_input.as_ref(),
-            &subject_document,
+            review_launch,
             remote,
             cancel,
         )?;
         input_warnings.extend(subject_warnings);
         let review_pin = subject
             .as_ref()
+            .filter(|_| review_launch)
             .map(|subject| json!({"base":subject.base,"head":subject.head}));
         let mut resolved_head = subject.as_ref().map(|subject| subject.head.to_string());
         let resolved_review_base = subject
@@ -2243,40 +2259,11 @@ impl Factory {
             limits: &self.context.config.graph.limits,
             worktree_layout: self.context.port_table.worktree_layout.clone(),
         };
-        // The read source is one sourced setting: `--source` is its launch
-        // layer and the host/project knob supplies the ref and fetch flag. An
-        // unreadable configuration is advisory; the compiled default keeps the
-        // stale-checkout pin.
+        // Admission resolved the sourced read-source and writer-base settings
+        // once; the queue settings below read the same run configuration.
         let read_config_result = provenant_cli::config_reads::read_for(&self.context.roots, "run");
         let read_config_error = read_config_result.as_ref().err().map(ToString::to_string);
         let read_config = read_config_result.ok();
-        let read_source = read_config
-            .as_ref()
-            .map(|config| {
-                read_source_choice(
-                    input,
-                    config,
-                    self.context.roots.state.as_path(),
-                    &self.context.project_root,
-                )
-            })
-            .unwrap_or_default();
-        let writer_base_setting = read_config
-            .as_ref()
-            .map(|config| {
-                writer_base_choice(
-                    input,
-                    config,
-                    self.context.roots.state.as_path(),
-                    &self.context.project_root,
-                )
-            })
-            .unwrap_or_default();
-        if read_config.is_none() {
-            warn_operator(
-                "could not read the run configuration; lanes.read_source keeps its compiled default",
-            );
-        }
         // Resolve the graph a template launch runs before sealing its identity.
         // Writer-ness is the resolved roles' answer, not one launch key's.
         let template_launch = if raw.is_none() || lane_document.is_some() {
@@ -2295,29 +2282,27 @@ impl Factory {
             Some(launch) => launch.writes_worktree(&library, &resolver)?,
             None => false,
         };
-        // The resolver already produced the writer base and the admitted
-        // subject. Keep a reported read source only for the explain/result
-        // shape; the subject is authoritative for every binding below.
-        let default_source = if !review_launch && raw.is_none() && writer_base.is_none() {
-            provenant_cli::run::resolve_read_source(
-                self.context.roots.state.as_path(),
-                &self.cwd,
-                &read_source,
-            )
-        } else {
-            None
-        };
-        // The commit the launch starts from belongs to its identity: a writer
-        // starts from its base, a reader from its admitted subject.
-        let source_commit = if writer_launch {
-            writer_base
-                .as_ref()
-                .map(|base| base.to_string())
-                .or_else(|| resolved_head.clone())
-        } else {
+        // Admission produced the writer base, the read subject and the pin it
+        // came from; writer-ness decides which one this launch keeps. A writer
+        // starts from its resolved base, which is then the graph's only read
+        // commit, so a moving checkout HEAD never enters a writer's identity. A
+        // review keeps its range subject either way.
+        let writer_base = writer_base.filter(|_| writer_launch);
+        if writer_launch {
+            input_warnings.extend(writer_warnings);
+        }
+        let subject = subject.filter(|_| review_launch || writer_base.is_none());
+        let default_source =
+            read_pin.filter(|_| raw.is_none() && subject.is_some() && !review_launch);
+        // The commit the launch starts from belongs to its identity.
+        let source_commit = if review_launch {
             resolved_head.clone()
+        } else {
+            writer_base
+                .map(|base| base.to_string())
+                .or_else(|| subject.as_ref().map(|subject| subject.head.to_string()))
         };
-        if resolved_head.is_none() && raw.and_then(|document| document.get("graph_id")).is_none() {
+        if !review_launch {
             resolved_head = source_commit.clone();
         }
         // The name is a handle; the digest of the launch decides whether it is
@@ -2571,22 +2556,19 @@ impl Factory {
         // A writer's read-only members take its base; every other pinned read
         // node takes the admitted subject's head. A live checkout keeps its
         // working tree and carries no source binding at all.
-        if let Some(commit) = writer_base.as_ref().map(|base| base.to_string()) {
+        let read_commit = writer_base.or_else(|| {
+            subject
+                .as_ref()
+                .filter(|_| read == ReadPlan::Pinned)
+                .map(|subject| subject.head)
+        });
+        if let Some(commit) = read_commit.map(|commit| commit.to_string()) {
             for node in &mut document.nodes {
-                bind_writer_base_source(node, &commit);
+                bind_read_source(node, &commit);
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
-        } else if read == ReadPlan::Pinned {
-            if let Some(commit) = subject.as_ref().map(|subject| subject.head.to_string()) {
-                for node in &mut document.nodes {
-                    bind_default_read_only_source(node, &commit);
-                }
-                document.schema_version = document.schema_version.max(u64::from(
-                    provenant_fabric_runtime::graph::minimum_schema_version(&document),
-                ));
-            }
         }
         let mut bound = encode(&document)?;
         self.confine_nodes(&mut bound)?;
