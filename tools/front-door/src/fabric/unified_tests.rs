@@ -3111,6 +3111,8 @@ fn relayed_peer_presence_reports_a_live_writer_as_running() -> Result<(), Box<dy
         provenant_records::wire::LanePresence::Live,
     );
     assert_eq!(relayed.state, "running");
+    // The shared projection derives stale from the peer's observed presence.
+    assert_eq!(relayed.stale, Some(false));
     assert_eq!(
         relayed.presence,
         Some(provenant_records::wire::LanePresence::Live)

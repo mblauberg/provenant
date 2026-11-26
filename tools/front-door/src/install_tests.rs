@@ -709,6 +709,54 @@ fn smoke_verify_gives_the_review_a_non_empty_range() -> Result<(), Box<dyn std::
 }
 
 #[test]
+// Spec: docs/specs/cli.md#upgrade-verification — a peer can only name a project
+// whose canonical common dir is relative to its home, so the smoke scratch must
+// sit under $HOME rather than $TMPDIR.
+fn smoke_scratch_root_is_projectable_to_a_peer() -> Result<(), Box<dyn std::error::Error>> {
+    use super::*;
+    use provenant_core::{HostId, ProjectId};
+    use provenant_fabric_runtime::{
+        hosts::ProjectLocator,
+        identity::{Address, Identity},
+    };
+    use provenant_records::AbsolutePath;
+
+    let tmp = tempfile::tempdir()?;
+    let home = tmp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let scratch = smoke_scratch_root(&home)?;
+    assert!(
+        scratch.starts_with(&home),
+        "smoke scratch must be home-relative: {}",
+        scratch.display()
+    );
+
+    // Build a real fixture the way verify does, so the locator sees the same
+    // canonical common directory the peer call would name.
+    let runner = UpgradeRunner {
+        executor: provenant_os::exec::SystemExecutor::new(1)?,
+        environment: std::env::vars_os().collect(),
+        cwd: home.clone(),
+    };
+    let project = smoke_project(&runner, &scratch)?;
+    let common_dir = project.path().join(".git");
+    let host = HostId::from_bytes([1; 16]);
+    let identity = Identity {
+        project: ProjectId::from_bytes([2; 16]),
+        host,
+        inbox: Address::new(host, "chair")?,
+        client: "test".into(),
+        cwd: AbsolutePath::new(project.path())?,
+        common_dir: AbsolutePath::new(&common_dir)?,
+        federation: None,
+    };
+    let locator = ProjectLocator::new(&identity, &home)
+        .expect("the smoke scratch project must be projectable to a peer");
+    assert_eq!(locator.resolve(&home)?, common_dir);
+    Ok(())
+}
+
+#[test]
 fn remote_smoke_verify_carries_the_writer_branch_and_staged_fixture()
 -> Result<(), Box<dyn std::error::Error>> {
     use super::*;
@@ -855,6 +903,7 @@ fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::e
         &runner,
         &launcher,
         &state,
+        tmp.path(),
         &cli::Upgrade {
             yes: false,
             from_source: None,
@@ -910,6 +959,7 @@ fn smoke_dry_run_pins_the_fixture_base_and_drops_a_user_base()
         &runner,
         &launcher,
         &state,
+        tmp.path(),
         &cli::Upgrade {
             yes: false,
             from_source: None,
