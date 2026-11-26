@@ -183,6 +183,7 @@ pub fn project_lane(
         (HostView::from_observation(observe_host), &[]),
         None,
         false,
+        None,
     )
 }
 
@@ -219,6 +220,7 @@ pub fn project_lane_with_census(
         (HostView::from_observation(observe_host), &[]),
         Some(census),
         true,
+        None,
     )
 }
 
@@ -239,7 +241,58 @@ pub fn project_lane_with_admission(
         (HostView::from_observation(observe_host), holders),
         Some(census),
         true,
+        None,
     )
+}
+
+/// Project a row from a peer's own liveness observation instead of this host's
+/// census. The caller relays the observation with the attempt record; old
+/// output is never used here to infer that a writer is still alive.
+pub fn project_lane_with_relayed_presence(
+    lane: &run::AttemptRecord,
+    waits: &[run::LaneWait],
+    root: &Path,
+    now_wall: Option<WallTime>,
+    presence: provenant_records::wire::LanePresence,
+) -> provenant_records::wire::LaneRow {
+    project_lane_inner(
+        lane,
+        waits,
+        root,
+        now_wall,
+        (HostView::Unobserved, &[]),
+        None,
+        true,
+        Some(presence),
+    )
+}
+
+/// This host's census observation of one attempt, to relay with its status.
+/// A reader on another host cannot run this census itself; it must see the
+/// owner's result rather than guess from the age of relayed output events.
+pub fn relayed_presence(
+    root: &Path,
+    lane: &run::AttemptRecord,
+) -> Option<provenant_records::wire::LanePresence> {
+    use provenant_records::wire::LanePresence;
+    if !matches!(lane.state, run::AttemptState::Running { .. }) {
+        return None;
+    }
+    let census = provenant_supervisor::census::ProcessObserver::census(
+        &provenant_supervisor::census::SystemProcessObserver,
+        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+    )
+    .ok();
+    let observed = match census.as_ref() {
+        Some(census) => run::attempt_presence_with_census(root, lane, census),
+        None => run::attempt_presence_with_unavailable_census(root, lane),
+    };
+    observed.map(|presence| match presence {
+        run::AttemptPresence::Live => LanePresence::Live,
+        run::AttemptPresence::Unattended => LanePresence::Unattended,
+        run::AttemptPresence::Unknown => LanePresence::Unknown,
+        run::AttemptPresence::Settling => LanePresence::Settling,
+    })
 }
 
 /// Project a row for a reader that may be on another host. Presence comes from
@@ -259,6 +312,7 @@ pub fn project_lane_presence_only(
         (HostView::PresenceOnly, &[]),
         Some(Err(())),
         true,
+        None,
     )
 }
 
@@ -346,13 +400,17 @@ fn project_lane_inner(
     host: (HostView, &[provenant_os::admission::HeldInfo]),
     census: Option<std::result::Result<&provenant_supervisor::census::Census, ()>>,
     unknown_when_host_unobserved: bool,
+    relayed_presence: Option<provenant_records::wire::LanePresence>,
 ) -> provenant_records::wire::LaneRow {
     let (view, lane_holders) = host;
     let usage = lane.effective_usage();
     let host_artifacts = view.projects_host_artifacts();
     let presence = if !view.observes_presence() {
-        (unknown_when_host_unobserved && matches!(lane.state, run::AttemptState::Running { .. }))
+        relayed_presence.or_else(|| {
+            (unknown_when_host_unobserved
+                && matches!(lane.state, run::AttemptState::Running { .. }))
             .then_some(provenant_records::wire::LanePresence::Unknown)
+        })
     } else {
         let observed = match census {
             Some(Ok(census)) => run::attempt_presence_with_census(root, lane, census),
