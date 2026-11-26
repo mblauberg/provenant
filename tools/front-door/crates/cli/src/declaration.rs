@@ -23,7 +23,7 @@ use std::{io::Read, path::PathBuf, time::Duration};
 
 /// Declare the last accepted handoff for this lane, from a file or stdin.
 #[derive(Clone, Debug, Args)]
-pub struct Handoff {
+pub struct HandoffArgs {
     /// Read the schema v2 handoff JSON from a file
     #[arg(long, catalog_required_unless = "stdin", conflicts_with = "stdin")]
     pub file: Option<PathBuf>,
@@ -221,7 +221,7 @@ pub fn serve_lane(
     clippy::disallowed_methods,
     reason = "stdin is an explicit real-time boundary"
 )]
-fn read_input(command: &Handoff) -> Result<Vec<u8>, String> {
+fn read_input(command: &HandoffArgs) -> Result<Vec<u8>, String> {
     let limit = provenant_records::handoff::HANDOFF_BYTES;
     if let Some(path) = &command.file {
         let mut bytes = Vec::new();
@@ -274,7 +274,7 @@ fn print_invalid(message: &str, data: &Value) {
 }
 
 /// Process edge: one declaration, one receipt, no prose fallback.
-pub fn run(command: Handoff, globals: &crate::Globals) -> u8 {
+pub fn run(command: HandoffArgs, globals: &crate::Globals) -> u8 {
     let Some(parent) = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID).ok() else {
         eprintln!("{}", DeclarationError::NotInLane);
         return 2;
