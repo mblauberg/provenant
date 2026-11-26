@@ -3082,12 +3082,13 @@ impl Factory {
                 };
                 let effort = route.effort.clone();
                 let node_effort = effort.is_some();
-                let (adapter, model, resolved_effort, sources, selection, candidates): (
+                let (adapter, model, resolved_effort, sources, selection, candidates, route_name): (
                     Value,
                     Value,
                     Value,
                     Value,
                     &str,
+                    Value,
                     Value,
                 ) = match route.selector() {
                     GraphRouteSelector::Model(model) => (
@@ -3100,9 +3101,13 @@ impl Factory {
                         }),
                         "node field",
                         json!([]),
+                        Value::Null,
                     ),
                     GraphRouteSelector::Adapter(name) => (
-                        Value::String(name.to_owned()),
+                        route
+                            .adapter
+                            .clone()
+                            .map_or(Value::Null, Value::String),
                         Value::Null,
                         optional(effort),
                         json!({
@@ -3111,6 +3116,7 @@ impl Factory {
                         }),
                         "node field",
                         json!([]),
+                        Value::String(name.to_owned()),
                     ),
                     GraphRouteSelector::Alias(alias) => {
                         let alias = alias.unwrap_or_default();
@@ -3134,6 +3140,7 @@ impl Factory {
                                     }),
                                     "policy",
                                     json!([model]),
+                                    Value::Null,
                                 )
                             }
                             None => match listed.as_ref().and_then(|list| list.pools.get(alias)) {
@@ -3149,6 +3156,27 @@ impl Factory {
                                             pool.iter()
                                                 .all(|member| member.effort.as_ref() == Some(value))
                                         });
+                                    let candidates: Vec<Value> = pool
+                                        .iter()
+                                        .map(|member| {
+                                            let model = member.model.as_str();
+                                            let member_effort = effort
+                                                .clone()
+                                                .or_else(|| member.effort.clone());
+                                            json!({
+                                                "model": model,
+                                                "adapter": adapter_of(model),
+                                                "effort": member_effort,
+                                                "sources": {
+                                                    "model": "pool",
+                                                    "adapter": "pool",
+                                                    "effort": if node_effort { "node field" }
+                                                        else if member.effort.is_some() { "pool" }
+                                                        else { "default" }
+                                                }
+                                            })
+                                        })
+                                        .collect();
                                     let common_adapter = models
                                         .first()
                                         .and_then(|model| adapter_of(model))
@@ -3161,16 +3189,17 @@ impl Factory {
                                     (
                                         common_adapter.map_or(Value::Null, Value::String),
                                         Value::Null,
-                                        optional(effort.or(common_effort.clone())),
+                                        optional(effort.clone().or(common_effort)),
                                         json!({
                                             "adapter":"pool","model":"pool",
                                             "effort": if node_effort { "node field" }
-                                                else if common_effort.is_some() { "pool" }
+                                                else if pool.iter().any(|member| member.effort.is_some()) { "pool" }
                                                 else { "default" },
                                             "origin": format!("pool {alias}"),
                                         }),
                                         "pool",
-                                        json!(models),
+                                        json!(candidates),
+                                        Value::Null,
                                     )
                                 }
                                 None => (
@@ -3183,6 +3212,7 @@ impl Factory {
                                     }),
                                     "default",
                                     json!([]),
+                                    Value::Null,
                                 ),
                             },
                         }
@@ -3197,6 +3227,7 @@ impl Factory {
                     "sources": sources,
                     "selection": selection,
                     "candidates": candidates,
+                    "route_name": route_name,
                 }));
             }
         }
