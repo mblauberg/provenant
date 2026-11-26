@@ -13,7 +13,6 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub(super) mod observation;
-pub(super) use observation::advance_after_remote_terminal;
 pub(super) use observation::wait_submission;
 use observation::{launch_retry_due, observation_clock_error, wait_graph_updates};
 
@@ -3732,7 +3731,7 @@ impl Factory {
                 },
                 budget,
                 cancel,
-            );
+            )
         })?;
         // A successful reading of a finished lane supersedes the transport
         // failure held while its home endpoint was unreachable.

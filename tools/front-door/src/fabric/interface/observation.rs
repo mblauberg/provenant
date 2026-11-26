@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn advance_after_remote_terminal(
+pub(in crate::fabric) fn advance_after_remote_terminal(
     run: &provenant_fabric_runtime::graph::GraphRun,
     remote_terminal: bool,
     advance: impl FnOnce() -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,

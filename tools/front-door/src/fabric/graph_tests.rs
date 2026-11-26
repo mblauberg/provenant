@@ -559,7 +559,7 @@ mod graph_writer_admission_tests {
                 match call {
                     1 => Err(FacadeError::HomeUnavailable),
                     2 => Err(FacadeError::Busy),
-                    _ => super::interface::advance_after_remote_terminal(run, true, || {
+                    _ => super::interface::observation::advance_after_remote_terminal(run, true, || {
                         advancements.set(advancements.get() + 1);
                         advance(&document, &mut owner, &mut journal)
                             .map_err(|_| FacadeError::StateCorrupt)
@@ -626,7 +626,7 @@ mod graph_writer_admission_tests {
                 if call <= 4 {
                     Err(FacadeError::HomeUnavailable)
                 } else {
-                    super::interface::advance_after_remote_terminal(run, true, || {
+                    super::interface::observation::advance_after_remote_terminal(run, true, || {
                         advancements.set(advancements.get() + 1);
                         advance(&document, &mut owner, &mut journal)
                             .map_err(|_| FacadeError::StateCorrupt)
