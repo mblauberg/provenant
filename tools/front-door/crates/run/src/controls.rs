@@ -3871,7 +3871,7 @@ impl RunStore {
             let mut destination = HostDeliveryContext::destination_for_remote(
                 prior.mode.clone(),
                 branch,
-                &prior.remote,
+                prior.remote.remote_name().cloned(),
             )?
             .ok_or(RunError::Validation("fresh fallback delivery destination"))?;
             destination.remote = prior.remote.clone();

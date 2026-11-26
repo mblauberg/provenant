@@ -352,19 +352,19 @@ pub(crate) struct StopWorkPolicy<'a> {
 }
 
 /// The remote bound for stop publication wins over the launch destination: a
-/// local-integration launch deliberately records no remote, while its
-/// stop-publication binding names the real remote the stopped head must use.
-/// The launch binding is read only when the stop binding has no remote, and an
-/// empty recorded launch remote is an absence, not a corrupt name.
+/// local-integration launch has no remote, while its stop-publication binding
+/// names the real remote the stopped head must use. The launch binding is read
+/// only when the stop binding has no remote. Both destinations were typed on
+/// decode, so neither can carry an empty name.
 pub(super) fn bound_stop_remote(
     publish: Option<&crate::HostDeliveryContext>,
 ) -> Result<Option<provenant_config::RemoteName>> {
     let Some(host) = publish else {
         return Ok(None);
     };
-    match host.stop_publish_remote()? {
+    match host.stop_publish_remote() {
         Some(remote) => Ok(Some(remote)),
-        None => host.delivery_remote(),
+        None => Ok(host.delivery_remote()),
     }
 }
 
@@ -3633,7 +3633,7 @@ impl WriterLaunch {
                         let request = crate::HostDeliveryContext::destination_for_remote(
                             crate::DeliveryMode::Push,
                             branch,
-                            remote.as_str(),
+                            Some(remote.clone()),
                         )?
                         .ok_or(RunError::Validation("stop publication destination missing"))?;
                         crate::HostDeliveryContext::capture()

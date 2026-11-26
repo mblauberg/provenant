@@ -256,6 +256,12 @@ free-form source to the typed `stream` source, preserving every stated number.
 A malformed row is skipped so it fails only its own decode; a row already in the
 new shape is left byte-identical. No decoder accepts a retired spelling.
 
+The run store's base-14-to-15 migration (`crates/run/src/migration_14_15.sql`)
+rewrites the retired empty local destination to JSON null in an attempt's
+stored delivery receipt and its integration. It leaves named remotes and
+already-current rows alone and skips malformed JSON. The terminal update trigger
+is restored in the migration transaction.
+
 ### One sourced port table
 
 One table declares forge operations, verify, land, CI observation, worktree

@@ -291,7 +291,8 @@ mod stored_format_tests {
         let request = WriterDeliveryRequest {
             extra: Default::default(),
             mode: crate::DeliveryMode::Push,
-            remote: "origin".into(),
+            remote: provenant_records::run::Destination::from_name("origin")
+                .expect("fixture remote"),
             branch: "feature".into(),
             open_pr: false,
             fast_forward_only: false,
@@ -313,7 +314,8 @@ mod stored_format_tests {
         let receipt = WriterDeliveryReceipt {
             extra: Default::default(),
             schema_version: 1,
-            remote: "origin".into(),
+            remote: provenant_records::run::Destination::from_name("origin")
+                .expect("fixture remote"),
             branch: "feature".into(),
             head: None,
             review_acceptance: None,
@@ -402,7 +404,10 @@ mod forge_context_tests {
         let push = HostDeliveryContext::destination(crate::DeliveryMode::Push, "lane", &forge)
             .expect("destination")
             .expect("push request");
-        assert_eq!(push.remote, "upstream");
+        assert_eq!(
+            push.remote,
+            provenant_records::run::Destination::from_name("upstream").expect("fixture remote")
+        );
         assert_eq!(push.branch, "lane");
         assert!(forge.is_protected("trunk"));
         assert!(!forge.is_protected("lane"));
@@ -413,7 +418,10 @@ mod forge_context_tests {
         )
         .expect("destination")
         .expect("integrate request");
-        assert_eq!(integrate.remote, "upstream");
+        assert_eq!(
+            integrate.remote,
+            provenant_records::run::Destination::from_name("upstream").expect("fixture remote")
+        );
         assert_eq!(integrate.branch, "trunk");
     }
 }

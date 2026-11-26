@@ -561,9 +561,7 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
         // value is absent evidence: never render a header saying "unavailable".
         // Spec: docs/specs/lane-contracts.md#result-projection
         let lane_publication = (data["delivery"]["state"]["state"].as_str() == Some("delivered")
-            && data["delivery"]["integration"]["remote"]
-                .as_str()
-                .is_some_and(|remote| !remote.is_empty()))
+            && data["delivery"]["integration"]["remote"].as_str().is_some())
         .then_some("pushed");
         for (label, value) in [
             ("base", data["writer_base"].as_str()),
@@ -1106,7 +1104,7 @@ fn output_read_part(
                     && delivery
                         .integration
                         .as_ref()
-                        .is_some_and(|integration| !integration.remote.is_empty()) =>
+                        .is_some_and(|integration| !integration.remote.is_local()) =>
             {
                 json!("pushed")
             }
