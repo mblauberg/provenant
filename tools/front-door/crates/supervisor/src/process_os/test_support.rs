@@ -12,7 +12,8 @@ pub(crate) fn spawn_setsid_with_attempt_mark(mark: &str) -> std::io::Result<Chil
     // SAFETY: the pre-exec hook performs only the async-signal-safe setsid call.
     unsafe {
         command.pre_exec(|| {
-            if libc::setsid() == -1 {
+            // SAFETY: setsid is async-signal-safe and affects only the spawned child.
+            if unsafe { libc::setsid() } == -1 {
                 Err(std::io::Error::last_os_error())
             } else {
                 Ok(())
