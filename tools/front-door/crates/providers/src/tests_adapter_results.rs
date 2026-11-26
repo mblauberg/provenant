@@ -999,7 +999,16 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
                 host_git(&linked, &["rev-parse".as_ref(), "HEAD".as_ref()]),
                 bound_head
             );
-            assert!(scratch.join("git-common/FETCH_HEAD").is_file());
+            // FETCH_HEAD is a per-worktree file: under the linked layout the
+            // shim's GIT_DIR is the private registration, so fetch state lands
+            // there, while refs still land in the attempt's private common dir.
+            let registration = lane_git_common
+                .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+                .join(provenant_core::LANE_GIT_REGISTRATION);
+            assert!(
+                registration.join("FETCH_HEAD").is_file(),
+                "{id}: fetch state must stay in the attempt-private registration"
+            );
             assert!(
                 scratch
                     .join("git-common/refs/remotes/origin/reader")
