@@ -578,7 +578,7 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
                 data["publication"].as_str().or(lane_publication),
             ),
             ("pushed", data["pushed_head"].as_str()),
-            ("handoff source", data["handoff_source"].as_str()),
+            ("declaration source", data["declaration_source"].as_str()),
             ("residual tree state", data["residual_tree"].as_str()),
         ] {
             if let Some(value) = value {
@@ -1124,7 +1124,7 @@ fn output_read_part(
         if let Some(git) = git.filter(|git| !git.uncommitted_paths.is_empty()) {
             data["uncommitted_paths"] = json!(git.uncommitted_paths);
         }
-        data["handoff_source"] = json!(record.handoff_source);
+        data["declaration_source"] = json!(record.declaration_source);
         data["residual_tree"] = residual_tree_evidence(session, &record, call);
         data["publication"] = match &record.delivery {
             Some(delivery)

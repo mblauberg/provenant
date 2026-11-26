@@ -58,7 +58,7 @@ pub struct OutputChunk {
     pub uncommitted_paths: Option<Vec<String>>,
     /// Whether the lane declared its handoff or the host synthesised it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub handoff_source: Option<String>,
+    pub declaration_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<Value>,
 }
@@ -178,7 +178,10 @@ pub fn output_chunk_schema() -> Value {
             ("publication", nullable(string())),
             ("pushed_head", nullable(string())),
             ("uncommitted_paths", array(string())),
-            ("handoff_source", nullable(choices(&["declared", "host"]))),
+            (
+                "declaration_source",
+                nullable(choices(&["declared", "host"])),
+            ),
             ("selected", any()),
         ],
     ))

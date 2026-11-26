@@ -27,7 +27,7 @@ pub(crate) fn guidance() -> &'static str {
     static GUIDANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     GUIDANCE.get_or_init(|| {
         [
-            "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. Declare your result with `provenant handoff --stdin` (schema v2 JSON; see STATUS_GUIDANCE). Field errors come back at once; fix and call again. The last accepted declaration settles the lane; prose and fenced blocks are not read. To stop early, declare `stopped_early` or `blocked`. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). When a criterion is wrong, add spec_concerns entries with criterion, claim, evidence, proposed_change and status (as_written, diverged or stopped); disclose any divergence. A write scope names the expected files, not a fence: when the fix needs another file, edit it minimally and list each such path in decisions; only a strict WRITE_SCOPE lane policy refuses those paths at settlement.",
+            "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. Declare your result with `provenant declare --stdin` (schema v2 JSON; see STATUS_GUIDANCE). Field errors come back at once; fix and call again. The last accepted declaration settles the lane; prose and fenced blocks are not read. To stop early, declare `stopped_early` or `blocked`. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). When a criterion is wrong, add spec_concerns entries with criterion, claim, evidence, proposed_change and status (as_written, diverged or stopped); disclose any divergence. A write scope names the expected files, not a fence: when the fix needs another file, edit it minimally and list each such path in decisions; only a strict WRITE_SCOPE lane policy refuses those paths at settlement.",
             provenant_records::handoff::STATUS_GUIDANCE,
             "The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings."
         ]
@@ -553,7 +553,7 @@ impl BriefPreamble {
             .collect::<Vec<_>>()
             .join("; ");
         format!(
-            "Static checks: before pushing, run the project's no-build checks (source: {source}): {checks}. Report any failure in the handoff; a failure does not refuse the push and CI still gates the merge.\n"
+            "Static checks: before pushing, run the project's no-build checks (source: {source}): {checks}. Report any failure in your declaration; a failure does not refuse the push and CI still gates the merge.\n"
         )
     }
 

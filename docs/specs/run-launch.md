@@ -205,7 +205,7 @@ primary checkout is not the lane's working copy. It is advice, never a fence, an
 absolute path elsewhere in the lane's context does not override it. Launch records the primary
 checkout's branch and ref tips (`primary-checkout.json`) so settlement can detect
 [stray work](run-settlement.md#stray-lane-work). The lane receives `PROVENANT_ROUTE`,
-`PROVENANT_MODEL`, `PROVENANT_EFFORT` and `PROVENANT_ACCOUNT`. On a lane, `provenant handoff` is the
+`PROVENANT_MODEL`, `PROVENANT_EFFORT` and `PROVENANT_ACCOUNT`. On a lane, `provenant declare` is the
 companion to `provenant notes`: both travel over the attempt relay socket, and only a declared
 handoff — never prose — settles the lane.
 - Why: a provider's system prompt may name the primary checkout as the workspace root of a linked
@@ -231,7 +231,7 @@ entry carries that layer and file/key source. Config merging replaces arrays who
 in the effective list share one source. A failure is reported in the handoff and does not refuse
 the push; CI still gates the merge.
 Readers get neither the list nor its receipt. Every brief states the result protocol verbatim:
-"Declare your result with `provenant handoff --stdin` (schema v2 JSON; see STATUS_GUIDANCE).
+"Declare your result with `provenant declare --stdin` (schema v2 JSON; see STATUS_GUIDANCE).
 Field errors come back at once; fix and call again. The last accepted declaration settles the
 lane; prose and fenced blocks are not read. To stop early, declare `stopped_early` or `blocked`."
 - Why: standing rules belong in one owned file per layer, not repeated in every brief, and a

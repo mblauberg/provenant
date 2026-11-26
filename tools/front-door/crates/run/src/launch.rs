@@ -453,7 +453,7 @@ impl Drop for PreparedStart {
 
 fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
     format!(
-        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them. Declare your result with `provenant handoff --stdin` (schema v2 JSON; see STATUS_GUIDANCE). Field errors come back at once; fix and call again. The last accepted declaration settles the lane; prose and fenced blocks are not read. To stop early, declare `stopped_early` or `blocked`. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
+        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them. Declare your result with `provenant declare --stdin` (schema v2 JSON; see STATUS_GUIDANCE). Field errors come back at once; fix and call again. The last accepted declaration settles the lane; prose and fenced blocks are not read. To stop early, declare `stopped_early` or `blocked`. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
         handoff = crate::completion::guidance(),
         result = directory.join("result.md").display(),
         exit = directory.join("process-exit.json").display(),
@@ -480,7 +480,7 @@ fn output_prompt_teaches_the_declaration_command_and_host_ownership() {
     assert!(prompt.contains("$TMPDIR"));
     assert!(prompt.contains("not in the worktree"));
     assert!(
-        prompt.contains("Declare your result with `provenant handoff --stdin`"),
+        prompt.contains("Declare your result with `provenant declare --stdin`"),
         "{prompt}"
     );
     assert!(

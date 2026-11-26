@@ -241,7 +241,7 @@ fn outside_a_lane_the_command_reports_not_in_lane() -> Result {
     let rig = TestRig::new()?;
     let file = rig.root.join("handoff.json");
     std::fs::write(&file, serde_json::to_vec(&payload("outside"))?)?;
-    let output = rig.command(&["handoff", "--file", file.to_str().ok_or("file path")?])?;
+    let output = rig.command(&["declare", "--file", file.to_str().ok_or("file path")?])?;
     assert_eq!(code(&output), 2);
     let stderr = String::from_utf8_lossy(&output.stderr.bytes);
     assert!(stderr.contains("not inside a lane"), "{stderr}");
@@ -292,13 +292,13 @@ fn settings_from(
     rig: &TestRig,
     project: &str,
     source: &str,
-) -> Result<provenant_cli::declaration::HandoffSettings> {
+) -> Result<provenant_cli::declaration::DeclarationSettings> {
     std::fs::write(rig.state.join("config.toml"), source)?;
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let config = provenant_cli::config_reads::read_for(&roots, "handoff")?;
-    Ok(provenant_cli::declaration::HandoffSettings::resolve(
+    let config = provenant_cli::config_reads::read_for(&roots, "declare")?;
+    Ok(provenant_cli::declaration::DeclarationSettings::resolve(
         &config,
         project,
         roots.state.as_path(),
@@ -313,7 +313,7 @@ fn a_project_limit_overrides_the_host_limit() -> Result {
         &rig,
         &project,
         &format!(
-            "schema_version=1\n[domains.run]\nhandoff_journal_bytes = 2097152\nhandoff_relay_seconds = 12\nhandoff_relay_retries = 2\n[domains.run.projects.\"{project}\"]\nhandoff_journal_bytes = 65536\nhandoff_relay_seconds = 3\nhandoff_relay_retries = 0\n"
+            "schema_version=1\n[domains.run]\ndeclaration_journal_bytes = 2097152\ndeclaration_relay_seconds = 12\ndeclaration_relay_retries = 2\n[domains.run.projects.\"{project}\"]\ndeclaration_journal_bytes = 65536\ndeclaration_relay_seconds = 3\ndeclaration_relay_retries = 0\n"
         ),
     )?;
     assert_eq!(settings.journal_bytes, 65536);
@@ -330,11 +330,11 @@ fn near_full_policy_off_still_reports_the_bound() -> Result {
     let settings = settings_from(
         &rig,
         "",
-        "schema_version=1\n[knobs]\n'policy.HANDOFF_JOURNAL_NEAR_FULL'='off'\n",
+        "schema_version=1\n[knobs]\n'policy.DECLARATION_JOURNAL_NEAR_FULL'='off'\n",
     )?;
     assert!(settings.near_full(0));
     let effect = settings.near_full_policy.check(
-        "HANDOFF_JOURNAL_NEAR_FULL",
+        "DECLARATION_JOURNAL_NEAR_FULL",
         provenant_records::policy::Facts::violation("three bytes left".into()),
     );
     assert_eq!(effect, provenant_records::policy::Effect::Proceed);
@@ -347,8 +347,8 @@ fn a_full_journal_names_its_key_and_source() -> Result {
     let store = fixture.store()?;
     let limit = DeclarationLimit {
         journal_bytes: 1,
-        key: "domains.run.projects.p.handoff_journal_bytes".into(),
-        source: "host (config.toml#handoff)".into(),
+        key: "domains.run.projects.p.declaration_journal_bytes".into(),
+        source: "host (config.toml#declaration)".into(),
     };
     let failure = fixture.declare_with(&store, "too-big", payload("done"), &limit);
     let DeclarationError::Full {
@@ -370,7 +370,7 @@ fn the_receipt_reports_bytes_left_for_the_near_full_warning() -> Result {
     let store = fixture.store()?;
     let large = DeclarationLimit {
         journal_bytes: 16 << 20,
-        key: "domains.run.handoff_journal_bytes".into(),
+        key: "domains.run.declaration_journal_bytes".into(),
         source: "compiled defaults".into(),
     };
     let first = fixture.declare_with(&store, "same", payload("done"), &large)?;

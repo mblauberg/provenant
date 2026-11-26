@@ -41,8 +41,8 @@ macro_rules! policy_value {
 }
 
 policy_value!(
-    /// What a missing or malformed handoff does to a passing outcome.
-    HandoffAction { Review => "review", Fail => "fail", Warn => "warn", Off => "off" }
+    /// What a missing or malformed declaration does to a passing outcome.
+    DeclarationAction { Review => "review", Fail => "fail", Warn => "warn", Off => "off" }
 );
 policy_value!(
     /// What an empty final result does to a writer's passing outcome. The
@@ -63,12 +63,12 @@ policy_value!(
 );
 
 /// The settlement policy keys. A recorded policy effect names its key, not a
-/// signal: an empty result and a missing handoff are different knobs.
+/// signal: an empty result and a missing declaration are different knobs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SettlementKey {
-    HandoffMissing,
-    HandoffMalformed,
+    DeclarationMissing,
+    DeclarationMalformed,
     EmptyResult,
     UncommittedWork,
     StrayWork,
@@ -78,8 +78,8 @@ pub enum SettlementKey {
 impl SettlementKey {
     /// Every key, in the order a receipt lists them.
     pub const ALL: [Self; 6] = [
-        Self::HandoffMissing,
-        Self::HandoffMalformed,
+        Self::DeclarationMissing,
+        Self::DeclarationMalformed,
         Self::EmptyResult,
         Self::UncommittedWork,
         Self::StrayWork,
@@ -89,8 +89,8 @@ impl SettlementKey {
     /// The `[knobs]` name.
     pub const fn knob(self) -> &'static str {
         match self {
-            Self::HandoffMissing => "lanes.settlement.handoff_missing",
-            Self::HandoffMalformed => "lanes.settlement.handoff_malformed",
+            Self::DeclarationMissing => "lanes.settlement.declaration_missing",
+            Self::DeclarationMalformed => "lanes.settlement.declaration_malformed",
             Self::EmptyResult => "lanes.settlement.empty_result",
             Self::UncommittedWork => "lanes.settlement.uncommitted_work",
             Self::StrayWork => "lanes.settlement.stray_work",
@@ -106,7 +106,7 @@ impl SettlementKey {
     /// The values this key allows.
     pub fn values(self) -> &'static [&'static str] {
         match self {
-            Self::HandoffMissing | Self::HandoffMalformed => HandoffAction::VALUES,
+            Self::DeclarationMissing | Self::DeclarationMalformed => DeclarationAction::VALUES,
             Self::EmptyResult => EmptyResultAction::VALUES,
             Self::UncommittedWork => UncommittedAction::VALUES,
             Self::StrayWork => StrayAction::VALUES,
@@ -119,8 +119,8 @@ impl SettlementKey {
 /// re-drive and an audit reproduce the same decision.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettlementPolicy {
-    pub handoff_missing: Sourced<HandoffAction>,
-    pub handoff_malformed: Sourced<HandoffAction>,
+    pub declaration_missing: Sourced<DeclarationAction>,
+    pub declaration_malformed: Sourced<DeclarationAction>,
     pub empty_result: Sourced<EmptyResultAction>,
     pub uncommitted_work: Sourced<UncommittedAction>,
     pub stray_work: Sourced<StrayAction>,
@@ -147,8 +147,8 @@ impl SettlementPolicy {
             }
         }
         Self {
-            handoff_missing: shipped(HandoffAction::Review),
-            handoff_malformed: shipped(HandoffAction::Review),
+            declaration_missing: shipped(DeclarationAction::Review),
+            declaration_malformed: shipped(DeclarationAction::Review),
             empty_result: shipped(EmptyResultAction::Review),
             uncommitted_work: shipped(UncommittedAction::Hold),
             stray_work: shipped(StrayAction::Review),
@@ -158,19 +158,65 @@ impl SettlementPolicy {
 }
 
 /// The route layer of settlement policy. Routing declares these under
-/// `model_policy.defaults.lane.settlement` and `rules.policy.lane.settlement`;
-/// the holder reads the resolved value from the sealed route. Every field is
-/// optional, so an absent field leaves the lower layers in place.
+/// `model_policy.defaults.lanes.settlement.<key>` and a rule's
+/// `policy.lanes.settlement.<key>`, the same `lanes.settlement.<key>` spelling
+/// every layer uses. Launch seals the matched values on the applied route and
+/// the holder resolves from that record. Every field is optional, so an absent
+/// field leaves the lower layers in place.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "snake_case")]
 pub struct RouteSettlement {
-    pub handoff_missing: Option<HandoffAction>,
-    pub handoff_malformed: Option<HandoffAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declaration_missing: Option<DeclarationAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declaration_malformed: Option<DeclarationAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub empty_result: Option<EmptyResultAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub uncommitted_work: Option<UncommittedAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stray_work: Option<StrayAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub no_work: Option<NoWork>,
 }
+
+impl RouteSettlement {
+    /// Each key this layer sets, with its configured value, in key order.
+    pub fn entries(&self) -> Vec<(SettlementKey, serde_json::Value)> {
+        let value = serde_json::to_value(self).unwrap_or_default();
+        SettlementKey::ALL
+            .into_iter()
+            .filter_map(|key| {
+                value
+                    .get(key.field())
+                    .filter(|value| !value.is_null())
+                    .map(|value| (key, value.clone()))
+            })
+            .collect()
+    }
+
+    /// Overlay every key `patch` sets, keeping the keys it leaves unset.
+    pub fn overlay(&mut self, patch: &Self) {
+        macro_rules! keys {
+            ($($field:ident),+) => {
+                $(if patch.$field.is_some() { self.$field = patch.$field; })+
+            };
+        }
+        keys!(
+            declaration_missing,
+            declaration_malformed,
+            empty_result,
+            uncommitted_work,
+            stray_work,
+            no_work
+        );
+    }
+}
+
+/// One route-layer settlement value as launch seals it on the applied route:
+/// the `lanes.settlement.<key>` name and value, at the route layer, with the
+/// model-policy entry that set it as the origin.
+pub type RouteLayerValue = Sourced<(String, serde_json::Value)>;
 
 /// A non-default value that changed an outcome or a class, with the key and
 /// the source that chose it. Built only inside the classifier.
@@ -197,11 +243,30 @@ mod tests {
 
     #[test]
     fn every_declared_spelling_is_the_serde_spelling() {
-        round_trips::<HandoffAction>();
+        round_trips::<DeclarationAction>();
         round_trips::<EmptyResultAction>();
         round_trips::<UncommittedAction>();
         round_trips::<StrayAction>();
         round_trips::<NoWork>();
+    }
+
+    #[test]
+    fn a_route_overlay_keeps_the_keys_the_patch_leaves_unset() {
+        let mut base = RouteSettlement {
+            stray_work: Some(StrayAction::Warn),
+            ..Default::default()
+        };
+        base.overlay(&RouteSettlement {
+            no_work: Some(NoWork::Off),
+            ..Default::default()
+        });
+        assert_eq!(
+            base.entries(),
+            vec![
+                (SettlementKey::StrayWork, serde_json::Value::from("warn")),
+                (SettlementKey::NoWork, serde_json::Value::from("off")),
+            ]
+        );
     }
 
     #[test]

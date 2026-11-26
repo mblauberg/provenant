@@ -392,7 +392,7 @@ pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIAL
 pub const ROUTE_MODEL_NOT_CATALOGUED: WarningCode = WarningCode("ROUTE_MODEL_NOT_CATALOGUED");
 /// A declaration succeeded but its journal is nearly full. The claim still
 /// succeeds; the named setting is the one to raise.
-pub const HANDOFF_JOURNAL_NEAR_FULL: WarningCode = WarningCode("HANDOFF_JOURNAL_NEAR_FULL");
+pub const DECLARATION_JOURNAL_NEAR_FULL: WarningCode = WarningCode("DECLARATION_JOURNAL_NEAR_FULL");
 
 impl Warning {
     /// A warning with no subject, source or repair.

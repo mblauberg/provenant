@@ -1115,7 +1115,7 @@ fn prepare_nested(
             child
                 .prompt
                 .push_str(&format!(
-                    "Advisory write-scope paths: {}. The whole worktree remains writable; list out-of-scope edits in the handoff.\n",
+                    "Advisory write-scope paths: {}. The whole worktree remains writable; list out-of-scope edits in your declaration.\n",
                     child.write_scope.join(", ")
                 ));
         }

@@ -368,7 +368,7 @@ fn chunk() -> OutputChunk {
         publication: None,
         pushed_head: None,
         uncommitted_paths: None,
-        handoff_source: None,
+        declaration_source: None,
         selected: None,
     }
 }
@@ -446,7 +446,7 @@ fn chunk_optional_members_and_encodings() {
     full.publication = Some("pushed".into());
     full.pushed_head = Some("c".repeat(40));
     full.uncommitted_paths = Some(vec!["src/lib.rs".into()]);
-    full.handoff_source = Some("declared".into());
+    full.declaration_source = Some("declared".into());
     full.lane.provider_error = Some("failed".into());
     full.lane.result_path =
         json!(crate::StructuredPathWire::from_path(std::path::Path::new("/s/result.md")).unwrap());
@@ -463,7 +463,7 @@ fn chunk_optional_members_and_encodings() {
         "residual_tree",
         "publication",
         "pushed_head",
-        "handoff_source",
+        "declaration_source",
     ] {
         unavailable[field] = Value::Null;
     }

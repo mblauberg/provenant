@@ -31,7 +31,7 @@ settlement class (`settlement_class`) and the advisory settlement signals (`sign
 `terminal_cause`, `settlement_reason` and `partial_signals` keys retire at the one store and
 checkpoint crossings declared in [state](state.md). `handoff_missing` and `handoff_malformed` are
 `settlement_class` values, so their rates need no separate counter. Declaration counts reach the row
-as `handoff_declarations_accepted` and `handoff_declarations_rejected`, and `handoff_source`
+as `handoff_declarations_accepted` and `handoff_declarations_rejected`, and `declaration_source`
 (`Declared` or `Host`) says whether the lane declared its result or the host synthesised a stop
 handoff. Adapter writers have no declarations and report neither count nor source; an absent count
 is never read as zero.

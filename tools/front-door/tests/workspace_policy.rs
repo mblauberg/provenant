@@ -1900,7 +1900,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/run/src/store.rs", 2750),
         // The pushed tip sealed at the cut joined the writer terminal record
         // (#4020): 4255 lines. Next 250-band above size + 100.
-        ("crates/run/src/writer.rs", 4500),
+        ("crates/run/src/writer.rs", 4250),
         ("crates/supervisor/src/custody.rs", 4000),
         ("crates/supervisor/src/guardian.rs", 3250),
         ("crates/workflow/src/session.rs", 3500),

@@ -866,11 +866,11 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
             .unwrap();
         assert_eq!(correction, 1);
         // Every review prompt, the correction and the synthesis alike, asks for
-        // the verdict line first and the closed handoff as the very last thing.
+        // the verdict line as the very last thing.
         assert_eq!(owner.prompts.len(), 3);
         for prompt in &owner.prompts {
             assert!(
-                prompt.contains(super::review::VERDICT_THEN_HANDOFF),
+                prompt.contains(super::review::VERDICT_LAST),
                 "{prompt}"
             );
             assert!(!prompt.contains("may follow"), "{prompt}");

@@ -17,14 +17,14 @@ use provenant_records::run::{AttemptRecord, AttemptState};
 use provenant_records::run::{CauseKind, Outcome, SettlementClass, SettlementSignal};
 use provenant_records::settlement::project::graph_outcome;
 use provenant_records::settlement::{
-    CustodyFacts, GitEvidence, HandoffSource, HeadProgress, HostFacts, IdentityEvidence,
+    CustodyFacts, DeclarationSource, GitEvidence, HeadProgress, HostFacts, IdentityEvidence,
     IdentityPolicyEffect, LaneRole, PrimaryCheckout, SETTLEMENT_EVIDENCE_SCHEMA,
     SettlementEvidence,
     classify::budget_completed,
     classify::settle,
     policy::{
-        EmptyResultAction, HandoffAction, NoWork, RouteSettlement, SettlementKey, SettlementPolicy,
-        StrayAction, UncommittedAction,
+        DeclarationAction, EmptyResultAction, NoWork, RouteSettlement, SettlementKey,
+        SettlementPolicy, StrayAction, UncommittedAction,
     },
 };
 use provenant_records::stop::StopCause;
@@ -535,13 +535,16 @@ fn pushed_head_and_uncommitted_paths_are_not_settlement_evidence() {
 }
 
 #[test]
-fn a_host_stop_records_a_host_handoff_source() {
+fn a_host_stop_records_a_host_declaration_source() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::ReviewRequired, None);
     evidence.host.host_handoff = Some(handoff(
         HandoffStatus::StoppedEarly,
         "the host stopped this attempt",
     ));
-    assert_eq!(settle(&evidence).handoff_source, Some(HandoffSource::Host));
+    assert_eq!(
+        settle(&evidence).declaration_source,
+        Some(DeclarationSource::Host)
+    );
 }
 
 #[test]
@@ -554,7 +557,7 @@ fn rejected_then_accepted_reports_both_counts_and_a_declared_source() {
     };
     evidence.declarations = counts;
     let fact = settle(&evidence);
-    assert_eq!(fact.handoff_source, Some(HandoffSource::Declared));
+    assert_eq!(fact.declaration_source, Some(DeclarationSource::Declared));
     assert_eq!(fact.declarations, Some(counts));
 }
 
@@ -581,29 +584,29 @@ fn sourced_no_work(value: NoWork) -> Sourced<NoWork> {
         value,
         source: Source {
             layer: Layer::Route,
-            origin: Some("model_policy lane.settlement".into()),
+            origin: Some("model_policy.defaults.lanes.settlement".into()),
         },
     }
 }
 
 #[test]
-fn handoff_missing_fail_settles_failed_with_its_source() {
+fn declaration_missing_fail_settles_failed_with_its_source() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
-    evidence.policy.handoff_missing = sourced_action(HandoffAction::Fail);
+    evidence.policy.declaration_missing = sourced_action(DeclarationAction::Fail);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Failed);
     assert_eq!(fact.settlement_class, SettlementClass::Failed);
     assert!(fact.signals.contains(&SettlementSignal::HandoffMissing));
     assert_eq!(fact.applied.len(), 1);
-    assert_eq!(fact.applied[0].key, SettlementKey::HandoffMissing);
+    assert_eq!(fact.applied[0].key, SettlementKey::DeclarationMissing);
     assert_eq!(fact.applied[0].action, "fail");
     assert_eq!(fact.applied[0].source.layer, Layer::Project);
 }
 
 #[test]
-fn handoff_missing_off_records_the_signal_but_releases_dependants() {
+fn declaration_missing_off_records_the_signal_but_releases_dependants() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
-    evidence.policy.handoff_missing = sourced_action(HandoffAction::Off);
+    evidence.policy.declaration_missing = sourced_action(DeclarationAction::Off);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Succeeded);
     assert_eq!(fact.settlement_class, SettlementClass::Completed);
@@ -617,12 +620,12 @@ fn handoff_missing_off_records_the_signal_but_releases_dependants() {
 }
 
 #[test]
-fn handoff_malformed_off_keeps_the_error_but_completes_the_lane() {
+fn declaration_malformed_off_keeps_the_error_but_completes_the_lane() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     evidence.handoff = DeclarationEvidence::Rejected {
         error: HandoffError::new("status", "expected status done, stopped_early or blocked"),
     };
-    evidence.policy.handoff_malformed = sourced_action(HandoffAction::Off);
+    evidence.policy.declaration_malformed = sourced_action(DeclarationAction::Off);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Succeeded);
     assert_eq!(fact.settlement_class, SettlementClass::Completed);
@@ -690,7 +693,7 @@ fn a_route_value_is_sealed_with_the_policy() {
         value: route.stray_work.unwrap(),
         source: Source {
             layer: Layer::Route,
-            origin: Some("model_policy lane.settlement".into()),
+            origin: Some("model_policy.defaults.lanes.settlement".into()),
         },
     };
     let fact = settle(&evidence);

@@ -1,4 +1,4 @@
-//! `handoff` — declare a lane's result to the host-bound journal.
+//! `declare` — declare a lane's result to the host-bound journal.
 //!
 //! The command is a pure edge: it reads the declaration bytes, binds the
 //! parent attempt from the consumer environment, and relays one typed call.
@@ -21,9 +21,9 @@ use provenant_records::{
 use serde_json::Value;
 use std::{io::Read, path::PathBuf, time::Duration};
 
-/// Declare the last accepted handoff for this lane, from a file or stdin.
+/// Declare this lane's result, from a file or stdin.
 #[derive(Clone, Debug, Args)]
-pub struct HandoffArgs {
+pub struct DeclareArgs {
     /// Read the schema v2 handoff JSON from a file
     #[arg(long, catalog_required_unless = "stdin", conflicts_with = "stdin")]
     pub file: Option<PathBuf>,
@@ -37,7 +37,7 @@ pub struct HandoffArgs {
 /// near-full policy are applied by the lane CLI. Both sides resolve the same
 /// `domains.run` fields from the same host-owned configuration.
 #[derive(Clone, Debug, PartialEq)]
-pub struct HandoffSettings {
+pub struct DeclarationSettings {
     pub journal_bytes: u64,
     pub journal_key: String,
     pub journal_source: String,
@@ -46,13 +46,13 @@ pub struct HandoffSettings {
     pub near_full_policy: Policy,
 }
 
-impl HandoffSettings {
+impl DeclarationSettings {
     /// The shipped values: a 1 MiB journal, a 10 second relay, one retry and
     /// the compiled near-full warning rule.
     pub fn shipped() -> Self {
         Self {
             journal_bytes: provenant_records::declaration::DEFAULT_DECLARATION_JOURNAL_BYTES,
-            journal_key: "domains.run.handoff_journal_bytes".into(),
+            journal_key: "domains.run.declaration_journal_bytes".into(),
             journal_source: "compiled defaults".into(),
             relay_seconds: 10,
             retries: 1,
@@ -89,15 +89,15 @@ impl HandoffSettings {
         state: &std::path::Path,
     ) -> Self {
         let run = &config.domains.run;
-        let (journal_bytes, journal_used) = run.handoff_journal_bytes_for(project);
+        let (journal_bytes, journal_used) = run.declaration_journal_bytes_for(project);
         let journal_field = if journal_used == Layer::Project {
-            format!("domains.run.projects.{project}.handoff_journal_bytes")
+            format!("domains.run.projects.{project}.declaration_journal_bytes")
         } else {
-            "domains.run.handoff_journal_bytes".into()
+            "domains.run.declaration_journal_bytes".into()
         };
         let journal_source = setting_source(config, &journal_field);
-        let (relay_seconds, _) = run.handoff_relay_seconds_for(project);
-        let (retries, _) = run.handoff_relay_retries_for(project);
+        let (relay_seconds, _) = run.declaration_relay_seconds_for(project);
+        let (retries, _) = run.declaration_relay_retries_for(project);
         Self {
             journal_bytes,
             journal_key: journal_field,
@@ -123,22 +123,22 @@ fn setting_source(config: &ResolvedConfig<crate::domains::Domains>, field: &str)
 /// Build the host-owned roots the lane can see, read `domains.run`, and resolve
 /// every channel setting. A missing or unreadable configuration is advisory:
 /// it warns with its source and keeps the shipped values.
-fn lane_settings(globals: &crate::Globals) -> HandoffSettings {
-    let resolved = (|| -> Result<HandoffSettings, Box<dyn std::error::Error>> {
+fn lane_settings(globals: &crate::Globals) -> DeclarationSettings {
+    let resolved = (|| -> Result<DeclarationSettings, Box<dyn std::error::Error>> {
         let home = std::env::var_os("HOME").ok_or("HOME is unset")?;
         let cwd = std::env::current_dir()?;
         let mut inputs = RootInputs::new(PathBuf::from(home), cwd.clone());
         inputs.state_dir = globals.state_dir.clone();
         inputs.environment_state_dir = std::env::var_os(STATE_DIRECTORY_ENV).map(PathBuf::from);
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let config = crate::config_reads::read_for(&roots, "handoff")?;
+        let config = crate::config_reads::read_for(&roots, "declare")?;
         let project = std::env::var(provenant_core::consumer_env::ADMISSION_PROJECT)
             .ok()
             .and_then(|path| provenant_config::project_key_for(std::path::Path::new(&path)))
             .and_then(|key| ProjectId::parse(&key).ok())
             .map(|id| id.to_string())
             .unwrap_or_default();
-        Ok(HandoffSettings::resolve(
+        Ok(DeclarationSettings::resolve(
             &config,
             &project,
             roots.state.as_path(),
@@ -150,12 +150,12 @@ fn lane_settings(globals: &crate::Globals) -> HandoffSettings {
             warn(
                 Warning::new(
                     CONFIG_UNAVAILABLE,
-                    format!("handoff settings unavailable ({error}); using compiled defaults"),
+                    format!("declaration settings unavailable ({error}); using compiled defaults"),
                 )
-                .subject("domains.run.handoff_*")
+                .subject("domains.run.declaration_*")
                 .once_per_change(),
             );
-            HandoffSettings::shipped()
+            DeclarationSettings::shipped()
         }
     }
 }
@@ -203,7 +203,7 @@ pub fn serve_lane(
     match store.declare(holder.attempt_id, &input, limit) {
         Ok(receipt) => serde_json::to_value(receipt).map_err(|_| error()),
         Err(DeclarationError::Invalid(invalid)) => Err(ServiceError::Cli {
-            code: "handoff_invalid".into(),
+            code: "declaration_invalid".into(),
             message: invalid.to_string(),
             data: serde_json::to_value(&invalid).unwrap_or(Value::Null),
         }),
@@ -221,17 +221,17 @@ pub fn serve_lane(
     clippy::disallowed_methods,
     reason = "stdin is an explicit real-time boundary"
 )]
-fn read_input(command: &HandoffArgs) -> Result<Vec<u8>, String> {
+fn read_input(command: &DeclareArgs) -> Result<Vec<u8>, String> {
     let limit = provenant_records::handoff::HANDOFF_BYTES;
     if let Some(path) = &command.file {
         let mut bytes = Vec::new();
         std::fs::File::open(path)
-            .map_err(|error| format!("handoff file: {error}"))?
+            .map_err(|error| format!("declaration file: {error}"))?
             .take((limit + 1) as u64)
             .read_to_end(&mut bytes)
-            .map_err(|error| format!("handoff file: {error}"))?;
+            .map_err(|error| format!("declaration file: {error}"))?;
         if bytes.len() > limit {
-            return Err(format!("handoff file exceeds {limit} bytes"));
+            return Err(format!("declaration file exceeds {limit} bytes"));
         }
         Ok(bytes)
     } else if command.stdin {
@@ -241,13 +241,13 @@ fn read_input(command: &HandoffArgs) -> Result<Vec<u8>, String> {
         )
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::FileTooLarge {
-                format!("handoff exceeds {limit} bytes")
+                format!("declaration exceeds {limit} bytes")
             } else {
-                format!("handoff stdin: {error}")
+                format!("declaration stdin: {error}")
             }
         })
     } else {
-        Err("handoff requires exactly one of --file or --stdin".into())
+        Err("declare requires exactly one of --file or --stdin".into())
     }
 }
 
@@ -266,7 +266,7 @@ fn print_invalid(message: &str, data: &Value) {
     for item in items {
         let field = item.get("field").and_then(Value::as_str).unwrap_or("$");
         let detail = item.get("error").and_then(Value::as_str).unwrap_or("");
-        eprintln!("handoff field {field}: {detail}");
+        eprintln!("declaration field {field}: {detail}");
     }
     if items.is_empty() {
         eprintln!("{message}");
@@ -274,7 +274,7 @@ fn print_invalid(message: &str, data: &Value) {
 }
 
 /// Process edge: one declaration, one receipt, no prose fallback.
-pub fn run(command: HandoffArgs, globals: &crate::Globals) -> u8 {
+pub fn run(command: DeclareArgs, globals: &crate::Globals) -> u8 {
     let Some(parent) = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID).ok() else {
         eprintln!("{}", DeclarationError::NotInLane);
         return 2;
@@ -296,7 +296,7 @@ pub fn run(command: HandoffArgs, globals: &crate::Globals) -> u8 {
     let payload = match serde_json::from_slice::<Value>(&bytes) {
         Ok(payload) => payload,
         Err(error) => {
-            eprintln!("handoff field $: invalid handoff JSON: {error}");
+            eprintln!("declaration field $: invalid declaration JSON: {error}");
             return 1;
         }
     };
@@ -311,7 +311,7 @@ pub fn run(command: HandoffArgs, globals: &crate::Globals) -> u8 {
         payload,
     };
     let settings = lane_settings(globals);
-    let call = ToolCall::Handoff(input);
+    let call = ToolCall::Declare(input);
     let socket = provenant_providers::LaneRuntime::fabric_socket(attempt);
     let cancel = CancelToken::new();
     let timeout = Duration::from_secs(settings.relay_seconds);
@@ -333,7 +333,7 @@ pub fn run(command: HandoffArgs, globals: &crate::Globals) -> u8 {
                     );
                     if let Effect::Warn(warning) = settings
                         .near_full_policy
-                        .check("HANDOFF_JOURNAL_NEAR_FULL", Facts::violation(detail))
+                        .check("DECLARATION_JOURNAL_NEAR_FULL", Facts::violation(detail))
                     {
                         warn(warning);
                     }
@@ -344,13 +344,13 @@ pub fn run(command: HandoffArgs, globals: &crate::Globals) -> u8 {
                         0
                     }
                     Err(error) => {
-                        eprintln!("handoff receipt: {error}");
+                        eprintln!("declaration receipt: {error}");
                         1
                     }
                 }
             }
             Err(error) => {
-                eprintln!("handoff receipt: {error}");
+                eprintln!("declaration receipt: {error}");
                 1
             }
         },
@@ -358,12 +358,12 @@ pub fn run(command: HandoffArgs, globals: &crate::Globals) -> u8 {
             code,
             message,
             data,
-        }) if code == "handoff_invalid" => {
+        }) if code == "declaration_invalid" => {
             print_invalid(&message, &data);
             1
         }
         Err(error) => {
-            eprintln!("handoff: {error}");
+            eprintln!("declaration: {error}");
             1
         }
     }
@@ -376,18 +376,21 @@ mod tests {
 
     #[test]
     fn shipped_settings_match_the_channel_defaults() {
-        let settings = HandoffSettings::shipped();
+        let settings = DeclarationSettings::shipped();
         assert_eq!(settings.journal_bytes, 1 << 20);
         assert_eq!(settings.relay_seconds, 10);
         assert_eq!(settings.retries, 1);
-        assert_eq!(settings.limit().key, "domains.run.handoff_journal_bytes");
+        assert_eq!(
+            settings.limit().key,
+            "domains.run.declaration_journal_bytes"
+        );
         assert!(!settings.near_full(1 << 17));
         assert!(settings.near_full((1 << 20) / 10 - 1));
     }
 
     #[test]
     fn zero_retries_makes_exactly_one_attempt() {
-        let mut settings = HandoffSettings::shipped();
+        let mut settings = DeclarationSettings::shipped();
         assert_eq!(settings.relay_attempts(), 2);
         settings.retries = 0;
         assert_eq!(settings.relay_attempts(), 1);
@@ -397,16 +400,16 @@ mod tests {
 
     #[test]
     fn a_zero_journal_bound_is_never_near_full() {
-        let mut settings = HandoffSettings::shipped();
+        let mut settings = DeclarationSettings::shipped();
         settings.journal_bytes = 0;
         assert!(!settings.near_full(0));
     }
 
     #[test]
     fn a_project_bound_is_named_in_the_limit() {
-        let mut settings = HandoffSettings::shipped();
+        let mut settings = DeclarationSettings::shipped();
         settings.journal_bytes = 65_536;
-        settings.journal_key = "domains.run.projects.p.handoff_journal_bytes".into();
+        settings.journal_key = "domains.run.projects.p.declaration_journal_bytes".into();
         settings.journal_source = "host (config.toml)".into();
         let limit: DeclarationLimit = settings.limit();
         assert_eq!(limit.journal_bytes, 65_536);

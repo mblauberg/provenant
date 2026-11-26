@@ -6,7 +6,7 @@ pub(super) fn declaration_row(
     entries: impl IntoIterator<
         Item = (
             Option<provenant_records::declaration::DeclarationCounts>,
-            Option<provenant_records::settlement::HandoffSource>,
+            Option<provenant_records::settlement::DeclarationSource>,
         ),
     >,
 ) -> Value {
@@ -20,8 +20,8 @@ pub(super) fn declaration_row(
         }
         if let Some(source) = source {
             let label = match source {
-                provenant_records::settlement::HandoffSource::Declared => "declared",
-                provenant_records::settlement::HandoffSource::Host => "host",
+                provenant_records::settlement::DeclarationSource::Declared => "declared",
+                provenant_records::settlement::DeclarationSource::Host => "host",
             };
             *sources.entry(label.to_owned()).or_default() += 1;
         }
@@ -194,7 +194,7 @@ pub(super) fn stats_inner(
         store
             .as_ref()
             .and_then(|store| store.record(fact.attempt_id, &call).ok())
-            .map(|record| (record.declarations, record.handoff_source))
+            .map(|record| (record.declarations, record.declaration_source))
     }));
     let mut route_evidence = Vec::new();
     let mut requests = BTreeMap::new();
@@ -500,7 +500,7 @@ pub(super) fn stats_inner(
     data["signals"] = signals_value(partial);
     data["handoff_declarations_accepted"] = declarations["accepted"].clone();
     data["handoff_declarations_rejected"] = declarations["rejected"].clone();
-    data["handoff_source"] = declarations["sources"].clone();
+    data["declaration_source"] = declarations["sources"].clone();
     human.push_str(&format!(
         "handoff declarations: accepted={} rejected={}\n",
         declarations["accepted"], declarations["rejected"]
@@ -822,7 +822,7 @@ pub(super) fn pipeline_node_model(facts: &[provenant_records::AttemptFact]) -> O
 #[cfg(test)]
 mod tests {
     use super::declaration_row;
-    use provenant_records::{declaration::DeclarationCounts, settlement::HandoffSource};
+    use provenant_records::{declaration::DeclarationCounts, settlement::DeclarationSource};
     use serde_json::json;
 
     #[test]
@@ -833,9 +833,9 @@ mod tests {
                     accepted: 1,
                     rejected: 1,
                 }),
-                Some(HandoffSource::Declared),
+                Some(DeclarationSource::Declared),
             ),
-            (None, Some(HandoffSource::Host)),
+            (None, Some(DeclarationSource::Host)),
         ]);
         assert_eq!(row["accepted"], json!(1));
         assert_eq!(row["rejected"], json!(1));

@@ -14,11 +14,11 @@ use crate::run::{
     CauseKind, DependantRelease, Outcome, SettlementClass, SettlementSignal, TerminalBasis,
 };
 use crate::settlement::policy::{
-    AppliedPolicy, EmptyResultAction, HandoffAction, NoWork, PolicyValue, SettlementKey,
+    AppliedPolicy, DeclarationAction, EmptyResultAction, NoWork, PolicyValue, SettlementKey,
     SettlementPolicy, StrayAction, UncommittedAction,
 };
 use crate::settlement::{
-    HandoffSource, HeadProgress, IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout,
+    DeclarationSource, HeadProgress, IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout,
     RouteIdentityFact, SettlementEvidence,
 };
 use crate::stop::{Stop, StopCause};
@@ -29,7 +29,7 @@ use crate::stop::{Stop, StopCause};
 trait Classed: Copy {
     fn classed(self) -> bool;
 }
-impl Classed for HandoffAction {
+impl Classed for DeclarationAction {
     fn classed(self) -> bool {
         self == Self::Review
     }
@@ -306,26 +306,26 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         .is_some_and(crate::handoff::Handoff::unfinished);
 
     if let Err(error) = &declaration {
-        let action = policy.handoff_malformed.value;
+        let action = policy.declaration_malformed.value;
         let before = outcome;
         signals.push(SettlementSignal::HandoffMalformed);
-        if action != HandoffAction::Off {
+        if action != DeclarationAction::Off {
             append(&mut reason, error.to_string());
         }
         outcome = match action {
-            HandoffAction::Fail => Outcome::Failed,
-            HandoffAction::Review
+            DeclarationAction::Fail => Outcome::Failed,
+            DeclarationAction::Review
                 if matches!(outcome, Outcome::Succeeded | Outcome::Uncommitted) =>
             {
                 Outcome::ReviewRequired
             }
-            HandoffAction::Review | HandoffAction::Warn | HandoffAction::Off => outcome,
+            DeclarationAction::Review | DeclarationAction::Warn | DeclarationAction::Off => outcome,
         };
         record_action(
             &mut applied,
-            SettlementKey::HandoffMalformed,
-            shipped.handoff_malformed.value,
-            &policy.handoff_malformed,
+            SettlementKey::DeclarationMalformed,
+            shipped.declaration_malformed.value,
+            &policy.declaration_malformed,
             outcome != before || !action.classed(),
         );
     }
@@ -339,22 +339,22 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         && stopped.is_none()
         && matches!(&evidence.handoff, DeclarationEvidence::Missing)
     {
-        let action = policy.handoff_missing.value;
+        let action = policy.declaration_missing.value;
         let before = outcome;
         signals.push(SettlementSignal::HandoffMissing);
         outcome = match action {
-            HandoffAction::Fail => Outcome::Failed,
-            HandoffAction::Review if outcome == Outcome::Succeeded => {
+            DeclarationAction::Fail => Outcome::Failed,
+            DeclarationAction::Review if outcome == Outcome::Succeeded => {
                 reason = Some(NO_HANDOFF_REASON.into());
                 Outcome::ReviewRequired
             }
-            HandoffAction::Review | HandoffAction::Warn | HandoffAction::Off => outcome,
+            DeclarationAction::Review | DeclarationAction::Warn | DeclarationAction::Off => outcome,
         };
         record_action(
             &mut applied,
-            SettlementKey::HandoffMissing,
-            shipped.handoff_missing.value,
-            &policy.handoff_missing,
+            SettlementKey::DeclarationMissing,
+            shipped.declaration_missing.value,
+            &policy.declaration_missing,
             outcome != before || !action.classed(),
         );
     }
@@ -608,9 +608,9 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         .filter(|signal| match signal {
             SettlementSignal::UncommittedWork => policy.uncommitted_work.value.classed(),
             SettlementSignal::StrayWork => policy.stray_work.value.classed(),
-            SettlementSignal::HandoffMalformed => policy.handoff_malformed.value.classed(),
+            SettlementSignal::HandoffMalformed => policy.declaration_malformed.value.classed(),
             SettlementSignal::HandoffMissing => {
-                policy.handoff_missing.value.classed()
+                policy.declaration_missing.value.classed()
                     && (!empty_result_missing || policy.empty_result.value.classed())
             }
             _ => true,
@@ -623,7 +623,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
             cause
         };
     let class_declaration: HandoffResult =
-        if declaration.is_err() && !policy.handoff_malformed.value.classed() {
+        if declaration.is_err() && !policy.declaration_malformed.value.classed() {
             Ok(None)
         } else {
             declaration.clone()
@@ -652,10 +652,10 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
 
     // Provenance is a fact about where the settled handoff came from. A host
     // stop outranks a declaration; an accepted declaration is the lane's own.
-    let handoff_source = if stopped.is_some() {
-        Some(HandoffSource::Host)
+    let declaration_source = if stopped.is_some() {
+        Some(DeclarationSource::Host)
     } else if matches!(&evidence.handoff, DeclarationEvidence::Accepted(_)) {
-        Some(HandoffSource::Declared)
+        Some(DeclarationSource::Declared)
     } else {
         None
     };
@@ -673,7 +673,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         signals,
         head_progress,
         handoff: declaration,
-        handoff_source,
+        declaration_source,
         declarations,
         applied,
         reason,

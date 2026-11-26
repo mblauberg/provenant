@@ -4880,6 +4880,9 @@ pub(super) fn prepare_candidates_inner(
             push_launch_warning(&mut route, warning);
         }
         provider.lane_access = Some(lane_access.clone());
+        // The matched model policy's settlement keys, sealed on the applied
+        // route so the holder resolves the route layer explain reported.
+        provider.settlement = model_policy.lanes.route_layer();
         apply_resolved_model(&mut provider, &exact_model);
         if let Some(name) = host_native {
             provider.source = Some(format!("domains.fabric.host_native.{name}"));

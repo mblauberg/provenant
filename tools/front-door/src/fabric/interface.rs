@@ -2724,6 +2724,10 @@ impl Factory {
             // Explain runs the launch's pre-attempt admission checks, so an
             // explanation that passes means the same input admits a launch.
             super::graph_execution::validate_explain_submission(self, &document, &expanded)?;
+            let settlement_knobs = provenant_run::settlement_policy::SettlementConfig::from_knobs(
+                &config.knobs,
+                self.context.roots.state.as_path(),
+            );
             let mut writer_budgets = Vec::new();
             for node in &expanded.nodes {
                 if node.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
@@ -2777,6 +2781,13 @@ impl Factory {
                         "gh_budget": provenant_run::gh_budget(&profile),
                         "ci_scope": provenant_run::ResolvedCiScope::resolve(&profile).receipt(),
                         "pr_policy": provenant_run::ResolvedPrPolicy::resolve(&profile).receipt(),
+                        // The value a launch on this route seals, with the
+                        // matched model policy as its route layer.
+                        "settlement": provenant_run::settlement_policy::explain(
+                            &settlement_knobs
+                                .clone()
+                                .with_route(&route_settlement_layer(&config, route)),
+                        ),
                     }));
                 }
             }
@@ -2822,8 +2833,10 @@ impl Factory {
                     }).collect::<serde_json::Map<String, Value>>(),
                 },
                 // Settlement knobs are sealed with the evidence, so an
-                // explanation shows the same layers the holder will seal.
-                "settlement": provenant_run::settlement_policy::explain(&config.knobs),
+                // explanation shows the same layers the holder will seal. The
+                // host and project layers are here; each writer budget row
+                // adds its route's model policy.
+                "settlement": provenant_run::settlement_policy::explain(&settlement_knobs),
                 "implement_plan": {
                     "value": input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).cloned().unwrap_or(json!(self.context.config.implement.plan)),
                     "source": if input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).is_some() { json!("parameter (--plan or --set)") } else {
@@ -4263,4 +4276,37 @@ pub(super) fn warn_operator(warning: impl std::fmt::Display) {
         )
         .once_per_change(),
     );
+}
+
+/// The `lanes.settlement.*` route layer the model policy gives a concrete
+/// route, as launch would seal it. A tier alias or an unparsable model has no
+/// concrete policy yet, so it adds nothing. Rules match against the bundled
+/// catalogue here; a rule keyed on a discovered-only model shows at launch.
+fn route_settlement_layer(
+    config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
+    route: Option<&provenant_fabric_runtime::graph::GraphRoute>,
+) -> Vec<provenant_records::settlement::policy::RouteLayerValue> {
+    let Some(route) = route else {
+        return Vec::new();
+    };
+    let label = match (route.adapter.as_deref(), route.model.as_deref()) {
+        (_, Some(model)) if model.contains('/') => model.to_owned(),
+        (Some(adapter), Some(model)) => format!("{adapter}/{model}"),
+        _ => return Vec::new(),
+    };
+    let (Ok(model), Ok(catalogue), Ok(now)) = (
+        provenant_routing::ModelId::parse(&label),
+        provenant_routing::Catalogue::bundled(),
+        provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock),
+    ) else {
+        return Vec::new();
+    };
+    config
+        .domains
+        .routing
+        .model_policy
+        .effective(&catalogue, &model, route.account_key.as_deref(), now)
+        .policy
+        .lanes
+        .route_layer()
 }

@@ -1911,7 +1911,7 @@ impl RunStore {
             operation_id,
             attempt_id: AttemptId::from_bytes(attempt_bytes),
             prompt: format!(
-                "The writer token target has been crossed. You have {remaining} fresh tokens left in the grace allowance. Finish at a clean point now: commit your work, push your branch, and return the final handoff. Continue this same task and provider session. This is the only budget wrap-up continuation; the remaining allowance is a hard stop."
+                "The writer token target has been crossed. You have {remaining} fresh tokens left in the grace allowance. Finish at a clean point now: commit your work, push your branch, and declare your result with `provenant declare --stdin`. Continue this same task and provider session. This is the only budget wrap-up continuation; the remaining allowance is a hard stop."
             ),
             created_at: match record.state {
                 AttemptState::Terminal { finished_at, .. } => finished_at,
@@ -3077,11 +3077,19 @@ impl RunStore {
             return Err(RunError::Validation("request changed after launch"));
         }
         let task = request.task;
-        // Resolve once from the sealed profile; the same value is sealed with
-        // the evidence and the stray check reads it before it runs.
+        // Resolve once from the sealed profile and the route layer launch
+        // sealed on the applied route; the same value is sealed with the
+        // evidence and the stray check reads it before it runs.
+        let route_settlement = record
+            .applied_route
+            .as_ref()
+            .map_or(&[][..], |route| route.settlement.as_slice());
         let (settlement_policy, settlement_warnings) = crate::settlement_policy::resolve(
-            &crate::settlement_policy::SettlementConfig::from_profile(&task.profile),
-            None,
+            &crate::settlement_policy::SettlementConfig::from_profile(
+                &task.profile,
+                self.context.state_root.as_path(),
+            )
+            .with_route(route_settlement),
         );
         for warning in settlement_warnings {
             provenant_records::warning::warn(warning);

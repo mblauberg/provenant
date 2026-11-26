@@ -38,7 +38,7 @@ pub struct SettlementEvidence {
 /// and context stops; otherwise the lane declared it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HandoffSource {
+pub enum DeclarationSource {
     Declared,
     Host,
 }
@@ -174,7 +174,7 @@ pub struct OutcomeFact {
     pub signals: Vec<SettlementSignal>,
     pub head_progress: Option<HeadProgress>,
     pub handoff: crate::handoff::HandoffResult,
-    pub handoff_source: Option<HandoffSource>,
+    pub declaration_source: Option<DeclarationSource>,
     /// Declaration counts, absent for lanes that owe no handoff.
     pub declarations: Option<DeclarationCounts>,
     /// Non-default policy actions that changed the decision.

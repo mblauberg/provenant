@@ -788,6 +788,10 @@ pub struct RouteRecord {
     /// Human-readable, host-generated warnings retained with the applied route.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launch_warnings: Vec<String>,
+    /// The route layer of settlement policy the matched model policy set,
+    /// sealed at launch so the holder resolves the same value `--explain` showed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement: Vec<crate::settlement::policy::RouteLayerValue>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub provider: Option<String>,
@@ -2756,7 +2760,7 @@ pub struct AttemptRecord {
     pub declarations: Option<crate::declaration::DeclarationCounts>,
     /// Whether the settled handoff was declared by the lane or made by the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handoff_source: Option<crate::settlement::HandoffSource>,
+    pub declaration_source: Option<crate::settlement::DeclarationSource>,
     /// Non-default settlement policy actions that changed the decision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settlement_policy_applied: Vec<crate::settlement::policy::AppliedPolicy>,

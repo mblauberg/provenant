@@ -29,7 +29,7 @@ rules below for restructuring.
   its durable home (`engineering-docs`).
 - Move every caller and delete the old shape without compatibility code.
   Persisted state follows the owning repository's format policy.
-- When the spec is wrong, cite the evidence in the handoff `decisions` and take
+- When the spec is wrong, cite the evidence in the declaration `decisions` and take
   the best-evidenced option within write scope, recording why it beat the
   alternative. If no option serves the outcome, return the evidence to `scope`.
 

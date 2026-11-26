@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_DECLARATION_JOURNAL_BYTES: u64 = 1 << 20;
 /// Ceiling of the configurable bound: a journal can never grow past this even
-/// when an operator raises `domains.run.handoff_journal_bytes`.
+/// when an operator raises `domains.run.declaration_journal_bytes`.
 pub const MAX_DECLARATION_JOURNAL_BYTES: u64 = 16 << 20;
 pub const DECLARATION_SCHEMA: u64 = 1;
 
@@ -21,7 +21,7 @@ impl DeclarationLimit {
     pub fn shipped() -> Self {
         Self {
             journal_bytes: DEFAULT_DECLARATION_JOURNAL_BYTES,
-            key: "domains.run.handoff_journal_bytes".into(),
+            key: "domains.run.declaration_journal_bytes".into(),
             source: "compiled defaults".into(),
         }
     }

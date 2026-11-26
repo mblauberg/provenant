@@ -131,7 +131,7 @@ pub(crate) fn start_fabric_relay(
     let declaration_limit = {
         let project = context.project_id.to_string();
         match crate::config_reads::read_for(&ctx.roots, "handoff") {
-            Ok(config) => crate::declaration::HandoffSettings::resolve(
+            Ok(config) => crate::declaration::DeclarationSettings::resolve(
                 &config,
                 &project,
                 ctx.roots.state.as_path(),
@@ -145,7 +145,7 @@ pub(crate) fn start_fabric_relay(
                             "handoff journal settings unavailable ({error}); using compiled defaults"
                         ),
                     )
-                    .subject("domains.run.handoff_journal_bytes")
+                    .subject("domains.run.declaration_journal_bytes")
                     .once_per_change(),
                 );
                 provenant_records::declaration::DeclarationLimit::shipped()
@@ -160,7 +160,7 @@ pub(crate) fn start_fabric_relay(
             max_members: 100_000,
         },
         move |call, cancel, within| {
-            if let provenant_fabric_runtime::relay::ToolCall::Handoff(input) = &call {
+            if let provenant_fabric_runtime::relay::ToolCall::Declare(input) = &call {
                 return crate::declaration::serve_lane(
                     &ctx,
                     &notes_holder,

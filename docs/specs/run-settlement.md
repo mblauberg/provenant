@@ -235,10 +235,10 @@ settlement checks still apply.
   lock must remain an exclusion boundary during concurrent release (#3844).
 - Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`
 
-The lane declares its result with `provenant handoff --file <path>|--stdin`, exactly one of which is
+The lane declares its result with `provenant declare --file <path>|--stdin`, exactly one of which is
 required. The command reads `PROVENANT_PARENT_ATTEMPT_ID`, validates the schema v2 JSON through
 `Handoff::from_json`, and sends one declaration over the attempt's relay socket. A field error comes
-back at once as `handoff field <field>: <error>`, so the lane can fix it and call again. Every line
+back at once as `declaration field <field>: <error>`, so the lane can fix it and call again. Every line
 carries a sequence and a `request_id`: replaying the same id with the same bytes returns the original
 receipt, while the same id with different bytes is a conflict. Declarations close at settlement and
 the last accepted declaration wins; rejected submissions are journalled but never displace an
@@ -274,7 +274,7 @@ destinations are unusable does capture fail with the typed error. A transient st
 a safe entry is not an unsafe class: it
 keeps its typed, retriable cause and does not settle. The launch prompt tells the lane that the
 harness writes the attempt's own records, including the sealed `handoff.json`, while its result is
-declared with `provenant handoff` into `declarations.jsonl`. Provider scratch and
+declared with `provenant declare` into `declarations.jsonl`. Provider scratch and
 `$TMPDIR` live in the sibling scratch root; settlement still validates ownership of its snapshot slot.
 - Why: a lane can discover supervisor records from its scratch and write a bare handoff object that
   fails the sealed-envelope decode; trusting it, or retrying a decode that can never change, strands
@@ -338,7 +338,7 @@ commits.
 Settlement behaviour is data, sealed with the evidence. Resolution uses `SETTLEMENT_PRECEDENCE`,
 lowest first: `Default` < `Host` (`<state>/config.toml [knobs]`) < `Project`
 (`.provenant/config.toml [knobs]`, in any repository) < `Route` (the matched route's
-`model_policy.defaults.lane.settlement.<key>` and `rules.policy.lane.settlement.<key>`). There are no
+`model_policy.defaults.lanes.settlement.<key>` and `rules.policy.lanes.settlement.<key>`). There are no
 host-name or project-name special cases. Each value is a `Sourced<T>` carrying its layer and origin;
 the effective `SettlementPolicy` is sealed into `settlement-evidence.json` so a re-drive and an audit
 reproduce the decision. An invalid value warns `SETTLEMENT_POLICY_INVALID` naming the key, layer and
@@ -349,18 +349,18 @@ has its own value type, so a value another key allows is invalid here.
 
 | Key | Allowed | Default | Scope | Effect |
 | --- | --- | --- | --- | --- |
-| `lanes.settlement.handoff_missing` | `review`, `fail`, `warn`, `off` | `review` | host, project, route | Model writer with no accepted declaration; adapter writers owe none. |
-| `lanes.settlement.handoff_malformed` | `review`, `fail`, `warn`, `off` | `review` | host, project, route | Declarations submitted, none accepted. |
+| `lanes.settlement.declaration_missing` | `review`, `fail`, `warn`, `off` | `review` | host, project, route | Model writer with no accepted declaration; adapter writers owe none. |
+| `lanes.settlement.declaration_malformed` | `review`, `fail`, `warn`, `off` | `review` | host, project, route | Declarations submitted, none accepted. |
 | `lanes.settlement.empty_result` | `review`, `fail`, `warn` | `review` | host, project, route | Writer's empty final message; a reader's empty result stays `Failed`. |
 | `lanes.settlement.uncommitted_work` | `hold`, `review`, `warn`, `off` | `hold` | host, project, route | Never touches files; `domains.run.review_exempt` still decides which paths count. |
 | `lanes.settlement.stray_work` | `review`, `warn`, `off` | `review` | host, project, route | `off` skips the primary-checkout check; `warn` keeps `PRIMARY_MOVED_UNATTRIBUTED`. |
 | `lanes.settlement.no_work` | `detect`, `off` | `detect` | host, project, route | `off` keeps `DeclaredStop`/`StoppedEarly` on an unchanged head. |
 | `domains.fabric.graph.on_stop.<stop_cause>`, `projects.{project}.on_stop.<stop_cause>` | the `OnStop` spellings | the stop table | host, project | Resolved at graph admission; template and node `on_stop` stay above. A pinned cause warns `ON_STOP_PINNED_IGNORED`. |
-| `domains.run.handoff_journal_bytes`, `projects.{project}.handoff_journal_bytes` | 65536–16777216 | 1048576 | host, project | `Full` past the limit; under 10% remaining the receipt warns `HANDOFF_JOURNAL_NEAR_FULL`. |
-| `domains.run.handoff_relay_seconds` | 1–300 | 10 | host, project | Lane relay timeout; unreadable config warns and uses the default. |
-| `domains.run.handoff_relay_retries` | 0–5 | 1 | host, project | Retries reuse the `request_id`; 0 disables retry. |
+| `domains.run.declaration_journal_bytes`, `projects.{project}.declaration_journal_bytes` | 65536–16777216 | 1048576 | host, project | `Full` past the limit; under 10% remaining the receipt warns `DECLARATION_JOURNAL_NEAR_FULL`. |
+| `domains.run.declaration_relay_seconds` | 1–300 | 10 | host, project | Lane relay timeout; unreadable config warns and uses the default. |
+| `domains.run.declaration_relay_retries` | 0–5 | 1 | host, project | Retries reuse the `request_id`; 0 disables retry. |
 | `policy.SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS` | `warn`, `off` | `warn` | host, project | The sealed copy always wins; the rule is not refusable. |
-| `policy.HANDOFF_JOURNAL_NEAR_FULL` | `warn`, `off` | `warn` | host, project | Boundary-free and not refusable. |
+| `policy.DECLARATION_JOURNAL_NEAR_FULL` | `warn`, `off` | `warn` | host, project | Boundary-free and not refusable. |
 
 A signal's action changes only the outcome and the warning: the signal itself is always recorded.
 `review` turns `Succeeded` into `ReviewRequired`; `fail` turns it into `Failed` with its configured
@@ -383,9 +383,9 @@ the bound branch at the cut, sealed in `writer-terminal.json`: the full `output`
 `GitEvidence.uncommitted_paths` is the bounded, sorted census behind the `uncommitted` note and
 appears in `output --json` as `uncommitted_paths`. `DeclarationCounts` on `DeclarationEvidence` counts accepted and
 rejected declarations, reaching telemetry as `handoff_declarations_accepted` and
-`handoff_declarations_rejected`. `OutcomeFact.handoff_source` is `Declared` for an accepted
+`handoff_declarations_rejected`. `OutcomeFact.declaration_source` is `Declared` for an accepted
 declaration and `Host` for a host-synthesised stop handoff, reaching telemetry and `output` as
-`handoff_source`.
+`declaration_source`.
 - Why: per-route reliability and provenance need a measure without restoring a prose parser.
 
 ## Guardian loss proof
@@ -538,9 +538,9 @@ store, and oversize records fail explicitly instead of truncating ([state](state
 
 ## Review verdict wording
 
-A review result requires exactly one verdict declaration outside fenced blocks, in canonical
-order: a standalone verdict, then the final handoff. Every review prompt, including synthesis
-and the one automatic verdict correction, states that order. `ResultCapture` owns recognition,
+A review result requires exactly one verdict line outside fenced blocks, and the result ends
+with it: a reader owes no declaration, so nothing follows the verdict. Every review prompt,
+including synthesis and the one automatic verdict correction, says to end with the verdict line. `ResultCapture` owns recognition,
 case-insensitively: PASS, FAIL and INCONCLUSIVE are canonical; approve, approved and lgtm mean
 PASS; reject, request changes and changes requested mean FAIL. Trailing text after a complete
 recognised word is ignored, and `Verdict FAIL: explanation` is recognised. Accepted noncanonical
