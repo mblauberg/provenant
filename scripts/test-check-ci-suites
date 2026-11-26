@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import sys
+import tempfile
 from pathlib import Path
 try:
     import yaml
@@ -73,4 +74,20 @@ native_inventory = {
 assert not checker.artifact_edges(native_inventory)
 native_inventory['rust-macos-inventory']['if'] = "${{ always() && fromJSON(needs.scope.outputs.suites).macos_native == 'run' }}"
 assert checker.artifact_edges(native_inventory), 'inventory must skip when its archive producer is skipped'
+
+# Every macOS-specific cfg file must be selected, even with nested cfg syntax.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    variants = ['#[cfg(target_os = "macos")]', '#[cfg(all(unix, target_os = "macos"))]',
+                '#[cfg(not(target_os = "linux"))]',
+                '#[cfg(all(unix, not(target_os = "linux")))]',
+                '#[cfg(unix)] // macOS branch']
+    cfg = {'suite': [{'name': 'macos_lint', 'pr_paths': ['covered.rs']}]}
+    (root / 'covered.rs').write_text(variants[0])
+    assert checker.uncovered_macos(cfg, root) == []
+    for variant in variants:
+        (root / 'missing.rs').write_text(variant)
+        assert any('missing.rs' in error for error in checker.uncovered_macos(cfg, root))
+    (root / 'missing.rs').write_text('#[cfg(target_os = "linux")]')
+    assert checker.uncovered_macos(cfg, root) == []
 print('CI suite manifest fixtures passed.')
