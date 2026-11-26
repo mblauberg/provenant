@@ -523,10 +523,7 @@ esac
 }
 
 #[allow(dead_code)]
-fn smoke_runner(
-    root: &std::path::Path,
-    cwd: &std::path::Path,
-) -> Result<ChildRunner, Box<dyn std::error::Error>> {
+fn smoke_runner(cwd: &std::path::Path) -> Result<ChildRunner, Box<dyn std::error::Error>> {
     Ok(ChildRunner {
         executor: provenant_os::exec::SystemExecutor::new(1)?,
         environment: std::env::vars_os().collect(),
@@ -549,10 +546,32 @@ fn smoke_upgrade(host: Option<String>, set: Vec<String>) -> cli::Upgrade {
     }
 }
 
+// Extract the fixture from the first child invocation, so cleanup checks cannot
+// silently pass against a made-up path when the launch omitted its project.
+#[allow(dead_code)]
+fn smoke_recorded_project(recorded: &str) -> Option<std::path::PathBuf> {
+    recorded
+        .lines()
+        .next()?
+        .split_once("--project ")?
+        .1
+        .split_whitespace()
+        .next()
+        .map(std::path::PathBuf::from)
+}
+
+#[test]
+fn smoke_cleanup_checks_the_launched_fixture() {
+    assert_eq!(
+        smoke_recorded_project("run smoke --project /tmp/fixture --json\n"),
+        Some(std::path::PathBuf::from("/tmp/fixture"))
+    );
+    assert_eq!(smoke_recorded_project("run smoke --json\n"), None);
+    assert_eq!(smoke_recorded_project("run smoke --project "), None);
+}
+
 #[test]
 fn smoke_cleanup_warnings_never_hide_or_replace_the_smoke_result() {
-    use super::*;
-
     assert_eq!(
         crate::smoke::report_smoke_cleanup(Ok("smoke ok".to_owned()), Err("missing record".into())),
         Ok("smoke ok".to_owned())
@@ -570,8 +589,6 @@ fn smoke_cleanup_warnings_never_hide_or_replace_the_smoke_result() {
 // Spec: docs/specs/fabric.md#hermetic-smoke — the same nonce yields the same
 // commits in two different homes, so a peer can reproduce the fixture.
 fn smoke_fixture_is_deterministic_per_nonce() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-
     let temp = tempfile::tempdir()?;
     let nonce = "0123456789ab";
     let root = provenant_cli::smoke::Settings::default().root();
@@ -591,8 +608,6 @@ fn smoke_fixture_is_deterministic_per_nonce() -> Result<(), Box<dyn std::error::
 // Spec: docs/specs/state.md#managed-install — a smoke run forgets its fixture
 // binding and removes the directory on success, failure and refused launch.
 fn smoke_removes_its_fixture_and_binding() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-
     for (name, script) in [
         ("success", None),
         ("failure", Some("#!/bin/sh\nexit 42\n".to_owned())),
@@ -619,7 +634,7 @@ fn smoke_removes_its_fixture_and_binding() -> Result<(), Box<dyn std::error::Err
             }
             None => smoke_program(temp.path(), "nonce: $nonce")?,
         };
-        let runner = smoke_runner(temp.path(), &home)?;
+        let runner = smoke_runner(&home)?;
         let result = crate::smoke::run_lifecycle(
             &provenant_os::clock::SystemClock::new(),
             &runner,
@@ -638,17 +653,7 @@ fn smoke_removes_its_fixture_and_binding() -> Result<(), Box<dyn std::error::Err
             );
         }
         let recorded = std::fs::read_to_string(&calls).unwrap_or_default();
-        let project = recorded
-            .lines()
-            .next()
-            .and_then(|line| {
-                line.split_once("--project ")
-                    .map(|(_, rest)| rest.split_whitespace().next())
-            })
-            .map(std::path::PathBuf::from);
-        let root = provenant_cli::smoke::Settings::default().root();
-        let fixture = project
-            .unwrap_or_else(|| crate::smoke::fixture_root(&home, &root).join("000000000000"));
+        let fixture = smoke_recorded_project(&recorded).ok_or("project argument")?;
         assert!(!fixture.exists(), "{name}: fixture survived cleanup");
         let roots = crate::roots::child(&home, &home, state.clone())?;
         let bindings = provenant_config::registered_projects(&roots)?;
@@ -666,8 +671,6 @@ fn smoke_removes_its_fixture_and_binding() -> Result<(), Box<dyn std::error::Err
 // Spec: docs/specs/fabric.md#hermetic-smoke — the fixture replaces the caller
 // checkout, however it was selected.
 fn smoke_never_reads_the_caller_checkout() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     std::fs::create_dir(&home)?;
@@ -705,7 +708,7 @@ fn smoke_never_reads_the_caller_checkout() -> Result<(), Box<dyn std::error::Err
     let root = provenant_cli::smoke::Settings::default().root();
     for cwd in [repo.clone(), detached, plain] {
         std::fs::write(&calls, "")?;
-        let runner = smoke_runner(temp.path(), &cwd)?;
+        let runner = smoke_runner(&cwd)?;
         crate::smoke::run_lifecycle(
             &provenant_os::clock::SystemClock::new(),
             &runner,
@@ -734,15 +737,13 @@ fn smoke_never_reads_the_caller_checkout() -> Result<(), Box<dyn std::error::Err
 // Spec: docs/specs/fabric.md#hermetic-smoke — a verdict without the nonce is
 // a false pass and must fail verification.
 fn smoke_fails_without_the_nonce() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     std::fs::create_dir(&home)?;
     let state = temp.path().join("state");
     provenant_os::fixture::private_state_dir(&state)?;
     let (program, _) = smoke_program(temp.path(), "no nonce here")?;
-    let runner = smoke_runner(temp.path(), &home)?;
+    let runner = smoke_runner(&home)?;
     let outcome = crate::smoke::run_lifecycle(
         &provenant_os::clock::SystemClock::new(),
         &runner,
@@ -766,15 +767,13 @@ fn smoke_fails_without_the_nonce() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn smoke_wait_and_status_name_the_fixture_project() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     std::fs::create_dir(&home)?;
     let state = temp.path().join("state");
     provenant_os::fixture::private_state_dir(&state)?;
     let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
-    let runner = smoke_runner(temp.path(), &home)?;
+    let runner = smoke_runner(&home)?;
     let outcome = crate::smoke::run_lifecycle(
         &provenant_os::clock::SystemClock::new(),
         &runner,
@@ -800,15 +799,13 @@ fn smoke_wait_and_status_name_the_fixture_project() -> Result<(), Box<dyn std::e
 
 #[test]
 fn smoke_lifecycle_pins_the_review_to_the_fixture_head() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     std::fs::create_dir(&home)?;
     let state = temp.path().join("state");
     provenant_os::fixture::private_state_dir(&state)?;
     let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
-    let runner = smoke_runner(temp.path(), &home)?;
+    let runner = smoke_runner(&home)?;
     crate::smoke::run_lifecycle(
         &provenant_os::clock::SystemClock::new(),
         &runner,
@@ -850,15 +847,13 @@ fn smoke_lifecycle_pins_the_review_to_the_fixture_head() -> Result<(), Box<dyn s
 #[test]
 fn remote_smoke_carries_the_writer_branch_and_fixture_nonce()
 -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
     std::fs::create_dir(&home)?;
     let state = temp.path().join("state");
     provenant_os::fixture::private_state_dir(&state)?;
     let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
-    let runner = smoke_runner(temp.path(), &home)?;
+    let runner = smoke_runner(&home)?;
     crate::smoke::run_lifecycle(
         &provenant_os::clock::SystemClock::new(),
         &runner,
@@ -902,7 +897,7 @@ fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::E
         "#!/bin/sh\ncase \" $* \" in *\" run smoke \"*) printf '%s\\n' '{\"node\":\"smoke/write\",\"state\":\"failed\"}' '{\"node\":\"smoke/retry-probe\",\"state\":\"failed\"}' '{\"node\":\"smoke/steer-probe\",\"state\":\"failed\"}'; exit 1;; esac\nexit 0\n",
     )?;
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
-    let runner = smoke_runner(temp.path(), &home)?;
+    let runner = smoke_runner(&home)?;
     let outcome = crate::smoke::run_lifecycle(
         &provenant_os::clock::SystemClock::new(),
         &runner,
@@ -942,7 +937,7 @@ fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::e
         ),
     )?;
     std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
-    let runner = smoke_runner(temp.path(), &home)?;
+    let runner = smoke_runner(&home)?;
     let output = super::preview_smoke(
         &runner,
         &launcher,
@@ -991,7 +986,7 @@ fn smoke_dry_run_keeps_a_user_diff_base_and_adds_fixture_base()
         ),
     )?;
     std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
-    let runner = smoke_runner(temp.path(), &home)?;
+    let runner = smoke_runner(&home)?;
     let user_base = "2222222222222222222222222222222222222222";
     super::preview_smoke(
         &runner,
