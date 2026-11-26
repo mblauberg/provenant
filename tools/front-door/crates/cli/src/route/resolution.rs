@@ -126,10 +126,7 @@ pub(crate) fn selection_evidence(
                     .map_err(|e| e.to_string())?;
                 for lane in page.lanes {
                     if !matches!(lane.state, run::AttemptState::Terminal { .. })
-                        || !matches!(
-                            lane.terminal_evidence,
-                            Some(run::TerminalEvidence::ProcessExit)
-                        )
+                        || !matches!(lane.terminal_basis, Some(run::TerminalBasis::ProcessExit))
                     {
                         continue;
                     }
@@ -142,7 +139,7 @@ pub(crate) fn selection_evidence(
                         })
                         .map(|receipt| receipt.pool.clone());
                     let partial = provenant_telemetry::route_outcomes::provider_work_incomplete(
-                        &lane.partial_signals,
+                        &lane.signals,
                     );
                     let fact = run::fact(lane).map_err(|e| e.to_string())?;
                     outcomes.push(provenant_telemetry::route_outcomes::Evidence {
@@ -238,49 +235,55 @@ pub(crate) fn recorded_model_readiness(
         .collect()
 }
 
-/// Remove accounts whose recorded offer list excludes the model, including a
-/// pinned account: resolve and launch preparation refuse the same offer
-/// mismatch with the same reason.
+/// A preview pin names its account by key, label or `adapter/key`.
+fn pinned_row(hint: &str, adapter: &str, key: &str, label: &str) -> bool {
+    hint == key || hint == label || hint == format!("{adapter}/{key}")
+}
+
+/// Judge preview readiness with the one offer-evidence owner: a fresh probe
+/// first, a fresh snapshot only when no probe supplied offers, and never an
+/// expired snapshot. An unpinned account whose offers exclude the model leaves
+/// the readiness table; a pinned account stays so another account is never
+/// shown in its place, while the same typed mismatch is still reported.
 pub(crate) fn filter_unoffered_readiness(
     rows: Vec<RecordedReadiness>,
     model: &ModelId,
     catalogue: &provenant_routing::Catalogue,
-    accounts: &[provenant_quota::AccountRecord],
+    policy: &provenant_routing::OfferEvidencePolicy<'_>,
+    availability: &[AvailabilityRecord],
+    pin: Option<&str>,
 ) -> (Vec<RecordedReadiness>, Vec<String>) {
     let mut kept = Vec::new();
     let mut exclusions = Vec::new();
     for row in rows {
-        let reports_offers = provenant_records::AdapterSpec::get(model.adapter())
-            .is_some_and(|spec| spec.identity.offered_models);
-        let offered = reports_offers
-            .then(|| {
-                accounts.iter().find(|record| {
-                    record.account.adapter == model.adapter()
-                        && record.account.account_key == row.account_key
-                })
-            })
-            .flatten()
-            .and_then(|record| record.snapshot.as_ref()?.details.as_ref())
-            .filter(|details| !details.models.is_empty())
-            .map(|details| details.models.as_slice());
-        let (serves, offers) = match offered {
-            Some(list) => (
-                provenant_routing::offered_models_serve(list, model, catalogue),
-                list,
-            ),
-            None => (true, &[][..]),
-        };
-        if serves {
-            kept.push(row);
-            continue;
-        }
-        let detail = format!(
-            "account {} does not offer {} (recorded offers: {})",
-            row.account_key,
-            model.as_str(),
-            offers.join(", ")
+        let probe = availability.iter().find(|record| {
+            record.adapter == model.adapter()
+                && record.account_key.as_deref() == Some(row.account_key.as_str())
+        });
+        let evidence = provenant_routing::recorded_offer_models(
+            policy.inputs(probe, model.adapter(), &row.account_key),
+            model,
+            catalogue,
+            provenant_routing::OfferSupersedence::Allow,
         );
-        exclusions.push(detail);
+        let pinned = pin
+            .is_some_and(|hint| pinned_row(hint, model.adapter(), &row.account_key, &row.account));
+        if let Some(evidence) = evidence
+            && !evidence.serves
+        {
+            let mismatch = provenant_records::run::AccountOfferMismatch {
+                account: row.account_key.clone(),
+                model: model.as_str().to_owned(),
+                offered_models: evidence.offered_models,
+                age_seconds: evidence.age_seconds,
+            };
+            exclusions.push(mismatch.detail());
+            if pinned {
+                kept.push(row);
+            }
+        } else {
+            kept.push(row);
+        }
     }
     (kept, exclusions)
 }
@@ -1458,4 +1461,125 @@ pub fn depletion_facts(
         confidential: profile.confidential,
         now,
     })
+}
+
+#[cfg(test)]
+mod offer_evidence_tests {
+    use super::*;
+
+    fn row(key: &str, label: &str) -> RecordedReadiness {
+        RecordedReadiness {
+            host: provenant_quota::LOCAL_HOST.into(),
+            account: label.to_owned(),
+            account_key: key.to_owned(),
+            model: "agy/gemini-4-neon".into(),
+            observation: provenant_quota::ReadinessRead::absent(),
+        }
+    }
+
+    fn account(key: &str, observed: i64) -> provenant_quota::AccountRecord {
+        let scope = provenant_quota::AccountScope {
+            extra: Default::default(),
+            adapter: "agy".into(),
+            account_key: key.into(),
+            label: key.into(),
+        };
+        let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+        record.snapshot = Some(provenant_quota::QuotaSnapshot {
+            extra: Default::default(),
+            schema_version: 1,
+            account: scope,
+            revision: 1,
+            status: provenant_quota::QuotaStatus::Available,
+            observed_unix_seconds: observed,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: Some(provenant_quota::QuotaDetails {
+                extra: Default::default(),
+                models: vec!["Gemini 3.8 Flash".into()],
+                ..Default::default()
+            }),
+            windows: Vec::new(),
+        });
+        record
+    }
+
+    #[test]
+    fn preview_applies_one_offer_rule_and_keeps_the_pinned_account()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let model = ModelId::parse("agy/gemini-4-neon")?;
+        let freshness = provenant_quota::FreshnessPolicy {
+            snapshot_seconds: 10,
+            ..Default::default()
+        };
+        let policies: [provenant_quota::QuotaPolicy; 0] = [];
+        let records = [
+            account("probe-agy", 95),
+            account("pinned-agy", 95),
+            account("expired-agy", 80),
+        ];
+        let probe = AvailabilityRecord {
+            schema_version: 1,
+            adapter: "agy".into(),
+            executable: "/fixture/agy".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: catalogue.revision().into(),
+            account_key: Some("probe-agy".into()),
+            plan: None,
+            observed_models: vec!["Gemini 4 Neon".into()],
+            observed_unix_seconds: 95,
+            expires_unix_seconds: 120,
+        };
+        let policy = provenant_routing::OfferEvidencePolicy {
+            accounts: &records,
+            freshness: &freshness,
+            quota_policies: &policies,
+            catalogue_revision: catalogue.revision(),
+            now_seconds: 100,
+        };
+        let (kept, exclusions) = filter_unoffered_readiness(
+            vec![
+                row("probe-agy", "probe"),
+                row("pinned-agy", "pinned"),
+                row("expired-agy", "expired"),
+            ],
+            &model,
+            &catalogue,
+            &policy,
+            std::slice::from_ref(&probe),
+            None,
+        );
+        let keys: Vec<_> = kept.iter().map(|r| r.account_key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["probe-agy", "expired-agy"],
+            "a fresh probe wins and an expired snapshot is not evidence: {exclusions:?}"
+        );
+        assert!(
+            exclusions
+                .iter()
+                .any(|detail| detail.contains("pinned-agy")),
+            "the same typed mismatch is still reported: {exclusions:?}"
+        );
+        assert!(
+            exclusions
+                .iter()
+                .any(|detail| detail.contains("recorded 5s ago")),
+            "the mismatch carries the source's own age: {exclusions:?}"
+        );
+
+        let (kept, _) = filter_unoffered_readiness(
+            vec![row("pinned-agy", "pinned")],
+            &model,
+            &catalogue,
+            &policy,
+            &[],
+            Some("pinned-agy"),
+        );
+        assert_eq!(kept.len(), 1, "a pinned account is never dropped");
+        Ok(())
+    }
 }

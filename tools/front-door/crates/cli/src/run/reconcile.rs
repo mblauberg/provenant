@@ -31,6 +31,14 @@ pub(super) fn reconcile_summary(state: &run::Reconciled) -> String {
                 plain_text(&reason.to_string(), usize::MAX)
             )
         }
+        run::Reconciled::UnreadableReleased { locks, .. } => format!(
+            "warning: undecodable attempt record preserved; writer leases released: {}",
+            locks
+                .iter()
+                .map(|lock| plain_text(&lock.to_string_lossy(), usize::MAX))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         _ => state_tag(state),
     }
 }
@@ -40,7 +48,7 @@ pub(super) fn reconcile_blocks(state: &run::Reconciled) -> bool {
         state,
         run::Reconciled::Escaped { .. }
             | run::Reconciled::Settling {
-                blocking_reason: Some(_),
+                held_reason: Some(_),
                 ..
             }
     )
@@ -48,7 +56,8 @@ pub(super) fn reconcile_blocks(state: &run::Reconciled) -> bool {
 
 /// Recover runs whose guardian or submitter died: commit durable exits,
 /// withdraw launches that never reached a guardian, and start queued work.
-/// Uncertain custody stays fenced and is reported without hiding other results.
+/// An undecodable record is preserved and its lease reclaimed once liveness is
+/// disproved; uncertain custody stays fenced without hiding other results.
 pub fn reconcile(command: Reconcile, edge: &Edge<'_>) -> Reply {
     let mut fenced = false;
     let outcome = reconcile_inner(command, edge, &mut fenced);
@@ -241,6 +250,15 @@ pub(super) fn reconcile_inner(
             .iter()
             .map(|(id, state)| {
                 *fenced |= reconcile_blocks(state);
+                match state {
+                    run::Reconciled::UnreadableReleased { source, .. } => {
+                        warn(run::unreadable_record_warning(source, true));
+                    }
+                    run::Reconciled::Uncertain {
+                        reason: run::UncertainReason::UnreadableLivenessUnknown { source },
+                    } => warn(run::unreadable_record_warning(source, false)),
+                    _ => {}
+                }
                 human.push_str(&format!("{id} {}\n", reconcile_summary(state)));
                 json!({ "attempt_id": id, "found": state })
             })

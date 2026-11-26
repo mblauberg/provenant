@@ -1,5 +1,5 @@
 //! Shared graph state vocabulary used by runtime records and peer projections.
-use crate::run::TerminalCause;
+use crate::run::CauseKind;
 use serde::{Deserialize, Serialize};
 
 /// Stable identity for one graph route attempt.
@@ -57,7 +57,7 @@ pub enum AttemptState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AttemptOutcome {
+pub enum GraphAttemptOutcome {
     Succeeded,
     TaskFailed,
     /// A settled provider stall explicitly requested the next route.
@@ -69,9 +69,24 @@ pub enum AttemptOutcome {
     AuthRequired,
     UsageLimited,
     AdapterUnavailable,
-    PreparationRefused(TerminalCause),
+    PreparationRefused(CauseKind),
     DeadlineExceeded,
     Unclassified,
+}
+
+impl GraphAttemptOutcome {
+    /// The advance code settlement owns, if this outcome has one. The two
+    /// declared-stop outcomes are the only settlement-derived codes; every
+    /// other advance code comes from the owner or a launch refusal. Keeping the
+    /// spellings here gives the graph one source for them (docs/specs/run.md
+    /// lists the same two codes).
+    pub const fn advance_code(self) -> Option<&'static str> {
+        match self {
+            Self::DeclaredStop => Some("declared_stop"),
+            Self::StoppedNoWork => Some("stopped_no_work"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +104,43 @@ pub enum GraphStatus {
     Complete,
     Cancelled,
     Paused,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn advance_codes_are_the_documented_settlement_codes() {
+        let spec = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../docs/specs/run.md"),
+        )
+        .unwrap();
+        let list = spec
+            .split_once("The settlement-derived advance codes are ")
+            .unwrap()
+            .1
+            .lines()
+            .next()
+            .unwrap();
+        let documented: BTreeSet<&str> = list
+            .split_whitespace()
+            // A code may be followed by punctuation (e.g. `` `stopped_no_work`, ``),
+            // so read up to the closing backtick instead of requiring the
+            // backtick to be the word's last character.
+            .filter_map(|word| word.strip_prefix('`').and_then(|w| w.split('`').next()))
+            .collect();
+        let owned: BTreeSet<&str> = [
+            GraphAttemptOutcome::DeclaredStop,
+            GraphAttemptOutcome::StoppedNoWork,
+        ]
+        .into_iter()
+        .filter_map(GraphAttemptOutcome::advance_code)
+        .collect();
+        assert_eq!(documented, owned);
+        assert_eq!(GraphAttemptOutcome::Succeeded.advance_code(), None);
+    }
 }
 
 /// A typed edge selected when a bounded delivery loop settles.

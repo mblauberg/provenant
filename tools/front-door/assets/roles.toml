@@ -106,7 +106,7 @@ completion and the authority the implementer holds. Decide engineering
 questions yourself: pick the reversible option, state it as an assumption and
 record it under DECISIONS. Raise NEEDS-USER only for an owner decision or a
 need to expand authority, and write VERDICT: FAIL; otherwise write VERDICT: PASS.
-Put that verdict line before the closing handoff block, which comes last.
+End with that verdict line.
 """
 
 [roles."plan.slices"]
@@ -335,8 +335,8 @@ upstream findings; descriptive fields are inherited. New findings require
 severity, file, summary, status, evidence and proposed_fix as structured fields as well. After all findings and prose, write
 exactly one standalone verdict line: VERDICT: PASS only when no
 accepted finding remains, otherwise VERDICT: FAIL. Use VERDICT: INCONCLUSIVE
-when the evidence cannot support a decision. Then put the closing handoff block
-last, as the shared result contract in reviewer context states.
+when the evidence cannot support a decision. End with the verdict line, as the
+shared result contract in reviewer context states.
 """
 
 [roles."write.implement"]
@@ -352,7 +352,7 @@ prompt = """
 Implement one bounded slice: ${prompt}
 Spec (acceptance criteria): ${spec}
 Use the supplied write scope as guidance. Continue within the declared worktree
-and approved outcome, and report any path deviations in your final handoff.
+and approved outcome, and report any path deviations in your declaration.
 Honour strict scope policy and the authority envelope. Run targeted checks and commit.
 ${local_check_policy}
 

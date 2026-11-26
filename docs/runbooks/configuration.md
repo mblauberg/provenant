@@ -48,11 +48,13 @@ location.
   `{"git": {"remote": "upstream", "default_branch": "main", "protected": ["release"]}}`.
   An omitted `git.remote` is detected from the current branch's upstream, then
   the sole remote; a refusal lists the remotes seen with close matches instead
-  of assuming `origin`. An omitted `git.default_branch` is resolved from
-  `refs/remotes/<remote>/HEAD`, then the forge API. An omitted `git.protected`
-  is the default branch plus the forge-reported protected branches. These ports
-  report their layer and key in `config ports --json`; detected values report
-  `detected` with the branch key or ref that produced them.
+  of assuming `origin`. A declared `git.default_branch` wins ahead of
+  `refs/remotes/<remote>/HEAD` and the forge API; it is what makes the protected
+  set authoritative when the remote has no HEAD. An omitted `git.protected` is
+  the default branch plus the forge-reported protected branches. These ports
+  report their layer and key in `config ports --json`, which prints the effective
+  remote, default branch and protected set; detected values report `detected`
+  with the branch key or ref that produced them.
 - `verify.base`, when no layer sets it, is inferred from
   `refs/remotes/<remote>/HEAD` for `verify.remote` and shown as inferred. If no
   remote HEAD resolves, the refusal shows an example to put in a ports layer.
@@ -84,9 +86,8 @@ Discovery rules (Rust, Node, mixed tiers) are in
 
 ### Build port
 
-`build` configures the chair's one host-owned warm check. There is no lane
-build: lanes run formatting only, the chair runs one warm integrated check per
-epic, and CI runs clippy and the tests. `strategy` accepts only `slots`, with
+`build` configures the chair's host-owned warm check. Lane checks are declared
+separately in `verify.lane`. `strategy` accepts only `slots`, with
 `[admission.build].slots` as the host-wide concurrency cap; a leftover
 `lane_seed`, `lane`, `wrapper` or `command` value, or a `build.wrapper`,
 `build.command` or `build.seed` key, now warns as unknown.
@@ -94,12 +95,23 @@ epic, and CI runs clippy and the tests. `strategy` accepts only `slots`, with
 - `prepare` is an ordered list of argv arrays run from the checkout root before
   a slot job's first step. A failing command fails that job with
   `prepare_failed`, recording the command and the last 2 KiB of its output. An
-  unreadable table warns and runs nothing. Arrays replace across layers.
+  unreadable table warns and runs nothing. Lane worktree creation and refresh
+  run the same commands once per declaration digest; failures warn and are
+  retried on the next provisioning. Arrays replace across layers.
 - `offload = "off"` runs every job locally with exception `offload_off`.
   `overflow`: `auto` queues under slots and waits a bounded time otherwise;
   `queue` always waits; `local` runs locally after the admission wait.
 - `clean` before a slot job: `none` keeps files, `untracked` runs
   `git clean -ffd`, `ignored` runs `git clean -ffdx`.
+- `target` configures the slot's warm Cargo target identity by comma-separated
+  components. `toolchain` uses the compiler selected by Cargo, including a
+  `+toolchain` argument, and `worktree` gives workspace-member compiler calls a
+  checkout-specific `RUSTC_WORKSPACE_WRAPPER`; Cargo keeps dependency artifacts
+  in the shared target. The
+  default is `toolchain,worktree`; `shared` restores one legacy target. The
+  configured layer is reported by `check config` and `config show`, and
+  `check config` warns when a warm slot's toolchain differs from the
+  repository's `rust-toolchain.toml` pin.
 - `priority` maps a job class to a queue level and orders waiters; it never
   preempts a running job. `queue_aging` raises a waiter's effective level to
   bound lower-priority waits.
@@ -107,6 +119,13 @@ epic, and CI runs clippy and the tests. `strategy` accepts only `slots`, with
   hygiene and the build report. Leaves and defaults are in `ports.json`, and an
   unknown value warns with the leaf and its source and falls back to the
   builtin.
+
+### Lane checks
+
+Declare `verify.lane` as an array of `{ "tier": "T0", "argv": ["command", "arg"],
+"scope": "touched files" }` entries. The writer preamble renders every valid
+entry with its source. An empty or absent list defaults to the repository's
+formatter and declared pre-commit hooks; invalid entries warn and are omitted.
 
 ### Affected-package selection
 
@@ -134,18 +153,21 @@ its underlying model.
 Set `domains.lanes.user_skills` at host or project scope, or per route in
 `domains.routing.model_policy`. Configure project `shared_paths` and
 `exec_roots` for writer access, or `domains.run.writer_writes` for host-wide
-write grants. `provenant fabric identity` prints the project ID.
+write grants. `domains.lanes.projects.{project}.grants` names the capabilities
+(currently `postgres`) granted to that project's writer lanes; node settings
+and invocation flags may override them, and read-only lanes inherit none.
+Install renames a stored `capabilities` key to `grants` once; there is no alias.
+`provenant fabric identity` prints the project ID.
 
-## Lanes do not build
+## Lane verification
 
-Lanes format and coordinate only: they never provision, seed or admit a
-compiler job. The chair runs one warm integrated check per epic through the
-build port, capped by `[admission.build].slots`, and CI runs clippy and the
-tests; `lanes.verification` puts that instruction in the writer preamble.
-Cargo output is bounded by `lanes.cargo_cache_max` and collected after
-`gc.cargo_target_idle`, and `domains.fabric.lanes.cargo_source_writes` decides
-whether lanes may write the shared source caches. The former per-lane Cargo
-settings are retired: a leftover key warns as unknown.
+Writer lanes run the commands and scopes declared in the project's `verify.lane`
+port. A valid declaration is authoritative over the resolved legacy
+`lanes.verification` format-only scope; its tiers, commands, scopes and source
+also appear in the launch receipt. With no valid declaration writers run the
+repository formatter and declared pre-commit hooks. Git hooks are part of
+commit and push. Build admission and shared caches remain subject to host
+policy.
 
 ## Lane history
 

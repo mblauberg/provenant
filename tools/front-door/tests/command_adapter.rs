@@ -682,7 +682,7 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         let lane = settled(&rig, id)?;
         assert_eq!(lane["state"], expected, "{lane}");
         if name == "missing" {
-            assert_eq!(lane["terminal_cause"], "command_unavailable", "{lane}");
+            assert_eq!(lane["cause"], "command_unavailable", "{lane}");
             assert!(
                 lane["reason"]
                     .as_str()

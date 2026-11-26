@@ -69,6 +69,8 @@ pub enum Command {
     /// Share append-only observations with project lanes
     #[command(subcommand)]
     Notes(crate::notes::Notes),
+    /// Declare this lane's result to the host-bound journal
+    Declare(crate::declaration::DeclareArgs),
     /// Answer a request using the revision you saw
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts
@@ -108,7 +110,7 @@ pub enum Command {
     Adopt {
         subject: provenant_records::custody::Subject,
     },
-    /// Release an item from custody (KIND:ID)
+    /// Release an item from custody (KIND:ID); an attempt whose record no longer decodes also has its dead writer lease reclaimed
     Release {
         subject: provenant_records::custody::Subject,
     },
@@ -194,7 +196,7 @@ pub enum Command {
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
-    /// Settle open attempts and report uncertain custody
+    /// Settle open attempts, reclaim dead leases behind undecodable records, and report uncertain custody
     Reconcile(Reconcile),
     /// Report local usage and cost
     #[command(subcommand)]
@@ -757,7 +759,7 @@ pub struct GraphRunArgs {
     /// keep their higher precedence
     #[arg(long)]
     pub no_sandbox: bool,
-    /// Explain the compiled graph without starting work
+    /// Explain the compiled graph and each node's route without starting work
     #[arg(long)]
     pub explain: bool,
 }
@@ -1469,6 +1471,9 @@ pub struct Status {
     /// paged with --all, --limit and --cursor like the graph listing.
     #[arg(long, hide = true, conflicts_with = "targets")]
     pub session_stream: bool,
+    /// Stream custody rows for the session collector.
+    #[arg(long, hide = true, requires = "mine")]
+    pub custody_stream: bool,
     /// Graphs, nodes or attempts to show (NAME[/NODE[#N]]); every graph when omitted
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub targets: Vec<Target>,

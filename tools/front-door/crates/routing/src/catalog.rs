@@ -1076,6 +1076,30 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("model_policy.defaults.lane.max_context", 1, i64::MAX),
     FieldMetadata::int("model_policy.defaults.lane.max_turns", 1, i64::MAX),
     FieldMetadata::new("model_policy.defaults.lane.stop_early_ok", "bool"),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lanes.settlement.declaration_missing",
+        <provenant_records::settlement::policy::DeclarationAction as provenant_records::settlement::policy::PolicyValue>::VALUES,
+    ),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lanes.settlement.declaration_malformed",
+        <provenant_records::settlement::policy::DeclarationAction as provenant_records::settlement::policy::PolicyValue>::VALUES,
+    ),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lanes.settlement.empty_result",
+        <provenant_records::settlement::policy::EmptyResultAction as provenant_records::settlement::policy::PolicyValue>::VALUES,
+    ),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lanes.settlement.uncommitted_work",
+        <provenant_records::settlement::policy::UncommittedAction as provenant_records::settlement::policy::PolicyValue>::VALUES,
+    ),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lanes.settlement.stray_work",
+        <provenant_records::settlement::policy::StrayAction as provenant_records::settlement::policy::PolicyValue>::VALUES,
+    ),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lanes.settlement.no_work",
+        <provenant_records::settlement::policy::NoWork as provenant_records::settlement::policy::PolicyValue>::VALUES,
+    ),
     FieldMetadata::new("model_policy.defaults.lane.read_only", "bool"),
     FieldMetadata::enumeration("model_policy.defaults.lane.access", &["host", "isolated"]),
     FieldMetadata::enumeration(

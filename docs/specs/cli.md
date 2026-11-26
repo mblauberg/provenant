@@ -94,6 +94,21 @@ in place and is reported as incomplete coverage, never as complete.
 - Why: a partial observation must not hide available work or imply complete
   coverage.
 
+### Graph wait recovery
+
+A graph status refresh is read-only. While a wait observes remote attempts, a
+successful reading that confirms terminal remote work re-drives an unsettled
+graph through the journal-locked advancement owner. A recovered endpoint can
+therefore settle work in the same wait; a successful advance also clears the
+transport error held from an earlier failed attempt to settle it. Unavailable
+remote readings remain pending and are retried within the wait budget; if the
+wait ends pending, it reports the last failed reading. A peer read failure
+also projects the attempt as unknown in status; that projection does not erase
+the failure from wait history.
+
+- Why: terminal remote work must settle as soon as its home endpoint can be
+  reached again, without requiring a second wait or a manual advance.
+
 ### Nested tree
 
 The tree distinguishes dispatch, continuation and retry relationships, and
@@ -211,7 +226,13 @@ own state, so an older settlement cannot satisfy a wait for new work.
 Local graph waiters share one filesystem event source; when it is unavailable
 the result says why and rereads at `domains.wait.local_interval_ms`. Peer and
 relayed rows use the same paced reread because the relay has no remote
-subscription. Every blocking forge operation inside a wait shares one request
+subscription. An unreachable home endpoint is one pending observation, not a
+failed wait: a graph wait keeps rereading remote attempts until its budget ends
+or a later reading succeeds. A successful reading clears the earlier failure;
+when the budget ends still pending, the wait names the last failed reading
+rather than the first one held when it began. A successful reading of a finished
+remote lane also clears the transport error held from an earlier failed advance,
+so status shows the lane's settled state. Every blocking forge operation inside a wait shares one request
 context (the wait's absolute deadline, capped per read by
 `domains.wait.pr_read_timeout_seconds`, and its cancellation), and a wait that
 settles cancels the forge transport of its other targets. Wait event lines,
@@ -480,6 +501,17 @@ Release checks inspect the artifact to be distributed as well as Git evidence.
 
 - Why: an inspection must not change its subject or certify an uninspected
   artifact.
+
+### Check config reports warm-target provenance
+
+`check config` names the layer that set `build.target` when a layer other than
+the builtin changed the target identity, and warns when the toolchain recorded in
+a warm slot differs from the checkout's `rust-toolchain.toml` pin. These are
+findings: the check never rewarms a target or edits a slot record.
+
+- Why: a warm cache built by a different toolchain or worktree is cold or
+  stale, and the source of that decision must be visible without building.
+- Owner: `tools/front-door/src/checks.rs`
 
 ### Check install uses recorded roots
 

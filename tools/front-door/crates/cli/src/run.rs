@@ -635,10 +635,8 @@ fn disk_policy_refusal(error: DiskCheck) -> Box<run::PrepareRefusal> {
         DiskCheck::Unobserved(_) => None,
     };
     let cause = match &error {
-        DiskCheck::Low { .. } => provenant_records::run::TerminalCause::DiskFloor,
-        DiskCheck::Unobserved(_) => {
-            provenant_records::run::TerminalCause::DiskObservationUnavailable
-        }
+        DiskCheck::Low { .. } => provenant_records::run::CauseKind::DiskFloor,
+        DiskCheck::Unobserved(_) => provenant_records::run::CauseKind::DiskObservationUnavailable,
     };
     let policy_code = match &error {
         DiskCheck::Low { .. } => None,
@@ -993,7 +991,7 @@ impl Registry<'_> {
             .and_then(provenant_records::AdapterSpec::get)
             .is_some_and(|spec| spec.launch.result_event_usage);
         let failed = |reason: &str| run::Decoded {
-            terminal_cause: None,
+            cause: None,
             outcome: run::Outcome::Failed,
             result: String::new(),
             complete: false,
@@ -1005,11 +1003,10 @@ impl Registry<'_> {
             },
             session: None,
             reason: Some(reason.into()),
-            partial_signals: Vec::new(),
-            turns: Vec::new(),
+            signals: Vec::new(),
         };
         let unproven = |reason: &str| run::Decoded {
-            terminal_cause: None,
+            cause: None,
             outcome: run::Outcome::Unsettled,
             result: String::new(),
             complete: false,
@@ -1017,8 +1014,7 @@ impl Registry<'_> {
             usage: run::UsageRecord::default(),
             session: None,
             reason: Some(reason.into()),
-            partial_signals: Vec::new(),
-            turns: Vec::new(),
+            signals: Vec::new(),
         };
         let capture_defect = |line: usize, error: &str| {
             let line = line.max(1) as u64;
@@ -1026,7 +1022,7 @@ impl Registry<'_> {
                 "provider capture evidence defect at stdout.log line {line}; replay incomplete: {}",
                 provenant_core::bounded_line(error, 512)
             ));
-            decoded.terminal_cause = Some(run::TerminalCause::ProviderCaptureDefect { line });
+            decoded.cause = Some(run::CauseKind::ProviderCaptureDefect { line });
             decoded
         };
         // Only lost framing is missing evidence. A complete frame that reports a
@@ -1080,7 +1076,7 @@ impl Registry<'_> {
                 Ok(decoded) => events.extend(decoded),
                 Err(provenant_providers::ProviderError::IdentityMismatch) => {
                     let mut decoded = failed("provider identity mismatch");
-                    decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
+                    decoded.cause = Some(run::CauseKind::IdentityMismatch);
                     return Ok(decoded);
                 }
                 Err(error @ provenant_providers::ProviderError::MalformedFrame { line }) => {
@@ -1129,7 +1125,7 @@ impl Registry<'_> {
             Ok(outcome) => outcome,
             Err(provenant_providers::ProviderError::IdentityMismatch) => {
                 let mut decoded = failed("provider identity mismatch");
-                decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
+                decoded.cause = Some(run::CauseKind::IdentityMismatch);
                 return Ok(decoded);
             }
             Err(
@@ -1257,7 +1253,7 @@ impl Registry<'_> {
             outcome.model()
         };
         let mut decoded = run::Decoded {
-            terminal_cause: None,
+            cause: None,
             outcome: run::Outcome::Failed,
             result: String::new(),
             complete: true,
@@ -1294,8 +1290,7 @@ impl Registry<'_> {
             usage: run::UsageRecord::default(),
             session: outcome.session().map(str::to_owned),
             reason: None,
-            partial_signals: Vec::new(),
-            turns: Vec::new(),
+            signals: Vec::new(),
         };
         let mut has_usage = false;
         // The adapter declares what one report means; the accumulator is the
@@ -1316,21 +1311,13 @@ impl Registry<'_> {
             match event {
                 ProviderEvent::ResultFallback => result_fallback = true,
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
-                ProviderEvent::TurnEnd { tool_activity } => {
-                    decoded.turns.push(provenant_records::handoff::TurnEnd {
-                        at: decoded.result.len(),
-                        tool_activity: *tool_activity,
-                    });
-                }
                 ProviderEvent::MessageStart => {
                     if !decoded.result.is_empty() && !decoded.result.ends_with('\n') {
                         decoded.result.push('\n');
                     }
                 }
                 ProviderEvent::EarlyStop { .. } => {
-                    decoded
-                        .partial_signals
-                        .push(run::PartialSignal::ProviderStop);
+                    decoded.signals.push(run::SettlementSignal::ProviderStop);
                     early_stop = true;
                 }
                 ProviderEvent::Usage(report) => {
@@ -1367,7 +1354,6 @@ impl Registry<'_> {
             let second = right.trim_start();
             if !first.is_empty() && first == second && first.len() + second.len() < answer.len() {
                 decoded.result = first.to_owned();
-                decoded.turns.clear();
             }
         }
         if provenant_records::AdapterSpec::get(adapter.id())
@@ -1382,7 +1368,6 @@ impl Registry<'_> {
                 decoded
                     .result
                     .insert_str(0, "[output truncated; retained tail]\n");
-                decoded.turns.clear();
             }
         }
         if result_event_usage && !has_usage {
@@ -1432,7 +1417,7 @@ impl Registry<'_> {
                 let reason = if lane_token && registered_token {
                     crate::quota::registered_lane_token_diagnostic(entries, adapter.id(), key)
                 } else if lane_token {
-                    decoded.terminal_cause = Some(run::TerminalCause::LaneTokenLost);
+                    decoded.cause = Some(run::CauseKind::LaneTokenLost);
                     crate::quota::lane_token_lost_diagnostic(entries, adapter.id(), key)
                 } else if config.is_some() {
                     crate::quota::account_login_diagnostic(
@@ -1480,7 +1465,7 @@ impl Registry<'_> {
             });
         }
         if decoded.outcome == run::Outcome::Succeeded && early_stop {
-            decoded.terminal_cause = Some(run::TerminalCause::ProviderEarlyStop);
+            decoded.cause = Some(run::CauseKind::ProviderEarlyStop);
             decoded.reason = Some(
                 provenant_records::diagnostic::ProviderFailureFact::EarlyStop
                     .reason()
@@ -1518,7 +1503,7 @@ impl Registry<'_> {
         {
             decoded.outcome = run::Outcome::QuotaLimited;
             if pool.as_deref() == Some("opencode-free") {
-                decoded.terminal_cause = Some(run::TerminalCause::FreePoolQuota);
+                decoded.cause = Some(run::CauseKind::FreePoolQuota);
             }
             let fact = provenant_records::diagnostic::ProviderFailureFact::Quota {
                 free_pool: pool.as_deref() == Some("opencode-free"),
@@ -1938,7 +1923,7 @@ fn graph_quality_rows(
                     == Some(graph_id.as_str())
             })
             .collect();
-        let partial = partial_signals_value(partial_signal_counts(&in_graph, store, call));
+        let partial = signals_value(partial_signal_counts(&in_graph, store, call));
         rows.push(json!({
             "graph_id": graph_id,
             "checkpoint": "read",
@@ -1948,7 +1933,7 @@ fn graph_quality_rows(
             "findings": findings,
             "initial_rounds": initial_rounds,
             "repair_rounds": repair_rounds,
-            "partial_signals": partial,
+            "signals": partial,
         }));
     }
     Ok(rows)
@@ -1966,7 +1951,7 @@ fn partial_signal_counts(
             let record = store
                 .record(fact.attempt_id, call)
                 .map_err(|error| unavailable_cause(&error))?;
-            for signal in record.partial_signals {
+            for signal in record.signals {
                 *partial.entry(signal.as_str().to_owned()).or_default() += 1;
             }
         }
@@ -2068,7 +2053,7 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
 }
 
 /// Partial-signal counts, or a named unavailable field with its cause.
-fn partial_signals_value(counts: Result<BTreeMap<String, u64>, String>) -> Value {
+fn signals_value(counts: Result<BTreeMap<String, u64>, String>) -> Value {
     match counts {
         Ok(counts) => json!(counts),
         Err(cause) => json!({"unavailable": cause}),

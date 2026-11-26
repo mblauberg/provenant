@@ -857,8 +857,8 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 );
                 assert_eq!(record.provider_launched, Some(false), "{record:?}");
                 assert_eq!(
-                    record.state.terminal_cause(),
-                    Some(provenant_records::run::TerminalCause::UnsupportedPlatform),
+                    record.state.cause(),
+                    Some(provenant_records::run::CauseKind::UnsupportedPlatform),
                     "{record:?}"
                 );
             }
@@ -914,8 +914,8 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             }));
             assert_eq!(record.provider_launched, Some(false));
             assert_eq!(
-                record.terminal_evidence,
-                Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+                record.terminal_basis,
+                Some(provenant_records::run::TerminalBasis::PreLaunchRefusal)
             );
             cleanup.disarm();
             continue;
@@ -955,8 +955,8 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         );
         assert_eq!(record.provider_launched, Some(false));
         assert_eq!(
-            record.terminal_evidence,
-            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+            record.terminal_basis,
+            Some(provenant_records::run::TerminalBasis::PreLaunchRefusal)
         );
         cleanup.disarm();
     }
@@ -1444,11 +1444,11 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
             "peer-frame-limit"
         );
         assert_eq!(
-            refused["data"]["checkpoint"]["nodes"][0]["advance_error_code"], "launch_refused",
+            refused["data"]["checkpoint"]["nodes"][0]["advance_code"], "launch_refused",
             "{refused}"
         );
         assert!(
-            refused["data"]["advance_error"]
+            refused["data"]["advance_note"]
                 .as_str()
                 .is_some_and(|message| message.contains("[invalid_input]")),
             "{refused}"

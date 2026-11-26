@@ -30,6 +30,10 @@ pub use writer_release::{lock_writer_exclusion, lock_writer_occupancy, release_i
 pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
 pub const HOLDER_LOCK: &str = "holder.lock";
+/// Internal, non-secret mark passed to the provider at spawn. Descendants
+/// inherit it across fork, exec and setsid, so a host without an OS
+/// containment mark can still name a detached process after guardian death.
+pub(crate) const ATTEMPT_MARK_ENV: &str = "PROVENANT_ATTEMPT_MARK";
 use provenant_records::custody::Scope;
 
 /// Run seals this beside the reservation when private Git must be retained.
@@ -413,6 +417,22 @@ struct HolderAdmission {
 
 const HOLDER_GENERATION: &str = "holder-generation.json";
 const HOLDER_ADMISSION: &str = "holder-admission.json";
+
+/// Durable attribution for the processes a lane spawns. The identity gate
+/// publishes it in the reservation before provider exec, so a later recovery
+/// can still name the lane's processes if the guardian dies before an exit.
+///
+/// `contained` says whether an OS mark is in effect that survives a
+/// double-fork and setsid. Without one, group and session identify members of
+/// the recorded tree but grant no signal authority: they can only be reported.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ProcessAttribution {
+    pub boot: String,
+    pub group_id: i64,
+    pub session_id: i64,
+    pub contained: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Reservation {
     pub schema_version: u64,
@@ -439,6 +459,10 @@ pub(crate) struct Reservation {
     /// spawned; absent means no mark was in effect.
     #[serde(default)]
     pub sandboxed: bool,
+    /// Attempt tag recorded at provider spawn. Absent means the guardian died
+    /// before attribution could be published, so no descendant can be named.
+    #[serde(default)]
+    pub attribution: Option<ProcessAttribution>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -525,6 +549,13 @@ impl Reservation {
             if identity.boot != self.boot {
                 return Err(CustodyError::InvalidRecord);
             }
+        }
+        if let Some(attribution) = &self.attribution
+            && (attribution.boot != self.boot
+                || attribution.group_id <= 0
+                || attribution.session_id <= 0)
+        {
+            return Err(CustodyError::InvalidRecord);
         }
         if let Some(guardian) = &self.guardian
             && (guardian.session_id != guardian.pid || guardian.group_id != guardian.pid)
@@ -771,6 +802,7 @@ pub(crate) fn acquire_writer_with_observer(
         census_incomplete: true,
         omitted_descendants: 0,
         sandboxed: false,
+        attribution: None,
         extra: Default::default(),
     };
     reservation.validate()?;
@@ -2295,6 +2327,62 @@ pub fn checkpoint_before_reboot(
 /// record evidence also leaves the attempt open.
 pub fn holder_gone(directory: &Directory, scope: Scope, observer: &dyn ProcessObserver) -> bool {
     observe_holder(directory, scope, observer) == HolderPresence::Gone
+}
+/// Whether supervisor evidence proves this attempt can no longer hold custody.
+/// Callers must keep writer exclusion while acting on this proof. A completed
+/// exit is sufficient on the same boot only when cleanup finished without
+/// unresolved processes or retained custody; an exit still settling is not.
+pub fn attempt_quiescent(
+    directory: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+) -> bool {
+    match read_record::<StoredExit>(directory, "process-exit.json", EXIT_LIMIT) {
+        Ok(exit) => {
+            exit.schema_version == 1
+                && exit.scope == scope
+                && !exit.unresolved_cleanup
+                && exit.unresolved_pids.is_empty()
+                && exit.unresolved_identities.is_empty()
+                && exit.retention.is_none()
+                && match exit.settlement_evidence {
+                    SettlementEvidence::NeverSpawned => exit.never_spawned,
+                    SettlementEvidence::DarwinCensusAndCustodyLease
+                    | SettlementEvidence::OrphansEnded => !exit.never_spawned,
+                    SettlementEvidence::Unresolved | SettlementEvidence::LeftoverNotProven => false,
+                }
+                && match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
+                    Ok(record)
+                        if record.schema_version == 1
+                            && record.scope == scope
+                            && !record.publication_pending =>
+                    {
+                        record
+                            .guardian
+                            .iter()
+                            .chain(record.provider.iter())
+                            .chain(record.descendants.iter())
+                            .all(|identity| match observer.observe(identity.pid) {
+                                ProcessObservation::Present(fact) => {
+                                    fact.identity != *identity || fact.zombie
+                                }
+                                ProcessObservation::Absent => true,
+                                ProcessObservation::Unknown(_) => false,
+                            })
+                    }
+                    Err(CustodyError::Filesystem(error)) if error.is_not_found() => true,
+                    _ => false,
+                }
+        }
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
+            match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
+                Err(CustodyError::Filesystem(error)) if error.is_not_found() => true,
+                Ok(_) => holder_gone(directory, scope, observer),
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    }
 }
 /// Whether any of these PIDs may still be alive (a signal-0 probe, no effect).
 pub fn any_pid_alive(pids: &[i64]) -> bool {

@@ -50,9 +50,9 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
         .unwrap(),
         attempt_number: number,
         project_id: ProjectId::from_bytes([2; 16]),
-        terminal_state: AttemptOutcome::Succeeded,
+        terminal_state: Outcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Provider,
-        settlement_reason: None,
+        settlement_class: None,
         account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0).unwrap(),
@@ -368,17 +368,17 @@ fn exact_disjoint_usage_is_not_subtracted_or_attributed_from_requested_routes() 
 #[test]
 fn retry_totals_and_latest_outcome_use_highest_number_not_arrival_order() {
     let mut latest = fact(9, Some(5));
-    latest.terminal_state = AttemptOutcome::Rejected;
+    latest.terminal_state = Outcome::Rejected;
     let mut earlier = fact(2, Some(3));
     earlier.finished_at = WallTime::from_micros(2).unwrap();
     earlier.lineage.push(latest.attempt_id);
     let report = reduce([latest, earlier], Some(1_000_000)).unwrap();
     assert_eq!(report.totals.attempts, 2);
     assert_eq!(report.totals.usage.uncached_input.known, 8);
-    assert_eq!(report.totals.outcomes[&AttemptOutcome::Succeeded], 1);
-    assert_eq!(report.totals.outcomes[&AttemptOutcome::Rejected], 1);
+    assert_eq!(report.totals.outcomes[&Outcome::Succeeded], 1);
+    assert_eq!(report.totals.outcomes[&Outcome::Rejected], 1);
     assert_eq!(report.latest_task_outcomes.len(), 1);
-    assert_eq!(report.latest_task_outcomes[&AttemptOutcome::Rejected], 1);
+    assert_eq!(report.latest_task_outcomes[&Outcome::Rejected], 1);
     let duplicate = TelemetryError::InvalidFact("duplicate attempt ID or task/attempt number");
     assert_eq!(
         reduce([fact(1, Some(1)), fact(1, Some(1))], None).unwrap_err(),
@@ -1368,10 +1368,10 @@ fn route_outcomes_report_success_time_access_effort_and_assignment() {
     exact.provider_ms = None;
     exact.resolved_route.as_mut().unwrap().effort = Some("low".into());
     let mut failed = fact(4, Some(1_000_000));
-    failed.terminal_state = AttemptOutcome::Failed;
+    failed.terminal_state = Outcome::Failed;
     failed.provider_ms = Some(100);
     let mut host_failure = fact(5, Some(1_000_000));
-    host_failure.terminal_state = AttemptOutcome::Failed;
+    host_failure.terminal_state = Outcome::Failed;
     host_failure.cause_source = provenant_records::run::CauseSource::Host;
     host_failure.provider_ms = Some(900);
     let rows = report(vec![
@@ -1627,7 +1627,7 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         };
     let mut host_failure = evidence(
         9,
-        AttemptOutcome::Failed,
+        Outcome::Failed,
         Some("senior"),
         Some("review"),
         false,
@@ -1636,22 +1636,22 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
     host_failure.fact.cause_source = provenant_records::run::CauseSource::Host;
     let mut completed_before_budget = evidence(
         10,
-        AttemptOutcome::Succeeded,
+        Outcome::Succeeded,
         Some("senior"),
         Some("review"),
         false,
         true,
     );
     completed_before_budget.fact.cause_source = provenant_records::run::CauseSource::Host;
-    completed_before_budget.fact.settlement_reason =
-        Some(provenant_records::run::SettlementReason::CompletedBeforeBudget);
+    completed_before_budget.fact.settlement_class =
+        Some(provenant_records::run::SettlementClass::CompletedBeforeBudget);
     let identity_only = evidence(
         11,
-        AttemptOutcome::Succeeded,
+        Outcome::Succeeded,
         Some("senior"),
         Some("review"),
         crate::route_outcomes::provider_work_incomplete(&[
-            provenant_records::run::PartialSignal::IdentityUnobserved,
+            provenant_records::run::SettlementSignal::IdentityUnobserved,
         ]),
         true,
     );
@@ -1661,7 +1661,7 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         identity_only,
         evidence(
             1,
-            AttemptOutcome::Succeeded,
+            Outcome::Succeeded,
             Some("senior"),
             Some("review"),
             false,
@@ -1669,7 +1669,7 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         ),
         evidence(
             2,
-            AttemptOutcome::Succeeded,
+            Outcome::Succeeded,
             Some("senior"),
             Some("review"),
             true,
@@ -1677,7 +1677,7 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         ),
         evidence(
             3,
-            AttemptOutcome::Failed,
+            Outcome::Failed,
             Some("senior"),
             Some("review"),
             false,
@@ -1685,39 +1685,25 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         ),
         evidence(
             4,
-            AttemptOutcome::QuotaLimited,
+            Outcome::QuotaLimited,
             Some("senior"),
             Some("review"),
             false,
             true,
         ),
-        evidence(
-            5,
-            AttemptOutcome::Succeeded,
-            None,
-            Some("review"),
-            false,
-            true,
-        ),
+        evidence(5, Outcome::Succeeded, None, Some("review"), false, true),
         evidence(
             6,
-            AttemptOutcome::Succeeded,
+            Outcome::Succeeded,
             Some("junior"),
             Some("review"),
             false,
             true,
         ),
-        evidence(
-            7,
-            AttemptOutcome::Succeeded,
-            Some("senior"),
-            None,
-            false,
-            true,
-        ),
+        evidence(7, Outcome::Succeeded, Some("senior"), None, false, true),
         evidence(
             8,
-            AttemptOutcome::Succeeded,
+            Outcome::Succeeded,
             Some("senior"),
             Some("review"),
             false,

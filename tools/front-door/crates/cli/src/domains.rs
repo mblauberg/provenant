@@ -757,9 +757,9 @@ pub struct ProjectLanesConfig {
     pub user_skills: Option<UserSkillsMode>,
     #[serde(default)]
     pub shared_paths: Vec<PathBuf>,
-    /// Capabilities granted by default to this project's writer lanes.
+    /// Capability grants for this project's writer lanes.
     #[serde(default)]
-    pub capabilities: Vec<String>,
+    pub grants: Vec<String>,
     #[serde(default)]
     pub exec_roots: Vec<PathBuf>,
 }
@@ -798,7 +798,7 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("skill_stage_max_bytes", "int"),
     FieldMetadata::enumeration("projects.{project}.user_skills", &["discover", "off"]),
     FieldMetadata::new("projects.{project}.shared_paths", "array"),
-    FieldMetadata::new("projects.{project}.capabilities", "array"),
+    FieldMetadata::new("projects.{project}.grants", "array"),
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
 ]);
 
@@ -1482,13 +1482,13 @@ mod tests {
         let (config, _) = provenant_config::show(&roots, &SECTIONS).unwrap();
         assert_eq!(config.domains.lanes.skill_stage_max_bytes, 16 * 1024 * 1024);
         assert!(ProjectLanesConfig::default().shared_paths.is_empty());
-        assert!(ProjectLanesConfig::default().capabilities.is_empty());
+        assert!(ProjectLanesConfig::default().grants.is_empty());
         assert!(ProjectLanesConfig::default().exec_roots.is_empty());
         let edited = edit(
             &roots,
             json!({
                 "domains.lanes.projects.example.shared_paths": [".agent-run/locks", "~/locks"],
-                "domains.lanes.projects.example.capabilities": ["postgres"],
+                "domains.lanes.projects.example.grants": ["postgres"],
                 "domains.lanes.projects.example.exec_roots": [".local-tools"],
                 "domains.lanes.skill_stage_max_bytes": 1024,
             }),
@@ -1500,11 +1500,11 @@ mod tests {
             [PathBuf::from(".agent-run/locks"), PathBuf::from("~/locks")]
         );
         assert_eq!(project.exec_roots, [PathBuf::from(".local-tools")]);
-        assert_eq!(project.capabilities, ["postgres"]);
+        assert_eq!(project.grants, ["postgres"]);
         assert_eq!(edited.config.domains.lanes.skill_stage_max_bytes, 1024);
         for key in [
             "domains.lanes.projects.example.shared_paths",
-            "domains.lanes.projects.example.capabilities",
+            "domains.lanes.projects.example.grants",
             "domains.lanes.projects.example.exec_roots",
             "domains.lanes.skill_stage_max_bytes",
         ] {

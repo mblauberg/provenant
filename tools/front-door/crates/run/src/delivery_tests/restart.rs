@@ -108,6 +108,7 @@ fn delivery_restart_case(
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
@@ -930,7 +931,7 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         fixture.git(&["update-ref", &extra, &launch.base.to_string()])?;
         tests::seal_observation(&store, &input, &exit)?;
         let mut publication = tests::publication();
-        publication.outcome = outcome;
+        publication.fact.outcome = outcome;
         let terminal = store.publish_terminal(id, 1, &publication, &exit, &call)?;
         assert!(matches!(terminal.state, AttemptState::Terminal { .. }));
         for reference in [&pin, &stage, &extra] {

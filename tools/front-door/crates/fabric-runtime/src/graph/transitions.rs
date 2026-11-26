@@ -319,13 +319,15 @@ pub(super) fn apply_attempt_observation(
                 branch,
                 commit,
                 stop,
-                settlement_reason,
+                settlement_class,
+                cause,
             } => {
                 let mut result = result;
                 progress.review_settlement = None;
                 attempt.usage = usage;
                 attempt.launched = launched;
                 attempt.stop = stop;
+                attempt.cause = cause.map(|cause| *cause);
                 attempt.state = AttemptState::Terminal;
                 attempt.attempt_ref = attempt_ref;
                 // Provider success alone does not satisfy an explicit result contract.
@@ -386,7 +388,7 @@ pub(super) fn apply_attempt_observation(
                 let stopped_without_reply = result.is_none()
                     && matches!(
                         outcome,
-                        AttemptOutcome::DeclaredStop | AttemptOutcome::StoppedNoWork
+                        GraphAttemptOutcome::DeclaredStop | GraphAttemptOutcome::StoppedNoWork
                     );
                 let review_contract_error = if stopped_without_reply {
                     None
@@ -428,7 +430,7 @@ pub(super) fn apply_attempt_observation(
                         .warnings
                         .retain(|warning| !warning.starts_with(FINDINGS_INVALID));
                 }
-                if outcome == AttemptOutcome::UsageLimited {
+                if outcome == GraphAttemptOutcome::UsageLimited {
                     outputs.findings_available = Some(false);
                     outputs
                         .warnings
@@ -497,22 +499,6 @@ pub(super) fn apply_attempt_observation(
                             .push("review_partial: selected review coverage is incomplete".into());
                     }
                 }
-                let malformed = result
-                    .as_ref()
-                    .is_some_and(|capture| capture.handoff.is_err());
-                let settlement_reason = if malformed
-                    && matches!(
-                        outcome,
-                        AttemptOutcome::Succeeded
-                            | AttemptOutcome::ReviewRequired
-                            | AttemptOutcome::DeclaredStop
-                            | AttemptOutcome::StoppedNoWork
-                    ) {
-                    attempt.stop = Some(provenant_records::StopCause::HandoffMalformed);
-                    Some(provenant_records::run::SettlementReason::HandoffMalformed)
-                } else {
-                    settlement_reason
-                };
                 let review_result = node.access == AccessMode::ReadOnly
                     && template::review_node(node)
                     && outputs.verdict.is_some()
@@ -523,114 +509,49 @@ pub(super) fn apply_attempt_observation(
                         .iter()
                         .any(|warning| warning.starts_with(FINDINGS_INVALID))
                     && disposition_error.is_none();
-                // A lane's outcome is a fact about the work it left and the
-                // handoff it sealed, not the stop path that reported it: commits
-                // ahead of the input head count whether or not they were pushed,
-                // and a done handoff closes the brief. A terminal cause or a
-                // partial signal cannot call a lane with new commits "no work"
-                // (#3988).
                 let handoff = result
                     .as_ref()
                     .and_then(|capture| capture.handoff.as_ref().ok())
                     .and_then(Option::as_ref);
-                let commits_ahead = node.access == AccessMode::WorktreeWrite
-                    && commit
-                        .as_deref()
-                        .and_then(|head| GitOid::parse(head).ok())
-                        .zip(
-                            progress
-                                .source_commit
-                                .as_deref()
-                                .and_then(|base| GitOid::parse(base).ok()),
-                        )
-                        .is_some_and(|(head, base)| head != base);
-                let handoff_done = handoff.is_some_and(|handoff| !handoff.unfinished());
-                let stop_classifiable = matches!(
-                    outcome,
-                    AttemptOutcome::Succeeded
-                        | AttemptOutcome::ReviewRequired
-                        | AttemptOutcome::DeclaredStop
-                        | AttemptOutcome::StoppedNoWork
-                );
-                // A done brief plus a commit beyond the input head closes the
-                // writer whatever provisional reason was recorded. In particular
-                // a `failed` reason cannot deny a pushed, finished brief (#4065).
-                // The provider outcome still has to be classifiable below, so a
-                // genuinely failed attempt is never promoted by this escape.
-                let completed_by_evidence = launched
-                    && commits_ahead
-                    && handoff_done
-                    && matches!(
-                        settlement_reason,
-                        None | Some(
-                            provenant_records::run::SettlementReason::Completed
-                                | provenant_records::run::SettlementReason::DeclaredStop
-                                | provenant_records::run::SettlementReason::CompletedBeforeBudget
-                                | provenant_records::run::SettlementReason::Failed
-                        )
-                    );
-                let outcome = if stop_classifiable
-                    && launched
-                    && node.access == AccessMode::WorktreeWrite
-                    && handoff.is_some_and(|handoff| handoff.unfinished())
-                {
-                    AttemptOutcome::DeclaredStop
-                } else if stop_classifiable && completed_by_evidence {
-                    AttemptOutcome::Succeeded
-                } else {
-                    outcome
-                };
                 let outcome = if matches!(
                     outcome,
-                    AttemptOutcome::Succeeded
-                        | AttemptOutcome::ReviewRequired
-                        | AttemptOutcome::DeclaredStop
-                        | AttemptOutcome::StoppedNoWork
+                    GraphAttemptOutcome::Succeeded
+                        | GraphAttemptOutcome::ReviewRequired
+                        | GraphAttemptOutcome::DeclaredStop
+                        | GraphAttemptOutcome::StoppedNoWork
                 ) && disposition_error.is_some()
                 {
-                    AttemptOutcome::TaskFailed
-                } else if outcome == AttemptOutcome::DeclaredStop && review_result && !warned {
-                    AttemptOutcome::Succeeded
+                    GraphAttemptOutcome::TaskFailed
+                } else if outcome == GraphAttemptOutcome::DeclaredStop && review_result && !warned {
+                    GraphAttemptOutcome::Succeeded
                 } else if !warned
                     && launched
                     && node.access == AccessMode::WorktreeWrite
                     && matches!(
                         outcome,
-                        AttemptOutcome::StoppedNoWork | AttemptOutcome::DeclaredStop
+                        GraphAttemptOutcome::StoppedNoWork | GraphAttemptOutcome::DeclaredStop
                     )
                 {
-                    // The observed refs decide committed work, not the stop
-                    // path that classified the outcome: a declared no-work
-                    // with new commits is still committed work.
-                    let committed = commits_ahead;
-                    // One rule for every writer stop, committed, clean or with
-                    // uncommitted edits: restart in place on the retained
+                    // The projected stop decides the code and the note; refs
+                    // and pushes no longer revise a settled outcome. One rule
+                    // for every writer stop: restart in place on the retained
                     // worktree, or return to the chair (see `next_step`).
-                    progress.advance_error_code = Some(
-                        if committed {
-                            "writer_declared_stop"
-                        } else {
-                            "stopped_no_work"
-                        }
-                        .into(),
-                    );
-                    progress.advance_error = Some(
+                    progress.advance_code = outcome.advance_code().map(str::to_owned);
+                    progress.advance_note = Some(
                         if let Some(handoff) = handoff.filter(|handoff| {
                             handoff.status == provenant_records::handoff::HandoffStatus::Blocked
                         }) {
-                            bounded(&handoff.note, MAX_ADVANCE_ERROR_BYTES)
-                        } else if committed {
-                            "writer declared stop after committing work".into()
-                        } else if outcome == AttemptOutcome::StoppedNoWork {
+                            bounded(&handoff.note, MAX_ADVANCE_NOTE_BYTES)
+                        } else if outcome == GraphAttemptOutcome::StoppedNoWork {
                             "writer stopped with no work: no new commit".into()
                         } else {
                             "writer stopped before finishing".into()
                         },
                     );
                     outcome
-                } else if warned || outcome == AttemptOutcome::DeclaredStop {
-                    AttemptOutcome::OtherFailure
-                } else if outcome == AttemptOutcome::Succeeded
+                } else if warned || outcome == GraphAttemptOutcome::DeclaredStop {
+                    GraphAttemptOutcome::OtherFailure
+                } else if outcome == GraphAttemptOutcome::Succeeded
                     && (!review_result
                         && node.required_verdict.is_some()
                         && !(plans::writer(node)
@@ -642,7 +563,7 @@ pub(super) fn apply_attempt_observation(
                             .is_some_and(|capture| capture.matched_required)
                         || disposition_error.is_some())
                 {
-                    AttemptOutcome::TaskFailed
+                    GraphAttemptOutcome::TaskFailed
                 } else {
                     outcome
                 };
@@ -651,11 +572,11 @@ pub(super) fn apply_attempt_observation(
                 if warned || disposition_error.is_some() {
                     attempt.stop = None;
                 }
-                if outcome == AttemptOutcome::TaskFailed
+                if outcome == GraphAttemptOutcome::TaskFailed
                     && let Some((code, reason)) = disposition_error
                 {
-                    progress.advance_error_code = Some(code.into());
-                    progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+                    progress.advance_code = Some(code.into());
+                    progress.advance_note = Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
                 }
                 if node.access == AccessMode::WorktreeWrite {
                     progress.blocked = result.as_ref().is_some_and(|capture| {
@@ -681,37 +602,32 @@ pub(super) fn apply_attempt_observation(
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
-                let node_outcome = if completed_by_evidence {
-                    // Evidence of a done brief with new commits closes the node
-                    // even when the stop path recorded a failing settlement.
-                    provenant_records::run::SettlementNodeOutcome::Succeeded
-                } else {
-                    settlement_reason
-                        .map(|reason| reason.node_outcome(attempt.stop))
-                        .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed)
-                };
+                // The sealed settlement decides release; refs and the handoff
+                // never revise it here (one classifier, `settle`).
+                let release = settlement_class
+                    .map(|class| class.release(attempt.stop))
+                    .unwrap_or(provenant_records::run::DependantRelease::Hold);
                 let outcome = if matches!(
                     outcome,
-                    AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired
-                ) && node_outcome
-                    == provenant_records::run::SettlementNodeOutcome::Failed
+                    GraphAttemptOutcome::Succeeded | GraphAttemptOutcome::ReviewRequired
+                ) && release == provenant_records::run::DependantRelease::Hold
                 {
                     // A successful-looking attempt still has a real precondition
                     // failure here. Name it instead of reporting bare
                     // `other_failure`, which hides why the node stayed open.
-                    progress.advance_error_code = Some(
-                        settlement_reason
+                    progress.advance_code = Some(
+                        settlement_class
                             .map(|reason| reason.as_str())
                             .unwrap_or("settlement_failed")
-                            .into(),
+                            .to_owned(),
                     );
-                    AttemptOutcome::OtherFailure
+                    GraphAttemptOutcome::OtherFailure
                 } else {
                     outcome
                 };
                 attempt.outcome = Some(outcome);
                 match outcome {
-                    AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired => {
+                    GraphAttemptOutcome::Succeeded | GraphAttemptOutcome::ReviewRequired => {
                         progress.state = NodeState::Succeeded;
                         if node.access == AccessMode::ReadOnly && template::review_node(node) {
                             let head_oid = match &review_range {
@@ -815,11 +731,11 @@ pub(super) fn apply_attempt_observation(
                         }
                         false
                     }
-                    AttemptOutcome::AuthRequired
-                    | AttemptOutcome::UsageLimited
-                    | AttemptOutcome::AdapterUnavailable
-                    | AttemptOutcome::PreparationRefused(_)
-                    | AttemptOutcome::Unclassified => {
+                    GraphAttemptOutcome::AuthRequired
+                    | GraphAttemptOutcome::UsageLimited
+                    | GraphAttemptOutcome::AdapterUnavailable
+                    | GraphAttemptOutcome::PreparationRefused(_)
+                    | GraphAttemptOutcome::Unclassified => {
                         if let Some(retry) = fallback_evidence_retry.clone() {
                             progress.fallback_evidence_retry = Some(retry);
                             progress.state = NodeState::Running;
@@ -854,7 +770,7 @@ pub(super) fn apply_attempt_observation(
                             }
                         }
                     }
-                    AttemptOutcome::ProviderStalledRetry => {
+                    GraphAttemptOutcome::ProviderStalledRetry => {
                         let review_limit_reached = review_preparation_substitution(node, attempt)
                             && progress
                                 .attempts
@@ -882,14 +798,14 @@ pub(super) fn apply_attempt_observation(
                             }
                         }
                     }
-                    AttemptOutcome::DeadlineExceeded => {
-                        progress.advance_error_code = Some("deadline_exceeded".into());
-                        progress.advance_error =
+                    GraphAttemptOutcome::DeadlineExceeded => {
+                        progress.advance_code = Some("deadline_exceeded".into());
+                        progress.advance_note =
                             Some("node deadline exceeded; lane was cancelled".into());
                         progress.state = NodeState::Failed;
                         false
                     }
-                    AttemptOutcome::TaskFailed
+                    GraphAttemptOutcome::TaskFailed
                         if review_substitution(node, attempt)
                             && route_index + 1 < node.routes.len()
                             && progress
@@ -900,25 +816,25 @@ pub(super) fn apply_attempt_observation(
                                 < limits.review_substitutions =>
                     {
                         progress.outputs = None;
-                        progress.advance_error = None;
-                        progress.advance_error_code = None;
+                        progress.advance_note = None;
+                        progress.advance_code = None;
                         progress.advance_owner_code = None;
                         progress.state = NodeState::Running;
                         true
                     }
-                    AttemptOutcome::TaskFailed
-                    | AttemptOutcome::OtherFailure
-                    | AttemptOutcome::DeclaredStop
-                    | AttemptOutcome::StoppedNoWork => {
+                    GraphAttemptOutcome::TaskFailed
+                    | GraphAttemptOutcome::OtherFailure
+                    | GraphAttemptOutcome::DeclaredStop
+                    | GraphAttemptOutcome::StoppedNoWork => {
                         let is_merge_conflict = result_warning.as_ref().is_some_and(|w| {
                             w.contains("integration_conflict") || w.contains("merge conflict")
                         });
                         if is_merge_conflict {
                             progress.state = NodeState::Blocked;
-                            progress.advance_error_code = Some("merge_conflict".into());
-                            progress.advance_error = result_warning
+                            progress.advance_code = Some("merge_conflict".into());
+                            progress.advance_note = result_warning
                                 .as_ref()
-                                .map(|w| bounded(w, MAX_ADVANCE_ERROR_BYTES));
+                                .map(|w| bounded(w, MAX_ADVANCE_NOTE_BYTES));
                         } else {
                             progress.state = NodeState::Failed;
                         }
@@ -964,6 +880,9 @@ pub(super) fn initial_checkpoint(
         pull_request: None,
         schema_version: 2,
         cancelled: false,
+        // The caller resolves the configured defaults once at admission and
+        // stamps them on the checkpoint after this skeleton is returned.
+        on_stop_defaults: provenant_records::OnStop::default(),
         delivery_ci_superseded: Vec::new(),
         cancel_reason: None,
         integration_pin: None,
@@ -1054,8 +973,8 @@ pub(super) fn initial_checkpoint(
                 cancelled_from: None,
                 wait_reason: None,
                 skip_reason: when::skip_reason(&node.when),
-                advance_error: None,
-                advance_error_code: None,
+                advance_note: None,
+                advance_code: None,
                 advance_owner_code: None,
                 launch_retry: None,
                 fallback_evidence_retry: None,
@@ -1079,13 +998,13 @@ pub(super) fn writer_binding_failed(progress: &mut NodeProgress, _id: &str, reas
 }
 
 pub(super) fn retry_exhausted(progress: &mut NodeProgress, reason: &str) {
-    progress.advance_error_code = Some("launch_retry_exhausted".into());
-    progress.advance_error = Some(bounded(
+    progress.advance_code = Some("launch_retry_exhausted".into());
+    progress.advance_note = Some(bounded(
         &format!(
             "node {}: the launch failed: {reason}",
             provenant_records::diagnostic::safe_text(&progress.id)
         ),
-        MAX_ADVANCE_ERROR_BYTES,
+        MAX_ADVANCE_NOTE_BYTES,
     ));
     progress.state = NodeState::Blocked;
     progress.last_launch_retry = progress.launch_retry.take().map(|mut retry| {
@@ -1367,6 +1286,7 @@ pub(super) fn begin_attempt(
         input_cap_source: Some(input_cap_source),
         input_manifest: Some(initial_manifest),
         usage: None,
+        cause: None,
     });
     checkpoint.nodes[node_index].state = NodeState::Running;
     checkpoint.nodes[node_index].wait_reason = None;
@@ -1744,7 +1664,7 @@ fn attribute_blocker(
     if node.condition.is_some()
         || node.composite.is_some()
         || node.land.is_some()
-        || checkpoint.nodes[node_index].advance_error.is_some()
+        || checkpoint.nodes[node_index].advance_note.is_some()
     {
         return false;
     }
@@ -1756,9 +1676,8 @@ fn attribute_blocker(
         .find(|parent| matches!(parent.state, NodeState::Failed | NodeState::Blocked));
     if let Some(parent) = blocker {
         let reason = format!("blocked by {} ({:?})", parent.id, parent.state);
-        checkpoint.nodes[node_index].advance_error =
-            Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-        checkpoint.nodes[node_index].advance_error_code = Some("upstream_blocked".into());
+        checkpoint.nodes[node_index].advance_note = Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
+        checkpoint.nodes[node_index].advance_code = Some("upstream_blocked".into());
         true
     } else {
         false
@@ -1995,10 +1914,10 @@ pub(super) fn node_action<'a>(
         if state != NodeState::Blocked
             && state != NodeState::Pending
             && changed
-            && checkpoint.nodes[index].advance_error_code.as_deref() == Some("upstream_blocked")
+            && checkpoint.nodes[index].advance_code.as_deref() == Some("upstream_blocked")
         {
-            checkpoint.nodes[index].advance_error = None;
-            checkpoint.nodes[index].advance_error_code = None;
+            checkpoint.nodes[index].advance_note = None;
+            checkpoint.nodes[index].advance_code = None;
         }
         if changed {
             checkpoint.nodes[index].state = state;
@@ -2076,11 +1995,11 @@ fn recovery_pending(checkpoint: &GraphCheckpoint) -> bool {
         || !checkpoint.cancelled
             && checkpoint.nodes.iter().any(|node| {
                 node.state == NodeState::Blocked
-                    && node.advance_error_code.as_deref() == Some("steer_continuation_refused")
+                    && node.advance_code.as_deref() == Some("steer_continuation_refused")
             })
         || checkpoint.nodes.iter().any(|node| {
             node.state == NodeState::Failed
-                && node.advance_error_code.as_deref() == Some("review_verdict_invalid")
+                && node.advance_code.as_deref() == Some("review_verdict_invalid")
                 && node.review_verdict_correction_refused.is_none()
                 && !checkpoint
                     .expansions
@@ -2222,15 +2141,15 @@ pub(super) fn graph_run(checkpoint: GraphCheckpoint) -> GraphRun {
     } else {
         GraphStatus::Pending
     };
-    let advance_error = checkpoint
+    let advance_note = checkpoint
         .nodes
         .iter()
-        .find_map(|node| node.advance_error.clone());
+        .find_map(|node| node.advance_note.clone());
     GraphRun {
         status,
         outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
         checkpoint,
-        advance_error,
+        advance_note,
     }
 }
 

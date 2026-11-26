@@ -32,11 +32,11 @@ fn typed_local(
             provenant_confinement::permissions::PermissionError::BackendNotAvailable(
                 provenant_confinement::permissions::AvailabilityReason::UnsupportedPlatform,
             ),
-        ) => Some(TerminalCause::UnsupportedPlatform),
+        ) => Some(CauseKind::UnsupportedPlatform),
         RunError::DeliveryPrepare {
             step: crate::DeliveryPrepareStep::CredentialHelper,
             ..
-        } => Some(TerminalCause::DeliveryPrepareCredentialHelper),
+        } => Some(CauseKind::DeliveryPrepareCredentialHelper),
         _ => None,
     };
     let message = format!("{phase}: {error}");
@@ -86,7 +86,7 @@ fn typed_preparation(
     match typed_local(policy, phase, error) {
         HandOff::Local(message) => HandOff::TypedLocal {
             message,
-            cause: TerminalCause::PreparationRefused,
+            cause: CauseKind::PreparationRefused,
         },
         other => other,
     }
@@ -107,7 +107,7 @@ fn launch_lineage_refusal(policy: &provenant_records::policy::Policy, error: &Ru
         ),
         RunError::WriterLineage(detail) => HandOff::TypedLocal {
             message: format!("writer lineage mismatch: {detail}"),
-            cause: TerminalCause::PreparationRefused,
+            cause: CauseKind::PreparationRefused,
         },
         _ => typed_local(policy, "writer lineage", error),
     }
@@ -669,7 +669,7 @@ fn launch_failure(error: &custody::CustodyError) -> HandOff {
     match error {
         custody::CustodyError::UnsupportedPlatform => HandOff::TypedLocal {
             message: format!("provider custody: {error}"),
-            cause: TerminalCause::UnsupportedPlatform,
+            cause: CauseKind::UnsupportedPlatform,
         },
         _ => HandOff::Uncertain(error.to_string()),
     }
@@ -879,7 +879,7 @@ mod tests {
         else {
             panic!("expected a typed local preparation refusal");
         };
-        assert_eq!(cause, TerminalCause::PreparationRefused);
+        assert_eq!(cause, CauseKind::PreparationRefused);
         assert!(
             message.starts_with("Git setup: no Git remote is declared"),
             "{message}"
@@ -908,7 +908,7 @@ mod tests {
         let HandOff::TypedLocal { cause, message } = refusal else {
             panic!("writer lineage was not a typed local preparation refusal");
         };
-        assert_eq!(cause, TerminalCause::PreparationRefused);
+        assert_eq!(cause, CauseKind::PreparationRefused);
         assert_eq!(
             message,
             "writer lineage mismatch: graph predecessor writer or source"
@@ -1012,7 +1012,7 @@ mod tests {
         assert!(matches!(
             launch_failure(&custody::CustodyError::UnsupportedPlatform),
             HandOff::TypedLocal {
-                cause: TerminalCause::UnsupportedPlatform,
+                cause: CauseKind::UnsupportedPlatform,
                 ..
             }
         ));
@@ -1040,7 +1040,7 @@ mod tests {
             typed_local(&test_policy(), "confinement command", &error),
             HandOff::Boundary {
                 class: BoundaryClass::Authority,
-                cause: Some(TerminalCause::UnsupportedPlatform),
+                cause: Some(CauseKind::UnsupportedPlatform),
                 ..
             }
         ));
@@ -1075,7 +1075,7 @@ mod tests {
                 assert!(matches!(
                     handoff,
                     HandOff::TypedLocal {
-                        cause: TerminalCause::DeliveryPrepareCredentialHelper,
+                        cause: CauseKind::DeliveryPrepareCredentialHelper,
                         ..
                     }
                 ));
@@ -1084,7 +1084,7 @@ mod tests {
                     handoff,
                     HandOff::Boundary {
                         class: BoundaryClass::Credentials,
-                        cause: Some(TerminalCause::DeliveryPrepareCredentialHelper),
+                        cause: Some(CauseKind::DeliveryPrepareCredentialHelper),
                         ..
                     }
                 ));

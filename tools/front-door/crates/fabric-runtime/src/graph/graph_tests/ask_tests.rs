@@ -51,7 +51,7 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
     let mut owner = FakeOwner {
         now: Some(at(0)),
         actor: "chair".into(),
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -126,7 +126,7 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
     let document = routed(None);
     let mut owner = FakeOwner {
         now: Some(at(0)),
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     owner
@@ -148,7 +148,7 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
     // A rejected answer keeps the node open and replaces the request at once.
     let mut owner = FakeOwner {
         now: Some(at(0)),
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     owner
@@ -224,7 +224,7 @@ fn waiting_decide_nodes_do_not_use_up_concurrency() {
     .unwrap();
     let mut owner = FakeOwner {
         now: Some(at(0)),
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let limits = crate::config::GraphLimits {
@@ -325,8 +325,8 @@ fn completion_closes_a_pause_ask_left_by_lowered_limits() {
     assert_eq!(paused.checkpoint.asks.len(), 1);
 
     owner.observations = [
-        terminal(AttemptOutcome::Succeeded),
-        terminal(AttemptOutcome::Succeeded),
+        terminal(GraphAttemptOutcome::Succeeded),
+        terminal(GraphAttemptOutcome::Succeeded),
     ]
     .into();
     let run = advance_with_budget(
@@ -357,7 +357,7 @@ fn decide_inbox_error_at_deadline_keeps_the_ask_open_for_each_default() {
         spec.on_unanswered = disposition;
         let mut owner = FakeOwner {
             now: Some(at(0)),
-            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
             ..Default::default()
         };
         let mut journal = MemoryJournal::default();
@@ -399,7 +399,7 @@ fn handoff_missing_classification_does_not_release_a_dependant() {
     let mut owner = FakeOwner {
         observations: [AttemptObservation::Terminal {
             attempt_ref: Some("host/handoff-missing".into()),
-            outcome: AttemptOutcome::ReviewRequired,
+            outcome: GraphAttemptOutcome::ReviewRequired,
             launched: true,
             result: None,
             result_warning: None,
@@ -407,7 +407,8 @@ fn handoff_missing_classification_does_not_release_a_dependant() {
             branch: None,
             commit: None,
             stop: Some(provenant_records::StopCause::HandoffMissing),
-            settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+            settlement_class: Some(provenant_records::run::SettlementClass::HandoffMissing),
+        cause: None,
         }]
         .into(),
         ..Default::default()
@@ -469,7 +470,7 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
     let document = routed(Some(60));
     let mut owner = FakeOwner {
         now: Some(at(0)),
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -648,15 +649,16 @@ fn budget_pause() -> (GraphDocument, FakeOwner, crate::config::GraphBudget) {
     document.decision_session = Some("chair-session".into());
     let observation = || AttemptObservation::Terminal {
         attempt_ref: Some("host/attempt".into()),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: None,
         commit: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+    cause: None,
     };
     let owner = FakeOwner {
         now: Some(at(0)),
@@ -768,8 +770,8 @@ fn a_planner_fragment_can_add_a_decide_node() {
     let mut owner = FakeOwner {
         now: Some(at(0)),
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &fragment),
-            terminal(AttemptOutcome::Succeeded),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &fragment),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
@@ -818,8 +820,8 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             now: Some(at(0)),
             actor: "chair".into(),
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &report),
-                terminal(AttemptOutcome::Succeeded),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &report),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]
             .into(),
             ..Default::default()
@@ -898,7 +900,7 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             let mut approved_owner = FakeOwner {
                 now: Some(at(0)),
                 actor: "chair".into(),
-                observations: [terminal(AttemptOutcome::Succeeded)].into(),
+                observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
                 answers: std::collections::BTreeMap::from([(
                     "scope.ask-1".into(),
                     reply(Some("approve"), None),
@@ -971,7 +973,7 @@ fn principal_container_retry_does_not_reuse_owner_decision() {
     let mut owner = FakeOwner {
         now: Some(at(0)),
         actor: "chair".into(),
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, report)].into(),
+        observations: [terminal_with_result(GraphAttemptOutcome::Succeeded, report)].into(),
         answers: std::collections::BTreeMap::from([(
             "redesign--scope.ask-1".into(),
             reply(Some("approve"), None),
@@ -1006,7 +1008,7 @@ fn principal_container_retry_does_not_reuse_owner_decision() {
     )
     .unwrap();
     owner.observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         &report.replace("First principal slice", "Revised principal slice"),
     ));
     let retried = advance(&document, &mut owner, &mut journal).unwrap();
@@ -1046,7 +1048,7 @@ fn unanswered_decides_follow_their_declared_disposition_without_selecting_an_opt
         decide.on_unanswered = disposition;
         let mut owner = FakeOwner {
             now: Some(at(0)),
-            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
             ..Default::default()
         };
         let mut journal = MemoryJournal::default();

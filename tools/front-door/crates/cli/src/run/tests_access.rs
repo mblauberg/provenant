@@ -44,7 +44,15 @@ fn lane_access_keeps_non_utf8_origin_json_safe() -> Result<(), Box<dyn std::erro
         .path()
         .join(std::ffi::OsString::from_vec(b"alias-\xff".to_vec()));
     std::fs::create_dir(&credential)?;
-    std::fs::create_dir(&non_utf8)?;
+    // APFS refuses to create non-UTF-8 names. Probe the capability instead
+    // of failing: the JSON-safety invariant is pinned independently below.
+    if let Err(error) = std::fs::create_dir(&non_utf8) {
+        provenant_test_support::skip_filesystem_dependent_test(format!(
+            "non-UTF-8 origin names are unavailable on this filesystem: {error}"
+        ))
+        .map_err(std::io::Error::other)?;
+        return Ok(());
+    }
     let given = non_utf8.join("..").join("credential");
     let access = crate::Access {
         attach: Vec::new(),
@@ -69,6 +77,34 @@ fn lane_access_keeps_non_utf8_origin_json_safe() -> Result<(), Box<dyn std::erro
 
     let encoded = serde_json::to_value(granted)?;
     assert_eq!(encoded["dispatch_grants"][0]["given"], display);
+    Ok(())
+}
+
+// A non-UTF-8 origin must never reach the JSON record as raw bytes. This pin
+// needs no filesystem name, so it runs on APFS too: the capability probe in
+// the test above can skip there without losing coverage of the invariant.
+#[cfg(unix)]
+#[test]
+fn non_utf8_origin_is_json_safe_without_a_filesystem_name() -> Result<(), Box<dyn std::error::Error>>
+{
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let given = std::path::PathBuf::from(std::ffi::OsString::from_vec(
+        b"alias-\xff/credential".to_vec(),
+    ));
+    let grant = run::LaneAccessGrant {
+        kind: run::LaneAccessGrantKind::ReadRoot,
+        path: std::path::PathBuf::from("/fixture/credential"),
+        given: given.display().to_string(),
+    };
+    let encoded = serde_json::to_value(grant)?;
+    let rendered = encoded["given"]
+        .as_str()
+        .ok_or("grant given must be a JSON string")?;
+    assert!(
+        rendered.contains('\u{fffd}'),
+        "non-UTF-8 bytes must be replaced, not emitted raw: {rendered}"
+    );
     Ok(())
 }
 
@@ -444,10 +480,7 @@ fn quota_reason_uses_safe_fact_without_provider_message() {
             )
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
-        assert_eq!(
-            decoded.terminal_cause,
-            Some(run::TerminalCause::FreePoolQuota)
-        );
+        assert_eq!(decoded.cause, Some(run::CauseKind::FreePoolQuota));
         let reason = decoded.reason.as_deref().unwrap();
         assert!(reason.contains("free tier exhausted"));
         assert!(reason.contains("wait"));

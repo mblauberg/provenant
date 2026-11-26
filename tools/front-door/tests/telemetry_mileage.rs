@@ -120,8 +120,8 @@ fn fixture() -> Result<TestRig> {
         format!("{history}\n"),
     )?;
     // $20 of output priced usage across the first 20 points and $30 across the
-    // next 30. Output is $20 per million tokens. Feed the public native ingest
-    // boundary so this fixture follows the current segmented store format.
+    // next 30. Output is $20 per million tokens. The chair SessionStart worker
+    // ingests this transcript into the production segmented store.
     let config_path = rig.state.join("config.toml");
     let mut config = fs::read_to_string(&config_path)?;
     config.push_str(
@@ -140,11 +140,10 @@ fn fixture() -> Result<TestRig> {
     .join("\n");
     fs::write(&session, format!("{transcript}\n"))?;
     start_chair_session(&rig, "s1")?;
-    // Chair start queues usage ingest on a detached incremental worker and
-    // returns. Ingest takes ingest.lock nonblockingly, so an explicit ingest
-    // issued here races that worker and can be refused with Outcome::Error.
-    // Wait for the worker's rows instead: this is the production path, where
-    // mileage reads the usage the hook already recorded.
+    // Chair start queues a detached incremental ingest worker and returns.
+    // Wait for its verified rows instead of starting a second ingest against
+    // the same store, which races the child on a fast runner. This is the
+    // production path, where mileage reads usage the hook already recorded.
     provenant_test_support::wait_for(
         "detached chair ingest rows",
         Duration::from_secs(30),
@@ -164,6 +163,21 @@ fn fixture() -> Result<TestRig> {
         },
     )?;
     Ok(rig)
+}
+
+/// The detached chair-start worker, not a second explicit ingest, supplies the
+/// usage that mileage prices. Without the wait this fixture races the worker
+/// for the exclusive store lock and the explicit ingest exits with code 3.
+#[test]
+fn chair_start_worker_supplies_the_usage_that_mileage_prices() -> Result {
+    let rig = fixture()?;
+    let messages = stored(&rig)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|row| row["message"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(messages, ["m1", "m2"]);
+    Ok(())
 }
 
 #[test]

@@ -249,13 +249,15 @@ pub fn gap_rule(rule: &GapRule) -> Value {
 
 /// `run --explain`: each live node's capability gaps on its pinned adapter,
 /// with the setting that chose each action, under that node's dispatch policy.
-/// An unpinned route is checked when it resolves, so it is reported pending.
+/// An unpinned route is checked when it resolves, so it is reported pending;
+/// a node whose dispatch profile does not resolve reports that reason instead,
+/// since dispatch refuses it on the same profile.
 pub fn explain_capability_gaps(
     roots: &provenant_core::Roots,
     project: &str,
     config: &provenant_config::ResolvedConfig<crate::domains::Domains>,
     nodes: &[provenant_fabric_runtime::graph::GraphNode],
-) -> Result<Vec<Value>, String> {
+) -> Vec<Value> {
     let overlay = crate::config_reads::capability_overlay(roots);
     let mut rows = Vec::new();
     for node in nodes {
@@ -263,9 +265,17 @@ pub fn explain_capability_gaps(
             continue;
         }
         let spec = node.attempt.clone().unwrap_or_default();
-        let profile = config
-            .dispatch_profile(&spec.lane_knobs())
-            .map_err(|error| error.to_string())?;
+        let profile = match config.dispatch_profile(&spec.lane_knobs()) {
+            Ok(profile) => profile,
+            Err(error) => {
+                rows.push(json!({
+                    "node": node.id,
+                    "status": "profile_error",
+                    "reason": error.to_string(),
+                }));
+                continue;
+            }
+        };
         let policy = provenant_config::policy::read(
             roots.state.as_path(),
             project,
@@ -294,7 +304,7 @@ pub fn explain_capability_gaps(
             rows.push(row);
         }
     }
-    Ok(rows)
+    rows
 }
 
 /// The effective gap rule for each degradable field of one adapter.
@@ -1047,6 +1057,91 @@ mod tests {
         assert_eq!(
             adapter["capabilities"]["launch"]["image_input"]["source"],
             json!(provenant_records::OVERLAY_SOURCE)
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-launch.md#capability-overrides-and-gap-policy
+    #[test]
+    fn explain_reports_each_pinned_launch_gap_with_the_setting_that_chose_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{GraphNode, GraphRoute};
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&state)?;
+        let roots = |temp: &tempfile::TempDir| -> Result<provenant_core::Roots, Box<dyn std::error::Error>> {
+            let mut inputs = provenant_core::RootInputs::new(
+                temp.path().join("home"),
+                temp.path().join("checkout"),
+            );
+            inputs.state_dir = Some(state.clone());
+            Ok(inputs.resolve(&provenant_os::fs::SystemPathResolver)?)
+        };
+        let route: GraphRoute =
+            serde_json::from_value(json!({"adapter": "command", "effort": "high"}))?;
+        let nodes = [
+            GraphNode {
+                id: "pinned".into(),
+                route: Some(route),
+                ..Default::default()
+            },
+            GraphNode {
+                id: "unrouted".into(),
+                ..Default::default()
+            },
+        ];
+        // No owner setting: the compiled default warns and names both settings.
+        let config = configured(&temp, &state)?;
+        let rows = explain_capability_gaps(&roots(&temp)?, "project", &config, &nodes);
+        assert_eq!(rows.len(), 2);
+        let pinned = &rows[0];
+        assert_eq!(pinned["node"], json!("pinned"));
+        assert_eq!(pinned["adapter"], json!("command"));
+        assert_eq!(pinned["status"], json!("degraded"));
+        let gap = &pinned["gaps"][0];
+        assert_eq!(gap["field"], json!("effort"));
+        assert_eq!(gap["action"], json!("degrade"));
+        assert_eq!(gap["warn"], json!(true));
+        assert_eq!(gap["action_layer"], json!("default"));
+        assert_eq!(
+            gap["action_origin"],
+            json!("policy.LAUNCH_EFFORT_UNSUPPORTED")
+        );
+        assert!(
+            gap["message"].as_str().is_some_and(|message| message.contains(
+                "warn by default; set policy.LAUNCH_EFFORT_UNSUPPORTED or [[adapter_capabilities]] on_gap.effort"
+            )),
+            "{gap}"
+        );
+        assert_eq!(pinned["on_gap"]["effort"]["shadowed"], json!([]));
+        assert_eq!(
+            rows[1],
+            json!({"node": "unrouted", "status": "pending_route"})
+        );
+
+        // A host adapter entry wins and records the policy value it replaced.
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[[adapter_capabilities]]\nadapter = \"command\"\non_gap = { effort = \"refuse\" }\n",
+        )?;
+        let config = configured(&temp, &state)?;
+        let rows = explain_capability_gaps(&roots(&temp)?, "project", &config, &nodes);
+        let pinned = &rows[0];
+        assert_eq!(pinned["status"], json!("refused"));
+        let gap = &pinned["gaps"][0];
+        assert_eq!(gap["action"], json!("refuse"));
+        assert_eq!(gap["action_layer"], json!("host"));
+        assert!(
+            gap["action_origin"]
+                .as_str()
+                .is_some_and(|origin| origin.ends_with("[adapter=command].on_gap.effort")),
+            "{gap}"
+        );
+        let effort = &pinned["on_gap"]["effort"];
+        assert_eq!(effort["action"], json!("refuse"));
+        assert_eq!(
+            effort["shadowed"],
+            json!([{"action": "warn", "layer": "default", "origin": "policy.LAUNCH_EFFORT_UNSUPPORTED"}])
         );
         Ok(())
     }

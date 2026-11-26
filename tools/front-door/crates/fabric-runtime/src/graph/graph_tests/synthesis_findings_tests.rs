@@ -37,8 +37,8 @@ fn identity_only_dispositions_inherit_selected_findings() {
         ));
         let mut owner = FakeOwner {
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-                terminal_with_result(AttemptOutcome::Succeeded, &text),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &text),
             ]
             .into(),
             ..Default::default()
@@ -59,7 +59,7 @@ fn identity_only_dispositions_inherit_selected_findings() {
             assert_eq!(finding.status, "open");
             assert_eq!(finding.reason.as_deref(), Some("falsified"));
         } else {
-            let error = progress.advance_error.as_deref().unwrap();
+            let error = progress.advance_note.as_deref().unwrap();
             assert!(
                 error.contains("(missing-F9) field id: unknown upstream identity"),
                 "{error}"
@@ -109,12 +109,12 @@ fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
         );
         let mut owner = FakeOwner {
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &findings_text(&entry("").replace("F1", second_id)),
                 ),
-                terminal_with_result(AttemptOutcome::Succeeded, &text),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &text),
             ]
             .into(),
             ..Default::default()
@@ -163,7 +163,7 @@ fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
                 ids
             );
         } else {
-            let error = synthesis.advance_error.as_deref().unwrap();
+            let error = synthesis.advance_note.as_deref().unwrap();
             assert!(
                 error.contains("F1") && error.contains("ambiguous"),
                 "{error}"
@@ -215,7 +215,7 @@ fn findings_error_names_first_entry_and_field() {
         r#"{{"id":"{}","disposition":"rejected","reason":"unknown"}}"#,
         "界".repeat(2000)
     )));
-    assert!(progress.advance_error.as_ref().unwrap().len() <= MAX_ADVANCE_ERROR_BYTES);
+    assert!(progress.advance_note.as_ref().unwrap().len() <= MAX_ADVANCE_NOTE_BYTES);
 }
 
 #[test]
@@ -238,8 +238,8 @@ fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
         }];
         let mut owner = FakeOwner {
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-                terminal_with_result(AttemptOutcome::Succeeded, text),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, text),
             ]
             .into(),
             ..Default::default()
@@ -266,7 +266,7 @@ fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
         let progress = run(&text);
         assert_eq!(progress.state, NodeState::Failed, "{text}");
         assert_eq!(
-            progress.advance_error_code.as_deref(),
+            progress.advance_code.as_deref(),
             Some("disposition_count")
         );
     }
@@ -297,15 +297,15 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
         .collect();
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(
                     ",\"verification\":\"upheld\",\"propagates\":\"lens:F1\"",
                 )),
             ),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
             ),
         ]
@@ -334,7 +334,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
     };
     let mut nodes = vec![node("seed", route("first"))];
     let mut observations = VecDeque::from([terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         &findings_text(&entry("")),
     )]);
     let entries = vec![entry(",\"propagates\":\"seed:F1\""); MAX_FINDINGS].join(",");
@@ -345,7 +345,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
         verifier.inputs = vec![input("seed")];
         nodes.push(verifier);
         observations.push_back(terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             &verifier_text,
         ));
     }
@@ -360,11 +360,11 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
     nodes.push(next);
     let decisions = serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"x".repeat(8000)});
     observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         &findings_text(&decisions.to_string()),
     ));
     observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         &findings_text(""),
     ));
     let document = graph(nodes);
@@ -384,7 +384,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
         synthesis.state,
         NodeState::Succeeded,
         "{:?}",
-        synthesis.advance_error
+        synthesis.advance_note
     );
     let outputs = synthesis.outputs.as_ref().unwrap();
     assert!(
@@ -430,7 +430,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         let qualified =
             entry(",\"lens\":\"tests\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"");
         let mut observations = VecDeque::from([terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             &findings_text(&format!("{},{}", qualified, qualified.replace("F1", "F2"))),
         )]);
         // Leave room for trigger evidence under each verifier's findings cap;
@@ -460,7 +460,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             verifier.inputs = vec![input("seed")];
             nodes.push(verifier);
             observations.push_back(terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &verifier_text,
             ));
         }
@@ -483,7 +483,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
                 "root_cause":"input handling","blocking_class":"none"});
         }
         observations.push_back(terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             &findings_text(&format!(
                 "{},{}",
                 decisions,
@@ -492,7 +492,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             .replace("VERDICT: PASS", "VERDICT: FAIL"),
         ));
         observations.push_back(terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             &findings_text(""),
         ));
         let document = graph(nodes);
@@ -525,7 +525,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             synthesis.state,
             NodeState::Succeeded,
             "{:?}",
-            synthesis.advance_error
+            synthesis.advance_note
         );
         let outputs = synthesis.outputs.as_ref().unwrap();
         assert!(
@@ -579,7 +579,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             consumer.state,
             NodeState::Succeeded,
             "verifying={verifying}: {:?}",
-            consumer.advance_error
+            consumer.advance_note
         );
         let prompt = owner.prompts.last().unwrap();
         assert!(
@@ -643,7 +643,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     };
     let mut nodes = vec![node("seed", route("first"))];
     let mut observations = VecDeque::from([terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         &findings_text(&entry("")),
     )]);
     let long_file = "a".repeat(180);
@@ -656,7 +656,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
         verifier.inputs = vec![input("seed")];
         nodes.push(verifier);
         observations.push_back(terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             &verifier_text,
         ));
     }
@@ -690,11 +690,11 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     let decisions =
         serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail"});
     observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         &findings_text(&decisions.to_string()),
     ));
     observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         &findings_text(""),
     ));
     let document = graph(nodes);
@@ -714,7 +714,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
         synthesis.state,
         NodeState::Succeeded,
         "{:?}",
-        synthesis.advance_error
+        synthesis.advance_note
     );
     let outputs = synthesis.outputs.as_ref().unwrap();
     assert!(
@@ -796,17 +796,17 @@ fn settled_copies_keep_origin_and_evidence_for_downstream_disposition() {
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(",\"original\":\"lens-evidence\"")),
             ),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(
                     ",\"verification\":\"verified-evidence\",\"propagates\":\"lens:F1\"",
                 )),
             ),
-            terminal_with_result(AttemptOutcome::Succeeded, &decision),
-            terminal_with_result(AttemptOutcome::Succeeded, &decision),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &decision),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &decision),
         ]
         .into(),
         ..Default::default()
@@ -827,7 +827,7 @@ fn settled_copies_keep_origin_and_evidence_for_downstream_disposition() {
         settled.state,
         NodeState::Succeeded,
         "{:?}",
-        settled.advance_error
+        settled.advance_note
     );
     let findings = &settled.outputs.as_ref().unwrap().findings;
     assert_eq!(findings.len(), 3);
@@ -878,10 +878,10 @@ fn composite_qualified_propagation_resolves_identity_only_disposition() {
     );
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&propagated)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&propagated)),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
             ),
         ]
@@ -899,7 +899,7 @@ fn composite_qualified_propagation_resolves_identity_only_disposition() {
         synthesis.state,
         NodeState::Succeeded,
         "{:?}",
-        synthesis.advance_error
+        synthesis.advance_note
     );
     let findings = &synthesis.outputs.as_ref().unwrap().findings;
     assert_eq!(findings.len(), 2);

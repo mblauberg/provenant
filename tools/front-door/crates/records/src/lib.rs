@@ -28,6 +28,7 @@ mod attempt_file;
 mod canonical;
 pub mod control;
 pub mod custody;
+pub mod declaration;
 pub mod diagnostic;
 mod extra_de;
 mod finding;
@@ -42,6 +43,7 @@ pub mod policy;
 pub mod port_receipt;
 pub mod ports;
 pub mod provenance;
+pub mod settlement;
 mod source;
 pub mod telemetry_context;
 mod trace;
@@ -51,8 +53,7 @@ pub mod warning;
 
 pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
-    AttemptFact, AttemptOutcome, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact,
-    TranscriptRef, Usage,
+    AttemptFact, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact, TranscriptRef, Usage,
 };
 pub use attempt_file::{AttemptFile, AttemptFileClass};
 pub use canonical::{

@@ -179,6 +179,28 @@ impl PreparedLaunch {
             }
         }
         if !confinement.sandbox.effective {
+            // No OS mark survives a double-fork and setsid on this lane. The
+            // guardian still records the spawned group and session as an
+            // attempt tag, so reconcile can name a detached process after
+            // guardian loss, but cannot prove it enough to signal it. Warn
+            // once per change, naming where the access/sandbox mode came from
+            // and letting the chair turn the notice off.
+            let source = self
+                .route
+                .lane_access
+                .as_ref()
+                .map_or("default", |receipt| receipt.source.as_str());
+            let detail = format!(
+                "no OS process containment for this lane (lanes.access=host, source: {source}); a detached process is attributed by its recorded group and session and can only be reported"
+            );
+            if let provenant_records::policy::Effect::Warn(warning) = policy.check(
+                "LAUNCH_PROCESS_ATTRIBUTION_NONE",
+                provenant_records::policy::Facts::violation(detail),
+            ) {
+                use provenant_records::warning::warn;
+                // Spec: docs/specs/cli.md#warnings-are-typed-values
+                warn(warning.once_per_change());
+            }
             return Ok(());
         }
         let mode = &confinement.sandbox;
@@ -278,7 +300,7 @@ fn applied_write_grants(
 }
 /// Provider-decoded facts from a completed capture.
 pub struct Decoded {
-    pub terminal_cause: Option<TerminalCause>,
+    pub cause: Option<CauseKind>,
     pub outcome: Outcome,
     pub result: String,
     pub complete: bool,
@@ -288,21 +310,7 @@ pub struct Decoded {
     pub session: Option<String>,
     pub reason: Option<String>,
     /// Partial-finish signals the provider decode found; run adds its own.
-    pub partial_signals: Vec<PartialSignal>,
-    /// Where the provider ended each turn in `result`; empty when it does not
-    /// say. Settlement reads the handoff through these boundaries.
-    pub turns: Vec<provenant_records::handoff::TurnEnd>,
-}
-impl Decoded {
-    /// The lane's final handoff: the one rule for every provider.
-    pub fn handoff(&self) -> provenant_records::handoff::HandoffResult {
-        self.handoff_report().handoff
-    }
-
-    /// The parsed handoff together with a bounded output-order diagnostic.
-    pub fn handoff_report(&self) -> provenant_records::handoff::HandoffParse {
-        provenant_records::handoff::Handoff::from_turns_report(&self.result, &self.turns)
-    }
+    pub signals: Vec<SettlementSignal>,
 }
 /// A task-local preparation refusal, retaining candidate classifications.
 #[derive(Debug, thiserror::Error)]
@@ -315,7 +323,7 @@ pub struct PrepareRefusal {
     /// A configurable resource threshold that refused this launch, if known.
     pub resource: Option<provenant_records::diagnostic::ResourceFact>,
     /// The specific cause. There is no generic refusal.
-    pub terminal_cause: TerminalCause,
+    pub cause: CauseKind,
     /// Fixed-form text naming a configured value, never captured output.
     pub terminal_note: Option<String>,
     pub message: String,
@@ -327,7 +335,7 @@ pub struct PrepareRefusal {
 /// A refusal for test fixtures that do not care about its cause.
 #[cfg(test)]
 pub(crate) fn fixture_refusal(message: impl Into<String>) -> Box<PrepareRefusal> {
-    PrepareRefusal::boxed(TerminalCause::HandoffRefused, message)
+    PrepareRefusal::boxed(CauseKind::LaunchHandoffRefused, message)
 }
 
 impl PrepareRefusal {
@@ -341,18 +349,18 @@ impl PrepareRefusal {
             .map(|guard| guard.to_string())
             .collect();
         if facts.is_empty() {
-            self.terminal_cause.diagnostic(true)
+            self.cause.diagnostic(true)
         } else {
             facts.join("; ")
         }
     }
 
-    pub fn boxed(cause: TerminalCause, message: impl Into<String>) -> Box<Self> {
+    pub fn boxed(cause: CauseKind, message: impl Into<String>) -> Box<Self> {
         Box::new(Self {
             boundary_class: provenant_records::diagnostic::BoundaryClass::None,
             policy_code: None,
             resource: None,
-            terminal_cause: cause,
+            cause,
             terminal_note: None,
             message: message.into(),
             host_message: None,
@@ -412,7 +420,7 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
         ..Default::default()
     };
     skipped.set_guard_facts(None, Some(fact.clone())).unwrap();
-    let mut refusal = PrepareRefusal::boxed(TerminalCause::RouteResolutionRefused, "opaque source");
+    let mut refusal = PrepareRefusal::boxed(CauseKind::RouteResolutionRefused, "opaque source");
     refusal.skipped_routes.push(skipped);
     let kind = refusal.kind();
     assert!(matches!(&kind, RefusalKind::PacingReserveResource(value) if value == &fact));
@@ -469,7 +477,7 @@ impl Drop for PreparedStart {
 
 fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
     format!(
-        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them; your progress handoff JSON under provider-state is yours to update throughout the task and is kept. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
+        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them. Declare your result with `provenant declare --stdin` (schema v2 JSON; see STATUS_GUIDANCE). Field errors come back at once; fix and call again. The last accepted declaration settles the lane; prose and fenced blocks are not read. To stop early, declare `stopped_early` or `blocked`. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
         handoff = crate::completion::guidance(),
         result = directory.join("result.md").display(),
         exit = directory.join("process-exit.json").display(),
@@ -486,24 +494,27 @@ fn output_prompt_directs_scratch_outside_worktree() {
     assert!(prompt.contains("not in the worktree"));
 }
 
-/// #3844: the launch prompt must not tell a lane to stop updating its own
-/// progress handoff while it also carries the progress-handoff instruction.
-/// Harness ownership is scoped to the attempt's records, not to the lane's
-/// provider-state handoff.
+/// The launch prompt teaches the declaration command and keeps harness and
+/// lane ownership distinct: settlement seals the snapshot from declarations,
+/// never from a progress file or the answer text.
 #[cfg(test)]
 #[test]
-fn output_prompt_keeps_progress_handoff_and_attempt_record_ownership_consistent() {
-    let progress = crate::completion::handoff_progress_guidance(std::path::Path::new(
-        "/state/attempts/6/provider-state/candidate-0/handoff.json",
-    ));
-    let prompt = output_prompt(std::path::Path::new("/attempt"), &progress);
-    // The lane still owns and updates its progress handoff under provider-state.
-    assert!(prompt.contains("Progress handoff JSON:"), "{prompt}");
+fn output_prompt_teaches_the_declaration_command_and_host_ownership() {
+    let prompt = output_prompt(std::path::Path::new("/attempt"), "task");
+    assert!(prompt.contains("$TMPDIR"));
+    assert!(prompt.contains("not in the worktree"));
     assert!(
-        prompt.contains("Update this file throughout the task"),
+        prompt.contains("Declare your result with `provenant declare --stdin`"),
         "{prompt}"
     );
-    // The harness owns the attempt's own records, including the sealed snapshot.
+    assert!(
+        prompt.contains("Field errors come back at once"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("prose and fenced blocks are not read"),
+        "{prompt}"
+    );
     assert!(
         prompt.contains("harness writes the attempt's own records"),
         "{prompt}"
@@ -513,12 +524,11 @@ fn output_prompt_keeps_progress_handoff_and_attempt_record_ownership_consistent(
         "{prompt}"
     );
     assert!(prompt.contains("the lane never writes them"), "{prompt}");
-    // No sentence tells the lane the harness writes its progress handoff.
     assert!(
-        !prompt.contains("harness-recorded handoff progress"),
+        !prompt.contains("your progress handoff JSON under provider-state"),
         "{prompt}"
     );
-    assert!(!prompt.contains("never the lane"), "{prompt}");
+    assert!(!prompt.contains("Progress handoff JSON:"), "{prompt}");
 }
 
 /// Resolve policy once for this launch from host, project and dispatch settings.
@@ -541,7 +551,7 @@ fn check_launch_policy(
     };
     // DiskFloor is emitted only by the shared critical-space decision.
     // Advisory pressure has already warned and continued at that core.
-    if refusal.terminal_cause == TerminalCause::DiskFloor {
+    if refusal.cause == CauseKind::DiskFloor {
         return Err(refusal);
     }
     let owned = refusal.policy_code.clone();
@@ -562,10 +572,7 @@ fn check_launch_policy(
                 "LAUNCH_RUNSTORE_START_INNER_AUTHORITY"
             }
             provenant_records::diagnostic::BoundaryClass::None
-                if matches!(
-                    refusal.terminal_cause,
-                    TerminalCause::DiskObservationUnavailable
-                ) =>
+                if matches!(refusal.cause, CauseKind::DiskObservationUnavailable) =>
             {
                 "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
             }
@@ -910,7 +917,7 @@ pub trait Providers {
     ) -> std::result::Result<Decoded, String> {
         if continuation.expectation.is_some() {
             return Ok(Decoded {
-                terminal_cause: None,
+                cause: None,
                 outcome: Outcome::Unsettled,
                 result: String::new(),
                 complete: false,
@@ -920,8 +927,7 @@ pub trait Providers {
                 reason: Some(
                     "provider decoder cannot verify the retained continuation session".into(),
                 ),
-                partial_signals: Vec::new(),
-                turns: Vec::new(),
+                signals: Vec::new(),
             });
         }
         self.decode_captures(
@@ -941,7 +947,7 @@ pub(crate) enum HandOff {
     Boundary {
         message: String,
         class: provenant_records::diagnostic::BoundaryClass,
-        cause: Option<TerminalCause>,
+        cause: Option<CauseKind>,
     },
     Resource {
         message: String,
@@ -949,7 +955,7 @@ pub(crate) enum HandOff {
     },
     TypedLocal {
         message: String,
-        cause: TerminalCause,
+        cause: CauseKind,
     },
     Busy,
     /// No guardian was contacted, but custody remains protected.
@@ -976,11 +982,11 @@ pub(crate) fn handoff_preparation(
 ) {
     match error {
         HandOff::TypedLocal {
-            cause: TerminalCause::PreparationRefused,
+            cause: CauseKind::PreparationRefused,
             ..
         } => (
             Some(provenant_records::run::PreparationFailure::GitSetup),
-            Some(TerminalCause::preparation_note(reason)),
+            Some(CauseKind::preparation_note(reason)),
         ),
         HandOff::Local(_) | HandOff::TypedLocal { .. } => (
             Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
@@ -1169,7 +1175,7 @@ impl RunStore {
                             .wall_now()
                             .map_err(|_| RunError::Validation("wall clock"))?,
                         failure: None,
-                        terminal_cause: None,
+                        cause: None,
                         terminal_note: None,
                     },
                     call,
@@ -1845,7 +1851,7 @@ impl RunStore {
                 reason,
                 finished_at,
                 failure: None,
-                terminal_cause: Some(TerminalCause::HandoffRefused),
+                cause: Some(CauseKind::LaunchHandoffRefused),
                 terminal_note: None,
             },
             call,
@@ -1883,7 +1889,7 @@ impl RunStore {
                 reason: "cancelled before launch",
                 finished_at,
                 failure: None,
-                terminal_cause: None,
+                cause: None,
                 terminal_note: None,
             },
             &cleanup_call,
@@ -1961,7 +1967,7 @@ impl RunStore {
             // `cloud`. Never hand it to the local supervisor; settle it so
             // status, reconcile and gc can clear the run.
             if task.extra.contains_key("cloud") {
-                let cause = TerminalCause::CloudPlacementRemoved;
+                let cause = CauseKind::CloudPlacementRemoved;
                 match self.withdraw_with_preparation_failure(
                     id,
                     crate::store::Withdrawal {
@@ -1972,7 +1978,7 @@ impl RunStore {
                         reason: cause.detail(),
                         finished_at: now()?,
                         failure: None,
-                        terminal_cause: Some(cause),
+                        cause: Some(cause),
                         terminal_note: None,
                     },
                     call,
@@ -2160,7 +2166,7 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: None,
-                            terminal_cause: Some(TerminalCause::StoredPromptUnreadable),
+                            cause: Some(CauseKind::StoredPromptUnreadable),
                             terminal_note: None,
                         },
                         call,
@@ -2320,7 +2326,7 @@ impl RunStore {
                     } else {
                         Outcome::Rejected
                     };
-                    let terminal_cause = Some(refusal.terminal_cause);
+                    let cause = Some(refusal.cause);
                     let continuation_reason = resume.as_ref().map(|_| refusal.safe_reason());
                     let terminal_note = match (kind.terminal_note(), refusal.terminal_note) {
                         (Some(guidance), Some(note)) if guidance != note => {
@@ -2378,7 +2384,7 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: refusal.fallback_outcome,
-                            terminal_cause,
+                            cause,
                             terminal_note,
                         },
                         call,
@@ -2470,7 +2476,7 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: None,
-                            terminal_cause: Some(TerminalCause::WriteGrantsRefused),
+                            cause: Some(CauseKind::WriteGrantsRefused),
                             terminal_note: kind.terminal_note(),
                         },
                         call,
@@ -2598,16 +2604,14 @@ impl RunStore {
                         // local lease has been withdrawn. Preserve that typed
                         // pre-provider failure for graph fallback; a boundary or
                         // retained import does not establish safe preparation.
-                        let terminal_cause = match &error {
+                        let cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
                             HandOff::Boundary { cause, .. } => {
-                                cause.or(Some(TerminalCause::HandoffRefused))
+                                cause.or(Some(CauseKind::LaunchHandoffRefused))
                             }
-                            HandOff::Busy => Some(TerminalCause::WorktreeBusy),
-                            HandOff::RetainedImport { .. } => {
-                                Some(TerminalCause::RetainedWriterImport)
-                            }
-                            _ => Some(TerminalCause::HandoffRefused),
+                            HandOff::Busy => Some(CauseKind::WorktreeBusy),
+                            HandOff::RetainedImport { .. } => Some(CauseKind::RetainedWriterImport),
+                            _ => Some(CauseKind::LaunchHandoffRefused),
                         };
                         let (reason, kind) = match &error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
@@ -2661,7 +2665,7 @@ impl RunStore {
                                 reason: &reason,
                                 finished_at: now()?,
                                 failure: preparation_failure.filter(|_| !cancelled),
-                                terminal_cause,
+                                cause,
                                 terminal_note: preparation_note.or_else(|| kind.terminal_note()),
                             },
                             call,
@@ -3069,7 +3073,7 @@ mod policy_reporting_tests {
                     }
                 );
                 Err(PrepareRefusal::boxed(
-                    TerminalCause::RouteResolutionRefused,
+                    CauseKind::RouteResolutionRefused,
                     "fixture inspected admission",
                 ))
             }
@@ -3421,7 +3425,7 @@ mod resource_status_tests {
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
             let mut refusal = PrepareRefusal::boxed(
-                TerminalCause::RouteResolutionRefused,
+                CauseKind::RouteResolutionRefused,
                 "DEPENDENCY_OUTPUT_SECRET",
             );
             refusal.resource = Some(ResourceFact::DependencyPreparation { configured: true });

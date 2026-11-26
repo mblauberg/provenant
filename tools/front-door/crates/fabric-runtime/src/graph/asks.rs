@@ -864,7 +864,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
             .collect();
         answer.rejected = Some(bounded(
             &format!("answer must choose one of {}", ids.join(", ")),
-            MAX_ADVANCE_ERROR_BYTES,
+            MAX_ADVANCE_NOTE_BYTES,
         ));
     }
     if let (None, Some(chosen)) = (&answer.rejected, chosen) {
@@ -1098,7 +1098,7 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
             checkpoint.asks.remove(position);
         }
         Err((_, note)) => {
-            let note = bounded(&note, MAX_ADVANCE_ERROR_BYTES);
+            let note = bounded(&note, MAX_ADVANCE_NOTE_BYTES);
             let request = pause_ask(
                 &checkpoint.graph_id,
                 checkpoint.pause_asks + 1,
@@ -1275,7 +1275,7 @@ pub(super) fn validate_progress(
     let valid = progress.attempts.is_empty()
         && progress.gate.is_none()
         && progress.ci.is_none()
-        && (progress.advance_error.is_none() || progress.state == NodeState::Failed)
+        && (progress.advance_note.is_none() || progress.state == NodeState::Failed)
         && match progress.state {
             NodeState::Pending | NodeState::Blocked => progress.outputs.is_none(),
             NodeState::Skipped => progress.outputs.is_none() || unanswered_progress(progress, node),

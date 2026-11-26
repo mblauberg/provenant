@@ -908,6 +908,18 @@ pub fn dispatch() -> io::Result<bool> {
             wait_for_eof(&mut ready)?;
         }
         "s2-detach-provider" | "s2-registered-detach-provider" => {
+            if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from)
+                && state.join("s2-wait-for-reparent").is_file()
+            {
+                std::fs::write(
+                    state.join("s2-detach-provider-pid.tmp"),
+                    std::process::id().to_string(),
+                )?;
+                std::fs::rename(
+                    state.join("s2-detach-provider-pid.tmp"),
+                    state.join("s2-detach-provider-pid"),
+                )?;
+            }
             // Start a session-leading descendant, optionally in the attempt's
             // sandbox, then exit before a census follows the parent edge. The
             // registered variant also leaves a nested owner whose custody the

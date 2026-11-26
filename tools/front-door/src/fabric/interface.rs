@@ -869,8 +869,8 @@ mod launch_report_tests {
     #[test]
     fn launch_report_distinguishes_refusal_mixed_and_fallback() {
         let rows = vec![
-            json!({"kind":"attempt", "attempt_id":"host/one", "settlement_reason":"pre_launch_refusal", "preparation_failure":"auth_required"}),
-            json!({"kind":"attempt", "attempt_id":"host/two", "settlement_reason":"pre_launch_refusal", "preparation_failure":"usage_limited"}),
+            json!({"kind":"attempt", "attempt_id":"host/one", "settlement_class":"pre_launch_refusal", "preparation_failure":"auth_required"}),
+            json!({"kind":"attempt", "attempt_id":"host/two", "settlement_class":"pre_launch_refusal", "preparation_failure":"usage_limited"}),
         ];
         let attempt = |id: &str, launched: bool| json!({"attempt_ref":id,"launched":launched});
         let mut all = json!({"status":"complete","outcome":"failed","checkpoint":{"nodes":[{"attempts":[attempt("host/one", false)]},{"attempts":[attempt("host/two", false)]}]}});
@@ -928,7 +928,7 @@ mod launch_report_tests {
 fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
     let refusals: Vec<_> = rows
         .iter()
-        .filter(|row| row["kind"] == "attempt" && row["settlement_reason"] == "pre_launch_refusal")
+        .filter(|row| row["kind"] == "attempt" && row["settlement_class"] == "pre_launch_refusal")
         .cloned()
         .collect();
     if refusals.is_empty() {
@@ -2724,6 +2724,10 @@ impl Factory {
             // Explain runs the launch's pre-attempt admission checks, so an
             // explanation that passes means the same input admits a launch.
             super::graph_execution::validate_explain_submission(self, &document, &expanded)?;
+            let settlement_knobs = provenant_run::settlement_policy::SettlementConfig::from_knobs(
+                &config.knobs,
+                self.context.roots.state.as_path(),
+            );
             let mut writer_budgets = Vec::new();
             for node in &expanded.nodes {
                 if node.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
@@ -2777,6 +2781,13 @@ impl Factory {
                         "gh_budget": provenant_run::gh_budget(&profile),
                         "ci_scope": provenant_run::ResolvedCiScope::resolve(&profile).receipt(),
                         "pr_policy": provenant_run::ResolvedPrPolicy::resolve(&profile).receipt(),
+                        // The value a launch on this route seals, with the
+                        // matched model policy as its route layer.
+                        "settlement": provenant_run::settlement_policy::explain(
+                            &settlement_knobs
+                                .clone()
+                                .with_route(&route_settlement_layer(&config, route)),
+                        ),
                     }));
                 }
             }
@@ -2785,12 +2796,8 @@ impl Factory {
                 &self.context.identity.project.to_string(),
                 &config,
                 &expanded.nodes,
-            )
-            .map_err(|reason| FacadeError::DispatchRefused {
-                fact: None,
-                disk: None,
-                reason,
-            })?;
+            );
+            let node_routes = self.explain_node_routes(&expanded.nodes);
             let source_admission = self.explain_source_admission(&expanded.nodes)?;
             let refused = source_admission
                 .iter()
@@ -2813,6 +2820,7 @@ impl Factory {
                     "source": base.source.label(),
                 })),
                 "reused_writer_bases": reused_writer_bases,
+                "node_routes": node_routes,
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,
@@ -2833,6 +2841,11 @@ impl Factory {
                         }))
                     }).collect::<serde_json::Map<String, Value>>(),
                 },
+                // Settlement knobs are sealed with the evidence, so an
+                // explanation shows the same layers the holder will seal. The
+                // host and project layers are here; each writer budget row
+                // adds its route's model policy.
+                "settlement": provenant_run::settlement_policy::explain(&settlement_knobs),
                 "implement_plan": {
                     "value": input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).cloned().unwrap_or(json!(self.context.config.implement.plan)),
                     "source": if input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).is_some() { json!("parameter (--plan or --set)") } else {
@@ -3047,6 +3060,215 @@ impl Factory {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         })
+    }
+
+    /// Read-only route preview for `run --explain`. An exact node route or a
+    /// policy's configured model resolves to one spelling; a pool is shown as
+    /// its candidates, because the weighted pick, account and credential stay
+    /// launch-only. Every value names the field, policy, pool or default that
+    /// supplied it so pool routing can be checked before launch.
+    fn explain_node_routes(
+        &self,
+        nodes: &[provenant_fabric_runtime::graph::GraphNode],
+    ) -> Vec<Value> {
+        use provenant_fabric_runtime::graph::{GraphRoute, GraphRouteSelector, NodeKind};
+        // The provider check returns the route list together with the account
+        // settings; this preview only needs the list's named routes and pools.
+        let listed = provenant_cli::route::provider_check_routes(&self.context.roots)
+            .ok()
+            .map(|(routes, _accounts)| routes);
+        let optional = |value: Option<String>| value.map_or(Value::Null, Value::String);
+        let adapter_of = |model: &str| model.split_once('/').map(|(adapter, _)| adapter.to_owned());
+        let mut rows = Vec::new();
+        for node in nodes {
+            if !provenant_fabric_runtime::graph::when::holds(&node.when)
+                || node.composite.is_some()
+                || node.condition.is_some()
+                || node.decide.is_some()
+                || node.loop_body.is_some()
+                || node.land.is_some()
+                || matches!(
+                    node.kind,
+                    Some(
+                        NodeKind::Composite
+                            | NodeKind::Gate
+                            | NodeKind::Loop
+                            | NodeKind::Decide
+                            | NodeKind::Land
+                            | NodeKind::Hygiene
+                            | NodeKind::Publish
+                    )
+                )
+            {
+                continue;
+            }
+            let declared: Vec<Option<&GraphRoute>> = node
+                .routes
+                .as_ref()
+                .map(|routes| routes.iter().map(Some).collect())
+                .unwrap_or_else(|| vec![node.route.as_ref()]);
+            for (index, route) in declared.into_iter().enumerate() {
+                let Some(route) = route else {
+                    rows.push(json!({
+                        "node": node.id, "index": index,
+                        "adapter": Value::Null, "model": Value::Null, "effort": Value::Null,
+                        "sources": {"adapter":"default","model":"default","effort":"default"},
+                        "selection": "default", "candidates": []
+                    }));
+                    continue;
+                };
+                let effort = route.effort.clone();
+                let node_effort = effort.is_some();
+                let (adapter, model, resolved_effort, sources, selection, candidates, route_name): (
+                    Value,
+                    Value,
+                    Value,
+                    Value,
+                    &str,
+                    Value,
+                    Value,
+                ) = match route.selector() {
+                    GraphRouteSelector::Model(model) => (
+                        optional(route.adapter.clone().or_else(|| adapter_of(model))),
+                        Value::String(model.to_owned()),
+                        optional(effort),
+                        json!({
+                            "adapter":"node field","model":"node field",
+                            "effort": if node_effort { "node field" } else { "default" }
+                        }),
+                        "node field",
+                        json!([]),
+                        Value::Null,
+                    ),
+                    GraphRouteSelector::Adapter(name) => (
+                        route
+                            .adapter
+                            .clone()
+                            .map_or(Value::Null, Value::String),
+                        Value::Null,
+                        optional(effort),
+                        json!({
+                            "adapter":"node field","model":"node field",
+                            "effort": if node_effort { "node field" } else { "default" }
+                        }),
+                        "node field",
+                        json!([]),
+                        Value::String(name.to_owned()),
+                    ),
+                    GraphRouteSelector::Alias(alias) => {
+                        let alias = alias.unwrap_or_default();
+                        match listed
+                            .as_ref()
+                            .and_then(|list| list.named_routes.get(alias))
+                        {
+                            Some(named) => {
+                                let model = named.model.as_str().to_owned();
+                                let policy_effort = effort.clone().or_else(|| named.effort.clone());
+                                (
+                                    adapter_of(&model).map_or(Value::Null, Value::String),
+                                    Value::String(model.clone()),
+                                    optional(policy_effort),
+                                    json!({
+                                        "adapter":"policy","model":"policy",
+                                        "effort": if node_effort { "node field" }
+                                            else if named.effort.is_some() { "policy" }
+                                            else { "default" },
+                                        "origin": named.source.clone(),
+                                    }),
+                                    "policy",
+                                    json!([model]),
+                                    Value::Null,
+                                )
+                            }
+                            None => match listed.as_ref().and_then(|list| list.pools.get(alias)) {
+                                Some(pool) => {
+                                    let models: Vec<String> = pool
+                                        .iter()
+                                        .map(|member| member.model.as_str().to_owned())
+                                        .collect();
+                                    let common_effort = pool
+                                        .first()
+                                        .and_then(|member| member.effort.clone())
+                                        .filter(|value| {
+                                            pool.iter()
+                                                .all(|member| member.effort.as_ref() == Some(value))
+                                        });
+                                    let candidates: Vec<Value> = pool
+                                        .iter()
+                                        .map(|member| {
+                                            let model = member.model.as_str();
+                                            let member_effort = effort
+                                                .clone()
+                                                .or_else(|| member.effort.clone());
+                                            json!({
+                                                "model": model,
+                                                "adapter": adapter_of(model),
+                                                "effort": member_effort,
+                                                "sources": {
+                                                    "model": "pool",
+                                                    "adapter": "pool",
+                                                    "effort": if node_effort { "node field" }
+                                                        else if member.effort.is_some() { "pool" }
+                                                        else { "default" }
+                                                }
+                                            })
+                                        })
+                                        .collect();
+                                    let common_adapter = models
+                                        .first()
+                                        .and_then(|model| adapter_of(model))
+                                        .filter(|adapter| {
+                                            models.iter().all(|model| {
+                                                adapter_of(model).as_deref()
+                                                    == Some(adapter.as_str())
+                                            })
+                                        });
+                                    (
+                                        common_adapter.map_or(Value::Null, Value::String),
+                                        Value::Null,
+                                        optional(effort.clone().or(common_effort)),
+                                        json!({
+                                            "adapter":"pool","model":"pool",
+                                            "effort": if node_effort { "node field" }
+                                                else if pool.iter().any(|member| member.effort.is_some()) { "pool" }
+                                                else { "default" },
+                                            "origin": format!("pool {alias}"),
+                                        }),
+                                        "pool",
+                                        json!(candidates),
+                                        Value::Null,
+                                    )
+                                }
+                                None => (
+                                    Value::Null,
+                                    Value::Null,
+                                    optional(effort),
+                                    json!({
+                                        "adapter":"default","model":"default",
+                                        "effort": if node_effort { "node field" } else { "default" }
+                                    }),
+                                    "default",
+                                    json!([]),
+                                    Value::Null,
+                                ),
+                            },
+                        }
+                    }
+                };
+                rows.push(json!({
+                    "node": node.id,
+                    "index": index,
+                    "adapter": adapter,
+                    "model": model,
+                    "effort": resolved_effort,
+                    "sources": sources,
+                    "selection": selection,
+                    "candidates": candidates,
+                    "route_name": route_name,
+                }));
+            }
+        }
+        rows
     }
 
     /// Inspect source and state admission without preparing a provider. The
@@ -3749,38 +3971,6 @@ impl Factory {
         Ok(receipt)
     }
 
-    fn observe_remote_graph_attempts(
-        &self,
-        run: &provenant_fabric_runtime::graph::GraphRun,
-        target: &super::unified::GraphTarget,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<(), FacadeError> {
-        if cancel.is_cancelled() || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-            return Ok(());
-        }
-        let mut rows = super::unified::status_rows(run, target);
-        let local_host = self.context.identity.host;
-        rows.retain(|row| {
-            row["kind"] == "attempt"
-                && row["attempt_id"].as_str().is_some_and(|reference| {
-                    reference.split_once('/').is_some_and(|(owner, _)| {
-                        owner.parse::<provenant_core::HostId>() != Ok(local_host)
-                    })
-                })
-        });
-        if rows.is_empty() {
-            return Ok(());
-        }
-        super::unified::enrich_status_rows_within(
-            &mut rows,
-            &self.context,
-            &self.clock,
-            cancel,
-            budget,
-        )
-    }
-
     fn wait_cadence(&self) -> Result<provenant_cli::wait::LocalCadence, FacadeError> {
         crate::status_wait::local_cadence(&self.context.roots)
     }
@@ -4272,4 +4462,37 @@ pub(super) fn warn_operator(warning: impl std::fmt::Display) {
         )
         .once_per_change(),
     );
+}
+
+/// The `lanes.settlement.*` route layer the model policy gives a concrete
+/// route, as launch would seal it. A tier alias or an unparsable model has no
+/// concrete policy yet, so it adds nothing. Rules match against the bundled
+/// catalogue here; a rule keyed on a discovered-only model shows at launch.
+fn route_settlement_layer(
+    config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
+    route: Option<&provenant_fabric_runtime::graph::GraphRoute>,
+) -> Vec<provenant_records::settlement::policy::RouteLayerValue> {
+    let Some(route) = route else {
+        return Vec::new();
+    };
+    let label = match (route.adapter.as_deref(), route.model.as_deref()) {
+        (_, Some(model)) if model.contains('/') => model.to_owned(),
+        (Some(adapter), Some(model)) => format!("{adapter}/{model}"),
+        _ => return Vec::new(),
+    };
+    let (Ok(model), Ok(catalogue), Ok(now)) = (
+        provenant_routing::ModelId::parse(&label),
+        provenant_routing::Catalogue::bundled(),
+        provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock),
+    ) else {
+        return Vec::new();
+    };
+    config
+        .domains
+        .routing
+        .model_policy
+        .effective(&catalogue, &model, route.account_key.as_deref(), now)
+        .policy
+        .lanes
+        .route_layer()
 }

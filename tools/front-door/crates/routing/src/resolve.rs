@@ -58,6 +58,16 @@ impl RoutingContext<'_> {
     fn now_seconds(&self) -> i64 {
         self.now.unix_seconds()
     }
+    /// The one offer-evidence policy every routing caller builds from context.
+    pub fn offer_policy(&self) -> OfferEvidencePolicy<'_> {
+        OfferEvidencePolicy {
+            accounts: self.accounts,
+            freshness: &self.config.freshness,
+            quota_policies: self.quota_policies,
+            catalogue_revision: self.catalogue.revision(),
+            now_seconds: self.now_seconds(),
+        }
+    }
     fn validate(&self) -> Result<(), RoutingError> {
         if self.policy_account_hint.is_some_and(|hint| {
             hint.len() > 128
@@ -550,109 +560,172 @@ fn offered_list_serves_model(
             .into_iter()
             .any(|newer| provenant_providers::model_matches_offered(newer.model(), offered))
 }
-/// Whether a known offer list serves a model under the same supersedence rules
-/// used for pool candidates. An empty list means no restriction is known.
-pub fn offered_models_serve(offered: &[String], model: &ModelId, catalogue: &Catalogue) -> bool {
-    offered_list_serves_model(offered, model, catalogue, false)
+/// Where a recorded offer list came from. The source owns the age: a snapshot
+/// fallback reports when the snapshot was observed, not when the probe ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfferSource {
+    /// A fresh keychain-stamped usage probe.
+    Probe,
+    /// A fresh quota snapshot, used only when the probe supplied no offers.
+    Snapshot,
 }
 
-/// An account's offer list as recorded in its quota snapshot: the fallback for
-/// an account whose keychain-stamped usage probe has not run. An empty list
-/// means the offers are unknown, never that the account serves every model.
-fn snapshot_offered_models<'a>(
-    accounts: &'a [provenant_quota::AccountRecord],
-    adapter: &str,
-    account_key: Option<&str>,
-) -> Option<&'a [String]> {
-    if !provenant_records::AdapterSpec::get(adapter)
+/// How a recorded successor treats the requested model. Supersedence orders
+/// candidates; it never makes a literally listed model unoffered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfferSupersedence {
+    /// A listed successor still serves the requested model (refusal, preview).
+    Allow,
+    /// A listed successor withholds an older shipped pool member (selection).
+    Withhold,
+}
+
+/// The config-owned inputs to the one offer-evidence rule: every caller builds
+/// these from the same resolved config, so none can invent a freshness rule.
+pub struct OfferEvidencePolicy<'a> {
+    pub accounts: &'a [provenant_quota::AccountRecord],
+    pub freshness: &'a provenant_quota::FreshnessPolicy,
+    pub quota_policies: &'a [provenant_quota::QuotaPolicy],
+    pub catalogue_revision: &'a str,
+    pub now_seconds: i64,
+}
+impl OfferEvidencePolicy<'_> {
+    /// Add the per-account probe and identity to the shared policy.
+    pub fn inputs<'a>(
+        &'a self,
+        probe: Option<&'a AvailabilityRecord>,
+        adapter: &'a str,
+        account_key: &'a str,
+    ) -> OfferEvidenceInputs<'a> {
+        OfferEvidenceInputs {
+            probe,
+            adapter,
+            account_key,
+            accounts: self.accounts,
+            freshness: self.freshness,
+            quota_policies: self.quota_policies,
+            catalogue_revision: self.catalogue_revision,
+            now_seconds: self.now_seconds,
+        }
+    }
+}
+
+/// One account's offer evidence inputs. `probe` is `None` for callers without a
+/// live observation, such as `route resolve` preview.
+pub struct OfferEvidenceInputs<'a> {
+    pub probe: Option<&'a AvailabilityRecord>,
+    pub adapter: &'a str,
+    pub account_key: &'a str,
+    pub accounts: &'a [provenant_quota::AccountRecord],
+    pub freshness: &'a provenant_quota::FreshnessPolicy,
+    pub quota_policies: &'a [provenant_quota::QuotaPolicy],
+    pub catalogue_revision: &'a str,
+    pub now_seconds: i64,
+}
+
+/// The one offer-evidence fact shared by selection, resolve, preview and
+/// launch preparation: the recorded list, its source, its own age and whether
+/// it serves a model under the caller's supersedence policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfferEvidence {
+    pub offered_models: Vec<String>,
+    pub source: OfferSource,
+    /// Whole seconds between the recorded observation and `now_seconds`.
+    pub age_seconds: u64,
+    /// Whether the list serves the model under the requested supersedence policy.
+    pub serves: bool,
+}
+
+/// The single owner of offer evidence. A fresh keychain-stamped usage probe is
+/// the first source; a fresh quota snapshot serves only when the probe supplied
+/// no offers. Stale, expired, unknown or unaccounted availability is never
+/// offer evidence: it keeps its `StaleAvailability` re-probe path instead of
+/// refusing the account. An empty list means the offers are unknown, never
+/// that the account serves every model.
+pub fn recorded_offer_models(
+    inputs: OfferEvidenceInputs<'_>,
+    model: &ModelId,
+    catalogue: &Catalogue,
+    supersedence: OfferSupersedence,
+) -> Option<OfferEvidence> {
+    let (offered_models, source, observed_at) = recorded_offer_list(&inputs)?;
+    let serves = offered_list_serves_model(
+        &offered_models,
+        model,
+        catalogue,
+        supersedence == OfferSupersedence::Allow,
+    );
+    Some(OfferEvidence {
+        offered_models,
+        source,
+        age_seconds: inputs.now_seconds.saturating_sub(observed_at) as u64,
+        serves,
+    })
+}
+
+/// The source, list and observation time used by the offer evidence owner.
+fn recorded_offer_list(
+    inputs: &OfferEvidenceInputs<'_>,
+) -> Option<(Vec<String>, OfferSource, i64)> {
+    if !provenant_records::AdapterSpec::get(inputs.adapter)
         .is_some_and(|spec| spec.identity.offered_models)
     {
         return None;
     }
-    let key = account_key?;
-    accounts
-        .iter()
-        .find(|record| record.account.adapter == adapter && record.account.account_key == key)
-        .and_then(|record| record.snapshot.as_ref()?.details.as_ref())
-        .filter(|details| !details.models.is_empty())
-        .map(|details| details.models.as_slice())
-}
-
-/// The one rule that decides offer evidence for selection, resolve and launch
-/// preparation. A fresh keychain-stamped usage probe is the first source; a
-/// fresh quota snapshot serves only when the probe has not run. Stale, expired,
-/// unknown or unaccounted availability is never offer evidence: it keeps its
-/// re-probe path instead of refusing the account. An empty list means the
-/// offers are unknown, never that the account serves every model.
-fn recorded_offer_models(
-    availability: &AvailabilityRecord,
-    context: &RoutingContext<'_>,
-) -> Option<(Vec<String>, i64)> {
-    if !provenant_records::AdapterSpec::get(&availability.adapter)
-        .is_some_and(|spec| spec.identity.offered_models)
+    if let Some(probe) = inputs.probe
+        && probe.adapter == inputs.adapter
+        && probe.account_key.as_deref() == Some(inputs.account_key)
     {
-        return None;
+        // A stale observation must not preempt the documented StaleAvailability
+        // re-probe, whether it judges a refusal or shapes selection.
+        if probe.catalogue_revision != inputs.catalogue_revision
+            || probe.observed_unix_seconds > inputs.now_seconds
+            || probe.expires_unix_seconds <= inputs.now_seconds
+        {
+            return None;
+        }
+        if !probe.observed_models.is_empty() {
+            return Some((
+                probe.observed_models.clone(),
+                OfferSource::Probe,
+                probe.observed_unix_seconds,
+            ));
+        }
     }
-    // A stale observation must not preempt the documented StaleAvailability
-    // re-probe, whether it is judging a refusal or shaping selection.
-    if availability_reason(Some(availability), context).is_some() {
-        return None;
-    }
-    let key = availability.account_key.as_deref()?;
-    if !availability.observed_models.is_empty() {
-        return Some((
-            availability.observed_models.clone(),
-            availability.observed_unix_seconds,
-        ));
-    }
-    let snapshot = context
+    let snapshot = inputs
         .accounts
         .iter()
         .find(|record| {
-            record.account.adapter == availability.adapter && record.account.account_key == key
+            record.account.adapter == inputs.adapter
+                && record.account.account_key == inputs.account_key
         })?
         .snapshot
         .as_ref()?;
-    if !context.config.freshness.snapshot_fresh(
-        snapshot,
-        context.now_seconds(),
-        context.quota_policies,
-    ) {
+    if !inputs
+        .freshness
+        .snapshot_fresh(snapshot, inputs.now_seconds, inputs.quota_policies)
+    {
         return None;
     }
-    let offered = snapshot_offered_models(context.accounts, &availability.adapter, Some(key))?;
-    Some((offered.to_vec(), snapshot.observed_unix_seconds))
-}
-
-/// Give every selection the account's recorded offer list under the same rule
-/// [`recorded_offer_models`] uses to judge a refusal. Stale availability keeps
-/// its own (empty) probe list rather than being judged by an unrelated snapshot.
-fn availability_with_known_offers(
-    availability: &[AvailabilityRecord],
-    context: &RoutingContext<'_>,
-) -> Vec<AvailabilityRecord> {
-    availability
-        .iter()
-        .map(|record| {
-            if !record.observed_models.is_empty() {
-                return record.clone();
-            }
-            let Some((offered, _)) = recorded_offer_models(record, context) else {
-                return record.clone();
-            };
-            AvailabilityRecord {
-                observed_models: offered,
-                ..record.clone()
-            }
-        })
-        .collect()
+    let offered = snapshot
+        .details
+        .as_ref()
+        .filter(|details| !details.models.is_empty())?
+        .models
+        .clone();
+    Some((
+        offered,
+        OfferSource::Snapshot,
+        snapshot.observed_unix_seconds,
+    ))
 }
 
 fn account_serves_model(
     record: &AvailabilityRecord,
     model: &ModelId,
+    offer_policy: &OfferEvidencePolicy<'_>,
     catalogue: &Catalogue,
-    allow_superseded: bool,
+    supersedence: OfferSupersedence,
 ) -> bool {
     if record.adapter != model.adapter()
         || !provenant_records::AdapterSpec::get(model.adapter())
@@ -663,12 +736,15 @@ fn account_serves_model(
     if provenant_records::AdapterSpec::get(model.adapter())
         .is_some_and(|spec| spec.identity.offered_models)
     {
-        return offered_list_serves_model(
-            &record.observed_models,
-            model,
-            catalogue,
-            allow_superseded,
-        );
+        return record.account_key.as_deref().is_none_or(|key| {
+            recorded_offer_models(
+                offer_policy.inputs(Some(record), model.adapter(), key),
+                model,
+                catalogue,
+                supersedence,
+            )
+            .is_none_or(|evidence| evidence.serves)
+        });
     }
     true
 }
@@ -699,61 +775,71 @@ fn account_hint_matches(hint: &str, adapter: &str, account_key: Option<&str>) ->
         None => account_key == Some(hint),
     }
 }
-fn adapter_offered_lists<'a>(context: &'a RoutingContext<'_>, adapter: &str) -> Vec<&'a [String]> {
+/// Offer evidence for every account of an adapter under the pin, judged by the
+/// one owner instead of by a second selection-only list rule. An account with
+/// a probe record is judged by that probe (including when it is stale, which
+/// supplies no evidence); accounts known only from a snapshot are judged by a
+/// fresh snapshot.
+fn adapter_offered_evidence(
+    context: &RoutingContext<'_>,
+    adapter: &str,
+    model: &ModelId,
+) -> Vec<OfferEvidence> {
     if !provenant_records::AdapterSpec::get(adapter)
         .is_some_and(|spec| spec.identity.offered_models)
     {
         return Vec::new();
     }
-    let hint_in_availability = context.policy_account_hint.is_some_and(|hint| {
+    let hint = context.policy_account_hint;
+    let hint_in_availability = hint.is_some_and(|hint| {
         context.availability.iter().any(|a| {
-            a.adapter == adapter && account_hint_matches(hint, &a.adapter, a.account_key.as_deref())
+            a.adapter == adapter && account_hint_matches(hint, adapter, a.account_key.as_deref())
         })
     });
-    let mut lists: Vec<&[String]> = context
-        .availability
-        .iter()
-        .filter(|a| {
-            a.adapter == adapter
-                && !a.observed_models.is_empty()
-                && (!hint_in_availability
-                    || context.policy_account_hint.is_none_or(|hint| {
-                        account_hint_matches(hint, &a.adapter, a.account_key.as_deref())
-                    }))
+    let hint_in_accounts = hint.is_some_and(|hint| {
+        context.accounts.iter().any(|r| {
+            r.account.adapter == adapter
+                && (account_hint_matches(hint, adapter, Some(&r.account.account_key))
+                    || r.account.label == hint)
         })
-        .map(|a| a.observed_models.as_slice())
-        .collect();
-    if lists.is_empty() {
-        let hint_in_accounts = context.policy_account_hint.is_some_and(|hint| {
-            context.accounts.iter().any(|r| {
-                r.account.adapter == adapter
-                    && (account_hint_matches(
-                        hint,
-                        &r.account.adapter,
-                        Some(&r.account.account_key),
-                    ) || r.account.label == hint)
-            })
-        });
-        lists = context
-            .accounts
-            .iter()
-            .filter(|r| {
-                r.account.adapter == adapter
-                    && (!hint_in_accounts
-                        || context.policy_account_hint.is_none_or(|hint| {
-                            account_hint_matches(
-                                hint,
-                                &r.account.adapter,
-                                Some(&r.account.account_key),
-                            ) || r.account.label == hint
-                        }))
-            })
-            .filter_map(|r| r.snapshot.as_ref()?.details.as_ref())
-            .filter(|d| !d.models.is_empty())
-            .map(|d| d.models.as_slice())
-            .collect();
+    });
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    for record in context.availability.iter().filter(|a| {
+        a.adapter == adapter
+            && (!hint_in_availability
+                || hint.is_none_or(|hint| {
+                    account_hint_matches(hint, adapter, a.account_key.as_deref())
+                }))
+    }) {
+        if let Some(key) = record.account_key.as_deref() {
+            keys.insert(key.to_owned());
+        }
     }
-    lists
+    for record in context.accounts.iter().filter(|r| {
+        r.account.adapter == adapter
+            && (!hint_in_accounts
+                || hint.is_none_or(|hint| {
+                    account_hint_matches(hint, adapter, Some(&r.account.account_key))
+                        || r.account.label == hint
+                }))
+    }) {
+        keys.insert(record.account.account_key.clone());
+    }
+    let policy = context.offer_policy();
+    keys.into_iter()
+        .filter_map(|key| {
+            let probe = context
+                .availability
+                .iter()
+                .find(|a| a.adapter == adapter && a.account_key.as_deref() == Some(key.as_str()));
+            recorded_offer_models(
+                policy.inputs(probe, adapter, &key),
+                model,
+                context.catalogue,
+                OfferSupersedence::Withhold,
+            )
+        })
+        .collect()
 }
 fn pool_member_retained_by_offerings(
     member: &RoutePoolMember,
@@ -769,13 +855,11 @@ fn pool_member_retained_by_offerings(
     {
         return true;
     }
-    let lists = adapter_offered_lists(context, adapter);
-    if lists.is_empty() {
+    let evidence = adapter_offered_evidence(context, adapter, &member.model);
+    if evidence.is_empty() {
         return offered_list_serves_model(&[], &member.model, context.catalogue, false);
     }
-    lists
-        .into_iter()
-        .any(|list| offered_list_serves_model(list, &member.model, context.catalogue, false))
+    evidence.into_iter().any(|offered| offered.serves)
 }
 fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RoutePoolMember>> {
     let members = raw_pool(context, name)?;
@@ -1512,24 +1596,27 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
         });
     }
     // Pacing rows for accounts known not to offer the model are not route
-    // candidates either. An unrecorded offer list stays in the report.
-    if accounts.iter().any(|key| {
-        key.as_deref()
-            .and_then(|key| snapshot_offered_models(context.accounts, model.adapter(), Some(key)))
-            .is_some()
-    }) {
-        accounts.retain(|key| {
-            key.as_deref() == pinned.as_deref()
-                || key
-                    .as_deref()
-                    .and_then(|key| {
-                        snapshot_offered_models(context.accounts, model.adapter(), Some(key))
-                    })
-                    .is_none_or(|offered| {
-                        offered_list_serves_model(offered, model, context.catalogue, false)
-                    })
-        });
-    }
+    // candidates either. An unrecorded offer list stays in the report. The
+    // pinned row stays whatever the offers say, so the selection line never
+    // silently shows another account in its place.
+    let offer_policy = context.offer_policy();
+    accounts.retain(|key| {
+        key.as_deref() == pinned.as_deref()
+            || key
+                .as_deref()
+                .and_then(|key| {
+                    let probe = context.availability.iter().find(|a| {
+                        a.adapter == model.adapter() && a.account_key.as_deref() == Some(key)
+                    });
+                    recorded_offer_models(
+                        offer_policy.inputs(probe, model.adapter(), key),
+                        model,
+                        context.catalogue,
+                        OfferSupersedence::Withhold,
+                    )
+                })
+                .is_none_or(|evidence| evidence.serves)
+    });
     if accounts.is_empty() {
         accounts.insert(None);
     }
@@ -1738,14 +1825,13 @@ fn account_reason<'q>(
         reason = readiness_reason(model, availability, context);
     }
     // A recorded offer list that excludes the model refuses the account,
-    // pinned or not. Judge the availability probe first and fall back to a
-    // fresh snapshot only when the probe has not run, so the refusal is the
-    // same typed fact launch preparation reports. `recorded_offers` declines
-    // stale evidence, leaving the StaleAvailability re-probe path intact.
+    // pinned or not. The one owner judges the probe first and falls back to a
+    // fresh snapshot only when the probe supplied no offers; stale evidence is
+    // declined, leaving the StaleAvailability re-probe path intact.
     if reason.is_none()
-        && let Some(mismatch) = recorded_offers(model, availability, context)
-        // Supersedence orders candidates; it never makes a listed model unoffered.
-        && !offered_list_serves_model(&mismatch.offered_models, model, context.catalogue, true)
+        && let Some(evidence) =
+            offer_evidence_for(model, availability, context, OfferSupersedence::Allow)
+        && !evidence.serves
     {
         reason = Some(RouteExclusionReason::AccountDoesNotOffer);
     }
@@ -1873,6 +1959,23 @@ pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
         diagnostic.next.unwrap_or_default()
     )
 }
+/// The one owner's fact for an availability record, with the caller's
+/// supersedence policy. Only an account that owns the probe can be judged by it.
+fn offer_evidence_for(
+    model: &ModelId,
+    availability: &AvailabilityRecord,
+    context: &RoutingContext<'_>,
+    supersedence: OfferSupersedence,
+) -> Option<OfferEvidence> {
+    let key = availability.account_key.as_deref()?;
+    let policy = context.offer_policy();
+    recorded_offer_models(
+        policy.inputs(Some(availability), model.adapter(), key),
+        model,
+        context.catalogue,
+        supersedence,
+    )
+}
 /// The account's recorded offers and the age of that record, as one typed
 /// fact shared by resolve and launch preparation. It reads the single offer
 /// evidence rule in [`recorded_offer_models`], so selection and refusal cannot
@@ -1887,13 +1990,13 @@ fn recorded_offers(
     {
         return None;
     }
-    let (offered, observed_at) = recorded_offer_models(availability, context)?;
+    let evidence = offer_evidence_for(model, availability, context, OfferSupersedence::Allow)?;
     let key = availability.account_key.as_deref()?;
     Some(provenant_records::run::AccountOfferMismatch {
         account: key.to_owned(),
         model: model.as_str().to_owned(),
-        offered_models: offered,
-        age_seconds: context.now_seconds().saturating_sub(observed_at) as u64,
+        offered_models: evidence.offered_models,
+        age_seconds: evidence.age_seconds,
     })
 }
 /// Persisted mismatch or refusal evidence, assessed by the same quota function
@@ -2583,24 +2686,42 @@ fn candidate(
         }
     }
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
+    let offer_policy = context.offer_policy();
     // Several registered accounts may serve one adapter: take a ready one with
     // the most pacing headroom, so exhausted accounts are skipped rather than
     // chosen by registration order. A stale reading that showed the account
     // spent cannot refuse it, but it ranks the account behind every other.
     let any_explicit_serving_account = !for_pool
-        && context
-            .availability
-            .iter()
-            .any(|a| account_serves_model(a, model, context.catalogue, true));
+        && context.availability.iter().any(|a| {
+            account_serves_model(
+                a,
+                model,
+                &offer_policy,
+                context.catalogue,
+                OfferSupersedence::Allow,
+            )
+        });
     let mut policy_refused = false;
     let evaluated: Vec<_> = context
         .availability
         .iter()
         .filter(|a| {
             if for_pool {
-                account_serves_model(a, model, context.catalogue, false)
+                account_serves_model(
+                    a,
+                    model,
+                    &offer_policy,
+                    context.catalogue,
+                    OfferSupersedence::Withhold,
+                )
             } else if any_explicit_serving_account {
-                account_serves_model(a, model, context.catalogue, true)
+                account_serves_model(
+                    a,
+                    model,
+                    &offer_policy,
+                    context.catalogue,
+                    OfferSupersedence::Allow,
+                )
             } else {
                 a.adapter == model.adapter()
                     && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
@@ -3040,7 +3161,6 @@ pub fn resolve_for_account_with_seed_excluding_family(
         })
         .cloned()
         .collect();
-    let availability = availability_with_known_offers(&availability, &context.0);
     let kept = ValidatedContext(RoutingContext {
         availability: &availability,
         ..context.0
@@ -3154,10 +3274,16 @@ impl Excluded<'_> {
         if let Some(reason) = self.family_reason(model) {
             return Some(reason);
         }
-        let serving_accounts_remain = context
-            .availability
-            .iter()
-            .any(|record| account_serves_model(record, model, context.catalogue, false));
+        let offer_policy = context.offer_policy();
+        let serving_accounts_remain = context.availability.iter().any(|record| {
+            account_serves_model(
+                record,
+                model,
+                &offer_policy,
+                context.catalogue,
+                OfferSupersedence::Withhold,
+            )
+        });
         if let Some(rule) = self
             .rules
             .iter()
@@ -3605,10 +3731,19 @@ fn classify_pool(
             }),
             ..Default::default()
         };
+        let offer_policy = context.offer_policy();
         let spent = context
             .availability
             .iter()
-            .filter(|a| account_serves_model(a, &member.model, context.catalogue, false))
+            .filter(|a| {
+                account_serves_model(
+                    a,
+                    &member.model,
+                    &offer_policy,
+                    context.catalogue,
+                    OfferSupersedence::Withhold,
+                )
+            })
             .map(|a| latest_reading(&member.model, a, context, false))
             .collect::<Vec<_>>();
         let is_spent = |q: &QuotaObservation| {
@@ -4280,11 +4415,17 @@ pub fn depletion_facts(
     models.sort();
     models.dedup();
     let now = context.now_seconds();
+    let offer_policy = context.offer_policy();
     let mut facts = Vec::new();
     for model in &models {
         for record in context.availability.iter().filter(|record| {
-            account_serves_model(record, model, context.catalogue, true)
-                && record.observed_unix_seconds <= now
+            account_serves_model(
+                record,
+                model,
+                &offer_policy,
+                context.catalogue,
+                OfferSupersedence::Allow,
+            ) && record.observed_unix_seconds <= now
                 && now.saturating_sub(record.observed_unix_seconds) <= 3600
         }) {
             let one = std::slice::from_ref(record);

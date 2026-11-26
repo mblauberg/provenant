@@ -1288,7 +1288,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
             };
             route.set_guard_facts(None, Some(self.0.clone())).unwrap();
             let mut refusal = provenant_run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                provenant_records::run::CauseKind::RouteResolutionRefused,
                 "PRIVATE_PACING_SENTINEL",
             );
             refusal.skipped_routes.push(route);
@@ -1423,7 +1423,7 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             _: Option<&provenant_run::AttemptRecord>,
         ) -> Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>> {
             let mut refusal = provenant_run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                provenant_records::run::CauseKind::RouteResolutionRefused,
                 "allowance spent",
             );
             refusal
@@ -1489,14 +1489,14 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             .start(record.attempt_id, &Allowance, &|_, _| Ok(Vec::new()), &call);
     }
     let mut result = json!({"checkpoint":{"nodes":[{
-        "id":"parent", "advance_error_code":"preparation_refused",
-        "advance_error":"The launch was refused before admission.",
+        "id":"parent", "advance_code":"preparation_refused",
+        "advance_note":"The launch was refused before admission.",
         "attempts":[{"attempt_ref": format!("{}/{attempt}", factory.context.identity.host)}]
     }]}});
     factory.name_refusal_causes(&mut result);
-    let message = result["checkpoint"]["nodes"][0]["advance_error"]
+    let message = result["checkpoint"]["nodes"][0]["advance_note"]
         .as_str()
-        .ok_or("advance_error")?;
+        .ok_or("advance_note")?;
     let route = provenant_records::run::SkippedRoute {
         skipped_accounts: Vec::new(),
         extra: Default::default(),

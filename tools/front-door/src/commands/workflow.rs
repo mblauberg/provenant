@@ -52,7 +52,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let status = match command {
         Command::Workflow(provenant_cli::Workflow::Session(
             provenant_cli::workflow::Session::Handoff(args),
-        )) => crate::handoff::run(*args, globals, process.workers()),
+        )) => crate::session_handoff::run(*args, globals, process.workers()),
         Command::Workflow(cmd) => {
             let session_save = matches!(
                 cmd,

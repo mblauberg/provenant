@@ -20,7 +20,12 @@ read-only review: it holds no Git work, so a reservation left by its guardian is
 and reconciliation settles it with a typed warning ([outcome before release](run-settlement.md#outcome-before-release)).
 Reconciliation reports released custody only after exclusion and native
 absence evidence prove it safe; an unknown or live holder retains custody, and uncertain custody
-and unreadable reservations warn while reconciliation continues. Writer-bind refusals identify
+and unreadable reservations warn while reconciliation continues. An attempt whose stored record no
+longer decodes is not held merely because the decode failed: once writer exclusion is acquired and
+the recorded holder is proved gone with no settling exit, reconciliation preserves the bytes under
+`quarantine/` and releases the lease with a typed warning naming the source; `release attempt:ID`
+offers the same safety valve. Admission refusals keep fixed text and never carry a record path.
+Writer-bind refusals identify
 the durable lease holder, branch, worktree, reservation age (from its last durable update) and
 observed liveness.
 - Why: shared work must remain possible without holding coordination locks across external work.
@@ -205,7 +210,9 @@ primary checkout is not the lane's working copy. It is advice, never a fence, an
 absolute path elsewhere in the lane's context does not override it. Launch records the primary
 checkout's branch and ref tips (`primary-checkout.json`) so settlement can detect
 [stray work](run-settlement.md#stray-lane-work). The lane receives `PROVENANT_ROUTE`,
-`PROVENANT_MODEL`, `PROVENANT_EFFORT` and `PROVENANT_ACCOUNT`.
+`PROVENANT_MODEL`, `PROVENANT_EFFORT` and `PROVENANT_ACCOUNT`. On a lane, `provenant declare` is the
+companion to `provenant notes`: both travel over the attempt relay socket, and only a declared
+handoff — never prose — settles the lane.
 - Why: a provider's system prompt may name the primary checkout as the workspace root of a linked
   worktree, and a brief saying only "your worktree" loses to that absolute path.
 
@@ -216,9 +223,14 @@ Standing lane rules come from `lanes.brief_preamble`: a file path set at the hos
 (`--preamble-file`). The layers concatenate in that order, each labelled with its source. A
 file whose first line is a `<!-- provenant-roles: ... -->` header applies only to the roles it
 names: writer, review or read-only. A missing or unreadable file warns with its layer, and the
-launch proceeds without it. A writer's preamble also lists the project's declared no-build
-static checks from the port table under `Static checks:`, to run before pushing. A project
-declares them as `verify.static_checks` entries in `.provenant/ports.json` (or the host port
+launch proceeds without it.
+Declared no-build checks from the port table appear under `Static checks:` in writer
+preambles, to run before pushing. Readers do not get the list.
+- A writer with valid `verify.lane` entries receives those tiers, commands, scopes and source as
+  its authoritative verification guidance; the legacy format-only scope does not also apply. The
+  launch receipt records the same effective entries and source. With no valid entries, the
+  resolved `lanes.verification` scope or formatter and hooks default remains in force.
+Project no-build checks are declared as `verify.static_checks` entries in `.provenant/ports.json` (or the host port
 table): each has an `argv`, a repository-relative `cwd` and a `timeout_seconds` cap. An absent
 or empty list adds no text and invents no tier for other stacks; an invalid entry warns and is
 dropped rather than refusing the launch. The list is labelled with the layer and exact file and
@@ -228,7 +240,10 @@ project declarations use the stable `.provenant/ports.json` path. That same list
 entry carries that layer and file/key source. Config merging replaces arrays wholesale, so entries
 in the effective list share one source. A failure is reported in the handoff and does not refuse
 the push; CI still gates the merge.
-Readers get neither the list nor its receipt.
+Readers get neither the static checks list nor its receipt. Every brief states the result protocol verbatim:
+"Declare your result with `provenant declare --stdin` (schema v2 JSON; see STATUS_GUIDANCE).
+Field errors come back at once; fix and call again. The last accepted declaration settles the
+lane; prose and fenced blocks are not read. To stop early, declare `stopped_early` or `blocked`."
 - Why: standing rules belong in one owned file per layer, not repeated in every brief, and a
   writer should run the cheap checks the project declares before CI does.
 

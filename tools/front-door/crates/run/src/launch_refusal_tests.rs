@@ -24,7 +24,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
                     boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                     policy_code: None,
                     resource: None,
-                    terminal_cause: TerminalCause::DiskFloor,
+                    cause: CauseKind::DiskFloor,
                     terminal_note: Some("99 bytes available; gc.critical_free is 100 bytes (source: host configuration)".into()),
                     message: "HOST_DISK_ERROR_SENTINEL".into(),
                 host_message: None,
@@ -42,7 +42,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
             let mut refusal = PrepareRefusal::boxed(
-                TerminalCause::RouteResolutionRefused,
+                CauseKind::RouteResolutionRefused,
                 format!("PROVIDER_SECRET_SENTINEL {PROVIDER_TOKEN}"),
             );
             if self.source_overlap {
@@ -115,23 +115,23 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         assert_eq!(record.provider_launched, Some(false));
         let (state, reason) = LaneRow::state_and_reason(&record.state);
         assert_eq!(state, "rejected");
-        let cause = if disk {
-            TerminalCause::DiskFloor
+        let expected_cause = if disk {
+            CauseKind::DiskFloor
         } else {
-            TerminalCause::RouteResolutionRefused
+            CauseKind::RouteResolutionRefused
         };
-        let AttemptState::Terminal { terminal_cause, .. } = &record.state else {
+        let AttemptState::Terminal { cause, .. } = &record.state else {
             return Err("not terminal".into());
         };
-        assert_eq!(*terminal_cause, Some(cause));
+        assert_eq!(*cause, Some(expected_cause));
         let (_, label) = LaneRow::state_and_label(&record.state);
         let label = label.ok_or("missing human label")?;
-        assert_eq!(label, cause.reason());
+        assert_eq!(label, expected_cause.reason());
         assert!(!label.contains("PROVIDER_SECRET_SENTINEL"), "{label}");
         assert!(!label.contains("unsupported_effort"), "{label}");
         assert!(!label.contains("99 bytes available"), "{label}");
         let reason = reason.ok_or("missing structured reason")?;
-        assert!(reason.starts_with(cause.detail()), "{reason}");
+        assert!(reason.starts_with(expected_cause.detail()), "{reason}");
         if disk {
             assert!(reason.contains("gc.critical_free"), "{reason}");
             assert!(reason.contains("99 bytes available"), "{reason}");
@@ -148,7 +148,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             assert!(reason.contains("unsupported_effort"), "{reason}");
         } else {
             // Without a host-authored explanation or fixed note, only the safe cause remains.
-            assert!(reason.starts_with(cause.detail()), "{reason}");
+            assert!(reason.starts_with(expected_cause.detail()), "{reason}");
             assert!(!reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
             assert!(!reason.contains(PROVIDER_TOKEN), "{reason}");
         }
@@ -170,18 +170,13 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
     store.create(&run, &call)?;
     store.refuse_queued(run.attempt_id, "child proposal is invalid", &call)?;
     let record = store.record(run.attempt_id, &call)?;
-    let AttemptState::Terminal {
-        terminal_cause,
-        outcome,
-        ..
-    } = &record.state
-    else {
+    let AttemptState::Terminal { cause, outcome, .. } = &record.state else {
         return Err("not terminal".into());
     };
     assert_eq!(*outcome, Outcome::Rejected);
-    assert_eq!(*terminal_cause, Some(TerminalCause::Unrecorded));
+    assert_eq!(*cause, Some(CauseKind::Unrecorded));
     let (_, reason) = LaneRow::state_and_reason(&record.state);
-    assert_eq!(reason.as_deref(), Some(TerminalCause::Unrecorded.detail()));
+    assert_eq!(reason.as_deref(), Some(CauseKind::Unrecorded.detail()));
     Ok(())
 }
 
@@ -191,8 +186,8 @@ fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
     const REASON: &str = "launch preparation failed: Git setup: no Git remote is declared and none can be inferred; remotes seen: [\"origin\", \"pr\"]; did you mean origin?";
     let state = AttemptState::Terminal {
         extra: Default::default(),
-        terminal_cause: Some(TerminalCause::PreparationRefused),
-        terminal_note: Some(TerminalCause::preparation_note(REASON)),
+        cause: Some(CauseKind::PreparationRefused),
+        terminal_note: Some(CauseKind::preparation_note(REASON)),
         stop: None,
         outcome: Outcome::Rejected,
         exit_code: None,
@@ -203,7 +198,7 @@ fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
     let (_, status_reason) = LaneRow::state_and_reason(&state);
     let status_reason = status_reason.ok_or("missing status reason")?;
     assert!(
-        status_reason.starts_with(TerminalCause::PreparationRefused.detail()),
+        status_reason.starts_with(CauseKind::PreparationRefused.detail()),
         "{status_reason}"
     );
     assert!(
@@ -225,7 +220,7 @@ fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
     let (_, label) = LaneRow::state_and_label(&state);
     assert_eq!(
         label.as_deref(),
-        Some(TerminalCause::PreparationRefused.reason())
+        Some(CauseKind::PreparationRefused.reason())
     );
     // The typed failure and stop keep their own names; a real host handoff
     // refusal keeps its reconcile remedy.
@@ -234,20 +229,16 @@ fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
         serde_json::json!("git_setup")
     );
     assert_eq!(
-        serde_json::to_value(TerminalCause::PreparationRefused)?,
+        serde_json::to_value(CauseKind::PreparationRefused)?,
         serde_json::json!("preparation_refused")
     );
     assert_eq!(
-        provenant_records::StopCause::from(TerminalCause::PreparationRefused),
+        provenant_records::StopCause::from(CauseKind::PreparationRefused),
         provenant_records::StopCause::PreparationRefused
     );
+    assert!(!CauseKind::PreparationRefused.detail().contains("reconcile"));
     assert!(
-        !TerminalCause::PreparationRefused
-            .detail()
-            .contains("reconcile")
-    );
-    assert!(
-        TerminalCause::HandoffRefused
+        CauseKind::LaunchHandoffRefused
             .detail()
             .contains("provenant reconcile")
     );
@@ -266,7 +257,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
     const MESSAGE: &str = "Git setup: no Git remote is declared and none can be inferred; remotes seen: [\"origin\", \"pr\"]; did you mean origin?";
     let handoff = HandOff::TypedLocal {
         message: MESSAGE.into(),
-        cause: TerminalCause::PreparationRefused,
+        cause: CauseKind::PreparationRefused,
     };
     let reason = format!("launch preparation failed: {MESSAGE}");
     let (failure, note) = crate::launch::handoff_preparation(&handoff, &reason);
@@ -279,7 +270,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
     // The status reason reads this same typed note and cause.
     let state = AttemptState::Terminal {
         extra: Default::default(),
-        terminal_cause: Some(TerminalCause::PreparationRefused),
+        cause: Some(CauseKind::PreparationRefused),
         terminal_note: Some(note),
         stop: None,
         outcome: Outcome::Rejected,
@@ -290,7 +281,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
     let (_, status_reason) = LaneRow::state_and_reason(&state);
     let status_reason = status_reason.ok_or("missing status reason")?;
     assert!(
-        status_reason.starts_with(TerminalCause::PreparationRefused.detail()),
+        status_reason.starts_with(CauseKind::PreparationRefused.detail()),
         "{status_reason}"
     );
     assert!(
@@ -315,7 +306,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
     // its note names the retained-worktree repair, never a reconcile (#3987).
     let lineage = HandOff::TypedLocal {
         message: "writer lineage mismatch: graph predecessor writer or source".into(),
-        cause: TerminalCause::PreparationRefused,
+        cause: CauseKind::PreparationRefused,
     };
     let (failure, note) = crate::launch::handoff_preparation(
         &lineage,
@@ -327,7 +318,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
     assert!(!note.contains("provenant reconcile"), "{note}");
     let typed_other = HandOff::TypedLocal {
         message: "some other typed local refusal".into(),
-        cause: TerminalCause::HandoffRefused,
+        cause: CauseKind::LaunchHandoffRefused,
     };
     let (failure, _) = crate::launch::handoff_preparation(
         &typed_other,

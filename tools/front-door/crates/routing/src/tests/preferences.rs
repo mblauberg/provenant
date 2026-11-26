@@ -1045,7 +1045,13 @@ fn known_quota_offers_withhold_an_unoffered_agy_account_unpinned()
     }
     // The isolated account has no usage probe: its availability offer list is
     // empty, but its quota snapshot records which models it actually offers.
-    let availability = [agy_account("home-agy"), agy_account("isolated-agy")];
+    let availability = [
+        agy_account("home-agy"),
+        provenant_providers::AvailabilityRecord {
+            observed_unix_seconds: 90,
+            ..agy_account("isolated-agy")
+        },
+    ];
     let account_with_offers = |key: &str, models: &[&str]| {
         let scope = provenant_quota::AccountScope {
             extra: Default::default(),
@@ -1466,5 +1472,92 @@ fn resolve_selection_line_names_the_pinned_account() -> Result<(), Box<dyn std::
             .any(|row| row.account.as_deref() == Some("isolated-agy")),
         "the pinned account must appear on the selection line: {rows:?}"
     );
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn one_offer_owner_reports_source_age_and_supersedence() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let model = ModelId::parse("agy/gemini-3.8-flash")?;
+    let probe = provenant_providers::AvailabilityRecord {
+        observed_models: vec!["gemini-3.8-flash".into(), "gemini-4-neon".into()],
+        observed_unix_seconds: 90,
+        ..agy_account("owner-agy")
+    };
+    let ctx = context(&catalogue, &config, now()?);
+    let policy = ctx.offer_policy();
+    let allowed = recorded_offer_models(
+        policy.inputs(Some(&probe), "agy", "owner-agy"),
+        &model,
+        &catalogue,
+        OfferSupersedence::Allow,
+    )
+    .expect("a fresh probe is offer evidence");
+    assert_eq!(allowed.source, OfferSource::Probe);
+    assert_eq!(allowed.age_seconds, 10);
+    assert!(
+        allowed.serves,
+        "a listed model is never refused because its successor is listed"
+    );
+
+    let withheld = recorded_offer_models(
+        policy.inputs(Some(&probe), "agy", "owner-agy"),
+        &model,
+        &catalogue,
+        OfferSupersedence::Withhold,
+    )
+    .expect("the same probe under the selection policy");
+    assert!(
+        !withheld.serves,
+        "selection withholds a superseded member whose successor is offered"
+    );
+
+    // A probe that ran but listed nothing defers to a fresh snapshot, whose own
+    // observation time is the age carried by the refusal.
+    let unprobed = provenant_providers::AvailabilityRecord {
+        observed_models: Vec::new(),
+        observed_unix_seconds: 90,
+        ..agy_account("owner-agy")
+    };
+    let scope = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "agy".into(),
+        account_key: "owner-agy".into(),
+        label: "owner-agy".into(),
+    };
+    let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+    record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
+        schema_version: 1,
+        account: scope,
+        revision: 1,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: 80,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: Some(provenant_quota::QuotaDetails {
+            extra: Default::default(),
+            models: vec!["gemini-3.8-flash".into()],
+            ..Default::default()
+        }),
+        windows: Vec::new(),
+    });
+    let accounts = [record];
+    let ctx = RoutingContext {
+        accounts: &accounts,
+        ..context(&catalogue, &config, now()?)
+    };
+    let policy = ctx.offer_policy();
+    let snapshot = recorded_offer_models(
+        policy.inputs(Some(&unprobed), "agy", "owner-agy"),
+        &model,
+        &catalogue,
+        OfferSupersedence::Allow,
+    )
+    .expect("a fresh snapshot serves when the probe listed nothing");
+    assert_eq!(snapshot.source, OfferSource::Snapshot);
+    assert_eq!(snapshot.age_seconds, 20, "the snapshot owns its age");
     Ok(())
 }

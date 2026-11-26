@@ -1161,9 +1161,9 @@ pub fn hook(start: bool, globals: &Globals, deadline: Instant) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    // The hook timing test measures real monotonic time.
     #![allow(clippy::disallowed_methods)]
 
+    // The hook timing test measures real monotonic time.
     #[test]
     fn chair_log_request_warns_with_the_source_file_and_key() {
         let dir = tempfile::tempdir().unwrap();

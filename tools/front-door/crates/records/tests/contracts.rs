@@ -1,8 +1,8 @@
 use std::io::Cursor;
 
 use provenant_records::{
-    AttemptOutcome, CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits, RecordHeader,
-    decode, decode_v1,
+    CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits, RecordHeader, decode, decode_v1,
+    run::Outcome,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -190,11 +190,11 @@ fn canonical_v1_sorts_keys_uses_required_escapes_and_separates_digest_domains() 
         format!("\"sha256:{}\"", "ab".repeat(32))
     );
     assert_eq!(
-        serde_json::to_string(&AttemptOutcome::InputRequired).expect("outcome wire form"),
+        serde_json::to_string(&Outcome::InputRequired).expect("outcome wire form"),
         "\"input_required\""
     );
     assert_eq!(
-        serde_json::to_string(&AttemptOutcome::Uncommitted).expect("outcome wire form"),
+        serde_json::to_string(&Outcome::Uncommitted).expect("outcome wire form"),
         "\"uncommitted\""
     );
 }
