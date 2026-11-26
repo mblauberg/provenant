@@ -39,18 +39,24 @@ fn caller_is_guardian_descendant_with(
     let ProcessObservation::Present(peer_now) = observer.observe(peer_pid) else {
         return false;
     };
-    let census = match observer.live_census(guardian, &[], MAX_CENSUS_ENTRIES) {
-        Ok(Some(census)) => census,
-        // A scoped macOS walk can fail on process churn or an unreadable
-        // process. Its own contract says persistent churn and unavailable
-        // observations reach the full-scan backstop; refusing here would
-        // present a healthy relay guardian as replaced (`relay_peer_refused`).
-        Ok(None) | Err(_) => match observer.census(MAX_CENSUS_ENTRIES) {
-            Ok(census) => census,
-            Err(_) => return false,
-        },
-    };
-    descendant_in_census(peer_pid, &peer_now.identity, guardian, &census)
+    // A scoped walk is partial by design: even a successful snapshot can omit
+    // the caller and its parent chain. Seed it with the exact caller identity
+    // so the walk can include that chain without a host-wide scan. Known PIDs
+    // are accepted only when their observed identity still matches.
+    let scoped = observer.live_census(guardian, &[peer_now.identity.clone()], MAX_CENSUS_ENTRIES);
+    if let Ok(Some(census)) = &scoped
+        && descendant_in_census(peer_pid, &peer_now.identity, guardian, census)
+    {
+        return true;
+    }
+    // A failed, absent or inconclusive scoped snapshot is not an absence
+    // proof. Only the full census may decide that the caller is outside the
+    // guardian's tree; refusing earlier reports a healthy relay as replaced
+    // (`relay_peer_refused`).
+    match observer.census(MAX_CENSUS_ENTRIES) {
+        Ok(census) => descendant_in_census(peer_pid, &peer_now.identity, guardian, &census),
+        Err(_) => false,
+    }
 }
 
 /// Protect the lane from a same-UID process that replaces the pathname socket:
@@ -275,6 +281,109 @@ mod tests {
                 fact(sibling.clone(), 20),
             ],
         };
+        assert!(!caller_is_guardian_descendant_with(
+            &outsider,
+            Some(sibling.pid),
+            Some(&guardian),
+        ));
+    }
+
+    /// The macOS scoped walk can succeed while seeing only part of the host.
+    /// A successful but inconclusive snapshot is not an absence proof: the
+    /// caller is seeded into the walk, and the full census decides the same
+    /// ancestry proof before any refusal is rendered.
+    struct InconclusiveScopedObserver {
+        facts: Vec<provenant_supervisor::census::ProcessFact>,
+        scoped: Census,
+        known: std::cell::RefCell<Vec<ProcessIdentity>>,
+    }
+
+    impl InconclusiveScopedObserver {
+        fn new(
+            facts: Vec<provenant_supervisor::census::ProcessFact>,
+            guardian: &ProcessIdentity,
+        ) -> Self {
+            let scoped = Census::from_observations(
+                facts
+                    .iter()
+                    .filter(|current| {
+                        current.identity.pid == 1 || current.identity.pid == guardian.pid
+                    })
+                    .cloned(),
+                [],
+                [],
+                false,
+                false,
+                MAX_CENSUS_ENTRIES,
+            )
+            .expect("scoped fixture");
+            Self {
+                facts,
+                scoped,
+                known: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ProcessObserver for InconclusiveScopedObserver {
+        fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+            Ok("fixture-boot".into())
+        }
+
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            self.facts
+                .iter()
+                .find(|current| current.identity.pid == pid)
+                .cloned()
+                .map_or(ProcessObservation::Absent, ProcessObservation::Present)
+        }
+
+        fn census(&self, max_entries: usize) -> std::result::Result<Census, CensusError> {
+            Census::from_observations(self.facts.clone(), [], [], true, false, max_entries)
+        }
+
+        fn live_census(
+            &self,
+            _root: &ProcessIdentity,
+            known: &[ProcessIdentity],
+            _max_entries: usize,
+        ) -> std::result::Result<Option<Census>, CensusError> {
+            *self.known.borrow_mut() = known.to_vec();
+            Ok(Some(self.scoped.clone()))
+        }
+    }
+
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
+    #[test]
+    fn inconclusive_scoped_census_uses_the_full_census_backstop() {
+        let system = identity(1, 1);
+        let guardian = identity(10, 10);
+        let child = identity(11, 11);
+        let observer = InconclusiveScopedObserver::new(
+            vec![
+                fact(system, 0),
+                fact(guardian.clone(), 1),
+                fact(child.clone(), 10),
+            ],
+            &guardian,
+        );
+        assert!(caller_is_guardian_descendant_with(
+            &observer,
+            Some(child.pid),
+            Some(&guardian),
+        ));
+        assert_eq!(*observer.known.borrow(), vec![child.clone()]);
+
+        let sibling = identity(21, 21);
+        let outsider = InconclusiveScopedObserver::new(
+            vec![
+                fact(identity(1, 1), 0),
+                fact(guardian.clone(), 1),
+                fact(identity(20, 20), 1),
+                fact(sibling.clone(), 20),
+            ],
+            &guardian,
+        );
         assert!(!caller_is_guardian_descendant_with(
             &outsider,
             Some(sibling.pid),

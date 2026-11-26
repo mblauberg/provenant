@@ -2,7 +2,7 @@
 
 ### Pipelines and graphs
 
-- Lane-side graph calls no longer report `relay_peer_refused` when macOS's scoped process walk fails transiently. The relay now uses the documented full-census backstop for the same ancestry proof, so a healthy host guardian is not mistaken for a replaced socket owner. (#4070)
+- Lane-side graph calls no longer report `relay_peer_refused` when macOS's scoped process walk fails or succeeds without the caller's parent chain. The relay seeds the scoped walk with the caller's exact identity and uses the documented full-census backstop whenever the snapshot is inconclusive, so a healthy host guardian is not mistaken for a replaced socket owner. (#4070)
 
 ### Tests
 
