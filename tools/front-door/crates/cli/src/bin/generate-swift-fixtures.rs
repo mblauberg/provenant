@@ -348,13 +348,13 @@ mod fixtures {
         );
         let overview_active = [
             (
-                "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+                "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
                 "implement-console-overview",
                 running(),
                 "Implement console overview",
             ),
             (
-                "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+                "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
                 "review-the-change-set",
                 running(),
                 "Review the change set",
@@ -531,31 +531,31 @@ mod fixtures {
                 1,
             ),
             (
-                "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+                "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
                 "review-the-change-set",
                 "task",
                 1,
             ),
             (
-                "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
                 "write-the-migration-notes",
                 "task",
                 1,
             ),
             (
-                "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+                "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
                 "settle-quota-fixtures",
                 "task",
                 1,
             ),
             (
-                "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+                "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
                 "regenerate-cli-fixtures",
                 "task",
                 1,
             ),
             (
-                "c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+                "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
                 "run-the-whole-test-suite",
                 "task--writer",
                 2,
@@ -2211,6 +2211,34 @@ mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::fixtures;
+
+    #[test]
+    fn synthetic_overview_lanes_share_valid_attempt_ids_with_tree() {
+        let generated = fixtures::console().expect("synthetic console fixtures");
+        let overview = &generated
+            .iter()
+            .find(|(name, _)| *name == "console-overview-active")
+            .expect("overview fixture")
+            .1;
+        let tree = &generated
+            .iter()
+            .find(|(name, _)| *name == "console-tree")
+            .expect("tree fixture")
+            .1;
+        let lanes = overview["data"]["lanes"]
+            .as_array()
+            .expect("overview lanes");
+        let nodes = tree["data"]["nodes"].as_array().expect("tree nodes");
+        assert!(!lanes.is_empty());
+        for lane in lanes {
+            let id = lane["attempt_id"].as_str().expect("attempt ID");
+            provenant_core::AttemptId::parse(id).expect("valid attempt ID");
+            assert!(
+                nodes.iter().any(|node| node["lane_id"]["attempt_id"] == id
+                    && node["lane_id"]["key"] == lane["key"])
+            );
+        }
+    }
 
     #[test]
     fn synthetic_tree_edges_reference_valid_present_parents_and_children() {
