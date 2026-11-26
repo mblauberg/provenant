@@ -533,6 +533,175 @@ pub fn output_result_evidence(
     data["changed_files_total"] = changed_files_total.clone();
 }
 
+/// Reviewer receipt object and human text from one settled typed attempt.
+/// Both the output command and generated fixtures use this projection so a
+/// receipt tail exercises the same wire shape the command actually returns.
+pub fn output_receipt(
+    record: &provenant_records::run::AttemptRecord,
+    writer: bool,
+    catalogue: Option<&provenant_routing::Catalogue>,
+) -> Result<(Value, String), provenant_run::RunError> {
+    let route = record.applied_route.as_ref();
+    let adapter = route
+        .and_then(|route| route.provider.as_deref())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    let model = route
+        .and_then(|route| route.model.as_deref())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    let qualified_model = route
+        .and_then(|route| output_receipt_model(route.provider.as_deref(), route.model.as_deref()));
+    let (effort, effort_source) = output_receipt_effort(record);
+    let family = output_receipt_family(catalogue, qualified_model.as_deref());
+    let resolved_from = output_receipt_resolution(record);
+    let reviewer = provenant_run::fact(record.clone())?.reviewer;
+    let reviewer_model = record
+        .observed_route
+        .as_ref()
+        .and_then(|route| output_receipt_model(route.provider.as_deref(), route.model.as_deref()));
+    let reviewer_family = output_receipt_family(catalogue, reviewer_model.as_deref());
+    let provenance = reviewer
+        .as_ref()
+        .map_or("unknown", |reviewer| match reviewer.provenance {
+            provenant_records::ReviewerProvenance::Observed => "observed",
+            provenant_records::ReviewerProvenance::ChairAttested => "chair_attested",
+            provenant_records::ReviewerProvenance::Unknown => "unknown",
+        });
+    let actor = reviewer.as_ref().map_or_else(
+        || "unknown".into(),
+        |reviewer| reviewer.actor_id.to_string(),
+    );
+    let reviewer_model = reviewer
+        .as_ref()
+        .and_then(|reviewer| reviewer.model.as_deref())
+        .unwrap_or("unknown");
+    let reviewer_family = if reviewer.is_some() {
+        reviewer_family
+    } else {
+        "unknown".into()
+    };
+    let role = if writer { "writer" } else { "reviewer" };
+    let label = if writer { "Writer" } else { "Reviewer" };
+    let qualified_model = qualified_model.as_deref().unwrap_or("unknown");
+    let line = format!(
+        "{label}: {qualified_model}@{effort} ({family}; resolved from {resolved_from}; effort source {effort_source}), attempt {} {}",
+        record.key, record.attempt_id
+    );
+    let attribution = format!(
+        "Reviewer provenance: {provenance}, actor {actor}, model {reviewer_model}, family {reviewer_family}"
+    );
+    let data = json!({
+        "key": record.key,
+        "attempt_id": record.attempt_id,
+        "adapter": adapter,
+        "model": model,
+        "effort": effort,
+        "effort_source": effort_source,
+        "family": family,
+        "role": role,
+        "resolved_from": resolved_from,
+        "receipt": line,
+        "reviewer": {
+            "provenance": provenance,
+            "actor_id": actor,
+            "model": reviewer_model,
+            "family": reviewer_family
+        },
+        "reviewer_provenance": attribution
+    });
+    let text = format!("{line}\n{attribution}\n");
+    Ok((data, text))
+}
+
+fn output_receipt_model(adapter: Option<&str>, model: Option<&str>) -> Option<String> {
+    let adapter = adapter.filter(|value| !value.is_empty())?;
+    let model = model.filter(|value| !value.is_empty())?;
+    Some(if model.starts_with(&format!("{adapter}/")) {
+        model.to_owned()
+    } else {
+        format!("{adapter}/{model}")
+    })
+}
+
+fn output_receipt_family(
+    catalogue: Option<&provenant_routing::Catalogue>,
+    model: Option<&str>,
+) -> String {
+    catalogue
+        .and_then(|catalogue| {
+            provenant_routing::ModelId::parse(model?)
+                .ok()
+                .and_then(|id| catalogue.model(&id).and_then(|entry| entry.family.clone()))
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn output_receipt_effort(record: &provenant_records::run::AttemptRecord) -> (String, String) {
+    let route = record.applied_route.as_ref();
+    if let Some(effort) = route
+        .and_then(|route| route.effort.as_deref())
+        .filter(|value| !value.is_empty())
+    {
+        return (effort.to_owned(), "applied_route.effort".into());
+    }
+    if let Some(warning) = route.and_then(|route| route.effort_warning.as_ref()) {
+        let source = format!("effort_warning:{}", warning.source);
+        if let Some(applied) = warning.applied.as_deref().filter(|value| !value.is_empty()) {
+            return (applied.to_owned(), source);
+        }
+        return ("none".into(), source);
+    }
+    ("unknown".into(), "unknown".into())
+}
+
+fn output_receipt_resolution(record: &provenant_records::run::AttemptRecord) -> String {
+    let Some(route) = record.applied_route.as_ref() else {
+        return "unknown".into();
+    };
+    let Some(applied) = output_receipt_model(route.provider.as_deref(), route.model.as_deref())
+    else {
+        return "unknown".into();
+    };
+    if let Some(pool) = &route.pool_selection {
+        return if pool.pick == applied {
+            format!("pool {}", pool.pool)
+        } else {
+            "unknown".into()
+        };
+    }
+    match route.source.as_deref() {
+        Some("pin") => return "explicit".into(),
+        Some("pool") => return "pool".into(),
+        Some("named_route") => {
+            return match &record.requested_route {
+                provenant_records::run::RequestedRoute::Named { name, .. }
+                | provenant_records::run::RequestedRoute::Review { name, .. } => {
+                    format!("route {name}")
+                }
+                _ => "route".into(),
+            };
+        }
+        Some("fallback") => return "fallback".into(),
+        Some("continuation") => return "continuation".into(),
+        _ => {}
+    }
+    let provenant_records::run::RequestedRoute::Model {
+        provider, model, ..
+    } = &record.requested_route
+    else {
+        return "unknown".into();
+    };
+    let Some(requested) = output_receipt_model(Some(provider), Some(model)) else {
+        return "unknown".into();
+    };
+    if applied == requested {
+        "explicit".into()
+    } else {
+        "unknown".into()
+    }
+}
+
 /// Optional fields added by the output owner after reading an artifact. Keeping
 /// their wire shape here lets the fixture generator exercise the same branches.
 #[derive(Default)]
@@ -568,6 +737,45 @@ pub fn output_extras(data: &mut Value, extras: OutputExtras<'_>) {
 pub enum OutputTail {
     Bytes(u64),
     Lines(u64),
+}
+
+/// Select the human text for a receipt tail using the same byte boundary as
+/// the output command. Receipt metadata and its displayed tail stay aligned.
+pub fn output_tail_text(text: &str, tail: OutputTail) -> String {
+    let bytes = text.as_bytes();
+    let start = match tail {
+        OutputTail::Bytes(max_bytes) => {
+            let mut start = bytes.len().saturating_sub(max_bytes as usize);
+            while start < bytes.len() && std::str::from_utf8(&bytes[start..]).is_err() {
+                start += 1;
+            }
+            start
+        }
+        OutputTail::Lines(lines) => {
+            if lines == 0 {
+                bytes.len()
+            } else {
+                let mut end = bytes.len();
+                if bytes.last() == Some(&b'\n') {
+                    end -= 1;
+                }
+                let mut seen = 0u64;
+                let mut start = 0;
+                while end > 0 {
+                    end -= 1;
+                    if bytes[end] == b'\n' {
+                        seen += 1;
+                        if seen >= lines {
+                            start = end + 1;
+                            break;
+                        }
+                    }
+                }
+                start
+            }
+        }
+    };
+    text[start..].to_owned()
 }
 
 pub struct OutputWrite<'a> {

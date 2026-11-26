@@ -187,7 +187,7 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(failedData["provider_error"] as? String, "provider exited with an error")
 
         let (evictedConsole, _) = client([(["output"], "output-transcript-evicted", 0)])
-        let evicted = try await evictedConsole.output("c1c1", part: "transcript")
+        let evicted = try await evictedConsole.output("c4c4", part: "transcript")
         XCTAssertEqual(evicted.state, "succeeded")
         XCTAssertEqual(try data("output-transcript-evicted")["payload"] as? String, "evicted")
 
@@ -200,11 +200,14 @@ final class ConsoleClientTests: XCTestCase {
 
         let byteTail = try data("output-result-tail-bytes")
         XCTAssertEqual(byteTail["tail"] as? Int, 10)
-        XCTAssertEqual(byteTail["tail_clamped"] as? Bool, true)
+        XCTAssertEqual(byteTail["tail_clamped"] as? Bool, false)
         let receiptTail = try data("output-receipt-tail")
         XCTAssertEqual(receiptTail["tail_lines"] as? Int, 1)
         XCTAssertEqual(receiptTail["tail_clamped"] as? Bool, false)
-        XCTAssertEqual(receiptTail["tail_text"] as? String, "last line")
+        XCTAssertEqual(
+            receiptTail["tail_text"] as? String,
+            "Reviewer provenance: unknown, actor unknown, model unknown, family unknown"
+        )
 
         let resultWritten = try data("output-result-written")
         XCTAssertEqual(resultWritten["written"] as? Int, 22)

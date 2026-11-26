@@ -1,25 +1,31 @@
 {
   "command": "output",
   "data": {
-    "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
-    "bytes": {
-      "data": "first line\nlast line",
-      "encoding": "utf8"
+    "adapter": "fixture",
+    "attempt_id": "c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+    "effort": "high",
+    "effort_source": "applied_route.effort",
+    "family": "unknown",
+    "key": {
+      "attempt": 1,
+      "graph": "output-receipt",
+      "node": "task",
+      "project": "01010101010101010101010101010101"
     },
-    "clipped": false,
-    "complete": true,
-    "digest": null,
-    "eof": true,
-    "length": 20,
-    "next_offset": 20,
-    "offset": 0,
-    "part": "receipt",
-    "reason": null,
-    "settlement_reason": null,
-    "state": "succeeded",
+    "model": "fixture/model",
+    "receipt": "Reviewer: fixture/model@high (unknown; resolved from explicit; effort source applied_route.effort), attempt output-receipt/task#1 c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+    "resolved_from": "explicit",
+    "reviewer": {
+      "actor_id": "unknown",
+      "family": "unknown",
+      "model": "unknown",
+      "provenance": "unknown"
+    },
+    "reviewer_provenance": "Reviewer provenance: unknown, actor unknown, model unknown, family unknown",
+    "role": "reviewer",
     "tail_clamped": false,
     "tail_lines": 1,
-    "tail_text": "last line"
+    "tail_text": "Reviewer provenance: unknown, actor unknown, model unknown, family unknown"
   },
   "error": null,
   "next": [],

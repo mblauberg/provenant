@@ -150,67 +150,42 @@ mod fixtures {
     }
 
     fn lane_local(row: &AttemptRecord) -> Result<Value, String> {
-        lane_with_facts(row, true, &[])
+        lane_with_facts(row, &[])
     }
 
     fn lane_local_with_waits(
         row: &AttemptRecord,
         waits: &[provenant_run::LaneWait],
     ) -> Result<Value, String> {
-        lane_with_facts(row, true, waits)
+        lane_with_facts(row, waits)
     }
 
     /// Assemble the same wire row as the owner from deterministic synthetic
-    /// observations. `LaneRow::project` is the pure typed projector used by
-    /// the owner after its bounded host reads; no ambient fixture paths are read.
+    /// observations. The owner and generator share the loaded-facts projection
+    /// seam; no ambient fixture paths are read.
     fn lane_with_facts(
         row: &AttemptRecord,
-        local_paths: bool,
         waits: &[provenant_run::LaneWait],
     ) -> Result<Value, String> {
-        use provenant_records::wire::{
-            LanePresence, LaneProjectionFacts, LaneRow, LastEventSource,
-        };
+        use provenant_records::wire::{LanePresence, LaneProjectionFacts};
 
         let wait = waits.iter().find(|wait| wait.attempt_id == row.attempt_id);
-        let (last_event_at, last_event_source) = row
-            .last_output_at
-            .map(|at| (at, LastEventSource::Output))
-            .or_else(|| row.started_at.map(|at| (at, LastEventSource::Started)))
-            .unwrap_or((row.queued_at, LastEventSource::Queued));
         let presence = matches!(&row.state, provenant_run::AttemptState::Running { .. })
             .then_some(LanePresence::Unknown);
-        let attempt_directory = if local_paths {
-            let path = Path::new("/fixture")
-                .join("attempts")
-                .join(row.attempt_id.to_string());
-            Some(
-                provenant_records::StructuredPathWire::from_path(&path)
-                    .map_err(|error| format!("synthetic attempt directory: {error}"))?,
-            )
-        } else {
-            None
-        };
-        let usage = row.effective_usage();
-        let projected = LaneRow::project(
+        let mut projected = provenant_cli::run::project_lane_with_loaded_facts(
             row,
+            wait,
+            Path::new("/fixture"),
+            None,
+            true,
+            true,
             LaneProjectionFacts {
-                superseded_by: row.superseded_by,
-                waiting_for: wait.map(|wait| wait.waiting_for.description()),
-                lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
-                last_event_at: Some(last_event_at),
-                last_event_source: Some(last_event_source),
-                attempt_directory,
                 presence,
                 payload_evicted: false,
-                cache_read_share: provenant_routing::cache_read_share(
-                    usage.tokens.input,
-                    usage.tokens.cache_read,
-                    usage.tokens.cache_write,
-                ),
                 ..Default::default()
             },
         );
+        provenant_cli::run::normalise_lane_wait_reason(&mut projected);
         serde_json::to_value(projected).map_err(|error| format!("lane projection: {error}"))
     }
 
@@ -737,8 +712,8 @@ mod fixtures {
             &Value::Null,
             &Value::Null,
             &Value::Null,
-            &json!([]),
-            &json!(0),
+            &Value::Null,
+            &Value::Null,
         );
         p::output_render_fields(
             &mut output_result,
@@ -785,7 +760,7 @@ mod fixtures {
         let (cancelled_label, cancelled_reason) =
             provenant_records::wire::LaneRow::state_and_reason(&cancelled_state);
         let mut output_result_stopped = p::output(
-            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
             &cancelled_label,
             Some(json!(cancelled_reason)),
             None,
@@ -837,7 +812,7 @@ mod fixtures {
         let failed_settlement = serde_json::to_value(failed_settlement)
             .map_err(|error| format!("output failure settlement: {error}"))?;
         let mut output_result_failed = p::output(
-            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
             &failed_label,
             Some(json!(failed_reason)),
             Some(failed_settlement),
@@ -890,7 +865,7 @@ mod fixtures {
         let (succeeded_label, _) =
             provenant_records::wire::LaneRow::state_and_reason(&succeeded_state);
         let mut output_transcript_evicted = p::output(
-            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
             &succeeded_label,
             None,
             None,
@@ -916,7 +891,7 @@ mod fixtures {
             p::OutputRenderFields::default(),
         );
         let mut output_result_pending = p::output(
-            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
             "running",
             Some(Value::Null),
             Some(Value::Null),
@@ -940,7 +915,7 @@ mod fixtures {
         let tail_bytes = "tail bytes";
         let tail_bytes_len = tail_bytes.len() as u64;
         let mut output_result_tail_bytes = p::output(
-            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
             "running",
             Some(Value::Null),
             Some(Value::Null),
@@ -959,31 +934,45 @@ mod fixtures {
             p::OutputRenderFields {
                 headed: true,
                 tail: Some(p::OutputTail::Bytes(tail_bytes_len)),
-                tail_clamped: true,
                 ..Default::default()
             },
         );
-        let receipt_text = "first line\nlast line";
-        let mut output_receipt_tail = p::output(
-            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
-            &succeeded_label,
-            Some(Value::Null),
-            Some(Value::Null),
-            "receipt",
-            0,
-            receipt_text.len() as u64,
-            Some(receipt_text.len() as u64),
-            true,
-            Some(false),
-            Some(true),
-            &Value::Null,
-            &output_bytes(receipt_text),
+        let receipt_id = "c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7";
+        let mut receipt_record = attempt(
+            receipt_id,
+            "output-receipt",
+            json!({"state":"terminal", "outcome":"succeeded", "exit_code":0,
+                "finished_at":"2026-11-02T02:05:00Z", "reason":null}),
+            "Receipt fixture",
+        )?;
+        receipt_record.result = Some(
+            serde_json::from_value(json!({
+                "path":{"encoding":"utf8","path":format!("attempts/{receipt_id}/result.txt")},
+                "digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "bytes":20,
+                "complete":true,
+                "redacted":false
+            }))
+            .map_err(|error| format!("synthetic receipt result: {error}"))?,
         );
+        receipt_record.applied_route = Some(
+            serde_json::from_value(json!({
+                "provider":"fixture",
+                "model":"fixture/model",
+                "effort":"high",
+                "source":"pin"
+            }))
+            .map_err(|error| format!("synthetic receipt route: {error}"))?,
+        );
+        let (mut output_receipt_tail, receipt_text) =
+            p::output_receipt(&receipt_record, false, None)
+                .map_err(|error| format!("synthetic output receipt: {error}"))?;
+        let receipt_tail_text = p::output_tail_text(&receipt_text, p::OutputTail::Lines(1));
         p::output_render_fields(
             &mut output_receipt_tail,
             p::OutputRenderFields {
                 tail: Some(p::OutputTail::Lines(1)),
-                tail_text: Some("last line"),
+                tail_text: Some(&receipt_tail_text),
                 ..Default::default()
             },
         );
@@ -995,7 +984,7 @@ mod fixtures {
             .map_err(|error| format!("output destination: {error}"))?;
         let result_write = "the result was written";
         let mut output_result_written = p::output(
-            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
             &succeeded_label,
             Some(Value::Null),
             Some(Value::Null),
@@ -1008,6 +997,15 @@ mod fixtures {
             Some(true),
             &Value::Null,
             &output_bytes(result_write),
+        );
+        p::output_result_evidence(
+            &mut output_result_written,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
         );
         p::output_render_fields(
             &mut output_result_written,
@@ -1022,7 +1020,7 @@ mod fixtures {
         );
         let prompt_write = "the prompt was written";
         let mut output_prompt_written = p::output(
-            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
             "running",
             Some(Value::Null),
             Some(Value::Null),
@@ -1048,7 +1046,7 @@ mod fixtures {
             },
         );
         let mut output_prompt = p::output(
-            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
             "running",
             Some(Value::Null),
             Some(Value::Null),

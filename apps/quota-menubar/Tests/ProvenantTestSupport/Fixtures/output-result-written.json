@@ -1,11 +1,13 @@
 {
   "command": "output",
   "data": {
-    "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "attempt_id": "c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
     "bytes": {
       "data": "",
       "encoding": "utf8"
     },
+    "changed_files": null,
+    "changed_files_total": null,
     "clipped": false,
     "complete": true,
     "digest": null,
@@ -14,7 +16,9 @@
     "next_offset": 22,
     "offset": 0,
     "part": "result",
+    "publication": null,
     "reason": null,
+    "residual_tree": null,
     "settlement_reason": null,
     "state": "succeeded",
     "to": {
@@ -25,6 +29,8 @@
       },
       "root": "/"
     },
+    "writer_base": null,
+    "writer_head": null,
     "written": 22
   },
   "error": null,

@@ -338,6 +338,90 @@ fn stalled_projection(
     now.map(|now| run::stalled_at(lane, now, true))
 }
 
+/// The newest durable activity and the field that supplied its timestamp.
+pub fn lane_last_event(
+    lane: &run::AttemptRecord,
+) -> (WallTime, provenant_records::wire::LastEventSource) {
+    use provenant_records::wire::LastEventSource;
+    lane.last_output_at
+        .map(|at| (at, LastEventSource::Output))
+        .or_else(|| lane.started_at.map(|at| (at, LastEventSource::Started)))
+        .unwrap_or((lane.queued_at, LastEventSource::Queued))
+}
+
+/// Project a lane after the owner has loaded its bounded host observations.
+/// This pure seam supplies the common fields derived from the retained record
+/// and wait row, then assembles the typed wire projection used by console and
+/// fixture generation. `facts` contains only already loaded observations.
+pub fn project_lane_with_loaded_facts(
+    lane: &run::AttemptRecord,
+    wait: Option<&run::LaneWait>,
+    root: &Path,
+    now_wall: Option<WallTime>,
+    path_visible: bool,
+    host_artifacts: bool,
+    mut facts: provenant_records::wire::LaneProjectionFacts,
+) -> provenant_records::wire::LaneRow {
+    let (last_event_at, last_event_source) = lane_last_event(lane);
+    let usage = lane.effective_usage();
+    facts.superseded_by = facts.superseded_by.or(lane.superseded_by);
+    facts.waiting_for = facts.waiting_for.or_else(|| {
+        wait.map(|wait| wait.waiting_for.description()).or_else(|| {
+            (host_artifacts && matches!(&lane.state, run::AttemptState::Starting { .. }))
+                .then(|| "launch preparation".to_owned())
+        })
+    });
+    facts.lane_class = wait
+        .map(|wait| wait.lane_class.as_str().to_owned())
+        .or(facts.lane_class);
+    facts.last_event_at = Some(last_event_at);
+    facts.last_event_source = Some(last_event_source);
+    facts.stale = facts.presence.and_then(|presence| match presence {
+        provenant_records::wire::LanePresence::Live => Some(false),
+        provenant_records::wire::LanePresence::Unattended
+        | provenant_records::wire::LanePresence::Settling => Some(true),
+        provenant_records::wire::LanePresence::Unknown => None,
+    });
+    facts.stalled = stalled_projection(lane, now_wall, last_event_source, facts.presence);
+    facts.overdue = now_wall.map(|now| run::overdue_at(lane, now));
+    facts.attempt_directory = path_visible
+        .then(|| root.join("attempts").join(lane.attempt_id.to_string()))
+        .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok())
+        .or(facts.attempt_directory);
+    facts.result_path = if path_visible && lane.result.is_some() {
+        Some(artifact(root, lane, "result.md"))
+            .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok())
+    } else {
+        None
+    }
+    .or(facts.result_path);
+    facts.cache_read_share = provenant_routing::cache_read_share(
+        usage.tokens.input,
+        usage.tokens.cache_read,
+        usage.tokens.cache_write,
+    );
+
+    let mut projected = provenant_records::wire::LaneRow::project(lane, facts);
+    if let run::AttemptState::Terminal {
+        terminal_cause: Some(run::TerminalCause::HandoffRefused),
+        reason: Some(reason),
+        ..
+    } = &lane.state
+    {
+        projected.reason = Some(format!(
+            "{}; inspect the cause and retry the lane",
+            provenant_core::bounded_line(reason, 256)
+        ));
+    }
+    projected
+}
+
+pub fn normalise_lane_wait_reason(projected: &mut provenant_records::wire::LaneRow) {
+    if projected.reason == projected.waiting_for {
+        projected.reason = projected.waiting_for.as_deref().map(full_wait_reason);
+    }
+}
+
 fn project_lane_inner(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
@@ -348,7 +432,6 @@ fn project_lane_inner(
     unknown_when_host_unobserved: bool,
 ) -> provenant_records::wire::LaneRow {
     let (view, lane_holders) = host;
-    let usage = lane.effective_usage();
     let host_artifacts = view.projects_host_artifacts();
     let presence = if !view.observes_presence() {
         (unknown_when_host_unobserved && matches!(lane.state, run::AttemptState::Running { .. }))
@@ -366,12 +449,6 @@ fn project_lane_inner(
             run::AttemptPresence::Settling => provenant_records::wire::LanePresence::Settling,
         })
     };
-    let stale = presence.and_then(|presence| match presence {
-        provenant_records::wire::LanePresence::Live => Some(false),
-        provenant_records::wire::LanePresence::Unattended
-        | provenant_records::wire::LanePresence::Settling => Some(true),
-        provenant_records::wire::LanePresence::Unknown => None,
-    });
     let wait = waits.iter().find(|wait| wait.attempt_id == lane.attempt_id);
     let admission_wait =
         if host_artifacts && matches!(lane.state, run::AttemptState::Running { .. }) {
@@ -404,46 +481,41 @@ fn project_lane_inner(
     let child_command = host_artifacts
         .then(|| waiting_command.clone().or_else(holding_command))
         .flatten();
-    let waiting_for = admission_wait
-        .map(|wait_info| {
-            let now_sec = now_wall.map_or_else(
-                || {
-                    use provenant_core::Clock;
-                    provenant_os::clock::SystemClock::new()
-                        .unix_seconds()
-                        .max(0) as u64
-                },
-                |w| w.unix_seconds().max(0) as u64,
-            );
-            let elapsed = now_sec.saturating_sub(wait_info.start_unix_seconds);
-            let mut holders = provenant_os::admission::host_holders(root, &wait_info.class);
-            for holder in lane_holders.iter().filter(|h| h.class == wait_info.class) {
-                if !holders
-                    .iter()
-                    .any(|known| known.pid == holder.pid && known.slot == holder.slot)
-                {
-                    holders.push(holder.clone());
-                }
+    let admission_waiting_for = admission_wait.as_ref().map(|wait_info| {
+        let now_sec = now_wall.map_or_else(
+            || {
+                use provenant_core::Clock;
+                provenant_os::clock::SystemClock::new()
+                    .unix_seconds()
+                    .max(0) as u64
+            },
+            |w| w.unix_seconds().max(0) as u64,
+        );
+        let elapsed = now_sec.saturating_sub(wait_info.start_unix_seconds);
+        let mut holders = provenant_os::admission::host_holders(root, &wait_info.class);
+        for holder in lane_holders.iter().filter(|h| h.class == wait_info.class) {
+            if !holders
+                .iter()
+                .any(|known| known.pid == holder.pid && known.slot == holder.slot)
+            {
+                holders.push(holder.clone());
             }
-            if holders.is_empty() {
-                format!("waiting for a host {} slot ({}s)", wait_info.class, elapsed)
-            } else {
-                let holders_desc = holders
-                    .iter()
-                    .map(admission_holder_description)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "waiting for a host {} slot ({}s; held by {})",
-                    wait_info.class, elapsed, holders_desc
-                )
-            }
-        })
-        .or_else(|| wait.map(|wait| wait.waiting_for.description()))
-        .or_else(|| {
-            (host_artifacts && matches!(lane.state, run::AttemptState::Starting { .. }))
-                .then(|| "launch preparation".to_owned())
-        });
+        }
+        if holders.is_empty() {
+            format!("waiting for a host {} slot ({}s)", wait_info.class, elapsed)
+        } else {
+            let holders_desc = holders
+                .iter()
+                .map(admission_holder_description)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "waiting for a host {} slot ({}s; held by {})",
+                wait_info.class, elapsed, holders_desc
+            )
+        }
+    });
+    let path_visible = view.observes_presence();
     let transcript = lane
         .applied_route
         .as_ref()
@@ -462,34 +534,6 @@ fn project_lane_inner(
                     .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok()),
             }
         });
-    let path_visible = view.observes_presence();
-    let result_path = path_visible
-        .then(|| {
-            lane.result
-                .as_ref()
-                .map(|_| artifact(root, lane, "result.md"))
-        })
-        .flatten()
-        .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
-    // The path is metadata; presence does not require exposing host file facts.
-    let attempt_directory = path_visible
-        .then(|| root.join("attempts").join(lane.attempt_id.to_string()))
-        .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
-    // There is no wall-clock column on a run event; the newest observed
-    // activity is the last output, else the launch, else the queue time. Carry
-    // which fallback was used so a quiet writer's old output is not read as a
-    // fresh heartbeat.
-    let (last_event_at, last_event_source) = lane
-        .last_output_at
-        .map(|at| (at, provenant_records::wire::LastEventSource::Output))
-        .or_else(|| {
-            lane.started_at
-                .map(|at| (at, provenant_records::wire::LastEventSource::Started))
-        })
-        .unwrap_or((
-            lane.queued_at,
-            provenant_records::wire::LastEventSource::Queued,
-        ));
     let retained = (host_artifacts
         && lane.settlement_receipts.as_ref().is_some_and(|receipts| {
             matches!(
@@ -502,8 +546,13 @@ fn project_lane_inner(
         }))
     .then(|| run::retained_git(root, lane).ok())
     .flatten();
-    let mut projected = provenant_records::wire::LaneRow::project(
+    let mut projected = project_lane_with_loaded_facts(
         lane,
+        wait,
+        root,
+        now_wall,
+        path_visible,
+        host_artifacts,
         provenant_records::wire::LaneProjectionFacts {
             superseded_by: lane.superseded_by,
             git_import_head: retained
@@ -514,17 +563,9 @@ fn project_lane_inner(
             retained_git_objects: retained
                 .and_then(|git| git.objects)
                 .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok()),
-            waiting_for,
-            lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
-            last_event_at: Some(last_event_at),
-            last_event_source: Some(last_event_source),
-            stalled: stalled_projection(lane, now_wall, last_event_source, presence),
-            attempt_directory,
+            waiting_for: admission_waiting_for,
             child_command,
-            overdue: now_wall.map(|now| run::overdue_at(lane, now)),
-            stale,
             presence,
-            result_path,
             transcript,
             payload_evicted: host_artifacts
                 && artifact(
@@ -533,25 +574,9 @@ fn project_lane_inner(
                     provenant_records::AttemptFile::PayloadEvicted.name(),
                 )
                 .exists(),
-            cache_read_share: provenant_routing::cache_read_share(
-                usage.tokens.input,
-                usage.tokens.cache_read,
-                usage.tokens.cache_write,
-            ),
             ..Default::default()
         },
     );
-    if let run::AttemptState::Terminal {
-        terminal_cause: Some(run::TerminalCause::HandoffRefused),
-        reason: Some(reason),
-        ..
-    } = &lane.state
-    {
-        projected.reason = Some(format!(
-            "{}; inspect the cause and retry the lane",
-            provenant_core::bounded_line(reason, 256)
-        ));
-    }
     if host_artifacts
         && let Some(releasing) =
             run::release_progress(root, lane, census.and_then(|census| census.ok()), now_wall)
@@ -568,9 +593,7 @@ fn project_lane_inner(
             None => blocked,
         });
     }
-    if projected.reason == projected.waiting_for {
-        projected.reason = projected.waiting_for.as_deref().map(full_wait_reason);
-    }
+    normalise_lane_wait_reason(&mut projected);
     projected
 }
 
