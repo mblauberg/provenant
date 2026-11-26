@@ -5,6 +5,7 @@ use super::{
     BuildContext, BuildError, Captured, Exception, ExecPlace, Job, JobOutcome, JobResult,
     RunContext, SlotChanges,
 };
+mod target;
 use provenant_core::{Clock, MonoTime};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode};
 use provenant_os::git_config::{ConfigContext, ConfigMutation, StoreSetting};
@@ -401,7 +402,7 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
         }
     }
     drop(store_lock);
-    let target = resolve_target(job, context, &paths);
+    let target = target::resolve_target(job, context, &paths);
     warnings.extend(target.warnings);
     paths.target = paths.keyed_target(&target.key);
     paths.workspace_wrapper = target.workspace_wrapper;
@@ -1120,148 +1121,6 @@ fn build_context(job: &Job, context: &RunContext) -> BuildContext {
     }
 }
 
-/// The derived Cargo target key for one job. Toolchain is resolved from
-/// `rustc -vV` in the job's own environment; worktree is the source checkout
-/// identity, so workspace members cannot be reused across worktrees.
-struct TargetResolution {
-    key: Vec<String>,
-    workspace_wrapper: Option<PathBuf>,
-    toolchain: Option<super::rust::ToolchainInfo>,
-    warnings: Vec<String>,
-}
-
-fn resolve_target(job: &Job, context: &RunContext, paths: &SlotPaths) -> TargetResolution {
-    use provenant_config::BuildTargetKey;
-    let layout = context.strategy.port.target_layout();
-    let mut warnings = layout.warnings;
-    if layout.value.is_empty() {
-        return TargetResolution {
-            key: Vec::new(),
-            workspace_wrapper: None,
-            toolchain: None,
-            warnings,
-        };
-    }
-    let build_context = build_context(job, context);
-    let env = super::rust::job_env(&job.env, &build_context, paths);
-    let wants_toolchain = layout.value.contains(&BuildTargetKey::Toolchain);
-    let toolchain = if wants_toolchain {
-        let argv = job
-            .steps
-            .first()
-            .map(|step| step.argv.as_slice())
-            .unwrap_or(&[]);
-        let cwd = target_probe_cwd(job, &paths.repo);
-        super::rust::probe_job_toolchain(&env, &cwd, argv)
-    } else {
-        None
-    };
-    if wants_toolchain && toolchain.is_none() {
-        warnings
-            .push("could not resolve rustc -vV for the slot target; toolchain key omitted".into());
-    }
-    let checkout = match &job.source {
-        super::SnapshotSource::WorkingTree { worktree, .. } => worktree.as_path(),
-        super::SnapshotSource::Commit {
-            repo_common_dir, ..
-        } => repo_common_dir.as_path(),
-    };
-    let mut key = Vec::new();
-    let mut wrapper_path = None;
-    for component in &layout.value {
-        match component {
-            BuildTargetKey::Toolchain => {
-                if let Some(info) = &toolchain {
-                    key.push(info.key());
-                }
-            }
-            BuildTargetKey::Worktree => match workspace_wrapper(paths, &build_context, checkout) {
-                Ok(wrapper) => wrapper_path = Some(wrapper),
-                Err(error) => {
-                    warnings.push(format!(
-                            "could not create per-worktree rustc wrapper; isolating the full Cargo target instead: {error}"
-                        ));
-                    key.push(super::rust::worktree_key(checkout));
-                }
-            },
-        }
-    }
-    TargetResolution {
-        key,
-        workspace_wrapper: wrapper_path,
-        toolchain,
-        warnings,
-    }
-}
-
-/// Resolve the first build step's working directory in the slot snapshot,
-/// matching the path mapping used when the command itself is executed.
-fn target_probe_cwd(job: &Job, slot_repo: &Path) -> PathBuf {
-    let cwd_rel = job
-        .steps
-        .first()
-        .map(|step| step.cwd_rel.as_path())
-        .unwrap_or_else(|| Path::new(""));
-    let source_root = super::job_root(job);
-    let original = if cwd_rel.is_absolute() {
-        cwd_rel.to_path_buf()
-    } else {
-        source_root.join(cwd_rel)
-    };
-    super::rust::rewrite_argv(&[original.into_os_string()], source_root, slot_repo)
-        .into_iter()
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| slot_repo.join(cwd_rel))
-}
-
-#[cfg(unix)]
-fn workspace_wrapper(
-    paths: &SlotPaths,
-    context: &BuildContext,
-    checkout: &Path,
-) -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::symlink;
-
-    let env = std::env::split_paths(&context.host_path)
-        .map(|directory| directory.join("env"))
-        .find(|path| path.is_file())
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "env executable missing")
-        })?;
-    let directory = paths.root.join("workspace-wrappers");
-    fs::create_dir_all(&directory)?;
-    let wrapper = directory.join(super::rust::worktree_key(checkout));
-    let recreate = match fs::symlink_metadata(&wrapper) {
-        Ok(_) => fs::read_link(&wrapper).is_ok_and(|target| target != env),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-        Err(error) => return Err(error),
-    };
-    if recreate {
-        if fs::symlink_metadata(&wrapper).is_ok() {
-            fs::remove_file(&wrapper)?;
-        }
-        match symlink(&env, &wrapper) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(wrapper)
-}
-
-#[cfg(not(unix))]
-fn workspace_wrapper(
-    _paths: &SlotPaths,
-    _context: &BuildContext,
-    _checkout: &Path,
-) -> std::io::Result<PathBuf> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "per-worktree rustc wrapper is not supported on this platform",
-    ))
-}
-
 fn lane_port_plan(state: &Path) -> std::io::Result<Option<provenant_os::lane_ports::Plan>> {
     let settings = provenant_config::LaneBuildSettings::read(state)?;
     let blocks = settings.lane_port_blocks();
@@ -1739,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn target_directory_key_separates_toolchains_and_shares_worktree_dependencies() {
+    fn target_directory_key_distinguishes_toolchains() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = SlotPaths::new(&tmp.path().join("home"), "project", 0);
         let shared = paths.keyed_target(&[]);
@@ -1751,87 +1610,6 @@ mod tests {
         assert_eq!(first, other_worktree);
         assert_ne!(first, other_toolchain);
         assert!(!first.to_string_lossy().contains(".."));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn production_target_resolution_uses_cargo_selector_and_step_working_directory() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source");
-        let nested = source.join("nested");
-        let slot_repo = tmp.path().join("slot-repo");
-        let bin = tmp.path().join("bin");
-        fs::create_dir_all(&nested).unwrap();
-        fs::create_dir_all(slot_repo.join("nested")).unwrap();
-        fs::create_dir_all(&bin).unwrap();
-        let rustc = bin.join("rustc");
-        fs::write(
-            &rustc,
-            "#!/bin/sh\nprintf 'release: %s\\nhost: %s\\ncommit: fixture\\n' \"$RUSTUP_TOOLCHAIN\" \"${PWD##*/}\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&rustc, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let mut port = provenant_config::PortTable::builtin().build;
-        port.target = "toolchain".into();
-        let context = RunContext {
-            state: tmp.path().join("state"),
-            home: tmp.path().join("home"),
-            strategy: super::super::strategy(&port).value,
-            cancel: provenant_core::CancelToken::new(),
-        };
-        let job = Job {
-            id: "fixture".into(),
-            project_key: "project".into(),
-            project: source.clone(),
-            origin: super::super::Origin::Chair,
-            owner: "chair".into(),
-            kind: super::super::JobKind::Intercepted {
-                stack: super::super::Stack::Rust,
-                subcommand: "check".into(),
-            },
-            priority: super::super::Priority::Interactive,
-            source: super::super::SnapshotSource::WorkingTree {
-                worktree: source,
-                git: super::super::GitBinding {
-                    git: "git".into(),
-                    git_dir: tmp.path().join("git"),
-                    common_dir: tmp.path().join("common"),
-                    object_dir: None,
-                    index_file: tmp.path().join("index"),
-                    config_global: None,
-                },
-            },
-            verify_base: None,
-            steps: vec![super::super::Step {
-                cwd_rel: PathBuf::from("nested"),
-                argv: ["cargo", "+1.99.1", "check"]
-                    .map(std::ffi::OsString::from)
-                    .to_vec(),
-            }],
-            stop_on_failure: true,
-            env: vec![
-                ("PATH".into(), bin.as_os_str().into()),
-                ("RUSTUP_TOOLCHAIN".into(), "1.100.0".into()),
-            ],
-            output: super::super::Output::Capture { limit_bytes: 1024 },
-            timeout: None,
-            sandboxed: false,
-            prelude: None,
-        };
-        let paths = SlotPaths::new(&context.home, "project", 0);
-        let paths = SlotPaths {
-            repo: slot_repo,
-            ..paths
-        };
-
-        let resolved = resolve_target(&job, &context, &paths);
-        let toolchain = resolved.toolchain.unwrap();
-        assert_eq!(toolchain.release, "1.99.1");
-        assert_eq!(toolchain.host, "nested");
-        assert!(resolved.key.contains(&toolchain.key()));
     }
 
     #[test]
