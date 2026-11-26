@@ -2156,18 +2156,29 @@ fn installed_destination(targets: &provenant_config::Targets) -> PathBuf {
 
 /// `upgrade --verify` runs the same lifecycle as `run smoke`: a nonce fixture
 /// under the host's home, a child graph pinned to that fixture, and cleanup.
+/// The verdict-to-exit mapping lives here: a failed smoke is an error, while
+/// an unverified one is reported with a warning and exits zero until a knob
+/// makes that choice configurable.
 fn verify_smoke(
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
 ) -> Result<String, String> {
     let runner = runner_for_verify(targets)?;
-    crate::smoke::run_lifecycle(
+    let clock = provenant_os::clock::SystemClock::new();
+    let outcome = crate::smoke::run_lifecycle(
+        &clock,
         &runner,
         &installed_destination(targets),
         targets.roots.state.as_path(),
         &targets.home,
         args,
-    )
+    )?;
+    match &outcome.verdict {
+        crate::smoke::SmokeVerdict::Failed { .. } => Err(outcome.text()),
+        crate::smoke::SmokeVerdict::Passed | crate::smoke::SmokeVerdict::Unverified { .. } => {
+            Ok(outcome.text())
+        }
+    }
 }
 
 /// Re-exec the installed binary so its own verifier drives the smoke graph,

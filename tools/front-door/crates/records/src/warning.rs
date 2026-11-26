@@ -338,6 +338,8 @@ pub const READ_SOURCE_VALUE_RENAMED: WarningCode = WarningCode("READ_SOURCE_VALU
 /// The peer does not support the smoke fixture protocol.
 pub const SMOKE_PEER_FIXTURE_UNSUPPORTED: WarningCode =
     WarningCode("SMOKE_PEER_FIXTURE_UNSUPPORTED");
+/// A fixture directory has no ownership marker and was left in place by the sweep.
+pub const SMOKE_FIXTURE_FOREIGN: WarningCode = WarningCode("SMOKE_FIXTURE_FOREIGN");
 /// A pull request wait followed a new head.
 pub const PR_HEAD_FOLLOWED: WarningCode = WarningCode("PR_HEAD_FOLLOWED");
 /// A pull request wait has not yet pinned a head.

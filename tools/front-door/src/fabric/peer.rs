@@ -641,7 +641,7 @@ pub fn peer(
         // home-relative path is the only authority for the fixture location.
         let smoke_created = match &request.action {
             PeerAction::SmokeFixture {
-                op: SmokeFixtureOp::Create { nonce },
+                op: SmokeFixtureOp::Create { nonce, .. },
                 ..
             } => {
                 let expected = crate::smoke::fixture_root(&home).join(nonce).join(".git");
@@ -737,6 +737,7 @@ pub fn peer(
                                 extra: Default::default(),
                                 base: Some(commits.base),
                                 head: Some(commits.head),
+                                recipe: Some(crate::smoke::FIXTURE_RECIPE),
                                 reason: None,
                             },
                             extra: Default::default(),
@@ -750,6 +751,7 @@ pub fn peer(
                                     extra: Default::default(),
                                     base: None,
                                     head: None,
+                                    recipe: None,
                                     reason: Some("removed".into()),
                                 },
                                 extra: Default::default(),

@@ -692,19 +692,37 @@ fn smoke_lifecycle(
         route: request.route.clone(),
         set: request.set.clone(),
     };
+    let clock = provenant_os::clock::SystemClock::new();
     match crate::smoke::run_lifecycle(
+        &clock,
         &runner,
         &program,
         resolved.roots.state.as_path(),
         &resolved.home,
         &args,
     ) {
-        Ok(output) => crate::emit(
-            &CommandResult::new("run", Outcome::Ok, serde_json::json!({"smoke": output})),
-            globals,
-            "",
-            false,
-        ),
+        Ok(outcome) => match &outcome.verdict {
+            crate::smoke::SmokeVerdict::Passed | crate::smoke::SmokeVerdict::Unverified { .. } => {
+                let text = outcome.text();
+                crate::emit(
+                    &CommandResult::new("run", Outcome::Ok, serde_json::json!({"smoke": text})),
+                    globals,
+                    "",
+                    false,
+                )
+            }
+            crate::smoke::SmokeVerdict::Failed { .. } => {
+                let mut result =
+                    CommandResult::new("run", Outcome::Failed, serde_json::Value::Null);
+                result.error = Some(provenant_records::CommandError::new(
+                    "SMOKE_FAILED",
+                    &outcome.text(),
+                    None,
+                    "inspect the reported smoke failure, then rerun `provenant run smoke`",
+                ));
+                crate::emit(&result, globals, "", false)
+            }
+        },
         Err(error) => {
             let mut result = CommandResult::new("run", Outcome::Failed, serde_json::Value::Null);
             result.error = Some(provenant_records::CommandError::new(
