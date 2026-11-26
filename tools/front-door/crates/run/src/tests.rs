@@ -3216,10 +3216,7 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
             replayed.cancellation_disposition,
             record.cancellation_disposition
         );
-        assert_eq!(
-            replayed.terminal_basis,
-            Some(TerminalBasis::ProcessExit)
-        );
+        assert_eq!(replayed.terminal_basis, Some(TerminalBasis::ProcessExit));
     }
     Ok(())
 }
@@ -4202,5 +4199,68 @@ fn run_store_keeps_no_run_or_operation_tables() -> TestResult {
         );
     }
     assert!(names.iter().any(|name| name == "attempts"));
+    Ok(())
+}
+
+#[test]
+fn base_14_settlement_fields_migrate_once_without_extra_fields() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let record = store.record_refusal(
+        &input,
+        provenant_records::diagnostic::Diagnostic::new("REFUSED"),
+        None,
+        &call,
+    )?;
+    let mut value = serde_json::to_value(record)?;
+    value["state"]["terminal_cause"] = serde_json::json!("handoff_refused");
+    value["state"].as_object_mut().unwrap().remove("cause");
+    value["partial_signals"] = serde_json::json!(["handoff_missing"]);
+    value["terminal_evidence"] = serde_json::json!({"kind":"pre_launch_refusal"});
+    value["settlement_reason"] = serde_json::json!("pre_launch_refusal");
+    for key in ["signals", "terminal_basis", "settlement_class"] {
+        value.as_object_mut().unwrap().remove(key);
+    }
+    store
+        .db
+        .execute_batch("DROP TRIGGER immutable_terminal_update")?;
+    store.db.execute(
+        "UPDATE attempts SET record=?1 WHERE id=?2",
+        rusqlite::params![serde_json::to_vec(&value)?, input.attempt_id.to_string()],
+    )?;
+    store.db.pragma_update(None, "user_version", 14)?;
+    drop(store);
+    let migrated = RunStore::open(&context, &call)?;
+    let record = migrated.record(input.attempt_id, &call)?;
+    assert_eq!(
+        record.state.cause(),
+        Some(provenant_records::run::CauseKind::LaunchHandoffRefused)
+    );
+    for key in ["partial_signals", "terminal_evidence", "settlement_reason"] {
+        assert!(!record.extra.contains_key(key));
+    }
+    if let AttemptState::Terminal { extra, .. } = &record.state {
+        assert!(!extra.contains_key("terminal_cause"));
+    } else {
+        panic!("expected terminal state");
+    }
+    let bytes: Vec<u8> = migrated.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [input.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    drop(migrated);
+    let reopened = RunStore::open(&context, &call)?;
+    let again: Vec<u8> = reopened.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [input.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(bytes, again);
     Ok(())
 }
