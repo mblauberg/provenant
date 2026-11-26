@@ -2429,9 +2429,11 @@ fn no_work_restart_preserves_raw_handoff_and_the_stop() {
     assert!(owner.prompts[1].contains("Finish renderer"));
     assert!(owner.prompts[1].contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
     assert_eq!(run.checkpoint.nodes[0].previous_attempts.len(), 1);
+    // The handoff-driven DeclaredStop override is gone: the attempt keeps the
+    // projected StoppedNoWork, and next_step keys on that projected outcome.
     assert_eq!(
         run.checkpoint.nodes[0].previous_attempts[0].outcome,
-        Some(AttemptOutcome::DeclaredStop)
+        Some(AttemptOutcome::StoppedNoWork)
     );
     assert!(!next_step::pending(&run.checkpoint));
     let saved = journal.load(&document.graph_id).unwrap().unwrap();
