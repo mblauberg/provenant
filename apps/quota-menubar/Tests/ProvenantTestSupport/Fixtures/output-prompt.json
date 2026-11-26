@@ -6,6 +6,16 @@
       "data": "Implement the console overview screen.",
       "encoding": "utf8"
     },
+    "clipped": null,
+    "complete": null,
+    "digest": null,
+    "eof": true,
+    "length": null,
+    "next_offset": 38,
+    "offset": 0,
+    "part": "prompt",
+    "reason": null,
+    "settlement_reason": null,
     "state": "running"
   },
   "error": null,

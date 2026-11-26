@@ -25,12 +25,11 @@
           "host_session_id": "console-chair",
           "last_saved_at": "2026-11-02T01:58:26.511922Z",
           "project_id": "47e56ec3dd1b387241e80489127d81e9",
-          "schema_version": 1,
-          "summary": null
+          "schema_version": 1
         },
         "role": "chair",
-        "summary_line": "Console checkpoint",
-        "summary_source": "title"
+        "summary_line": null,
+        "summary_source": "unavailable"
       }
     ],
     "snapshot": "sha256:9b20d92ab3bb05518444148548bdfcce45638cbac982608e2e274fc8ce398f1f",

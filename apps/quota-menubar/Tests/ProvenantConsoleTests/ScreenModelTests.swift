@@ -456,7 +456,7 @@ final class ScreenModelTests: XCTestCase {
         XCTAssertFalse(Stamp.relative("2026-11-02T02:18:00Z", now: clock).contains("in "))
     }
 
-    func testChairRowShowsTheDerivedLineWhenThereIsNoStructuredSummary() async throws {
+    func testChairRowShowsSavedContextWhenThereIsNoDerivedLine() async throws {
         let replies: [Replay.Reply] = [(["console", "sessions"], "console-sessions-without-summary", 0),
                                        (["console", "projects"], "console-projects", 0)]
         let (console, _) = client(replies)
@@ -466,14 +466,14 @@ final class ScreenModelTests: XCTestCase {
         let project = chairs.reader.value?.projectName(session.record.projectId)
         let now = try XCTUnwrap(Stamp.parse("2026-11-22T09:00:00Z"))
         XCTAssertNil(session.record.summary)
-        XCTAssertEqual(session.summaryLine, "Console checkpoint")
-        XCTAssertEqual(session.summarySource, "title")
-        XCTAssertEqual(ChairsModel.title(session, project: project, now: now), "Console checkpoint")
-        // The derived line does not carry the row context, so the detail line must still show it.
-        let detail = ChairsModel.detailLine(session, project: project, now: now)
-        XCTAssertTrue(detail.contains("project"), detail)
-        XCTAssertTrue(detail.contains("saved"), detail)
-        XCTAssertFalse(detail.contains("Console checkpoint"), detail)
+        XCTAssertNil(session.summaryLine)
+        XCTAssertEqual(session.summarySource, "unavailable")
+        // An untouched checkpoint template has no derived line, so the title
+        // carries project, session and save time instead.
+        let title = ChairsModel.title(session, project: project, now: now)
+        XCTAssertTrue(title.contains("project"), title)
+        XCTAssertTrue(title.contains("saved"), title)
+        XCTAssertFalse(title.contains("Console checkpoint"), title)
     }
 
     func testChairRowPrefersTheSummaryWhenPresent() async throws {

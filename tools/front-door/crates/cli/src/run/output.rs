@@ -1064,21 +1064,25 @@ fn output_read_part(
     {
         text = format!("{reason}\n");
     }
-    let mut data = json!({
-            "attempt_id": id,
-            "state": state,
-            "reason": reason,
-            "settlement_reason": record.settlement_reason,
-            "part": format!("{:?}", command.part).to_lowercase(),
-            "offset": chunk.offset,
-            "next_offset": chunk.next_offset,
-            "length": chunk.len,
-            "eof": chunk.eof,
-            "clipped": chunk.clipped,
-            "complete": chunk.complete,
-            "digest": chunk.digest,
-            "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes),
-    });
+    let part = format!("{:?}", command.part).to_lowercase();
+    let id_text = id.to_string();
+    let mut data = crate::console::projection::output(
+        &id_text,
+        &state,
+        &json!(reason),
+        &json!(record.settlement_reason),
+        &part,
+        chunk.offset,
+        chunk.next_offset,
+        Some(chunk.len),
+        chunk.eof,
+        Some(chunk.clipped),
+        Some(chunk.complete),
+        &json!(chunk.digest),
+        &json!(
+            provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes)
+        ),
+    );
     if let Some(usage) = budget_usage(&record) {
         data["budget_usage"] = usage;
     }

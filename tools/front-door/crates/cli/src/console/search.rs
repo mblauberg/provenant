@@ -182,9 +182,20 @@ pub(super) fn read(
     } else {
         None
     };
-    Ok(
-        json!({"schema_version":1,"snapshot":snapshot,"query":query,"part":part,"matches":&matches[offset..end],"next_cursor":next_cursor,"truncated":truncated || end < matches.len(),"coverage":{"scope":"local","peers":"not_searched","files_scanned":scanned,"bytes_scanned":scan_bytes,"file_limit":FILE_LIMIT,"per_artifact_bytes":ARTIFACT_BYTES,"total_bytes":TOTAL_BYTES,"artifact_errors":artifact_errors,"restart":"If the cursor is invalid or stale, restart with the same query and filters without --cursor."}}),
-    )
+    Ok(super::projection::search(
+        &snapshot,
+        query,
+        part,
+        &matches[offset..end],
+        next_cursor.as_deref(),
+        truncated || end < matches.len(),
+        scanned,
+        scan_bytes,
+        &artifact_errors,
+        FILE_LIMIT,
+        ARTIFACT_BYTES,
+        TOTAL_BYTES,
+    ))
 }
 
 #[cfg(test)]

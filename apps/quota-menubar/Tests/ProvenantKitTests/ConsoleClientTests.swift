@@ -109,9 +109,9 @@ final class ConsoleClientTests: XCTestCase {
         let (bare, _) = client([(["console", "sessions"], "console-sessions-without-summary", 0)])
         let derived = try await bare.sessions().sessions
         XCTAssertFalse(derived.isEmpty)
-        XCTAssertTrue(derived.allSatisfy { $0.summaryLine == "Console checkpoint" })
+        XCTAssertTrue(derived.allSatisfy { $0.summaryLine == nil })
         XCTAssertNil(derived.first?.record.summary)
-        XCTAssertTrue(derived.allSatisfy { $0.summarySource == "title" })
+        XCTAssertTrue(derived.allSatisfy { $0.summarySource == "unavailable" })
     }
 
     /// Older CLIs send `summary` with no display-line fields, either as the structured object

@@ -17,6 +17,7 @@
       "nested": "bounded_tree_search",
       "peer": "not_searched"
     },
+    "delivery": null,
     "lane_id": {
       "attempt_id": "65656565656565656565656565656565",
       "host": null,

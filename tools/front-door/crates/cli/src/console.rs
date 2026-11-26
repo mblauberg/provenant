@@ -3,7 +3,7 @@ use crate::metadata::CatalogueArg;
 use clap::Subcommand;
 use provenant_core::{ProjectId, Roots};
 use provenant_records::CanonicalV1;
-use provenant_workflow::session::{HostSessionId, SummarySource, discover_sessions_bounded};
+use provenant_workflow::session::{HostSessionId, discover_sessions_bounded};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
@@ -14,6 +14,7 @@ mod detail_inbox;
 mod overview;
 pub mod peer;
 pub mod peer_inbox;
+pub mod projection;
 mod search;
 mod tree;
 pub mod tree_peer;
@@ -267,19 +268,7 @@ fn read_with_budget(
                 Ok(value)
             })
             .transpose()?;
-        let mut changed = serde_json::Map::new();
-        for name in ["inbox", "board", "runs", "chair", "quota", "configuration"] {
-            let now = current[name].as_u64();
-            let before = previous.as_ref().and_then(|value| value[name].as_u64());
-            let same_epoch = current["epoch"].as_u64().is_some()
-                && current["epoch"] == *previous.as_ref().map_or(&Value::Null, |v| &v["epoch"]);
-            let comparison = match (now, before) {
-                (Some(now), Some(before)) if same_epoch && now >= before => json!(now > before),
-                _ => Value::Null,
-            };
-            changed.insert(name.to_owned(), comparison);
-        }
-        return Ok(json!({"schema_version":2,"generations": current, "changed": changed}));
+        return Ok(projection::changes(&current, previous.as_ref()));
     }
     if let Console::Board {
         all, limit, cursor, ..
@@ -329,11 +318,7 @@ fn read_with_budget(
         Console::Open => unreachable!("open is handled at the process edge"),
         Console::Detail { .. } | Console::Search { .. } => unreachable!("read handled above"),
         Console::Overview => return overview::read(roots, &projects),
-        Console::Projects => {
-            return Ok(
-                json!({"schema_version":2,"projects":projects, "coverage":{"scope":"local"}}),
-            );
-        }
+        Console::Projects => return Ok(projection::projects(&projects)),
         Console::Sessions {
             session,
             limit,
@@ -359,19 +344,19 @@ fn read_with_budget(
                     .summary
                     .as_ref()
                     .filter(|summary| !summary.now.trim().is_empty())
-                    .map(|summary| summary.now.clone());
-                let (summary_line, summary_source) = match structured {
-                    Some(now) => (json!(now), SummarySource::Structured),
-                    None => match found.summary_line {
-                        Some(line) => (json!(line.text), line.source),
-                        None => (Value::Null, SummarySource::Unavailable),
-                    },
-                };
-                sessions.push(
-                    json!({"record":found.record, "consistency":found.consistency,
-                    "role":"chair", "evidence":"checkpoint_save", "summary_line":summary_line,
-                    "summary_source":summary_source}),
-                );
+                    .map(|summary| summary.now.as_str());
+                let (summary_line, summary_source) =
+                    projection::session_line(structured, found.summary_line);
+                let record = serde_json::to_value(&found.record).map_err(|_| Error::Encode)?;
+                let consistency =
+                    serde_json::to_value(&found.consistency).map_err(|_| Error::Encode)?;
+                let source = serde_json::to_value(summary_source).map_err(|_| Error::Encode)?;
+                sessions.push(projection::session_row(
+                    &record,
+                    &consistency,
+                    &summary_line,
+                    &source,
+                ));
             }
         }
         if page.truncated {
@@ -401,11 +386,13 @@ fn read_with_budget(
     };
     let end = offset.saturating_add(*limit as usize).min(sessions.len());
     let next_cursor = (end < sessions.len()).then(|| format!("{snapshot}:{end}"));
-    Ok(
-        json!({"schema_version":2,"snapshot":snapshot, "sessions":&sessions[offset..end], "next_cursor":next_cursor,
-        "truncated":scan_truncated || end < sessions.len(), "scan_truncated":scan_truncated,
-        "coverage":{"scope":"local"}}),
-    )
+    Ok(projection::sessions(
+        &sessions[offset..end],
+        &snapshot,
+        next_cursor.as_deref(),
+        scan_truncated || end < sessions.len(),
+        scan_truncated,
+    ))
 }
 
 #[cfg(test)]

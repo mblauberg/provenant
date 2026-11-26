@@ -66,11 +66,13 @@ fn console_catalogues_use_registered_labels_and_saved_summaries() -> Result {
         ],
     )?;
     let derived = cli(&rig, &["console", "sessions"])?;
+    // An untouched checkpoint template has no author-supplied title, so the
+    // derived line is unavailable rather than the template's H1.
+    assert!(derived["data"]["sessions"][0]["summary_line"].is_null());
     assert_eq!(
-        derived["data"]["sessions"][0]["summary_line"],
-        "Console checkpoint"
+        derived["data"]["sessions"][0]["summary_source"],
+        "unavailable"
     );
-    assert_eq!(derived["data"]["sessions"][0]["summary_source"], "title");
     assert!(derived["data"]["sessions"][0].get("summary").is_none());
     fixture(&rig, "sessions-without-summary", &derived)?;
     let patch = rig.root.join("summary.json");

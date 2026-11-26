@@ -6,6 +6,16 @@
       "data": "The overview now joins the inbox so every needs-you row carries its kind and blocking flag.\n\nCoverage warnings show above the tiles.",
       "encoding": "utf8"
     },
+    "clipped": null,
+    "complete": null,
+    "digest": null,
+    "eof": true,
+    "length": null,
+    "next_offset": 132,
+    "offset": 0,
+    "part": "result",
+    "reason": null,
+    "settlement_reason": null,
     "state": "running"
   },
   "error": null,

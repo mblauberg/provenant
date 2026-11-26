@@ -2,7 +2,15 @@
   "command": "console search",
   "data": {
     "coverage": {
-      "scope": "local"
+      "artifact_errors": [],
+      "bytes_scanned": 0,
+      "file_limit": 1000,
+      "files_scanned": 0,
+      "peers": "not_searched",
+      "per_artifact_bytes": 65536,
+      "restart": "If the cursor is invalid or stale, restart with the same query and filters without --cursor.",
+      "scope": "local",
+      "total_bytes": 8388608
     },
     "matches": [
       {

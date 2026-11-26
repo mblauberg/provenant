@@ -228,14 +228,28 @@ pub(super) fn read(
                 "observation_coverage":if observed.contains(&attempt.attempt_id) { "complete" } else { "unavailable" }}));
         }
     }
-    Ok(
-        json!({"schema_version":3,"snapshot":snapshot,"high_water":high_water,"generation":generation,
-        "observed_at":clock.wall_now().map_err(|_| Error::Encode)?,"filters":filters,
-        "lanes":lanes,"next_cursor":next,"truncated":next.is_some(),
-        "coverage":{"scope":"local","host":host,"runs":if store.is_some() { "complete" } else { "empty" },"chairs":chair_coverage,
-            "observations":if observed.len() == lanes.len() { "complete" } else if observed.is_empty() { "unavailable" } else { "partial" },
-            "nested_runs":"unavailable"}}),
-    )
+    let observed_at = serde_json::to_value(clock.wall_now().map_err(|_| Error::Encode)?)
+        .map_err(|_| Error::Encode)?;
+    let observations = if observed.len() == lanes.len() {
+        "complete"
+    } else if observed.is_empty() {
+        "unavailable"
+    } else {
+        "partial"
+    };
+    Ok(super::projection::board(
+        &snapshot,
+        high_water,
+        &generation,
+        &observed_at,
+        &filters,
+        &lanes,
+        next.as_deref(),
+        &serde_json::to_value(host).map_err(|_| Error::Encode)?,
+        if store.is_some() { "complete" } else { "empty" },
+        chair_coverage,
+        observations,
+    ))
 }
 
 #[cfg(test)]

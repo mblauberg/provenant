@@ -8,7 +8,7 @@
     },
     "coverage": {
       "inbox": "complete",
-      "nested_runs": "partial",
+      "nested_runs": "unavailable",
       "runs": "complete",
       "scope": "local"
     },

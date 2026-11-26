@@ -226,13 +226,29 @@ pub(super) fn read_inner(
                 .remove("metadata");
         }
     }
-    let totals: BTreeMap<_, _> = totals
+    let usage: BTreeMap<_, _> = totals
         .into_iter()
         .map(|(key, (known, missing))| (key, json!({"known_sum":known,"missing":missing})))
         .collect();
-    Ok(
-        json!({"schema_version":1,"nodes":nodes,"edges":edges,"totals":{"attempts":seen.len(),"duplicate_observations":duplicate_count,"usage":totals},"identity_conflicts":conflicts,"truncated":truncated,"children_absent":children_absent,"unfetched_children":unfetched,"coverage":{"scope":"local","host":host,"runs":root_coverage,"nested_runs":if partial { "partial" } else { "complete" }},"limits":{"depth":max_depth,"nodes":max_nodes}}),
-    )
+    let totals = json!({
+        "attempts": seen.len(),
+        "duplicate_observations": duplicate_count,
+        "usage": usage,
+    });
+    Ok(super::projection::tree(
+        &nodes,
+        &edges,
+        &totals,
+        &conflicts,
+        truncated,
+        children_absent,
+        &unfetched,
+        &serde_json::to_value(host).map_err(|_| Error::Encode)?,
+        root_coverage,
+        partial,
+        max_depth,
+        max_nodes,
+    ))
 }
 
 /// Select descendants across dispatch and continuation edges from a bounded snapshot.
