@@ -195,7 +195,13 @@ own state, so an older settlement cannot satisfy a wait for new work.
 Local graph waiters share one filesystem event source; when it is unavailable
 the result says why and rereads at `domains.wait.local_interval_ms`. Peer and
 relayed rows use the same paced reread because the relay has no remote
-subscription. Every blocking forge operation inside a wait shares one request
+subscription. An unreachable home endpoint is one pending observation, not a
+failed wait: a graph wait keeps rereading remote attempts until its budget ends
+or a later reading succeeds. A successful reading clears the earlier failure;
+when the budget ends still pending, the wait names the last failed reading
+rather than the first one held when it began. A successful reading of a finished
+remote lane also clears the transport error held from an earlier failed advance,
+so status shows the lane's settled state. Every blocking forge operation inside a wait shares one request
 context (the wait's absolute deadline, capped per read by
 `domains.wait.pr_read_timeout_seconds`, and its cancellation), and a wait that
 settles cancels the forge transport of its other targets. Wait event lines,

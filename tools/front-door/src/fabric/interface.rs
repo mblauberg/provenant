@@ -220,6 +220,10 @@ pub(super) fn graph_wait_needs_refresh(
 struct GraphObservationHistory {
     remote_source_seen: bool,
     reader_woken: bool,
+    /// The most recent failed remote reading. A later success clears it, so a
+    /// wait that ends on its budget names the last failure rather than the
+    /// first one it saw.
+    last_remote_error: Option<FacadeError>,
 }
 impl GraphObservationHistory {
     fn record(
@@ -231,6 +235,12 @@ impl GraphObservationHistory {
         let remote_pending = graph_run_has_remote_pending(run, local_host, target);
         self.remote_source_seen |= remote_pending;
         remote_pending
+    }
+
+    /// An unreachable home endpoint is a pending observation, not a failed
+    /// wait: keep reading and keep only the newest error.
+    fn record_remote(&mut self, result: Result<(), FacadeError>) {
+        self.last_remote_error = result.err();
     }
 
     fn report(&self, observation: &crate::status_wait::LocalObservation) -> String {
@@ -300,7 +310,7 @@ fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
         run = observe(&run)?;
         remote_pending = history.record(&run, local_host, remote_target);
         if remote_pending {
-            observe_remote(&run)?;
+            history.record_remote(observe_remote(&run));
         }
         remote_deadline = next_remote_deadline(
             remote_deadline,
@@ -326,7 +336,7 @@ fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
                 remote_pending = history.record(&run, local_host, remote_target);
             }
             if remote_due && remote_pending {
-                observe_remote(&run)?;
+                history.record_remote(observe_remote(&run));
             }
             remote_deadline = next_remote_deadline(
                 remote_deadline,
@@ -373,7 +383,7 @@ fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
             remote_pending = history.record(&run, local_host, remote_target);
         }
         if remote_due && remote_pending {
-            observe_remote(&run)?;
+            history.record_remote(observe_remote(&run));
         }
         remote_deadline = next_remote_deadline(
             remote_deadline,
@@ -382,6 +392,17 @@ fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
             clock.mono_now().as_micros(),
             interval_micros(interval),
         );
+    }
+    // The wait kept reading through remote failures. If it ended still
+    // pending, name the last failed reading on the returned run so the final
+    // status line reports that failure instead of the first one held at the
+    // start. A settled or cancelled wait has no pending failure to name.
+    if active(&run) {
+        if let Some(error) = history.last_remote_error.take() {
+            run.advance_error = Some(error.to_string());
+        }
+    } else {
+        history.last_remote_error = None;
     }
     Ok((run, history))
 }
@@ -3615,7 +3636,31 @@ impl Factory {
             &self.clock,
             cancel,
             budget,
-        )
+        )?;
+        // A successful reading of a finished lane supersedes the transport
+        // failure held while its home endpoint was unreachable. Keep the error
+        // while any node or remote attempt is still unfinished.
+        if run.checkpoint.nodes.iter().all(|node| node.state.settled())
+            && rows
+                .iter()
+                .all(|row| row["kind"] != "attempt" || row["state"] == "terminal")
+            && FileJournal::read_advance_error(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &run.checkpoint.graph_id,
+            )
+            .map_err(|_| FacadeError::io("access graph journal"))?
+            .is_some()
+        {
+            FileJournal::set_advance_error(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &run.checkpoint.graph_id,
+                None,
+            )
+            .map_err(|_| FacadeError::io("access graph journal"))?;
+        }
+        Ok(())
     }
 
     fn wait_cadence(&self) -> Result<provenant_cli::wait::LocalCadence, FacadeError> {
