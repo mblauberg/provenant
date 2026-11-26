@@ -4872,7 +4872,9 @@ impl RunStore {
             let mut grace_report = ProviderStateGc::default();
             self.collect_grace_scratch(
                 &id.to_string(),
-                call.clock.wall_now()?,
+                call.clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?,
                 false,
                 &policy,
                 call,

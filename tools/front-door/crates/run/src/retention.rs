@@ -997,7 +997,7 @@ impl RunStore {
         let newest_ns = attempt.as_ref().map_or(newest_ns, |run| {
             let marker_names = [
                 OsStr::new("writer-objects.json"),
-                AttemptFile::Release.name(),
+                OsStr::new(AttemptFile::Release.name()),
             ];
             let newest = marker_names.into_iter().fold(newest_ns, |newest, name| {
                 run.metadata_at(name, false)

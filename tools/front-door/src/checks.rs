@@ -386,7 +386,9 @@ fn warn_on_attempt_scratch(roots: &provenant_core::Roots) {
         Duration::from_millis(500),
     )
     .with_cancellation(CancelToken::new());
-    census.measure("attempt_scratch", &scratch);
+    // The whole census is summed below, so the measured entry's index is not
+    // needed; discard the `#[must_use]` observation explicitly.
+    let _ = census.measure("attempt_scratch", &scratch);
     let bytes = census.entries.iter().fold(0_u64, |sum, entry| {
         sum.saturating_add(entry.allocated_bytes)
     });
