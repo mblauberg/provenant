@@ -9,8 +9,9 @@ use provenant_os::fs::{Directory, FsError, LockGuard, LockMode};
 use provenant_records::{
     CanonicalV1,
     declaration::{
-        DECLARATION_JOURNAL_BYTES, DECLARATION_SCHEMA, DeclarationCounts, DeclarationError,
-        DeclarationEvidence, DeclarationInput, DeclarationReceipt, JournalLine, SealedDeclaration,
+        DECLARATION_SCHEMA, DeclarationCounts, DeclarationError, DeclarationEvidence,
+        DeclarationInput, DeclarationLimit, DeclarationReceipt, JournalLine,
+        MAX_DECLARATION_JOURNAL_BYTES, SealedDeclaration,
     },
     handoff::{Handoff, HandoffError},
 };
@@ -55,6 +56,9 @@ impl JournalState {
                                 sequence: sealed.sequence,
                                 request_id: sealed.request_id.clone(),
                                 digest: sealed.digest,
+                                // A replay refreshes this from the live journal
+                                // size; only the original call seals it.
+                                remaining_bytes: 0,
                             }),
                         ),
                     );
@@ -121,7 +125,7 @@ fn try_declaration_lock(attempt: &Directory) -> provenant_os::fs::Result<LockGua
 }
 
 fn read_lines(attempt: &Directory) -> Result<Vec<JournalLine>> {
-    let bytes = match attempt.read_bounded(OsStr::new(JOURNAL), DECLARATION_JOURNAL_BYTES) {
+    let bytes = match attempt.read_bounded(OsStr::new(JOURNAL), MAX_DECLARATION_JOURNAL_BYTES) {
         Ok(bytes) => bytes,
         Err(error) if error.is_not_found() => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
@@ -142,14 +146,29 @@ fn encoded_line(line: &JournalLine) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn append_line(attempt: &Directory, line: &JournalLine, used: u64) -> Result<()> {
+/// Append one already-admitted line. The caller owns the configurable bound
+/// check; the host's own `Closed` line is always small enough to append.
+fn append_line(attempt: &Directory, line: &JournalLine) -> Result<()> {
     let bytes = encoded_line(line)?;
-    if used.saturating_add(bytes.len() as u64) > DECLARATION_JOURNAL_BYTES {
-        return Err(RunError::Validation("declaration journal is full"));
-    }
     let mut file = attempt.open_append(OsStr::new(JOURNAL))?;
     file.write_all(&bytes)?;
     file.sync()?;
+    Ok(())
+}
+
+/// Refuse an append that would pass the configured bound, naming the setting
+/// and its source in the error so the lane can fix it in turn.
+fn admit(
+    bytes: &[u8],
+    used: u64,
+    limit: &DeclarationLimit,
+) -> std::result::Result<(), DeclarationError> {
+    if used.saturating_add(bytes.len() as u64) > limit.journal_bytes {
+        return Err(DeclarationError::Full {
+            key: limit.key.clone(),
+            source: limit.source.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -164,6 +183,7 @@ impl RunStore {
         &self,
         attempt: AttemptId,
         input: &DeclarationInput,
+        limit: &DeclarationLimit,
     ) -> std::result::Result<DeclarationReceipt, DeclarationError> {
         let dir = self.attempt_dir(attempt, false).map_err(io)?;
         let _lock = try_declaration_lock(&dir).map_err(io)?;
@@ -179,7 +199,11 @@ impl RunStore {
                 return Err(DeclarationError::Conflict);
             }
             return match original {
-                Original::Accepted(receipt) => Ok(receipt.clone()),
+                Original::Accepted(receipt) => {
+                    let mut receipt = receipt.clone();
+                    receipt.remaining_bytes = limit.journal_bytes.saturating_sub(lines_bytes(&dir));
+                    Ok(receipt)
+                }
                 Original::Rejected(error) => Err(DeclarationError::Invalid(error.clone())),
             };
         }
@@ -195,11 +219,8 @@ impl RunStore {
                     error: error.clone(),
                 };
                 let bytes = encoded_line(&line).map_err(io)?;
-                if lines_bytes(&dir).saturating_add(bytes.len() as u64) > DECLARATION_JOURNAL_BYTES
-                {
-                    return Err(DeclarationError::Full);
-                }
-                append_line(&dir, &line, lines_bytes(&dir)).map_err(io)?;
+                admit(&bytes, lines_bytes(&dir), limit)?;
+                append_line(&dir, &line).map_err(io)?;
                 return Err(DeclarationError::Invalid(error));
             }
         };
@@ -211,14 +232,13 @@ impl RunStore {
             handoff,
         });
         let bytes = encoded_line(&line).map_err(io)?;
-        if lines_bytes(&dir).saturating_add(bytes.len() as u64) > DECLARATION_JOURNAL_BYTES {
-            return Err(DeclarationError::Full);
-        }
-        append_line(&dir, &line, lines_bytes(&dir)).map_err(io)?;
+        admit(&bytes, lines_bytes(&dir), limit)?;
+        append_line(&dir, &line).map_err(io)?;
         Ok(DeclarationReceipt {
             sequence,
             request_id: input.request_id.clone(),
             digest,
+            remaining_bytes: limit.journal_bytes.saturating_sub(lines_bytes(&dir)),
         })
     }
 
@@ -233,7 +253,7 @@ impl RunStore {
         let lines = read_lines(attempt)?;
         let state = JournalState::from_lines(&lines);
         if !state.closed {
-            append_line(attempt, &JournalLine::Closed, lines_bytes(attempt))?;
+            append_line(attempt, &JournalLine::Closed)?;
         }
         Ok((state.evidence(), JournalState::counts(&lines)))
     }
@@ -296,12 +316,14 @@ mod tests {
             &call,
         )?;
         let dir = store.attempt_dir(attempt, false)?;
+        let limit = DeclarationLimit::shipped();
         store.declare(
             attempt,
             &DeclarationInput {
                 request_id: "first".into(),
                 payload: payload(),
             },
+            &limit,
         )?;
         // A later rejected line never displaces an accepted one.
         assert!(matches!(
@@ -311,6 +333,7 @@ mod tests {
                     request_id: "second".into(),
                     payload: json!({"schema_version":1,"status":"done"}),
                 },
+                &limit,
             ),
             Err(DeclarationError::Invalid(_))
         ));
@@ -332,6 +355,7 @@ mod tests {
                     request_id: "third".into(),
                     payload: payload(),
                 },
+                &limit,
             ),
             Err(DeclarationError::Closed)
         ));

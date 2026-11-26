@@ -388,6 +388,9 @@ pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIAL
 /// A route model is a full `ADAPTER/ID` that the effective catalogue does not
 /// know. The declared spelling is preserved; the warning names it.
 pub const ROUTE_MODEL_NOT_CATALOGUED: WarningCode = WarningCode("ROUTE_MODEL_NOT_CATALOGUED");
+/// A declaration succeeded but its journal is nearly full. The claim still
+/// succeeds; the named setting is the one to raise.
+pub const HANDOFF_JOURNAL_NEAR_FULL: WarningCode = WarningCode("HANDOFF_JOURNAL_NEAR_FULL");
 
 impl Warning {
     /// A warning with no subject, source or repair.

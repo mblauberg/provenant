@@ -1449,3 +1449,12 @@ strength = "warn"
 refusable = false
 knob = "policy.SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS"
 justification = "A crash re-drive that assembles different settlement evidence keeps the sealed copy and warns; the sealed copy always wins and a refusal would strand custody on an attempt whose decision was already sealed."
+
+[[rule]]
+code = "HANDOFF_JOURNAL_NEAR_FULL"
+site = "cli/src/declaration.rs#run"
+boundary = "none"
+strength = "warn"
+refusable = false
+knob = "policy.HANDOFF_JOURNAL_NEAR_FULL"
+justification = "A declaration below 10% of its journal bound still succeeds and warns; the declaration is the sealed record, so a refusal would drop the lane's result. Off silences the warning without changing the bound."

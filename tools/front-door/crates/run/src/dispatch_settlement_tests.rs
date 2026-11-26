@@ -1111,6 +1111,7 @@ fn graph_readers_get_the_sealed_handoff_not_a_rereading_of_the_text() -> TestRes
             request_id: "graph-reader".into(),
             payload: declared,
         },
+        &provenant_records::declaration::DeclarationLimit::shipped(),
     )?;
     let answer =
         format!("Done: parser.\n\n{STOPPED_EARLY}\nThe wait was redundant; nothing changed.");

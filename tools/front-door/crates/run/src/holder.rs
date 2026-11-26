@@ -4502,6 +4502,7 @@ mod budget_result_tests {
                 request_id: "budget-done".into(),
                 payload: done,
             },
+            &provenant_records::declaration::DeclarationLimit::shipped(),
         )?;
         if let Some(answer) = answer {
             crate::artifacts::seal(&attempt, "stdout.log", answer.as_bytes(), CAPTURE_LIMIT)?;
@@ -4610,6 +4611,7 @@ mod budget_result_tests {
                 request_id: "declared-done".into(),
                 payload: done,
             },
+            &provenant_records::declaration::DeclarationLimit::shipped(),
         )?;
         let answer = "Commit pushed. Now updating the PR body ...\n".to_owned();
         let mut observed = exit();
@@ -4697,6 +4699,7 @@ mod budget_result_tests {
                 request_id: "provider-snapshot".into(),
                 payload: declared,
             },
+            &provenant_records::declaration::DeclarationLimit::shipped(),
         )?;
         let answer = "the lane finished its work";
         let mut observed = crate::tests::exit();
@@ -5203,6 +5206,7 @@ mod settlement_5a_tests {
                 request_id: format!("5a-{status}"),
                 payload,
             },
+            &provenant_records::declaration::DeclarationLimit::shipped(),
         )?;
         Ok(())
     }
