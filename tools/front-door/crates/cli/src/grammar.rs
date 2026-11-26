@@ -1410,8 +1410,11 @@ pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str>
 #[derive(Clone, Debug, Args)]
 pub struct Status {
     /// Active custody of this chair and unattended items, across projects unless --project is set
-    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all"])]
+    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all", "adoptable"])]
     pub mine: bool,
+    /// Unattended custody open to adoption, across projects unless --project is set
+    #[arg(long, conflicts_with_all = ["mine", "targets", "session_stream", "all"])]
+    pub adoptable: bool,
     /// Exact chair session for the custody view (used by the session-start digest)
     #[arg(long = "session", requires = "mine")]
     pub custody_session: Option<String>,

@@ -13,7 +13,7 @@ use provenant_records::{
     inbox::*,
     warning::{Warning, warn},
 };
-use provenant_workflow::session::{CommandPrefix, HookEvent, HostSessionId};
+use provenant_workflow::session::{CommandPrefix, DigestScope, HookEvent, HostSessionId};
 use serde::Deserialize;
 use std::{
     path::{Path, PathBuf},
@@ -985,6 +985,7 @@ fn checkpoint(
 ) -> Result<provenant_workflow::session::HookContext, Error> {
     use provenant_workflow::session;
     let (roots, home, project) = project_id(globals, cwd)?;
+    let (scope, scope_source) = digest_scope(&roots);
     let input = serde_json::to_vec(host)?;
     let store = session::SessionStore::new(
         roots.state.clone(),
@@ -1006,6 +1007,9 @@ fn checkpoint(
                     .as_ref()
                     .map_or(wall - NO_CHECKPOINT_WINDOW, |b| b.chair_saved_unix),
                 session: Some(host.session_id.clone()),
+                project: Some(project.to_string()),
+                scope,
+                scope_source: scope_source.clone(),
             };
             let state = crate::hook_state::collect(globals, cwd, &want, deadline);
             digest = state.digest(session::DIGEST_LIMIT);
@@ -1037,6 +1041,9 @@ fn checkpoint(
                     wall,
                     &clock,
                     deadline,
+                    scope,
+                    scope_source.clone(),
+                    project.to_string(),
                 ) {
                     Ok(note) => diagnostic(&note),
                     Err(error) => diagnostic(&format!(
@@ -1140,6 +1147,9 @@ fn autosave(
     wall: i64,
     clock: &SystemClock,
     deadline: Instant,
+    scope: DigestScope,
+    scope_source: Option<String>,
+    project: String,
 ) -> Result<String, Error> {
     use provenant_workflow::session;
     let baseline = current.map(session::baseline);
@@ -1147,6 +1157,9 @@ fn autosave(
         worktrees: true,
         settled_after_unix: baseline.as_ref().map_or(wall, |b| b.chair_saved_unix),
         session: Some(session_id.to_owned()),
+        project: Some(project),
+        scope,
+        scope_source,
     };
     let state = crate::hook_state::collect(globals, cwd, &want, deadline);
     let stamp = String::from(clock.wall_now()?);
@@ -1206,6 +1219,35 @@ pub(crate) fn with_git<T>(
     let _ = anchor.rmdir(&name);
     result
 }
+/// The session digest's custody scope, with the layer that set it. The default
+/// keeps another project's work out of the chair's context; an unreadable
+/// config falls back to it and says so once.
+fn digest_scope(roots: &provenant_core::Roots) -> (DigestScope, Option<String>) {
+    match provenant_cli::config_reads::show_for(roots, "hook") {
+        Ok(read) => match read.knobs.get("session.digest.scope") {
+            Some(knob) => {
+                let scope = if knob.value.as_str() == Some("all") {
+                    DigestScope::All
+                } else {
+                    DigestScope::Project
+                };
+                (scope, Some(knob.source.layer.description().to_owned()))
+            }
+            None => (DigestScope::Project, None),
+        },
+        Err(error) => {
+            warn(
+                Warning::new(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                    format!("session digest: scope setting unavailable ({error}); using project"),
+                )
+                .once_per_change(),
+            );
+            (DigestScope::Project, None)
+        }
+    }
+}
+
 /// Unreadable config keeps the warn defaults and reports the fallback. The
 /// pre-push check is advisory except for the default-branch owner gate and a
 /// configured refuse.
