@@ -166,7 +166,7 @@ fn admit(
     if used.saturating_add(bytes.len() as u64) > limit.journal_bytes {
         return Err(DeclarationError::Full {
             key: limit.key.clone(),
-            source: limit.source.clone(),
+            setting_source: limit.source.clone(),
         });
     }
     Ok(())

@@ -2206,7 +2206,7 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     let lane = run_graph_provider(&rig, "fixture-claude", node)?;
     if !cfg!(target_os = "macos") {
         assert_eq!(lane["state"], "rejected", "{lane}");
-        assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+        assert_eq!(lane["settlement_class"], "pre_launch_refusal", "{lane}");
         assert_eq!(lane["cause"], "unsupported_platform", "{lane}");
         assert!(lane["started_at"].is_null(), "{lane}");
         assert!(lane["applied_route"].is_null(), "{lane}");
@@ -4478,7 +4478,7 @@ fn agy_denial_keeps_raw_step_out_of_terminal_diagnostics() -> Result {
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let lane = &lanes["data"]["rows"][0];
     assert_eq!(lane["state"], "permission_denied");
-    assert_eq!(lane["cause"], "failed");
+    assert_eq!(lane["settlement_class"], "failed");
     for diagnostic in [&lane["reason"], &lane["settlement"]["reason"]] {
         let diagnostic = diagnostic.as_str().ok_or("failure diagnostic")?;
         assert!(!diagnostic.is_empty());
@@ -4526,7 +4526,7 @@ fn agy_denied_command_reaches_result_without_entering_terminal_diagnostics() -> 
         let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
         let lane = &lanes["data"]["rows"][0];
         assert_eq!(lane["state"], "failed");
-        assert_eq!(lane["cause"], "failed");
+        assert_eq!(lane["settlement_class"], "failed");
         for diagnostic in [&lane["reason"], &lane["settlement"]["reason"]] {
             let diagnostic = diagnostic.as_str().ok_or("failure diagnostic")?;
             assert!(!diagnostic.is_empty());
@@ -6269,7 +6269,7 @@ fn graph_launch_reports_provider_update_after_wait_budget() -> Result {
         "1s",
     )?;
     assert_eq!(lane["state"], "rejected", "{lane}");
-    assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+    assert_eq!(lane["settlement_class"], "pre_launch_refusal", "{lane}");
     assert!(lane["started_at"].is_null(), "{lane}");
     assert!(lane["applied_route"].is_null(), "{lane}");
     assert_eq!(
@@ -6451,7 +6451,7 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
         .find(|row| row["route"] == fail)
         .ok_or("failing row")?;
     assert_eq!(passed["status"], "pass");
-    assert_eq!(passed["cause"], "completed");
+    assert_eq!(passed["settlement_class"], "completed");
     assert_eq!(failed["status"], "fail");
     assert_eq!(failed["cause"], "auth_required");
     // Both routes are probed in one invocation, each with its own attempt and

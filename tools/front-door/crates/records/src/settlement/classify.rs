@@ -94,7 +94,7 @@ fn derived_reason(
     if handoff
         .as_ref()
         .ok()
-        .flatten()
+        .and_then(Option::as_ref)
         .is_some_and(crate::handoff::Handoff::unfinished)
     {
         return SettlementClass::DeclaredStop;
@@ -119,7 +119,7 @@ fn derived_reason(
         && handoff
             .as_ref()
             .ok()
-            .flatten()
+            .and_then(Option::as_ref)
             .is_some_and(|accepted| !accepted.unfinished() && accepted.validate().is_ok())
     {
         return SettlementClass::CompletedBeforeBudget;
@@ -282,7 +282,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     let unfinished = declaration
         .as_ref()
         .ok()
-        .flatten()
+        .and_then(Option::as_ref)
         .is_some_and(crate::handoff::Handoff::unfinished);
 
     if let Err(error) = &declaration {
@@ -351,7 +351,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         if let Some(handoff) = declaration
             .as_ref()
             .ok()
-            .flatten()
+            .and_then(Option::as_ref)
             .filter(|handoff| handoff.unfinished())
         {
             signals.push(SettlementSignal::DeclaredStop);
@@ -388,7 +388,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         && let Some(blocked) = declaration
             .as_ref()
             .ok()
-            .flatten()
+            .and_then(Option::as_ref)
             .filter(|handoff| handoff.status == HandoffStatus::Blocked)
     {
         cause = Some(CauseKind::Blocked);
@@ -401,7 +401,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     let declared_stopped_early = declaration
         .as_ref()
         .ok()
-        .flatten()
+        .and_then(Option::as_ref)
         .is_some_and(|handoff| handoff.status == HandoffStatus::StoppedEarly);
     let no_work_applies = writer
         && outcome == Outcome::ReviewRequired

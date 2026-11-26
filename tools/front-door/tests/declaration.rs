@@ -351,11 +351,15 @@ fn a_full_journal_names_its_key_and_source() -> Result {
         source: "host (config.toml#handoff)".into(),
     };
     let failure = fixture.declare_with(&store, "too-big", payload("done"), &limit);
-    let DeclarationError::Full { key, source } = failure.expect_err("journal is full") else {
+    let DeclarationError::Full {
+        key,
+        setting_source,
+    } = failure.expect_err("journal is full")
+    else {
         panic!("expected a Full refusal")
     };
     assert_eq!(key, limit.key);
-    assert_eq!(source, limit.source);
+    assert_eq!(setting_source, limit.source);
     assert!(fixture.journal_lines()?.is_empty());
     Ok(())
 }

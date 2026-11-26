@@ -3,6 +3,7 @@ pub mod classify;
 pub mod policy;
 pub mod project;
 
+use provenant_core::GitOid;
 use serde::{Deserialize, Serialize};
 
 use crate::declaration::{DeclarationCounts, DeclarationEvidence};
@@ -98,8 +99,8 @@ pub enum IdentityPolicyEffect {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct GitEvidence {
-    pub input_head: Option<crate::GitOid>,
-    pub writer_head: Option<crate::GitOid>,
+    pub input_head: Option<GitOid>,
+    pub writer_head: Option<GitOid>,
     pub uncommitted: Option<String>,
     /// The bounded, sorted paths behind the census note. Diagnostic only:
     /// the classifier keeps deciding from `uncommitted`.
@@ -108,7 +109,7 @@ pub struct GitEvidence {
     /// The remote-tracking tip of the bound branch at the cut. Diagnostic
     /// only: `settle` never reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pushed_head: Option<crate::GitOid>,
+    pub pushed_head: Option<GitOid>,
     pub primary: PrimaryCheckout,
 }
 impl GitEvidence {

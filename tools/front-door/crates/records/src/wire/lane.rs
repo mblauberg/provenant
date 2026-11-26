@@ -39,7 +39,7 @@ fn token_budget_usage_schema() -> Value {
     )
 }
 
-fn settlement_reason_schema() -> Value {
+fn settlement_class_schema() -> Value {
     let mut schema = choices(&[]);
     schema["enum"] = json!(crate::run::SettlementClass::ALL);
     schema
@@ -67,7 +67,7 @@ lane_row! {
         attempt_number: u64 => unsigned();
         retry_of: Option<String> => nullable(string());
         superseded_by: Option<String> => nullable(string());
-        cause: Option<crate::run::SettlementClass> => nullable(settlement_reason_schema());
+        settlement_class: Option<crate::run::SettlementClass> => nullable(settlement_class_schema());
         state: String => string();
         presence: Option<LanePresence> => nullable(choices(&["live", "unattended", "unknown", "settling"]));
         recorded_state: Option<String> => nullable(string());
@@ -529,7 +529,7 @@ impl LaneRow {
             }),
             stop_work: lane.stop_work.clone(),
             warnings: (!lane.warnings.is_empty()).then(|| lane.warnings.clone()),
-            cause: if git_import_failure.is_some() {
+            settlement_class: if git_import_failure.is_some() {
                 Some(crate::run::SettlementClass::Failed)
             } else {
                 lane.settlement_class

@@ -135,6 +135,17 @@ fn rows() -> Vec<Row> {
         "Sealed pin survives restart.",
     ));
 
+    // Prose after the declaration is only a host note: the sealed handoff
+    // still decides the lane. It must not turn the stop into a completion.
+    let mut prose_after_handoff = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    prose_after_handoff.host.reason =
+        Some("Done: parser.\nThe wait was redundant; nothing changed.".into());
+    prose_after_handoff.git = git_at(Some(BASE), Some(HEAD));
+    prose_after_handoff.handoff = accepted(handoff(
+        HandoffStatus::StoppedEarly,
+        "More work remains in the renderer.",
+    ));
+
     let mut unchanged = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     unchanged.git = git_at(Some(BASE), Some(BASE));
     unchanged.handoff = accepted(handoff(HandoffStatus::StoppedEarly, "Nothing left to do."));
@@ -252,6 +263,16 @@ fn rows() -> Vec<Row> {
         Row {
             name: "restart after commit with the sealed pin",
             evidence: restarted,
+            outcome: Outcome::ReviewRequired,
+            cause: None,
+            reason: SettlementClass::DeclaredStop,
+            stop: Some(StopCause::StoppedEarly),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Moved),
+        },
+        Row {
+            name: "prose after handoff",
+            evidence: prose_after_handoff,
             outcome: Outcome::ReviewRequired,
             cause: None,
             reason: SettlementClass::DeclaredStop,
@@ -452,7 +473,7 @@ fn progress_is_pin_relative_and_never_reads_remote_state() {
 
     // A push, a moved remote ref or a settlement base is not a field of the
     // record. Only the sealed head changes when it is re-read after a restart.
-    evidence.git.as_mut().unwrap().head = Some(GitOid::parse(HEAD).unwrap());
+    evidence.git.as_mut().unwrap().writer_head = Some(GitOid::parse(HEAD).unwrap());
     let fact = settle(&evidence);
     assert_eq!(fact.head_progress, Some(HeadProgress::Moved));
     assert_ne!(fact.cause, Some(CauseKind::StoppedNoWork));

@@ -99,8 +99,10 @@ pub enum DeclarationError {
     Conflict,
     #[error("attempt is settling; declarations are closed")]
     Closed,
-    #[error("declaration journal is full: {key} from {source}")]
-    Full { key: String, source: String },
+    /// `setting_source` names the configuration that supplied the bound; it
+    /// is not an error source and must not be named `source` to thiserror.
+    #[error("declaration journal is full: {key} from {setting_source}")]
+    Full { key: String, setting_source: String },
     #[error("not inside a lane: PROVENANT_PARENT_ATTEMPT_ID is unset")]
     NotInLane,
     #[error("declaration journal: {0}")]

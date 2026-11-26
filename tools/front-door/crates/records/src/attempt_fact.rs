@@ -1,5 +1,5 @@
 use provenant_core::{ActorId, AttemptId, DeliveryId, GitOid, ProjectId, WallTime};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{FileDigest, PathWire, Trace};
 
