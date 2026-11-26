@@ -47,7 +47,10 @@ port table or settings, never a name compiled into a reader.
 Command names may change freely, and an unknown command or flag fails with
 exit 2; there are no aliases. JSON envelopes other than `process-tree` are
 evolving, and so is human output, including printed next-step command lines:
-scripts read `--json`.
+scripts read `--json`. `provenant adapter capabilities --json` projects the
+declared capability matrix, harness compatibility and measured latency in the
+result envelope's `data`; every capability declaration carries a reason and a
+source.
 
 - Why: a script that drives Provenant needs a fixed grammar and one parseable form.
 - Owner: `crates/cli/src/grammar.rs`

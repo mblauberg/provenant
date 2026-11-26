@@ -1642,6 +1642,7 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "accounts set",
         "accounts show",
         "accounts sync",
+        "adapter capabilities",
         "admit",
         "adopt",
         "answer",

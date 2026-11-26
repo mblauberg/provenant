@@ -254,6 +254,9 @@ pub enum Command {
     /// Run fast repository checks
     #[command(subcommand)]
     Check(Check),
+    /// Inspect declared adapter capabilities
+    #[command(subcommand)]
+    Adapter(Adapter),
     /// Run harness and git hook handlers
     #[command(subcommand)]
     Hook(Hook),
@@ -1194,6 +1197,12 @@ pub enum Rules {
 }
 pub use crate::check::Check;
 pub use crate::ci::Ci;
+/// Read the declared adapter capability matrix.
+#[derive(Clone, Debug, Subcommand)]
+pub enum Adapter {
+    /// Project the registry, compatibility and measured latency as JSON or text
+    Capabilities,
+}
 #[derive(Clone, Debug, Subcommand)]
 pub enum Hook {
     /// Handle git hook events
