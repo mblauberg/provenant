@@ -43,7 +43,9 @@ macOS tests have no module path, so they are named in `main_tests` on the
 and is run by hand.
 
 To request every suite, add the `ci:full` label to the pull request and push a
-commit, or run `gh workflow run ci.yml --ref BRANCH -f tier=full`. When a
+commit, or run `gh workflow run ci.yml --ref BRANCH -f tier=full`. To request
+all macOS suites on a PR, add `ci:macos` and push a commit. Labelling alone
+does not start a run. Any dispatch also runs the macOS suites. When a
 `ci:red-main` issue opens, inspect its failed jobs and comparison, then fix
 forward.
 

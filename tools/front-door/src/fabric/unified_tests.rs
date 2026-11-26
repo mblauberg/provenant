@@ -2850,6 +2850,140 @@ fn settled_lane_output_ignores_unfinished_sibling() {
     );
 }
 
+// Spec: docs/specs/cli.md#status-selection
+#[test]
+fn status_name_reads_one_other_project_and_lists_several() -> Result<(), Box<dyn std::error::Error>>
+{
+    struct FreeWorkers;
+    impl WorkerObserver for FreeWorkers {
+        fn observe_roots(
+            &self,
+            _: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
+        {
+            std::collections::BTreeMap::new()
+        }
+    }
+
+    let rig = crate::worktree_tests::support::TestRig::new()?;
+    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+    provenant_config::bind_host(&roots)?;
+    let project = std::fs::canonicalize(&rig.project)?;
+    let common = std::fs::canonicalize(project.join(".git"))?;
+    let own = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(common, &project)?,
+    )?;
+    // The search reads `registered_projects`: an ordinary directory is a
+    // transient location and never joins that index. Give each other project
+    // the production layout of a Git checkout bound by its common directory.
+    let other = rig.root.join("other");
+    let third = rig.root.join("third");
+    std::fs::create_dir(&other)?;
+    std::fs::create_dir(&third)?;
+    crate::worktree_tests::git(&rig, &["init", "-q", other.to_str().ok_or("other path")?])?;
+    crate::worktree_tests::git(&rig, &["init", "-q", third.to_str().ok_or("third path")?])?;
+    let other = std::fs::canonicalize(other)?;
+    let third = std::fs::canonicalize(third)?;
+    let foreign = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            std::fs::canonicalize(other.join(".git"))?,
+            &other,
+        )?,
+    )?;
+    let extra = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            std::fs::canonicalize(third.join(".git"))?,
+            &third,
+        )?,
+    )?;
+
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let bind_shared = |binding: &provenant_config::ProjectBinding, directory: &Path| {
+        let id = binding.project_id();
+        let mut journal = FileJournal::open(&roots.state, id, "shared", budget, &cancel, &clock)?;
+        journal.bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: None,
+            extra: Default::default(),
+            bases: None,
+            directory: directory.to_path_buf(),
+            document: document("shared"),
+        })?;
+        let mut checkpoint = checkpoint("shared");
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
+        journal.save(&checkpoint)?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    // One foreign owner holds the name first: it is read and noted alone.
+    bind_shared(&foreign, &other)?;
+
+    let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
+    let factory = Factory {
+        context,
+        project_attribution: false,
+        clock: SystemClock::new(),
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?,
+        home: rig.home.clone(),
+        cwd: rig.project.clone(),
+        assets: rig.project.clone(),
+        host_launch: None,
+        workers: &FreeWorkers,
+    };
+    let target: provenant_cli::Target = "shared".parse()?;
+    // The own project is skipped; the one other owner is read through a facade
+    // bound to it, and the note names it as a typed warning.
+    let (found, warnings) = provenant_records::warning::capture(|| {
+        let matches =
+            cross_project_matches(&roots, own.project_id(), &target).expect("cross-project search");
+        assert_eq!(matches.len(), 1, "{matches:?}");
+        assert_eq!(matches[0].project_id(), foreign.project_id());
+        let reader = project_factory(&factory, &matches[0]).expect("project reader");
+        assert_eq!(reader.context.identity.project, foreign.project_id());
+        let data = reader
+            .graph_document(json!({"op":"status","id":"shared"}), budget, &cancel)
+            .expect("status from the owning project");
+        let rows = data["rows"].as_array().expect("rows");
+        assert!(
+            rows.iter().any(|row| row["graph_id"] == "shared"),
+            "the matched graph must be shown: {rows:?}"
+        );
+        provenant_records::warning::warn(cross_project_notice("shared", &matches[0]));
+        matches
+    });
+    assert_eq!(found.len(), 1);
+    let notice = warnings
+        .iter()
+        .find(|warning| &*warning.code == "CROSS_PROJECT_TARGET_FOUND")
+        .expect("cross-project note");
+    assert!(
+        notice.message.contains(&project_label(&foreign))
+            && notice.message.contains(&foreign.project_id().to_string()),
+        "the note must name the owning project: {}",
+        notice.message
+    );
+    // A second owner makes the name ambiguous: list both rather than picking.
+    bind_shared(&extra, &third)?;
+    let matches = cross_project_matches(&roots, own.project_id(), &target)?;
+    assert_eq!(matches.len(), 2, "{matches:?}");
+    let fault = cross_project_ambiguity(&target, &matches);
+    assert_eq!(fault.code, "AMBIGUOUS_TARGET");
+    for binding in [&foreign, &extra] {
+        assert!(
+            fault.message.contains(project_label(binding).as_str()),
+            "the refusal must list every owner: {}",
+            fault.message
+        );
+    }
+    Ok(())
+}
+
 /// A peer-hosted attempt: its key is the peer's own graph, and the record
 /// retains the host that owns it. Both facts are relayed with the status.
 fn peer_attempt_fixture(

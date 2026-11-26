@@ -246,7 +246,13 @@ impl Factory {
             "review_empty_range: base and subject resolve to the same commit; select a subject with changes".into(),
         ))
         };
-        let base = base.ok_or_else(empty)?;
+        // An absent base is not an empty range: there was nothing to compare.
+        // Keep `review_empty_range` for two commits that really are equal.
+        let base = base.ok_or_else(|| {
+            FacadeError::invalid(InvalidInputDetail::Field(
+                "review_base_unresolved: no base was resolved for the review subject; declare a base on the writer or supply review_base".into(),
+            ))
+        })?;
         if base == subject {
             return Err(empty());
         }
@@ -454,6 +460,7 @@ impl F3Facade for BoundFacade<'_> {
         let steer = |attempt: provenant_core::AttemptId,
                      operation: &provenant_core::OperationId,
                      text: &str,
+                     now: bool,
                      call: &provenant_fabric_store::Request<'_>| {
             provenant_cli::inbox::deliver_steer(
                 &edge,
@@ -461,6 +468,7 @@ impl F3Facade for BoundFacade<'_> {
                 attempt,
                 operation,
                 text,
+                now,
                 call,
             )
         };

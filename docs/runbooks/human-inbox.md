@@ -95,10 +95,16 @@ warnings.
 ## Steering
 
 `provenant steer TARGET --brief TEXT` (or `--brief-file PATH`) durably queues
-guidance for the exact running graph attempt. On continuation routes the shared
-stream decoder waits for a route-bound session identity, custody interrupts the
-current provider, and the graph resumes that session with the saved text. This
-is next-turn continuation, not live input injection. Status reports
+guidance for the exact running graph attempt. By default the attempt keeps
+running and settlement delivers the text at its next turn boundary, resuming the
+retained session when one is available. `domains.fabric.steer.delivery` sets the
+host default (`queued` or `now`); `provenant steer --explain` shows the effective
+mode and its source without steering. Pass `--now` to request the
+session-preserving restart instead: once the text is durable and a route-bound
+session identity is validated, custody requests a `Steered` stop and the graph
+resumes that same session with the saved text. Without a retained session
+`--now` refuses and leaves the attempt running; queued delivery has no such
+gate. This is next-turn continuation, not live input injection. Status reports
 operation and message IDs and successor state, never the steering text.
 `chair message SESSION --text-stdin --channel CHANNEL` queues guidance as Fabric
 mail for that session's own mailbox, read with

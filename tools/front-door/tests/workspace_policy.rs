@@ -1884,7 +1884,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/routing/src/resolve.rs", 4500),
         ("crates/routing/src/review.rs", 3000),
         ("crates/run/src/build_dir_gc.rs", 6250),
-        ("crates/run/src/completion.rs", 2500),
+        // Static-check launch guidance and receipt provenance (#3652).
+        ("crates/run/src/completion.rs", 2750),
         // Stall detection and its opt-in policy (#3903).
         ("crates/run/src/controls.rs", 5250),
         ("crates/run/src/delivery.rs", 4750),
@@ -1903,7 +1904,11 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/workflow/src/session.rs", 3500),
         ("src/ci.rs", 2500),
         ("src/fabric/graph_execution.rs", 2750),
-        ("src/fabric/interface.rs", 4250),
+        // The #4064 reused-worktree review-base binding, typed writer-base
+        // report and node-sourced panel helpers grew this owner deliberately:
+        // 4327 lines on the CI head. Next 250-band above size + 100, with
+        // headroom for routine growth.
+        ("src/fabric/interface.rs", 4500),
         // Peer fixture transport and writer boundary coverage (#3979).
         ("src/fabric/owner.rs", 6000),
         ("src/fabric/peer.rs", 2500),
