@@ -666,9 +666,9 @@ impl BriefPreamble {
                     Warning::new(
                         PORT_LANE_CHECK_INVALID,
                         format!("dropped invalid lane verification declaration {subject}"),
+                        source.clone(),
                     )
-                    .subject(subject)
-                    .source(source.clone()),
+                    .subject(subject),
                 );
             }
         }

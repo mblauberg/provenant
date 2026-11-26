@@ -167,6 +167,9 @@ fn cross_project_notice(
             "{target} was found in project {} ({id}); showing that project's graph",
             project_label(binding)
         ),
+        provenant_records::warning::detected_source(
+            provenant_records::warning::CROSS_PROJECT_TARGET_FOUND,
+        ),
     )
     .subject(target)
 }
@@ -2382,6 +2385,9 @@ fn steer_delivery_setting(factory: &super::Factory) -> (SteerMode, String) {
             provenant_records::warning::warn(provenant_records::warning::Warning::new(
                 provenant_records::warning::CONFIG_UNAVAILABLE,
                 format!("steer delivery setting unavailable ({safe}); using default queued"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                ),
             ));
             return default();
         }

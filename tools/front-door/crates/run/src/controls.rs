@@ -797,13 +797,16 @@ pub struct UnreadableAttempt {
 /// The one typed warning for an undecodable attempt record. Its subject carries
 /// the source path, schema and error; admission refusals stay fixed text.
 pub fn unreadable_record_warning(source: &UnreadableSource, released: bool) -> Warning {
-    use provenant_records::warning::{UNREADABLE_RECORD_HELD, UNREADABLE_RECORD_RELEASED};
+    use provenant_records::warning::{
+        UNREADABLE_RECORD_HELD, UNREADABLE_RECORD_RELEASED, detected_source,
+    };
+    let code = if released {
+        UNREADABLE_RECORD_RELEASED
+    } else {
+        UNREADABLE_RECORD_HELD
+    };
     Warning::new(
-        if released {
-            UNREADABLE_RECORD_RELEASED
-        } else {
-            UNREADABLE_RECORD_HELD
-        },
+        code,
         format!(
             "stored record for attempt {} could not be decoded; {}",
             source.attempt,
@@ -813,6 +816,7 @@ pub fn unreadable_record_warning(source: &UnreadableSource, released: bool) -> W
                 "its writer lease is retained because liveness could not be disproved"
             }
         ),
+        detected_source(code),
     )
     .subject(source.to_string())
     .repair("inspect the preserved copy under quarantine/, then rerun reconcile")

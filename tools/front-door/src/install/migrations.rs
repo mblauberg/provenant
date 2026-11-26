@@ -598,6 +598,7 @@ impl Migration for ProjectGrantKeys {
                                 "{} holds both capabilities and grants for project {name}; neither value was overwritten",
                                 path.display()
                             ),
+                            provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
                         )
                         .subject(path.display().to_string())
                         .repair(format!(
@@ -610,6 +611,7 @@ impl Migration for ProjectGrantKeys {
                 Warning::new(
                     MIGRATION_STEP_FAILED,
                     format!("project grant keys could not be migrated: {error}"),
+                    provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
                 )
                 .subject(path.display().to_string())
                 .repair(format!(
