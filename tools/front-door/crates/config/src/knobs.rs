@@ -704,7 +704,7 @@ mod ceiling_tests {
             .unwrap();
         let (resolved, problems) = resolve(
             Profile::Balanced,
-            config.get("knobs").and_then(Item::as_table),
+            config.get("knobs").and_then(Item::as_table_like),
             false,
         )
         .unwrap();
