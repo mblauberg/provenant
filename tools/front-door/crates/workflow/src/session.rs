@@ -2659,7 +2659,7 @@ mod tests {
                 &root,
                 project,
                 HookEvent::SessionStart,
-                br#"{"hook_event_name":"SessionStart","session_id":"host-1","transcript_path":"/t/s.jsonl"}"#,
+                &br#"{"hook_event_name":"SessionStart","session_id":"host-1","transcript_path":"/t/s.jsonl"}"#[..],
                 &clock(mtime),
                 DurationMicros::ZERO,
                 Advice {

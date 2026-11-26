@@ -200,21 +200,29 @@ pub fn hook_context_with(
         } else {
             ("", LANE_SESSION_CONTEXT.to_owned())
         };
-        return render(
+        return render(RenderInput {
             event,
-            parsed,
-            CheckpointStatus::Present,
-            head,
-            "",
+            session_id: parsed,
+            status: CheckpointStatus::Present,
+            protected: head,
+            derived: "",
             diagnostic,
-            None,
-            "",
-        );
+            markdown: None,
+            more: "",
+        });
     }
     let Some(session) = parsed else {
         let head = head(event, transcript, None, None, None);
-        return render(event, None, CheckpointStatus::InvalidInput, &head, digest,
-            "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(), None, "");
+        return render(RenderInput {
+            event,
+            session_id: None,
+            status: CheckpointStatus::InvalidInput,
+            protected: &head,
+            derived: digest,
+            diagnostic: "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(),
+            markdown: None,
+            more: "",
+        });
     };
     let store = SessionStore::new(root.clone(), project, session.clone());
     // The chair's checkpoint and the hook-owned autosave file are read apart
@@ -378,16 +386,16 @@ pub fn hook_context_with(
         Some(command) => format!("read it with `{command}`"),
         None => "use workflow session show with this ID and this hook's --state-dir".into(),
     };
-    render(
+    render(RenderInput {
         event,
-        Some(session),
+        session_id: Some(session),
         status,
-        &head,
-        digest,
-        message,
+        protected: &head,
+        derived: digest,
+        diagnostic: message,
         markdown,
-        &more,
-    )
+        more: &more,
+    })
 }
 
 /// The chair's protected checkpoint content: standing, Intent and Now. Standing
@@ -493,16 +501,31 @@ fn fit_prefix_len(text: &str, fits: impl Fn(&str) -> bool) -> usize {
     boundaries[low]
 }
 
-fn render(
+/// Grouped inputs to [`render`]. Bundling the varying pieces keeps the
+/// renderer's signature stable as the hook grows instead of widening its
+/// argument list.
+struct RenderInput<'a> {
     event: HookEvent,
     session_id: Option<HostSessionId>,
     status: CheckpointStatus,
-    protected: &str,
-    derived: &str,
+    protected: &'a str,
+    derived: &'a str,
     diagnostic: String,
     markdown: Option<String>,
-    more: &str,
-) -> HookContext {
+    more: &'a str,
+}
+
+fn render(input: RenderInput<'_>) -> HookContext {
+    let RenderInput {
+        event,
+        session_id,
+        status,
+        protected,
+        derived,
+        diagnostic,
+        markdown,
+        more,
+    } = input;
     let retained = if event == HookEvent::SessionStart {
         markdown.unwrap_or_default()
     } else {
