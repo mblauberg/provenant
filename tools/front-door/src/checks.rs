@@ -413,23 +413,6 @@ fn scratch_exceeds_share(bytes: u64, free: u64, share: f64) -> bool {
     (bytes as f64) > (free as f64) * share
 }
 
-#[cfg(test)]
-mod scratch_warning_tests {
-    #[test]
-    fn small_positive_shares_keep_their_threshold() {
-        assert!(!super::scratch_exceeds_share(
-            99,
-            1_000_000_000,
-            0.000_000_1
-        ));
-        assert!(super::scratch_exceeds_share(
-            101,
-            1_000_000_000,
-            0.000_000_1
-        ));
-    }
-}
-
 fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
     let workspace = if matches!(check, Inspectable::Release { .. }) {
         roots::Workspace::Checkout
@@ -827,4 +810,21 @@ fn git_page(
             cancel: &cancel,
         })
     })
+}
+
+#[cfg(test)]
+mod scratch_warning_tests {
+    #[test]
+    fn small_positive_shares_keep_their_threshold() {
+        assert!(!super::scratch_exceeds_share(
+            99,
+            1_000_000_000,
+            0.000_000_1
+        ));
+        assert!(super::scratch_exceeds_share(
+            101,
+            1_000_000_000,
+            0.000_000_1
+        ));
+    }
 }
