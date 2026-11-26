@@ -649,6 +649,8 @@ fn inspect_and_recreate_follow_the_configured_upstream_remote()
         vec!["checkout", "-q", "trunk"],
         vec!["branch", "-D", "recreated"],
         vec!["fetch", "-q", "upstream"],
+        // Inspection enumerates checkouts, not all local branches.
+        vec!["checkout", "-q", "lane"],
     ] {
         provenant_os::fixture::run_git(&project, &args)?;
     }

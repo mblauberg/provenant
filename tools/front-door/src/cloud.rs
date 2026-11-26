@@ -439,7 +439,7 @@ mod forge_remote_tests {
         let project = temp.path().join("project");
         let bare = temp.path().join("upstream.git");
         std::fs::create_dir_all(&project)?;
-        std::fs::create_dir_all(&state)?;
+        provenant_os::fixture::private_state_dir(&state)?;
         let git = |dir: &std::path::Path, args: &[&str]| {
             provenant_os::fixture::run_git(dir, args).map(|_| ())
         };
