@@ -524,6 +524,7 @@ mod resolve_commit_tests {
 }
 
 #[cfg(test)]
+#[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
 mod remote_of_tests {
     use super::*;
 
