@@ -1091,7 +1091,7 @@ mod fixtures {
             receipt_id,
             "output-receipt",
             json!({"state":"terminal", "outcome":"succeeded", "exit_code":0,
-                "finished_at":"2026-11-02T02:05:00Z", "reason":null}),
+                "finished_at":"2026-11-02T02:05:00.000000Z", "reason":null}),
             "Receipt fixture",
         )?;
         receipt_record.result = Some(
@@ -2335,6 +2335,20 @@ mod tests {
             conflicts["data"]["unfetched_children"][0]["detail"],
             "synthetic child store unavailable"
         );
+    }
+
+    #[test]
+    fn synthetic_receipt_projects_a_canonical_terminal_wall_time() {
+        let generated = fixtures::console().expect("synthetic console fixtures");
+        let (_, receipt) = generated
+            .iter()
+            .find(|(name, _)| *name == "output-receipt-tail")
+            .expect("receipt fixture");
+        let finished_at = receipt["data"]["finished_at"]
+            .as_str()
+            .expect("terminal finish time");
+        provenant_core::WallTime::parse(finished_at).expect("canonical terminal wall time");
+        assert_eq!(finished_at, "2026-11-02T02:05:00.000000Z");
     }
 
     #[test]
