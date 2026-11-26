@@ -133,6 +133,9 @@ pub(crate) fn start_fabric_relay(
             max_members: 100_000,
         },
         move |call, cancel, within| {
+            if let provenant_fabric_runtime::relay::ToolCall::Handoff(input) = &call {
+                return crate::declaration::serve_lane(&ctx, &notes_holder, input.clone());
+            }
             if let provenant_fabric_runtime::relay::ToolCall::Notes(input) = call {
                 return crate::notes::serve_lane(&ctx, &notes_holder, input, &clock, cancel);
             }

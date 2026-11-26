@@ -201,6 +201,13 @@ impl ToolCall {
                     path: "arguments".into(),
                 });
         }
+        if name == HANDOFF {
+            return serde_json::from_value(arguments)
+                .map(Self::Handoff)
+                .map_err(|_| InvalidInput::Arguments {
+                    path: "arguments".into(),
+                });
+        }
         let mut arguments = arguments;
         if !matches!(name, MAIL | EVENTS | CLAIM) {
             return Err(InvalidInput::UnknownTool);
