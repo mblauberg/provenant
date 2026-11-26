@@ -269,6 +269,7 @@ pub(crate) fn invalid_answer(id: &str) {
         Warning::new(
             ANSWER_DELIVERY_SKIPPED,
             format!("answer delivery: skipping invalid answer {id}"),
+            provenant_records::warning::detected_source(ANSWER_DELIVERY_SKIPPED),
         )
         .subject(format!("answer {id}"))
         .repair("Correct or remove the invalid answer from the Fabric outbox."),
@@ -284,6 +285,7 @@ fn oversized_answer(id: &str) {
             format!(
                 "answer delivery: answer {id} exceeds internal page limit; retained for Fabric mail"
             ),
+            provenant_records::warning::detected_source(ANSWER_DELIVERY_RETAINED),
         )
         .subject(format!("answer {id}"))
         .repair("Shorten the answer or route it through Fabric mail so it fits an internal page."),

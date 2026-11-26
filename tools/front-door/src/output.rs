@@ -704,7 +704,7 @@ fn too_large_warning(command: &str, omitted: usize, repair: &str) -> Warning {
         format!(
             "[RESULT_TOO_LARGE] {command} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted"
         ),
-    )
+     provenant_records::warning::detected_source(RESULT_TOO_LARGE))
     .repair(repair)
 }
 
@@ -949,7 +949,11 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _sink = install_command_sink(true);
-        warning::warn(Warning::new(WarningCode("TEST"), "a typed warning"));
+        warning::warn(Warning::new(
+            WarningCode("TEST"),
+            "a typed warning",
+            provenant_records::warning::detected_source(WarningCode("TEST")),
+        ));
         let result = CommandResult::new("fixture", Outcome::Ok, json!({"ok": true}));
         let globals = provenant_cli::Globals {
             json: true,
@@ -1204,6 +1208,7 @@ mod tests {
             warning::warn(Warning::new(
                 WarningCode("TEST"),
                 "a configured key was ignored",
+                provenant_records::warning::detected_source(WarningCode("TEST")),
             ));
         });
         assert_eq!(captured.len(), 1);
@@ -1348,7 +1353,11 @@ mod tests {
             serde_json::to_vec(&result).expect("encode").len() < provenant_cli::MAX_RESULT_BYTES,
             "the bare result fits"
         );
-        warning::warn(Warning::new(WarningCode("TEST"), "w".repeat(512)));
+        warning::warn(Warning::new(
+            WarningCode("TEST"),
+            "w".repeat(512),
+            provenant_records::warning::detected_source(WarningCode("TEST")),
+        ));
         let globals = provenant_cli::Globals {
             json: true,
             ..Default::default()
@@ -1384,13 +1393,21 @@ mod tests {
     fn a_json_delivered_warning_is_kept_but_not_remembered() {
         with_root(|root| {
             set_state_root(root);
-            let shown = Warning::new(NAME_CASE_FOLDED, "folded `Reader` to `reader`")
-                .subject("reader-shown")
-                .once_per_change();
+            let shown = Warning::new(
+                NAME_CASE_FOLDED,
+                "folded `Reader` to `reader`",
+                provenant_records::warning::detected_source(NAME_CASE_FOLDED),
+            )
+            .subject("reader-shown")
+            .once_per_change();
             let shown_key = shown.key();
-            let fresh = Warning::new(NAME_CASE_FOLDED, "folded `Writer` to `writer`")
-                .subject("writer-fresh")
-                .once_per_change();
+            let fresh = Warning::new(
+                NAME_CASE_FOLDED,
+                "folded `Writer` to `writer`",
+                provenant_records::warning::detected_source(NAME_CASE_FOLDED),
+            )
+            .subject("writer-fresh")
+            .once_per_change();
             let fresh_key = fresh.key();
             // A prior human display must not hide the warning from a consumer.
             assert!(dedup::remember(
@@ -1439,9 +1456,13 @@ mod tests {
     fn a_failed_write_does_not_remember_an_undelivered_warning() {
         with_root(|root| {
             set_state_root(root);
-            let warning = Warning::new(NAME_CASE_FOLDED, "folded `Writer` to `writer`")
-                .subject("writer-bad")
-                .once_per_change();
+            let warning = Warning::new(
+                NAME_CASE_FOLDED,
+                "folded `Writer` to `writer`",
+                provenant_records::warning::detected_source(NAME_CASE_FOLDED),
+            )
+            .subject("writer-bad")
+            .once_per_change();
             let key = warning.key();
             let sink = install_command_sink(true);
             warning::warn(warning);
@@ -1482,9 +1503,13 @@ mod tests {
     fn an_exit_without_emitting_shows_and_remembers_held_warnings() {
         with_root(|root| {
             set_state_root(root);
-            let warning = Warning::new(NAME_CASE_FOLDED, "folded `Writer` to `writer`")
-                .subject("writer")
-                .once_per_change();
+            let warning = Warning::new(
+                NAME_CASE_FOLDED,
+                "folded `Writer` to `writer`",
+                provenant_records::warning::detected_source(NAME_CASE_FOLDED),
+            )
+            .subject("writer")
+            .once_per_change();
             let key = warning.key();
             {
                 let _sink = install_command_sink(true);
@@ -1541,9 +1566,13 @@ mod tests {
             // If the sink re-entered while holding its mutex on this path the
             // command would hang; it must instead reach the same envelope.
             warning::warn(
-                Warning::new(NAME_CASE_FOLDED, "folded `Sink` to `sink`")
-                    .subject("sink")
-                    .once_per_change(),
+                Warning::new(
+                    NAME_CASE_FOLDED,
+                    "folded `Sink` to `sink`",
+                    provenant_records::warning::detected_source(NAME_CASE_FOLDED),
+                )
+                .subject("sink")
+                .once_per_change(),
             );
             let result = CommandResult::new("fixture", Outcome::Ok, json!({"ok": true}));
             let globals = provenant_cli::Globals {
@@ -1571,9 +1600,13 @@ mod tests {
     fn a_failed_stderr_write_does_not_remember_a_per_change_warning() {
         with_root(|root| {
             set_state_root(root);
-            let first = Warning::new(NAME_CASE_FOLDED, "folded `Sink` to `sink`")
-                .subject("sink-write")
-                .once_per_change();
+            let first = Warning::new(
+                NAME_CASE_FOLDED,
+                "folded `Sink` to `sink`",
+                provenant_records::warning::detected_source(NAME_CASE_FOLDED),
+            )
+            .subject("sink-write")
+            .once_per_change();
             let key = first.key();
             let _sink = install_command_sink(false);
             let sink = COMMAND_SINK
@@ -1588,9 +1621,13 @@ mod tests {
                 "an undelivered warning must not be remembered as shown"
             );
 
-            let second = Warning::new(NAME_CASE_FOLDED, "folded `Sink` to `sink`")
-                .subject("sink-write")
-                .once_per_change();
+            let second = Warning::new(
+                NAME_CASE_FOLDED,
+                "folded `Sink` to `sink`",
+                provenant_records::warning::detected_source(NAME_CASE_FOLDED),
+            )
+            .subject("sink-write")
+            .once_per_change();
             let mut delivered = Vec::new();
             sink.display_with(second, &mut delivered);
             assert_eq!(

@@ -95,7 +95,7 @@ pub(crate) fn superseded_notice(
         provenant_records::warning::Warning::new(
             provenant_records::warning::NAME_ALIAS_USED,
             format!("graph `{name}` was superseded by `{newest}` (different input); reading the older graph"),
-        )
+         provenant_records::warning::detected_source(provenant_records::warning::NAME_ALIAS_USED))
         .subject(name)
         .repair(format!("provenant {verb} {newest}")),
     );
@@ -2025,6 +2025,9 @@ fn steer_settled_setting(
             provenant_records::warning::warn(provenant_records::warning::Warning::new(
                 provenant_records::warning::CONFIG_UNAVAILABLE,
                 format!("steer settled setting unavailable ({safe}); using default queue"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                ),
             ));
             return default;
         }
@@ -2040,6 +2043,9 @@ fn steer_settled_setting(
                 provenant_records::warning::Warning::new(
                     provenant_records::warning::CONFIG_MALFORMED,
                     "unrecognised lanes.steer_settled value; using default queue",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_MALFORMED,
+                    ),
                 )
                 .source(knob.source.clone()),
             );
@@ -2088,7 +2094,7 @@ fn settled_steer_result(
                 provenant_records::warning::Warning::new(
                     provenant_records::warning::STEER_TARGET_SETTLED,
                     format!("{target} has settled; steering was ignored"),
-                )
+                 provenant_records::warning::detected_source(provenant_records::warning::STEER_TARGET_SETTLED))
                 .subject(target.clone())
                 .source(source)
                 .repair(format!(

@@ -439,7 +439,11 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
     use provenant_records::warning::{BUILD_PORT_UNAVAILABLE, Warning, warn};
     for warning in &warnings {
         // Spec: docs/specs/cli.md#warnings-are-typed-values
-        warn(Warning::new(BUILD_PORT_UNAVAILABLE, warning.clone()));
+        warn(Warning::new(
+            BUILD_PORT_UNAVAILABLE,
+            warning.clone(),
+            provenant_records::warning::detected_source(BUILD_PORT_UNAVAILABLE),
+        ));
     }
     Ok(PreparedSlot {
         site: super::ExecSite {
@@ -555,6 +559,7 @@ pub fn execute_staged(
         warn(Warning::new(
             BUILD_SLOT_CUSTODY_UNPUBLISHED,
             format!("cannot publish slot custody before spawn: {error}"),
+            provenant_records::warning::detected_source(BUILD_SLOT_CUSTODY_UNPUBLISHED),
         ));
         Exception::PoolUnavailable
     })?;
@@ -734,7 +739,11 @@ pub fn execute(job: &Job, context: &RunContext, index: u64) -> Result<SlotExecut
             );
             use provenant_records::warning::{BUILD_SLOT_UNAVAILABLE, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            warn(Warning::new(BUILD_SLOT_UNAVAILABLE, warning.clone()));
+            warn(Warning::new(
+                BUILD_SLOT_UNAVAILABLE,
+                warning.clone(),
+                provenant_records::warning::detected_source(BUILD_SLOT_UNAVAILABLE),
+            ));
             outcome.warnings.push(warning);
             let result =
                 super::local::execute(&mut local_job, context, outcome, ExecPlace::Local, None, 0);

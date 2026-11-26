@@ -222,6 +222,7 @@ pub(super) fn set_pool(roots: &Roots, request: &RouteSet) -> Result<(), EdgeErro
             Warning::new(
                 CONFIG_KEY_IGNORED,
                 "model is absent from bundled and discovered catalogues (source=user)",
+                provenant_records::warning::detected_source(CONFIG_KEY_IGNORED),
             )
             .subject(model.as_str()),
         );

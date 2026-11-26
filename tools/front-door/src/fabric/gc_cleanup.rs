@@ -84,6 +84,9 @@ pub(crate) fn run(
             provenant_records::warning::Warning::new(
                 provenant_records::warning::GC_SCHEDULE_FAILED,
                 format!("settlement free-floor sweep failed: {error}"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::GC_SCHEDULE_FAILED,
+                ),
             )
             .once_per_change(),
         );
@@ -441,6 +444,9 @@ fn release_settled_cache(
                     "private cache release for {}: {error}",
                     writer.worktree.display()
                 ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::PRIVATE_CACHE_RELEASE_FAILED,
+                ),
             )
             .subject(writer.worktree.display().to_string()),
         );
@@ -604,6 +610,9 @@ pub(crate) fn collect_unsettled(
                         format!(
                             "settled lane collection failed for {}: {error}",
                             worktree.display()
+                        ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::SETTLED_LANE_COLLECTION_FAILED,
                         ),
                     )
                     .subject(worktree.display().to_string()),

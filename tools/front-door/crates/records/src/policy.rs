@@ -242,8 +242,10 @@ impl Policy {
                     Warning::new(
                         CONFIG_KEY_IGNORED,
                         format!("policy override {code} ignored: no such rule"),
+                        crate::warning::detected_source(CONFIG_KEY_IGNORED),
                     )
                     .subject(code.as_str())
+                    .source(source.provenance(code))
                     .repair("use a rule code from the compiled policy table"),
                 );
                 continue;
@@ -258,8 +260,9 @@ impl Policy {
                         format!(
                             "policy override {code} ignored: boundary and operation rules have no override"
                         ),
-                    )
+                     crate::warning::detected_source(CONFIG_KEY_IGNORED))
                     .subject(code.as_str())
+                    .source(source.provenance(code))
                     .repair("remove the override; boundary and operation rules have no knob"),
                 );
                 continue;
@@ -281,8 +284,9 @@ impl Policy {
                             strength_name(effective.rule.strength),
                             effective.source
                         ),
-                    )
+                     crate::warning::detected_source(CONFIG_MALFORMED))
                     .subject(code.as_str())
+                    .source(source.provenance(code))
                     .repair(format!("use one of: {supported}")),
                 );
                 continue;
@@ -318,13 +322,17 @@ impl Policy {
         match rule.strength {
             Strength::Off => Effect::Proceed,
             Strength::Warn => Effect::Warn(
-                Warning::new(rule_warning_code(code), message)
-                    .subject(code.to_owned())
-                    .source(effective.source.provenance(code))
-                    // Observational rules warn and proceed: one notice per
-                    // state change is enough for a person, while the JSON
-                    // envelope keeps every warning as data.
-                    .once_per_change(),
+                Warning::new(
+                    rule_warning_code(code),
+                    message,
+                    crate::warning::detected_source(rule_warning_code(code)),
+                )
+                .subject(code.to_owned())
+                .source(effective.source.provenance(code))
+                // Observational rules warn and proceed: one notice per
+                // state change is enough for a person, while the JSON
+                // envelope keeps every warning as data.
+                .once_per_change(),
             ),
             Strength::Refuse if rule.boundary == Boundary::None => Effect::Stop(Box::new(
                 crate::diagnostic::Diagnostic::new(code).detail(message),
@@ -557,7 +565,7 @@ mod tests {
         assert_eq!(warning.code.as_ref(), "WRITER_CENSUS");
         assert_eq!(warning.subject.as_deref(), Some("WRITER_CENSUS"));
         assert_eq!(warning.dedup, crate::warning::Dedup::PerChange);
-        let source = warning.source.expect("compiled rule has a source");
+        let source = warning.source;
         assert_eq!(source.layer, Layer::Default);
         assert_eq!(source.origin.as_deref(), Some("compiled policy table"));
 
@@ -575,7 +583,7 @@ mod tests {
         else {
             panic!("an observational rule must warn")
         };
-        let source = warning.source.expect("overlaid rule has a source");
+        let source = warning.source;
         assert_eq!(source.layer, Layer::Project);
         assert_eq!(
             source.origin.as_deref(),

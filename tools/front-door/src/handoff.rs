@@ -272,6 +272,9 @@ fn emit_writer_advisory(advisory: &str) {
         provenant_records::warning::Warning::new(
             provenant_records::warning::WRITER_ADVISORY,
             provenant_fabric_runtime::hosts::plain_text(advisory, 4096),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::WRITER_ADVISORY,
+            ),
         )
         .once_per_change(),
     );

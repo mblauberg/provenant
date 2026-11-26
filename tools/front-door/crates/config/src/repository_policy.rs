@@ -120,6 +120,7 @@ fn warn_project_config(warnings: &[provenant_records::InputWarning]) {
                     "{}: {}: unknown configuration key; ignored",
                     warning.source, warning.key
                 ),
+                provenant_records::warning::detected_source(CONFIG_KEY_IGNORED),
             )
             .subject(format!("{}: {}", warning.source, warning.key))
             .repair("remove the unknown key from the project configuration")

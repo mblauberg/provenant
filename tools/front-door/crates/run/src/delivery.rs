@@ -32,7 +32,11 @@ pub(super) use origin_refresh::{OriginRefreshRequest, coalesced_origin_refresh};
 
 fn delivery_advisory(message: impl Into<String>) {
     use provenant_records::warning::{DELIVERY_REFRESH_FAILED, Warning, warn};
-    warn(Warning::new(DELIVERY_REFRESH_FAILED, message.into()));
+    warn(Warning::new(
+        DELIVERY_REFRESH_FAILED,
+        message.into(),
+        provenant_records::warning::detected_source(DELIVERY_REFRESH_FAILED),
+    ));
 }
 
 /// Build a forge context from explicit values for test fixtures, never for
@@ -1769,8 +1773,12 @@ impl HostDeliveryContext {
             use provenant_records::warning::{DELIVERY_TRANSPORT_FALLBACK, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             warn(
-                Warning::new(DELIVERY_TRANSPORT_FALLBACK, message)
-                    .subject("DELIVERY_HOST_TRANSPORT_NONE"),
+                Warning::new(
+                    DELIVERY_TRANSPORT_FALLBACK,
+                    message,
+                    provenant_records::warning::detected_source(DELIVERY_TRANSPORT_FALLBACK),
+                )
+                .subject("DELIVERY_HOST_TRANSPORT_NONE"),
             );
         }
     }

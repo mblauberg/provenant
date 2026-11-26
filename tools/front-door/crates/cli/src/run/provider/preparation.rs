@@ -556,6 +556,9 @@ fn publish_preparation_login_failure(
         warn(Warning::new(
             provenant_records::warning::LOGIN_RECORD_UNRETAINED,
             format!("could not publish preparation login failure: {error}"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::LOGIN_RECORD_UNRETAINED,
+            ),
         ));
     }
 }
@@ -3241,6 +3244,9 @@ pub(super) fn prepare_candidates_inner(
             warn(Warning::new(
                 provenant_records::warning::CONFIG_UNAVAILABLE,
                 format!("{ARGV_LIMIT_KEY} unavailable ({error}); using compiled default"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                ),
             ));
             (
                 default_limit,
@@ -3363,6 +3369,9 @@ pub(super) fn prepare_candidates_inner(
                 warn(Warning::new(
                     provenant_records::warning::GH_PUBLISHING_UNAVAILABLE,
                     format!("GitHub publishing unavailable: {cause}"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::GH_PUBLISHING_UNAVAILABLE,
+                    ),
                 ));
             }
             None
@@ -3731,6 +3740,9 @@ pub(super) fn prepare_candidates_inner(
                                 warn(Warning::new(
                                     provenant_records::warning::LOGIN_RECORD_UNRETAINED,
                                     format!("could not publish login recovery: {error}"),
+                                    provenant_records::warning::detected_source(
+                                        provenant_records::warning::LOGIN_RECORD_UNRETAINED,
+                                    ),
                                 ));
                             }
                             let interval = record
@@ -4230,6 +4242,9 @@ pub(super) fn prepare_candidates_inner(
                                 .detail
                                 .as_deref()
                                 .unwrap_or("account readiness is stale")
+                        ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::ACCOUNT_READINESS_STALE,
                         ),
                     )
                     .repair(diagnostic.next.as_deref().unwrap_or("re-probe the account")),
@@ -5444,6 +5459,9 @@ pub(super) fn prepare_candidates_inner(
                 Warning::new(
                     provenant_records::warning::GH_CREDENTIALS_WITHHELD,
                     "GitHub publishing credentials withheld by the access policy",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::GH_CREDENTIALS_WITHHELD,
+                    ),
                 )
                 .subject(label.as_str()),
             );
@@ -5513,8 +5531,14 @@ pub(super) fn prepare_candidates_inner(
                 Ok(origin) => super::gh_auth::Delivery::Injected(origin),
                 Err(warning) => {
                     warn(
-                        Warning::new(provenant_records::warning::GH_LOGIN_UNAVAILABLE, warning)
-                            .subject(label.to_string()),
+                        Warning::new(
+                            provenant_records::warning::GH_LOGIN_UNAVAILABLE,
+                            warning,
+                            provenant_records::warning::detected_source(
+                                provenant_records::warning::GH_LOGIN_UNAVAILABLE,
+                            ),
+                        )
+                        .subject(label.to_string()),
                     );
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
@@ -5793,6 +5817,9 @@ pub(super) fn prepare_candidates_inner(
             warn(Warning::new(
                 provenant_records::warning::LAUNCH_ACCESS_PROFILE,
                 message.clone(),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::LAUNCH_ACCESS_PROFILE,
+                ),
             ));
             for warning in spec.warnings.iter().chain(continuation_warning.iter()) {
                 let text = warning
@@ -5801,6 +5828,9 @@ pub(super) fn prepare_candidates_inner(
                 warn(Warning::new(
                     provenant_records::warning::LAUNCH_ACCESS_PROFILE,
                     text.to_string(),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::LAUNCH_ACCESS_PROFILE,
+                    ),
                 ));
             }
             provider.launch_warnings.push(message);
@@ -5865,8 +5895,14 @@ pub(super) fn prepare_candidates_inner(
                 Ok(origin) => super::gh_auth::Delivery::Injected(origin),
                 Err(warning) => {
                     warn(
-                        Warning::new(provenant_records::warning::GH_LOGIN_UNAVAILABLE, warning)
-                            .subject(label.to_string()),
+                        Warning::new(
+                            provenant_records::warning::GH_LOGIN_UNAVAILABLE,
+                            warning,
+                            provenant_records::warning::detected_source(
+                                provenant_records::warning::GH_LOGIN_UNAVAILABLE,
+                            ),
+                        )
+                        .subject(label.to_string()),
                     );
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
@@ -6311,10 +6347,7 @@ mod lane_access_tests {
         );
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
-        assert_eq!(
-            warnings[0].source.as_ref().map(|source| source.layer),
-            Some(Layer::Profile)
-        );
+        assert_eq!(warnings[0].source.layer, Layer::Profile);
     }
 }
 

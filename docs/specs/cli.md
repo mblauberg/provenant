@@ -157,12 +157,12 @@ passing `--project PATH` as the repair.
 ### Warnings are typed values
 
 A warning is a typed value: a stable UPPER_SNAKE code from one of the two
-declared catalogues, a one-sentence message, and optional subject, source and
-repair.
+declared catalogues, a one-sentence message, a required structured source, and
+optional subject and repair.
 Library code never writes a warning itself: one function routes each warning to
 the innermost thread-local capture on this thread, then to the command's process
-sink, then to stderr as `warning: <message>` when neither is installed. A sink
-guard restores the previous sink when it is dropped. Codes follow the same
+sink, then retains it for the caller when neither is installed. A sink guard
+restores the previous sink when it is dropped. Codes follow the same
 stability rules as refusal codes, so a consumer branches on the code and never
 on the prose, and adding a code is additive. A repeated key collapses per
 invocation or per change; a per-change key hashes the code, subject and message

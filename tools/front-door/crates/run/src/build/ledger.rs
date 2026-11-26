@@ -174,6 +174,7 @@ fn warn(message: &str) {
     warn(Warning::new(
         BUILD_LEDGER_NOTE,
         format!("provenant: {message}"),
+        provenant_records::warning::detected_source(BUILD_LEDGER_NOTE),
     ));
 }
 

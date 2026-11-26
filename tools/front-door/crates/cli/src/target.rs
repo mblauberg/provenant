@@ -136,6 +136,9 @@ fn parse_name(name: &str) -> Result<String, TargetError> {
             provenant_records::warning::Warning::new(
                 provenant_records::warning::NAME_CASE_FOLDED,
                 format!("folded `{name}` to `{folded}`"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::NAME_CASE_FOLDED,
+                ),
             )
             .subject(folded.clone()),
         );

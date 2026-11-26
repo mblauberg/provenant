@@ -124,7 +124,7 @@ fn resolve_admin_publication(
                     "domains.pr.land.admin_publication from {} is ignored; only the host layer may grant admin publication",
                     ignored.source.layer.description()
                 ),
-            )
+             provenant_records::warning::detected_source(warning::SETTING_LAYER_IGNORED))
             .subject("domains.pr.land.admin_publication")
             .source(ignored.source)
             .repair("set admin_publication in the owner's host config [domains.pr.land]")
@@ -982,10 +982,7 @@ mod tests {
         assert!(!ignored.publication.allows_review_unavailable());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(warnings[0].code, "SETTING_LAYER_IGNORED");
-        assert_eq!(
-            warnings[0].source.as_ref().map(|source| source.layer),
-            Some(Layer::HostProject)
-        );
+        assert_eq!(warnings[0].source.layer, Layer::HostProject);
         Ok(())
     }
 }

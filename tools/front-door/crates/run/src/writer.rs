@@ -388,7 +388,7 @@ pub(super) fn terminal_forge_remote(
                 Warning::new(
                     FORGE_CONTEXT_UNRESOLVED,
                     format!("configured remote {remote:?} is not a usable Git remote name; keeping the local remote behaviour"),
-                )
+                 provenant_records::warning::detected_source(FORGE_CONTEXT_UNRESOLVED))
                 .once_per_change(),
             );
             None
@@ -1276,7 +1276,14 @@ fn emit_git_operation_warning(message: String) {
     #[cfg(test)]
     GIT_OPERATION_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.clone()));
     use provenant_records::warning::{GIT_OPERATION_RETAINED, Warning, warn};
-    warn(Warning::new(GIT_OPERATION_RETAINED, message).subject("lane Git operation retained"));
+    warn(
+        Warning::new(
+            GIT_OPERATION_RETAINED,
+            message,
+            provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+        )
+        .subject("lane Git operation retained"),
+    );
 }
 
 /// Whether a terminal check stopped only because an operation is unfinished.
@@ -3165,8 +3172,12 @@ impl WriterLaunch {
             use provenant_records::warning::{TOOL_STATE_COMMIT_FAILED, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             warn(
-                Warning::new(TOOL_STATE_COMMIT_FAILED, rendered)
-                    .subject("LANE_TOOL_STATE_COMMITTED"),
+                Warning::new(
+                    TOOL_STATE_COMMIT_FAILED,
+                    rendered,
+                    provenant_records::warning::detected_source(TOOL_STATE_COMMIT_FAILED),
+                )
+                .subject("LANE_TOOL_STATE_COMMITTED"),
             );
         }
         // A failure to inspect the diff never blocks settlement. A block here
@@ -3432,8 +3443,14 @@ impl WriterLaunch {
                     };
                     // Spec: docs/specs/cli.md#warnings-are-typed-values
                     warn(
-                        Warning::new(LANE_HISTORY_PUBLICATION_ADJUSTED, warning.clone())
-                            .subject(self.branch.as_str().to_owned()),
+                        Warning::new(
+                            LANE_HISTORY_PUBLICATION_ADJUSTED,
+                            warning.clone(),
+                            provenant_records::warning::detected_source(
+                                LANE_HISTORY_PUBLICATION_ADJUSTED,
+                            ),
+                        )
+                        .subject(self.branch.as_str().to_owned()),
                     );
                 }
                 let _ = attempt
@@ -3631,6 +3648,7 @@ impl WriterLaunch {
                         warn(Warning::new(
                             WRITER_UNPUSHED_WORK,
                             format!("stopped work remains unpushed: {error}"),
+                            provenant_records::warning::detected_source(WRITER_UNPUSHED_WORK),
                         ));
                         error
                     })
@@ -3673,6 +3691,7 @@ impl WriterLaunch {
                         warn(Warning::new(
                             WRITER_UNPUSHED_WORK,
                             format!("stopped work remains unpushed: {error}"),
+                            provenant_records::warning::detected_source(WRITER_UNPUSHED_WORK),
                         ));
                         StopWorkPush::Failed
                     }
@@ -3803,7 +3822,11 @@ impl WriterLaunch {
         let warn = |message: String| {
             use provenant_records::warning::{NATIVE_INDEX_SYNC_FAILED, Warning};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            provenant_records::warning::warn(Warning::new(NATIVE_INDEX_SYNC_FAILED, message));
+            provenant_records::warning::warn(Warning::new(
+                NATIVE_INDEX_SYNC_FAILED,
+                message,
+                provenant_records::warning::detected_source(NATIVE_INDEX_SYNC_FAILED),
+            ));
         };
         match crate::objects::sync_native_index(self.worktree.repo(), fallback) {
             crate::objects::IndexSync::Deferred => {}
@@ -3930,6 +3953,7 @@ impl WriterLaunch {
             warn(Warning::new(
                 PRIMARY_POSITION_UNRECORDED,
                 format!("could not record the primary checkout position: {error}"),
+                provenant_records::warning::detected_source(PRIMARY_POSITION_UNRECORDED),
             ));
         }
     }

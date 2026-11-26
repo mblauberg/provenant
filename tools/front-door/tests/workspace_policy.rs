@@ -1970,11 +1970,10 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-// The `warning: ` prefix belongs to the binary edge's one emitter and to the
-// library fallback that runs when no edge is installed. A library that writes
-// its own prefix bypasses dedup and JSON delivery, so a source check keeps the
-// seam singular. Spec: docs/specs/cli.md#warnings-are-typed-values
-const WARNING_EMITTERS: &[&str] = &["src/output.rs", "crates/records/src/warning.rs"];
+// The `warning: ` prefix belongs only to the binary edge's emitter. A library
+// that writes its own prefix bypasses dedup and JSON delivery, so the source
+// check scans records too. Spec: docs/specs/cli.md#warnings-are-typed-values
+const WARNING_EMITTERS: &[&str] = &["src/output.rs"];
 
 /// Byte offsets of string literals whose text starts with `warning: `.
 /// Comments and character literals are skipped so examples cannot trip the

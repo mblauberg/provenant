@@ -1215,6 +1215,7 @@ impl RunStore {
                     Warning::new(
                         warning::PROVIDER_STALLED,
                         "retrying the recorded stall stop request",
+                        provenant_records::warning::detected_source(warning::PROVIDER_STALLED),
                     )
                     .subject(record.attempt_id.to_string())
                     .once_per_change(),
@@ -1267,10 +1268,14 @@ impl RunStore {
             )?;
         }
         warning::warn(
-            Warning::new(warning::PROVIDER_STALLED, message)
-                .subject(record.attempt_id.to_string())
-                .source(source)
-                .once_per_change(),
+            Warning::new(
+                warning::PROVIDER_STALLED,
+                message,
+                provenant_records::warning::detected_source(warning::PROVIDER_STALLED),
+            )
+            .subject(record.attempt_id.to_string())
+            .source(source)
+            .once_per_change(),
         );
         match policy {
             StallPolicy::Report => Ok(None),

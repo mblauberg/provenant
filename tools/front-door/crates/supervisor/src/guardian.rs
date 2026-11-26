@@ -2679,6 +2679,9 @@ impl Driver<'_> {
                         Warning::new(
                             TERMINAL_FAILURE_UNRETAINED,
                             format!("cannot retain terminal failure: {persist_error}"),
+                            provenant_records::warning::detected_source(
+                                TERMINAL_FAILURE_UNRETAINED,
+                            ),
                         )
                         .subject(format!("attempt {}", self.reservation.scope.attempt))
                         .repair(format!(
@@ -2710,6 +2713,7 @@ impl Driver<'_> {
                 Warning::new(
                     TERMINAL_PUBLICATION_INCOMPLETE,
                     "terminal publication incomplete; retaining reservation for reconciliation",
+                    provenant_records::warning::detected_source(TERMINAL_PUBLICATION_INCOMPLETE),
                 )
                 .subject(format!("attempt {}", self.reservation.scope.attempt))
                 .repair(format!(

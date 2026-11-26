@@ -548,6 +548,7 @@ impl<'a> Service<'a> {
                 Warning::new(
                     SECRET_SHAPE_IN_FIELD,
                     format!("provenant: field={field} rule=known_secret_shape"),
+                    provenant_records::warning::detected_source(SECRET_SHAPE_IN_FIELD),
                 )
                 .subject(field.to_owned())
                 .once_per_change(),

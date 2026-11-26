@@ -465,6 +465,7 @@ impl RunStore {
                     warn(Warning::new(
                         STOP_PUBLICATION_UNAVAILABLE,
                         format!("stop publication is unavailable: {error}"),
+                        provenant_records::warning::detected_source(STOP_PUBLICATION_UNAVAILABLE),
                     ));
                 }
             }

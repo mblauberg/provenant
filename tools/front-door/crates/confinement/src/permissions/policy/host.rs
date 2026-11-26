@@ -168,6 +168,7 @@ fn warn_inventory(path: &Path, stage: &str, reason: &str) {
                 "{stage} incomplete at {}: {reason}; protecting this directory",
                 path.display()
             ),
+            provenant_records::warning::detected_source(HOST_INVENTORY_INCOMPLETE),
         )
         .subject(path.display().to_string())
         .once_per_change(),
@@ -283,7 +284,7 @@ impl InventorySummary {
                 Warning::new(
                     CREDENTIAL_INVENTORY_INCOMPLETE,
                     format!("credential symlink inventory incomplete: {}", details.join(" | ")),
-                )
+                 provenant_records::warning::detected_source(CREDENTIAL_INVENTORY_INCOMPLETE))
                 .repair("repair the reported links or move credentials into their configured home stores")
                 .once_per_change(),
             );

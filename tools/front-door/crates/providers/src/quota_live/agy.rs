@@ -119,6 +119,9 @@ impl LiveQuota {
                                     "failed to reconcile {} account switch: {error}",
                                     provenant_records::Harness::Agy.spec().name
                                 ),
+                                provenant_records::warning::detected_source(
+                                    ACCOUNT_SWITCH_RECONCILE_FAILED,
+                                ),
                             )
                             .subject(account.scope.account_key.clone()),
                         );

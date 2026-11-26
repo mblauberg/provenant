@@ -1563,7 +1563,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 provenant_records::warning::Warning::new(
                     provenant_records::warning::WAIT_TARGET_FALLBACK,
                     "[WAIT_TARGET_FALLBACK] wait inside a lane named no targets; waiting on this lane's children through the owner relay",
-                )
+                 provenant_records::warning::detected_source(provenant_records::warning::WAIT_TARGET_FALLBACK))
                 .once_per_change(),
             );
             // The local project journal is unavailable inside a lane and the
@@ -1726,7 +1726,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 "#{number}: local tip {local} differs from GitHub head {}; waiting for the local tip",
                                 reported.sha
                             ),
-                        )
+                         provenant_records::warning::detected_source(provenant_records::warning::BRANCH_BEHIND_BASE))
                         .subject(reported.branch.clone())
                         .source(provenant_records::Source {
                             layer: provenant_records::Layer::Detected,
@@ -2114,7 +2114,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         provenant_records::warning::warn(provenant_records::warning::Warning::new(
                             provenant_records::warning::PR_JOURNAL_UNAVAILABLE,
                             format!("PR journal unavailable; reconciling after gaps: {error}"),
-                        ));
+                         provenant_records::warning::detected_source(provenant_records::warning::PR_JOURNAL_UNAVAILABLE)));
                         None
                     }
                 };

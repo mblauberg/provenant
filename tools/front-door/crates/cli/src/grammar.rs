@@ -1426,6 +1426,9 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
             Warning::new(
                 provenant_records::warning::WAIT_BUDGET_CLAMPED,
                 format!("wait budget clamped to maximum {maximum}s"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::WAIT_BUDGET_CLAMPED,
+                ),
             )
             .repair("Request a smaller wait budget."),
         );

@@ -714,8 +714,12 @@ pub fn fold_graph_name(name: &str) -> Result<String, &'static str> {
     }
     if changed {
         warn(
-            Warning::new(NAME_CASE_FOLDED, format!("folded `{name}` to `{folded}`"))
-                .subject(folded.clone()),
+            Warning::new(
+                NAME_CASE_FOLDED,
+                format!("folded `{name}` to `{folded}`"),
+                provenant_records::warning::detected_source(NAME_CASE_FOLDED),
+            )
+            .subject(folded.clone()),
         );
     }
     Ok(folded)

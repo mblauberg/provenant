@@ -547,6 +547,9 @@ pub fn install_page(
                 warn(Warning::new(
                     provenant_records::warning::INSTALL_FINDING_ADVISORY,
                     detail.clone(),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::INSTALL_FINDING_ADVISORY,
+                    ),
                 ));
             }
             continue;

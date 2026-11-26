@@ -1016,6 +1016,9 @@ impl Factory {
                         format!(
                             "full config unavailable ({error}); using the owner's resolved policy"
                         ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::CONFIG_UNAVAILABLE,
+                        ),
                     )
                     .subject(self.context.identity.project.to_string()),
                 );
@@ -1631,7 +1634,7 @@ impl Factory {
                     provenant_records::warning::Warning::new(
                         provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE,
                         format!("repository worktree inventory unavailable ({reason}); read roots are limited to the current directory"),
-                    )
+                     provenant_records::warning::detected_source(provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE))
                     .subject(self.cwd.display().to_string()),
                 );
                 vec![self.cwd.clone()]
@@ -4204,6 +4207,9 @@ pub(super) fn warn_operator(warning: impl std::fmt::Display) {
         provenant_records::warning::Warning::new(
             provenant_records::warning::LAUNCH_ADVISORY,
             warning.to_string(),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::LAUNCH_ADVISORY,
+            ),
         )
         .once_per_change(),
     );

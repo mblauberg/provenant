@@ -1380,6 +1380,7 @@ fn warn_skipped_retry_credentials() {
     warn(Warning::new(
         RETRY_CREDENTIALS_SKIPPED,
         "retry admission skipped out-of-bounds ambient credentials (16 KiB per value, 128 values, 64 KiB total); publication remains fail-closed",
+        provenant_records::warning::detected_source(RETRY_CREDENTIALS_SKIPPED),
     ));
 }
 

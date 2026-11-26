@@ -312,6 +312,9 @@ fn switch(
                 provenant_records::warning::Warning::new(
                     provenant_records::warning::CHAIR_SWITCH_QUOTA_STALE,
                     "chair switch: current quota below threshold or unavailable/stale; continuing",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CHAIR_SWITCH_QUOTA_STALE,
+                    ),
                 )
                 .once_per_change(),
             );
@@ -1034,6 +1037,9 @@ fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIde
             provenant_records::warning::Warning::new(
                 provenant_records::warning::ACCOUNT_IDENTITY_UNVERIFIED,
                 "Claude account identity could not be verified; usage is attributed as unknown",
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::ACCOUNT_IDENTITY_UNVERIFIED,
+                ),
             )
             .once_per_change(),
         );

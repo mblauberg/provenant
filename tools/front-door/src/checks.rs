@@ -445,6 +445,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::POOL_EFFORT_UNSUPPORTED,
                     message,
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::POOL_EFFORT_UNSUPPORTED,
+                    ),
                 ));
             }
             for message in
@@ -453,6 +456,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::PORT_DECLARATION_IGNORED,
                     message,
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::PORT_DECLARATION_IGNORED,
+                    ),
                 ));
             }
             Ok(provenant_cli::check::config_page(
@@ -542,7 +548,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::AGENT_TOOLCHAIN_PATH,
                     message,
-                ));
+                 provenant_records::warning::detected_source(provenant_records::warning::AGENT_TOOLCHAIN_PATH)));
             }
             let apps = crate::apps::dir(&targets.home);
             let login_item = crate::apps::stale_login_item(&apps);
@@ -565,6 +571,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::STALE_LOGIN_ITEM_ADVISORY,
                     message,
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::STALE_LOGIN_ITEM_ADVISORY,
+                    ),
                 ));
             }
             Ok(result)
@@ -729,6 +738,9 @@ fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<
                 provenant_records::warning::Warning::new(
                     provenant_records::warning::PRIVATE_CHECK_DIR_UNCLEAN,
                     format!("cannot clean private check directory: {error}"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::PRIVATE_CHECK_DIR_UNCLEAN,
+                    ),
                 )
                 .once_per_change(),
             );

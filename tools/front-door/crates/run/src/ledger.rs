@@ -497,6 +497,7 @@ fn malformed_row(rowid: i64) {
         Warning::new(
             ADMISSION_RECORD_MALFORMED,
             format!("admission: malformed lease row {rowid}"),
+            provenant_records::warning::detected_source(ADMISSION_RECORD_MALFORMED),
         )
         .subject(format!("row {rowid}")),
     );

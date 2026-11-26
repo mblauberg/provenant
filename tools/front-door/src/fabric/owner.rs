@@ -630,6 +630,9 @@ impl BoundGraphOwner<'_> {
                 Warning::new(
                     provenant_records::warning::REFUSAL_NOTICE_UNDELIVERED,
                     "refusal notice could not be delivered",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::REFUSAL_NOTICE_UNDELIVERED,
+                    ),
                 )
                 .repair("run `provenant reconcile`"),
             );
@@ -1836,6 +1839,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         format!(
                             "full config unavailable ({error}); using the owner's resolved policy"
                         ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::CONFIG_UNAVAILABLE,
+                        ),
                     )
                     .subject(project.clone()),
                 );
@@ -1857,6 +1863,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 warn(Warning::new(
                     provenant_records::warning::CONFIG_UNAVAILABLE,
                     format!("graph launch retry settings unavailable: {error}; using defaults"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                    ),
                 ));
                 return policy;
             }
@@ -2025,13 +2034,17 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     "ignoring --base {reference} for --branch {branch}; using remote tip {tip}"
                 );
                 warn(
-                    Warning::new(BRANCH_BEHIND_BASE, warning.clone())
-                        .subject(branch.to_string())
-                        .source(provenant_records::Source {
-                            layer: provenant_records::Layer::Detected,
-                            origin: Some(format!("git remote tip {tip}")),
-                        })
-                        .repair(format!("use --base {tip}")),
+                    Warning::new(
+                        BRANCH_BEHIND_BASE,
+                        warning.clone(),
+                        provenant_records::warning::detected_source(BRANCH_BEHIND_BASE),
+                    )
+                    .subject(branch.to_string())
+                    .source(provenant_records::Source {
+                        layer: provenant_records::Layer::Detected,
+                        origin: Some(format!("git remote tip {tip}")),
+                    })
+                    .repair(format!("use --base {tip}")),
                 );
                 self.launch_warnings.push(warning);
             }
@@ -2059,6 +2072,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 warn(Warning::new(
                     provenant_records::warning::BASE_FALLBACK_ADVISORY,
                     warning.clone(),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::BASE_FALLBACK_ADVISORY,
+                    ),
                 ));
                 self.launch_warnings.push(warning);
             }
@@ -4301,12 +4317,17 @@ impl BoundGraphOwner<'_> {
             (None, None)
         };
         if let Some(warning) = repin_warning.take() {
-            warn(Warning::new(BRANCH_BEHIND_BASE, warning.clone()).source(
-                provenant_records::Source {
+            warn(
+                Warning::new(
+                    BRANCH_BEHIND_BASE,
+                    warning.clone(),
+                    provenant_records::warning::detected_source(BRANCH_BEHIND_BASE),
+                )
+                .source(provenant_records::Source {
                     layer: provenant_records::Layer::Detected,
                     origin: Some("writer branch repin".to_owned()),
-                },
-            ));
+                }),
+            );
             submission_prompt.push_str("\n\n");
             submission_prompt.push_str(&warning);
         }
@@ -4696,6 +4717,9 @@ impl BoundGraphOwner<'_> {
                 warn(Warning::new(
                     provenant_records::warning::EXCLUSION_ADVISORY,
                     warning.clone(),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::EXCLUSION_ADVISORY,
+                    ),
                 ));
                 self.launch_warnings.push(warning);
             }
@@ -4960,7 +4984,11 @@ impl BoundGraphOwner<'_> {
                 &provenant_cli::run::ReadSourceChoice::automatic(),
             )
         {
-            warn(Warning::new(SETTING_LAYER_IGNORED, warning.clone()));
+            warn(Warning::new(
+                SETTING_LAYER_IGNORED,
+                warning.clone(),
+                provenant_records::warning::detected_source(SETTING_LAYER_IGNORED),
+            ));
             self.launch_warnings.push(warning);
         }
         if !accepted {
@@ -5014,6 +5042,9 @@ impl BoundGraphOwner<'_> {
                 Warning::new(
                     provenant_records::warning::MODEL_SEGMENT_ADVISORY,
                     warning.clone(),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::MODEL_SEGMENT_ADVISORY,
+                    ),
                 )
                 .subject(model.as_str()),
             );
@@ -5104,6 +5135,9 @@ impl BoundGraphOwner<'_> {
                         provenant_records::warning::Warning::new(
                             provenant_records::warning::CONFIG_KEY_IGNORED,
                             format!("ignored unknown node or project capability {name}"),
+                            provenant_records::warning::detected_source(
+                                provenant_records::warning::CONFIG_KEY_IGNORED,
+                            ),
                         )
                         .subject(name.clone()),
                     );
@@ -5117,6 +5151,9 @@ impl BoundGraphOwner<'_> {
                             provenant_records::warning::Warning::new(
                                 provenant_records::warning::CONFIG_KEY_IGNORED,
                                 format!("ignored unknown flag capability {capability}"),
+                                provenant_records::warning::detected_source(
+                                    provenant_records::warning::CONFIG_KEY_IGNORED,
+                                ),
                             )
                             .subject(capability.clone()),
                         );

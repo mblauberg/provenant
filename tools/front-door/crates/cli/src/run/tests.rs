@@ -1384,6 +1384,11 @@ fn one_config_deprecation_notice_gives_one_warning_across_channels() {
         warnings[0].code.as_ref(),
         provenant_records::warning::CONFIG_DEPRECATION.as_str()
     );
+    assert_eq!(
+        warnings[0].source.layer,
+        provenant_records::provenance::Layer::Host
+    );
+    assert_eq!(warnings[0].source.origin.as_deref(), Some("config.toml"));
     assert!(warnings[0].message.contains(notice) && warnings[0].message.contains("config.toml"));
     // The adapter decides whether stderr is read at all.
     let ((), none) = provenant_records::warning::capture(|| {

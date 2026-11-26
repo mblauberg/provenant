@@ -337,6 +337,12 @@ fn fixture() -> Result {
     if args.get(1).is_some_and(|v| v == "run") {
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt)?;
+        if std::env::var_os("PROVENANT_TEST_CONFIG_DEPRECATION").is_some() {
+            writeln!(
+                io::stderr(),
+                "[features].multi_agent is deprecated. Use [agents].enabled=false instead."
+            )?;
+        }
         if prompt.contains("fixture owner lifetime probe") {
             // Keep the synthetic provider alive while its owner's lifetime is tested.
             #[allow(clippy::disallowed_methods)] // Bound fixture lifetime if cleanup fails.
@@ -6477,6 +6483,57 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn run_json_carries_provider_deprecation_source_without_warning_stderr() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let mut rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+    let account =
+        provenant_providers::identity::codex_account(auth).ok_or("Codex fixture account")?;
+    support::register_account(&rig, "codex", "fixture", &account, &rig.root.join("codex"))?;
+    rig.env
+        .push(("PROVENANT_TEST_CONFIG_DEPRECATION".into(), "1".into()));
+    let document = rig.root.join("config-deprecation.json");
+    fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "config-deprecation",
+            "nodes": [{
+                "id": "reader",
+                "prompt": "fixture config deprecation warning",
+                "access": "read_only",
+                "route": {"adapter": "codex", "model": "gpt-6-luna"}
+            }]
+        }))?,
+    )?;
+
+    let (out, envelope) = rig.launch(&["--file", document.to_str().ok_or("document path")?])?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let warnings = envelope["warnings"].as_array().ok_or("warnings array")?;
+    let warning = warnings
+        .iter()
+        .find(|warning| warning["code"] == "CONFIG_DEPRECATION")
+        .ok_or("config deprecation warning")?;
+    assert_eq!(warning["source"]["layer"], "host", "{warning}");
+    assert_eq!(warning["source"]["origin"], "config.toml", "{warning}");
+    assert!(
+        warnings.iter().all(|warning| {
+            warning["code"].as_str().is_some() && warning["source"]["layer"].as_str().is_some()
+        }),
+        "every envelope warning needs a code and source: {envelope}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr.bytes).contains("is deprecated"),
+        "JSON warning was also written to stderr: {out:?}"
+    );
+    cleanup.disarm();
+    Ok(())
+}
+
 /// Issue #3531: an exact model present in the cached discovered layer must
 /// resolve through the same effective catalogue `route list` uses, so launch
 /// emits no "not in the catalogue" warning. A genuinely unknown model still
@@ -6611,6 +6668,10 @@ fn main() -> ExitCode {
             (
                 "provider_checks_preserve_routes_and_settlement_causes",
                 provider_checks_preserve_routes_and_settlement_causes,
+            ),
+            (
+                "run_json_carries_provider_deprecation_source_without_warning_stderr",
+                run_json_carries_provider_deprecation_source_without_warning_stderr,
             ),
             (
                 "pending_graph_reports_pre_attempt_writer_failure",

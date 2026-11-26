@@ -670,6 +670,9 @@ fn await_pr_ci_with(
                             provenant_records::warning::Warning::new(
                                 provenant_records::warning::GH_RATE_LIMITED,
                                 format!("pull request #{} CI read skipped: {message}", pr.number),
+                                provenant_records::warning::detected_source(
+                                    provenant_records::warning::GH_RATE_LIMITED,
+                                ),
                             )
                             .subject(format!("#{}", pr.number))
                             .once_per_change(),

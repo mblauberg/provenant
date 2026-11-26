@@ -69,7 +69,7 @@ fn host_project_clash(source: &Path, target: &Path) -> Warning {
             source.display(),
             target.display()
         ),
-    )
+     provenant_records::warning::detected_source(MIGRATION_STEP_FAILED))
     .subject(source.display().to_string())
     .repair(format!(
         "compare {} with {}, copy the values you need into {}, then remove {} and rerun `provenant install`",
@@ -260,7 +260,7 @@ impl Migration for AttemptScratchMove {
                             "attempt scratch entry {} is not a directory; left in place",
                             source.display()
                         ),
-                    )
+                     provenant_records::warning::detected_source(MIGRATION_STEP_FAILED))
                     .subject(source.display().to_string())
                     .repair("inspect the entry, move any objects you need, then rerun `provenant install`"),
                 );
@@ -282,7 +282,7 @@ impl Migration for AttemptScratchMove {
                             source.display(),
                             target.display()
                         ),
-                    )
+                     provenant_records::warning::detected_source(MIGRATION_STEP_FAILED))
                     .subject(source.display().to_string())
                     .repair(format!(
                         "compare {} with {}, keep the objects you need, remove the stale path, then rerun `provenant install`",
@@ -341,6 +341,7 @@ fn rewrite_json_or_warn(
             Warning::new(
                 MIGRATION_STEP_FAILED,
                 format!("{what} could not be migrated: {error}"),
+                provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
             )
             .subject(path.display().to_string())
             .repair(format!(
@@ -410,7 +411,7 @@ impl Migration for PortSourceSpellings {
                             Warning::new(
                                 MIGRATION_STEP_FAILED,
                                 format!("port receipt {} is busy; its source spellings were not migrated", path.display()),
-                            )
+                             provenant_records::warning::detected_source(MIGRATION_STEP_FAILED))
                             .subject(path.display().to_string())
                             .repair("stop the publisher, then rerun `provenant install`; the step is idempotent"),
                         );
@@ -544,6 +545,7 @@ impl Migration for UsageLedgerV4 {
                 Warning::new(
                     MIGRATION_STEP_FAILED,
                     format!("usage ledger line could not be mapped to v4: {unmapped}"),
+                    provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
                 )
                 .subject(unmapped.segment.clone())
                 .repair("inspect the .v3-unmapped sidecar; no value was guessed"),
@@ -566,6 +568,7 @@ pub(super) fn record(state_root: &Path, applied: &[String]) {
             Warning::new(
                 MIGRATION_STEP_FAILED,
                 format!("migration ids could not be recorded in the install receipt: {error}"),
+                provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
             )
             .subject(state_root.display().to_string())
             .repair("rerun `provenant install`; the steps are idempotent"),
@@ -585,6 +588,7 @@ fn run_steps(state_root: &Path, steps: &[&dyn Migration]) -> Vec<String> {
                         "the install receipt under {} could not be read: {error}",
                         state_root.display()
                     ),
+                    provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
                 )
                 .subject(state_root.display().to_string())
                 .repair("repair or remove the install receipt, then rerun `provenant install`"),
@@ -617,7 +621,7 @@ fn run_steps(state_root: &Path, steps: &[&dyn Migration]) -> Vec<String> {
                                 "migration step {} applied but its receipt entry could not be written: {error}",
                                 step.id()
                             ),
-                        )
+                         provenant_records::warning::detected_source(MIGRATION_STEP_FAILED))
                         .subject(state_root.display().to_string())
                         .repair("rerun `provenant install`; the step is idempotent"),
                     );
@@ -632,6 +636,7 @@ fn run_steps(state_root: &Path, steps: &[&dyn Migration]) -> Vec<String> {
                             step.id(),
                             state_root.display()
                         ),
+                        provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
                     )
                     .subject(state_root.display().to_string())
                     .repair("rerun `provenant install`; the step is idempotent"),
@@ -1081,9 +1086,13 @@ mod tests {
             if self.warnings.load(Ordering::SeqCst) > 0 {
                 self.warnings.fetch_sub(1, Ordering::SeqCst);
                 report.warnings.push(
-                    Warning::new(MIGRATION_STEP_FAILED, "fixture left something behind")
-                        .subject("fixture")
-                        .repair("retry"),
+                    Warning::new(
+                        MIGRATION_STEP_FAILED,
+                        "fixture left something behind",
+                        provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
+                    )
+                    .subject("fixture")
+                    .repair("retry"),
                 );
             }
             Ok(report)

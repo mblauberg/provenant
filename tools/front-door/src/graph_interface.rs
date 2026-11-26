@@ -562,6 +562,9 @@ pub(crate) fn run(
                 "--over creates {} nodes; check comma-separated items",
                 request.over.len()
             ),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::ARGUMENT_VALUE_SUSPECT,
+            ),
         ));
     }
     let bare_model = request
@@ -613,6 +616,9 @@ pub(crate) fn run(
             warn(Warning::new(
                 provenant_records::warning::MODEL_SEGMENT_ADVISORY,
                 warning,
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::MODEL_SEGMENT_ADVISORY,
+                ),
             ));
         }
     }

@@ -924,6 +924,7 @@ fn warn_unrecognised_project(path: &Path) {
                 "ignoring unrecognised project directory at {}; it is not a project binding",
                 path.display()
             ),
+            provenant_records::warning::detected_source(PROJECT_DIRECTORY_IGNORED),
         )
         .subject(path.display().to_string())
         .repair("move or remove the stray entry from the projects registry")

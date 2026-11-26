@@ -246,6 +246,9 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
             Warning::new(
                 provenant_records::warning::HOOK_BUDGET_OVERRUN,
                 message.clone(),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::HOOK_BUDGET_OVERRUN,
+                ),
             )
             .subject(action),
         );
@@ -1327,6 +1330,9 @@ fn digest_scope(roots: &provenant_core::Roots) -> (DigestScope, Option<String>) 
                 Warning::new(
                     provenant_records::warning::CONFIG_UNAVAILABLE,
                     format!("session digest: scope setting unavailable ({error}); using project"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                    ),
                 )
                 .once_per_change(),
             );
@@ -1347,6 +1353,9 @@ fn push_history(roots: &provenant_core::Roots) -> provenant_config::LaneHistory 
                     provenant_records::warning::CONFIG_UNAVAILABLE,
                     format!(
                         "pre-push: policy settings unavailable ({error}); using compiled defaults"
+                    ),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
                     ),
                 )
                 .once_per_change(),
@@ -1427,6 +1436,9 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
             warn(Warning::new(
                 provenant_records::warning::PROJECT_UNAVAILABLE,
                 format!("pre-push: project unavailable: {error}"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::PROJECT_UNAVAILABLE,
+                ),
             ));
             return Ok(());
         }
@@ -1441,6 +1453,9 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
             warn(Warning::new(
                 provenant_records::warning::PROJECT_UNAVAILABLE,
                 format!("pre-push: project roots unavailable: {error}"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::PROJECT_UNAVAILABLE,
+                ),
             ));
             return Ok(());
         }
@@ -1474,6 +1489,9 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
                     warn(Warning::new(
                         provenant_records::warning::PRE_PUSH_POLICY_ADVISORY,
                         format!("pre-push: {refusal}"),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::PRE_PUSH_POLICY_ADVISORY,
+                        ),
                     ));
                     Ok(())
                 }
@@ -1490,6 +1508,9 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
         warn(Warning::new(
             provenant_records::warning::CHECK_UNAVAILABLE,
             format!("pre-push: check unavailable: {error}"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::CHECK_UNAVAILABLE,
+            ),
         ));
         return Ok(());
     }
@@ -1581,6 +1602,9 @@ fn run_local_gate(
             warn(Warning::new(
                 provenant_records::warning::CHECK_UNAVAILABLE,
                 format!("pre-push: local gate unavailable: {error}"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::CHECK_UNAVAILABLE,
+                ),
             ));
             return Ok(());
         }
@@ -1635,6 +1659,9 @@ fn run_local_gate_with(
             warn(Warning::new(
                 provenant_records::warning::LOCAL_GATE_ADVISORY,
                 format!("pre-push: {message}"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::LOCAL_GATE_ADVISORY,
+                ),
             ));
         }
     }
