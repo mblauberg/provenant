@@ -298,6 +298,8 @@ pub const NOTES_CURSOR_UNACKNOWLEDGED: WarningCode = WarningCode("NOTES_CURSOR_U
 /// A re-drive offered different evidence; the sealed copy was kept.
 pub const SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS: WarningCode =
     WarningCode("SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS");
+/// A settlement knob had an unrecognised value, so the shipped default applied.
+pub const SETTLEMENT_POLICY_INVALID: WarningCode = WarningCode("SETTLEMENT_POLICY_INVALID");
 /// A PR journal could not be read; reconciliation covers the gap.
 pub const PR_JOURNAL_UNAVAILABLE: WarningCode = WarningCode("PR_JOURNAL_UNAVAILABLE");
 /// A build context, Git binding or repository was unavailable; build ran locally.

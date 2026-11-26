@@ -9,10 +9,12 @@ use provenant_core::bounded_line;
 
 use crate::declaration::DeclarationEvidence;
 use crate::handoff::{HandoffResult, HandoffStatus};
+use crate::provenance::Sourced;
 use crate::run::{
     Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason, TerminalCause,
     TerminalEvidence,
 };
+use crate::settlement::policy::{AppliedPolicy, NoWork, SettlementPolicy, SignalAction};
 use crate::settlement::{
     HandoffSource, IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout, Progress,
     SettlementEvidence,
@@ -136,6 +138,10 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     let custody = &evidence.custody;
     let writer = !matches!(evidence.lane, LaneRole::Reader);
 
+    let policy = &evidence.policy;
+    let shipped = SettlementPolicy::shipped();
+    let mut applied: Vec<AppliedPolicy> = Vec::new();
+
     let mut outcome = host.outcome;
     let mut cause = host.cause;
     let mut reason = host.reason.clone();
@@ -143,14 +149,56 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     let mut complete = host.complete;
     let mut signals = host.signals.clone();
 
+    // A recorded signal is a fact. An action changes the outcome and whether
+    // the signal reaches the class ladder; only a non-default action that
+    // actually changed one of those is reported with its source.
+    fn record_action(
+        applied: &mut Vec<AppliedPolicy>,
+        shipped: SignalAction,
+        sourced: &Sourced<SignalAction>,
+        signal: PartialSignal,
+        changed: bool,
+    ) {
+        if sourced.value != shipped && changed {
+            applied.push(AppliedPolicy {
+                signal,
+                action: sourced.value,
+                source: sourced.source.clone(),
+            });
+        }
+    }
+    fn classed(action: SignalAction) -> bool {
+        !matches!(
+            action,
+            SignalAction::Fail | SignalAction::Warn | SignalAction::Off
+        )
+    }
+
     // 1. Edits left on the worktree are not a success. The census note is the
     // only change to the reason here; slice 5a no longer mutates the host state.
     if writer && outcome == Outcome::Succeeded {
         if let Some(git) = &evidence.git
             && let Some(note) = &git.uncommitted
         {
-            outcome = Outcome::Uncommitted;
-            append(&mut reason, note.clone());
+            let action = policy.uncommitted_work.value;
+            let before = outcome;
+            outcome = match action {
+                SignalAction::Fail => Outcome::Failed,
+                SignalAction::Review => Outcome::ReviewRequired,
+                SignalAction::Warn | SignalAction::Off => outcome,
+                SignalAction::Hold => Outcome::Uncommitted,
+            };
+            signals.push(PartialSignal::UncommittedWork);
+            if action != SignalAction::Off {
+                append(&mut reason, note.clone());
+            }
+            record_action(
+                &mut applied,
+                shipped.uncommitted_work.value,
+                &policy.uncommitted_work,
+                PartialSignal::UncommittedWork,
+                outcome != before || !classed(action),
+            );
         }
     }
 
@@ -158,9 +206,25 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     if let Some(git) = &evidence.git {
         match &git.primary {
             PrimaryCheckout::Review { note } => {
-                outcome = Outcome::ReviewRequired;
+                let action = policy.stray_work.value;
+                let before = outcome;
+                outcome = match action {
+                    SignalAction::Fail => Outcome::Failed,
+                    SignalAction::Review => Outcome::ReviewRequired,
+                    SignalAction::Warn | SignalAction::Off => outcome,
+                    SignalAction::Hold => Outcome::Uncommitted,
+                };
                 signals.push(PartialSignal::StrayWork);
-                append(&mut reason, note.clone());
+                if action != SignalAction::Off {
+                    append(&mut reason, note.clone());
+                }
+                record_action(
+                    &mut applied,
+                    shipped.stray_work.value,
+                    &policy.stray_work,
+                    PartialSignal::StrayWork,
+                    outcome != before || !classed(action),
+                );
             }
             PrimaryCheckout::Warn { note } | PrimaryCheckout::Unavailable { note } => {
                 append(&mut reason, note.clone());
@@ -173,12 +237,30 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     // answer is its result.
     if host.result_empty && matches!(outcome, Outcome::Succeeded | Outcome::Uncommitted) {
         if writer {
+            let action = policy.empty_result.value;
+            let before = outcome;
             cause = Some(TerminalCause::EmptyWriterResult);
-            if outcome == Outcome::Succeeded {
-                outcome = Outcome::ReviewRequired;
+            outcome = match action {
+                SignalAction::Fail => Outcome::Failed,
+                SignalAction::Review if outcome == Outcome::Succeeded => Outcome::ReviewRequired,
+                SignalAction::Review
+                | SignalAction::Warn
+                | SignalAction::Off
+                | SignalAction::Hold => outcome,
+            };
+            if action != SignalAction::Off {
+                append(&mut reason, TerminalCause::EmptyWriterResult.detail());
             }
-            append(&mut reason, TerminalCause::EmptyWriterResult.detail());
+            record_action(
+                &mut applied,
+                shipped.empty_result.value,
+                &policy.empty_result,
+                PartialSignal::HandoffMissing,
+                outcome != before || !classed(action),
+            );
         } else {
+            // A reader's only product is its answer, so an empty one stays
+            // failed under every value of the writer-facing knob.
             outcome = Outcome::Failed;
             reason = Some(EMPTY_RESULT_REASON.into());
         }
@@ -205,11 +287,30 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         .is_some_and(crate::handoff::Handoff::unfinished);
 
     if let Err(error) = &declaration {
+        let action = policy.handoff_malformed.value;
+        let before = outcome;
         signals.push(PartialSignal::HandoffMalformed);
-        append(&mut reason, error.to_string());
-        if matches!(outcome, Outcome::Succeeded | Outcome::Uncommitted) {
-            outcome = Outcome::ReviewRequired;
+        if action != SignalAction::Off {
+            append(&mut reason, error.to_string());
         }
+        outcome = match action {
+            SignalAction::Fail => Outcome::Failed,
+            SignalAction::Review
+                if matches!(outcome, Outcome::Succeeded | Outcome::Uncommitted) =>
+            {
+                Outcome::ReviewRequired
+            }
+            SignalAction::Review | SignalAction::Warn | SignalAction::Off | SignalAction::Hold => {
+                outcome
+            }
+        };
+        record_action(
+            &mut applied,
+            shipped.handoff_malformed.value,
+            &policy.handoff_malformed,
+            PartialSignal::HandoffMalformed,
+            outcome != before || !classed(action),
+        );
     }
     if cause == Some(TerminalCause::EmptyWriterResult) {
         signals.push(PartialSignal::HandoffMissing);
@@ -221,11 +322,26 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         && stopped.is_none()
         && matches!(&evidence.handoff, DeclarationEvidence::Missing)
     {
+        let action = policy.handoff_missing.value;
+        let before = outcome;
         signals.push(PartialSignal::HandoffMissing);
-        if outcome == Outcome::Succeeded {
-            outcome = Outcome::ReviewRequired;
-            reason = Some(NO_HANDOFF_REASON.into());
-        }
+        outcome = match action {
+            SignalAction::Fail => Outcome::Failed,
+            SignalAction::Review if outcome == Outcome::Succeeded => {
+                reason = Some(NO_HANDOFF_REASON.into());
+                Outcome::ReviewRequired
+            }
+            SignalAction::Review | SignalAction::Warn | SignalAction::Off | SignalAction::Hold => {
+                outcome
+            }
+        };
+        record_action(
+            &mut applied,
+            shipped.handoff_missing.value,
+            &policy.handoff_missing,
+            PartialSignal::HandoffMissing,
+            outcome != before || !classed(action),
+        );
     }
 
     if matches!(
@@ -288,7 +404,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         .ok()
         .flatten()
         .is_some_and(|handoff| handoff.status == HandoffStatus::StoppedEarly);
-    if writer
+    let no_work_applies = writer
         && outcome == Outcome::ReviewRequired
         && declared_stopped_early
         && cause.is_none()
@@ -298,8 +414,8 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
             .is_some_and(|git| git.progress() == Progress::Unchanged)
         && !signals.contains(&PartialSignal::StrayWork)
         && !signals.contains(&PartialSignal::UncommittedWork)
-        && !signals.contains(&PartialSignal::HandoffMalformed)
-    {
+        && !signals.contains(&PartialSignal::HandoffMalformed);
+    if no_work_applies && policy.no_work.value == NoWork::Detect {
         cause = Some(TerminalCause::StoppedNoWork);
         let previous = reason.take().unwrap_or_default();
         reason = Some(format!(
@@ -307,6 +423,13 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
             TerminalCause::StoppedNoWork.detail(),
             previous
         ));
+    }
+    if no_work_applies && policy.no_work.value != shipped.no_work.value {
+        applied.push(AppliedPolicy {
+            signal: PartialSignal::DeclaredStop,
+            action: SignalAction::Off,
+            source: policy.no_work.source.clone(),
+        });
     }
 
     // 8. A denial is a diagnostic, not part of the provider's answer.
@@ -412,12 +535,42 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     };
 
     // 14. One reason, then one stop, source and graph result from that reason.
+    // Every signal stays on the fact. A non-releasing action (fail, warn, off)
+    // withholds its signal and cause from the class ladder, so the class is a
+    // plain failure or a completed lane instead of the recorded partial state.
+    let empty_result_missing = cause == Some(TerminalCause::EmptyWriterResult);
+    let class_signals: Vec<PartialSignal> = signals
+        .iter()
+        .copied()
+        .filter(|signal| match signal {
+            PartialSignal::UncommittedWork => classed(policy.uncommitted_work.value),
+            PartialSignal::StrayWork => classed(policy.stray_work.value),
+            PartialSignal::HandoffMalformed => classed(policy.handoff_malformed.value),
+            PartialSignal::HandoffMissing => {
+                classed(policy.handoff_missing.value)
+                    && (!empty_result_missing || classed(policy.empty_result.value))
+            }
+            _ => true,
+        })
+        .collect();
+    let class_cause =
+        if cause == Some(TerminalCause::EmptyWriterResult) && !classed(policy.empty_result.value) {
+            None
+        } else {
+            cause
+        };
+    let class_declaration: HandoffResult =
+        if declaration.is_err() && !classed(policy.handoff_malformed.value) {
+            Ok(None)
+        } else {
+            declaration.clone()
+        };
     let settlement_reason = derived_reason(
         outcome,
         &terminal_evidence,
-        &signals,
-        cause,
-        &declaration,
+        &class_signals,
+        class_cause,
+        &class_declaration,
         custody.launched,
     );
     let outcome = settlement_reason.rule().terminal_outcome.apply(outcome);
@@ -459,7 +612,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         handoff: declaration,
         handoff_source,
         declarations,
-        applied: Vec::new(),
+        applied,
         reason,
         terminal_note,
         complete,

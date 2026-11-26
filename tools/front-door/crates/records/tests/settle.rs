@@ -11,11 +11,14 @@ use provenant_records::declaration::{
     DECLARATION_SCHEMA, DeclarationCounts, DeclarationEvidence, SealedDeclaration,
 };
 use provenant_records::handoff::{Handoff, HandoffError, HandoffStatus};
+use provenant_records::provenance::{Layer, Source, Sourced};
 use provenant_records::run::{Outcome, PartialSignal, SettlementReason, TerminalCause};
 use provenant_records::settlement::{
     CustodyFacts, GitEvidence, HandoffSource, HostVerdict, IdentityEvidence, IdentityPolicyEffect,
     LaneRole, PrimaryCheckout, Progress, SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
-    classify::budget_completed, classify::settle, policy::SettlementPolicy,
+    classify::budget_completed,
+    classify::settle,
+    policy::{NoWork, RouteSettlement, SettlementPolicy, SignalAction},
 };
 use provenant_records::stop::StopCause;
 
@@ -527,4 +530,136 @@ fn rejected_then_accepted_reports_both_counts_and_a_declared_source() {
 fn an_adapter_writer_reports_no_declaration_counts() {
     let evidence = base(LaneRole::AdapterWriter, Outcome::Succeeded, None);
     assert_eq!(settle(&evidence).declarations, None);
+}
+
+// --- Slice 9: the sealed policy is applied at each ladder step. ---
+
+fn sourced_action(value: SignalAction) -> Sourced<SignalAction> {
+    Sourced {
+        value,
+        source: Source {
+            layer: Layer::Project,
+            origin: Some(".provenant/config.toml".into()),
+        },
+    }
+}
+
+fn sourced_no_work(value: NoWork) -> Sourced<NoWork> {
+    Sourced {
+        value,
+        source: Source {
+            layer: Layer::Route,
+            origin: Some("model_policy lane.settlement".into()),
+        },
+    }
+}
+
+#[test]
+fn handoff_missing_fail_settles_failed_with_its_source() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.policy.handoff_missing = sourced_action(SignalAction::Fail);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Failed);
+    assert_eq!(fact.settlement_reason, SettlementReason::Failed);
+    assert!(fact.signals.contains(&PartialSignal::HandoffMissing));
+    assert_eq!(fact.applied.len(), 1);
+    assert_eq!(fact.applied[0].signal, PartialSignal::HandoffMissing);
+    assert_eq!(fact.applied[0].action, SignalAction::Fail);
+    assert_eq!(fact.applied[0].source.layer, Layer::Project);
+}
+
+#[test]
+fn handoff_missing_off_records_the_signal_but_releases_dependants() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.policy.handoff_missing = sourced_action(SignalAction::Off);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Succeeded);
+    assert_eq!(fact.settlement_reason, SettlementReason::Completed);
+    assert_eq!(
+        fact.node,
+        provenant_records::run::SettlementNodeOutcome::Succeeded
+    );
+    assert!(fact.signals.contains(&PartialSignal::HandoffMissing));
+    assert_eq!(fact.applied.len(), 1);
+    assert_eq!(fact.applied[0].action, SignalAction::Off);
+}
+
+#[test]
+fn handoff_malformed_off_keeps_the_error_but_completes_the_lane() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.handoff = DeclarationEvidence::Rejected {
+        error: HandoffError::new("status", "expected status done, stopped_early or blocked"),
+    };
+    evidence.policy.handoff_malformed = sourced_action(SignalAction::Off);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Succeeded);
+    assert_eq!(fact.settlement_reason, SettlementReason::Completed);
+    assert!(fact.signals.contains(&PartialSignal::HandoffMalformed));
+    assert!(fact.handoff.is_err());
+    assert_eq!(fact.applied.len(), 1);
+}
+
+#[test]
+fn empty_result_fail_overrides_the_default_review() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.host.result_empty = true;
+    evidence.policy.empty_result = sourced_action(SignalAction::Fail);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Failed);
+    assert_eq!(fact.settlement_reason, SettlementReason::Failed);
+    assert_eq!(fact.applied.len(), 1);
+    assert_eq!(fact.applied[0].signal, PartialSignal::HandoffMissing);
+}
+
+#[test]
+fn uncommitted_work_off_does_not_downgrade_a_success() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.git = git_at(Some(BASE), Some(HEAD));
+    evidence.git.as_mut().unwrap().uncommitted = Some("dirty worktree".into());
+    evidence.handoff = accepted(handoff(HandoffStatus::Done, "Delivered"));
+    evidence.policy.uncommitted_work = sourced_action(SignalAction::Off);
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Succeeded);
+    assert_eq!(fact.settlement_reason, SettlementReason::Completed);
+    assert!(fact.signals.contains(&PartialSignal::UncommittedWork));
+    assert_eq!(fact.applied.len(), 1);
+}
+
+#[test]
+fn no_work_off_keeps_a_declared_stop_on_an_unchanged_head() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.git = git_at(Some(BASE), Some(BASE));
+    evidence.handoff = accepted(handoff(HandoffStatus::StoppedEarly, "More work remains."));
+    evidence.policy.no_work = sourced_no_work(NoWork::Off);
+    let fact = settle(&evidence);
+    assert_eq!(fact.cause, None);
+    assert_eq!(fact.settlement_reason, SettlementReason::DeclaredStop);
+    assert_eq!(fact.applied.len(), 1);
+    assert_eq!(fact.applied[0].source.layer, Layer::Route);
+    assert_eq!(fact.applied[0].signal, PartialSignal::DeclaredStop);
+}
+
+#[test]
+fn a_route_value_is_sealed_with_the_policy() {
+    let route = RouteSettlement {
+        stray_work: Some(SignalAction::Off),
+        ..Default::default()
+    };
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.handoff = accepted(handoff(HandoffStatus::Done, "Delivered"));
+    evidence.git = git_at(Some(BASE), Some(HEAD));
+    evidence.git.as_mut().unwrap().primary = PrimaryCheckout::Review {
+        note: "primary checkout moved".into(),
+    };
+    evidence.policy.stray_work = Sourced {
+        value: route.stray_work.unwrap(),
+        source: Source {
+            layer: Layer::Route,
+            origin: Some("model_policy lane.settlement".into()),
+        },
+    };
+    let fact = settle(&evidence);
+    assert_eq!(fact.outcome, Outcome::Succeeded);
+    assert_eq!(fact.applied.len(), 1);
+    assert_eq!(fact.applied[0].source.layer, Layer::Route);
 }

@@ -5,6 +5,8 @@ use provenant_core::WallTime;
 use serde::{Deserialize, Serialize};
 
 pub use provenant_records::route_selection::Workload;
+/// The route layer of settlement policy, declared here as model policy.
+pub use provenant_records::settlement::policy::RouteSettlement as LaneSettlement;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -78,6 +80,10 @@ pub struct LanePolicy {
     pub read_only: Option<bool>,
     pub user_skills: Option<provenant_records::run::UserSkillsMode>,
     pub access: Option<provenant_records::LaneAccess>,
+    /// Settlement signal actions that override host and project knobs for
+    /// routes matching this model policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<LaneSettlement>,
     #[serde(skip)]
     pub access_key: Option<String>,
 }
@@ -129,6 +135,7 @@ impl ModelPolicy {
             read_only,
             user_skills,
             access,
+            settlement,
         );
         if patch.result.fallback.is_some() {
             self.result.fallback_family = None;
