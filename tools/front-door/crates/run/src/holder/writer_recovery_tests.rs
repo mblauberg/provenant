@@ -1122,6 +1122,14 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         } else {
             ("stopped_early", note)
         };
+        // The two arrays must share one type: `json!` reads the braces as
+        // blocks, so differently sized array literals never unify. A typed
+        // Vec keeps the declaration honest: done leaves no remaining work.
+        let remaining: Vec<&str> = if status == "done" {
+            Vec::new()
+        } else {
+            vec!["Finish work"]
+        };
         // The lane declares its stop on the journal; a fenced block in the
         // answer would be captured output and could not settle the attempt.
         crate::dispatch_tests::declare_handoff(
@@ -1132,7 +1140,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 "schema_version": 2,
                 "status": status,
                 "note": declared_note,
-                "remaining": if status == "done" { [] } else { ["Finish work"] },
+                "remaining": remaining,
                 "decisions": [],
                 "verify": [],
             }),
