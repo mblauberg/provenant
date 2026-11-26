@@ -1589,20 +1589,22 @@ fn remote_smoke_executes_with_and_without_writer_and_stages_fixture() -> Result 
         return Ok(());
     }
 
-    // Keep the submitted fixture different from the committed source so a
-    // provider reading the checkout instead of its staged file cannot pass.
-    std::fs::write(rig.project.join("fixture.txt"), "smoke base\n")?;
-    support::git(&rig, &["add", "fixture.txt"])?;
     support::git(&rig, &["commit", "-qm", "smoke base"])?;
     let base = support::git(&rig, &["rev-parse", "HEAD"])?;
-    std::fs::write(rig.project.join("fixture.txt"), "committed subject\n")?;
-    support::git(&rig, &["commit", "-qam", "smoke subject"])?;
+    support::git(&rig, &["commit", "--allow-empty", "-qm", "smoke subject"])?;
     let head = support::git(&rig, &["rev-parse", "HEAD"])?;
     assert_ne!(base, head);
     assert_eq!(support::git(&rig, &["merge-base", &base, &head])?, base);
-    // The fact is carried only by the staged working file: neither tree nor
-    // the bundled template knows this token, so a lane that reconstructs the
-    // answer from the checkout cannot pass the read check below.
+    // The fixture path is absent from both committed trees. The fresh fact is
+    // carried only by the staged working file, so a reader that reconstructs
+    // an answer from the checkout cannot pass the remote read check below.
+    for commit in [&base, &head] {
+        let paths = support::git(&rig, &["ls-tree", "-r", "--name-only", commit])?;
+        assert!(
+            !paths.lines().any(|path| path == "fixture.txt"),
+            "fixture.txt must be absent from committed tree {commit}"
+        );
+    }
     let nonce = provenant_os::fs::entropy_128()?;
     let fact = format!("smoke fact {}", provenant_core::hex(&nonce[..8]));
     std::fs::write(rig.project.join("fixture.txt"), format!("{fact}\n"))?;
