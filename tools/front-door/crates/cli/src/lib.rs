@@ -17,6 +17,7 @@ pub mod quota;
 pub(crate) mod quota_history;
 pub mod route;
 pub mod run;
+pub mod smoke;
 pub mod target;
 pub mod tracker;
 pub mod wait;

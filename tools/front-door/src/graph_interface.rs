@@ -577,17 +577,40 @@ pub(crate) fn run(
             crate::roots::Workspace::Directory,
             crate::roots::Product::Optional,
         )
-        && !resolved
-            .project
-            .starts_with(&crate::smoke::fixture_root(&resolved.home))
     {
-        if globals.project.is_some() {
-            warn(Warning::new(
-                provenant_records::warning::SMOKE_PROJECT_IGNORED,
-                "run smoke ignores --project and uses a hermetic fixture",
-            ));
+        let (smoke_settings, smoke_origin) = crate::smoke::settings(&resolved.roots);
+        let root = smoke_settings.root();
+        if !resolved
+            .project
+            .starts_with(&crate::smoke::fixture_root(&resolved.home, &root))
+        {
+            if globals.project.is_some() {
+                warn(Warning::new(
+                    provenant_records::warning::SMOKE_PROJECT_IGNORED,
+                    "run smoke ignores --project and uses a hermetic fixture",
+                ));
+            }
+            return smoke_lifecycle(&request, globals, &resolved, &smoke_settings, &smoke_origin);
         }
-        return smoke_lifecycle(&request, globals, &resolved);
+    }
+    // An explanation compiles against the caller's project and creates no
+    // fixture. Report the effective smoke values and their sources alongside it.
+    if request.template.as_deref() == Some("smoke")
+        && request.explain
+        && let Ok(resolved) = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Directory,
+            crate::roots::Product::Optional,
+        )
+    {
+        let (smoke_settings, smoke_origin) = crate::smoke::settings(&resolved.roots);
+        warn(Warning::new(
+            provenant_records::warning::LAUNCH_ADVISORY,
+            format!(
+                "run smoke --explain effective settings:\n{}",
+                smoke_settings.explain(&smoke_origin)
+            ),
+        ));
     }
     let bare_model = request
         .model
@@ -656,6 +679,8 @@ fn smoke_lifecycle(
     request: &GraphRunArgs,
     globals: &Globals,
     resolved: &crate::roots::Resolved,
+    settings: &provenant_cli::smoke::Settings,
+    origin: &provenant_cli::smoke::Origin,
 ) -> u8 {
     let program = match std::env::current_exe() {
         Ok(program) => program,
@@ -702,8 +727,31 @@ fn smoke_lifecycle(
         &args,
     ) {
         Ok(outcome) => match &outcome.verdict {
-            crate::smoke::SmokeVerdict::Passed | crate::smoke::SmokeVerdict::Unverified { .. } => {
+            crate::smoke::SmokeVerdict::Passed => {
                 let text = outcome.text();
+                crate::emit(
+                    &CommandResult::new("run", Outcome::Ok, serde_json::json!({"smoke": text})),
+                    globals,
+                    "",
+                    false,
+                )
+            }
+            crate::smoke::SmokeVerdict::Unverified { .. } => {
+                let text = outcome.text();
+                if settings.unverified == provenant_cli::smoke::Unverified::Fail {
+                    let mut result =
+                        CommandResult::new("run", Outcome::Failed, serde_json::Value::Null);
+                    result.error = Some(provenant_records::CommandError::new(
+                        "SMOKE_UNVERIFIED",
+                        &format!(
+                            "{text}\nsource: {}",
+                            origin.describe(provenant_cli::smoke::UNVERIFIED_KEY)
+                        ),
+                        None,
+                        "the peer could not verify the smoke fixture; use a peer with SMOKE_FIXTURE_PROTOCOL or set domains.smoke.unverified=warn",
+                    ));
+                    return crate::emit(&result, globals, "", false);
+                }
                 crate::emit(
                     &CommandResult::new("run", Outcome::Ok, serde_json::json!({"smoke": text})),
                     globals,

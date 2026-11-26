@@ -574,13 +574,14 @@ fn smoke_fixture_is_deterministic_per_nonce() -> Result<(), Box<dyn std::error::
 
     let temp = tempfile::tempdir()?;
     let nonce = "0123456789ab";
+    let root = provenant_cli::smoke::Settings::default().root();
     let mut commits = Vec::new();
     for name in ["home-a", "home-b"] {
         let home = temp.path().join(name);
         std::fs::create_dir(&home)?;
         let state = temp.path().join(format!("{name}-state"));
         provenant_os::fixture::private_state_dir(&state)?;
-        commits.push(crate::smoke::create_fixture(&state, &home, nonce)?);
+        commits.push(crate::smoke::create_fixture(&state, &home, nonce, &root)?);
     }
     assert_eq!(commits[0], commits[1], "nonce must determine both OIDs");
     Ok(())
@@ -645,8 +646,9 @@ fn smoke_removes_its_fixture_and_binding() -> Result<(), Box<dyn std::error::Err
                     .map(|(_, rest)| rest.split_whitespace().next())
             })
             .map(std::path::PathBuf::from);
-        let fixture =
-            project.unwrap_or_else(|| crate::smoke::fixture_root(&home).join("000000000000"));
+        let root = provenant_cli::smoke::Settings::default().root();
+        let fixture = project
+            .unwrap_or_else(|| crate::smoke::fixture_root(&home, &root).join("000000000000"));
         assert!(!fixture.exists(), "{name}: fixture survived cleanup");
         let roots = crate::roots::child(&home, &home, state.clone())?;
         let bindings = provenant_config::registered_projects(&roots)?;
@@ -700,6 +702,7 @@ fn smoke_never_reads_the_caller_checkout() -> Result<(), Box<dyn std::error::Err
     )?;
     let plain = temp.path().join("plain");
     std::fs::create_dir(&plain)?;
+    let root = provenant_cli::smoke::Settings::default().root();
     for cwd in [repo.clone(), detached, plain] {
         std::fs::write(&calls, "")?;
         let runner = smoke_runner(temp.path(), &cwd)?;
@@ -719,7 +722,7 @@ fn smoke_never_reads_the_caller_checkout() -> Result<(), Box<dyn std::error::Err
             .and_then(|(_, rest)| rest.split_whitespace().next())
             .ok_or("project argument")?;
         assert!(
-            std::path::Path::new(project).starts_with(crate::smoke::fixture_root(&home)),
+            std::path::Path::new(project).starts_with(crate::smoke::fixture_root(&home, &root)),
             "{run} did not use the fixture root"
         );
         assert!(!run.contains(&caller_head), "{run} leaked the caller OID");
