@@ -23,7 +23,7 @@ pub enum AttemptObservation {
     Unknown { attempt_ref: Option<String> },
     Terminal {
         attempt_ref: Option<String>,
-        outcome: AttemptOutcome,
+        outcome: GraphAttemptOutcome,
         launched: bool,
         result: Option<Box<crate::result_capture::CapturedResult>>,
         result_warning: Option<String>,

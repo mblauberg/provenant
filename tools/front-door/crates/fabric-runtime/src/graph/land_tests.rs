@@ -305,7 +305,7 @@ impl AttemptOwner for Owner {
         };
         Ok(AttemptObservation::Terminal {
             attempt_ref,
-            outcome: AttemptOutcome::Succeeded,
+            outcome: GraphAttemptOutcome::Succeeded,
             launched: true,
             result: result.map(Box::new),
             result_warning: None,

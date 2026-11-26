@@ -476,7 +476,7 @@ host_refused_before_acceptance: false,
                         state: AttemptState::Unresolved,
                         stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
                         attempt_ref: Some(worst(HOST_ID_BYTES)),
-                        outcome: Some(AttemptOutcome::AdapterUnavailable),
+                        outcome: Some(GraphAttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
                         input_cap: Some(usize::MAX),
                         input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
@@ -742,7 +742,7 @@ fn a_loop_extension_past_the_envelope_refuses_without_saving() {
     .unwrap();
     let mut owner = FakeOwner {
         observations: (0..18)
-            .map(|_| terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"))
+            .map(|_| terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"))
             .collect(),
         ..Default::default()
     };
@@ -918,8 +918,8 @@ fn usage_warnings_keep_the_most_recently_settled_attempts() {
     ]);
     let mut owner = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
@@ -978,13 +978,13 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
         node("one", route("first")),
         node("two", route("first")),
     ]);
-    let mut failed = terminal(AttemptOutcome::OtherFailure);
+    let mut failed = terminal(GraphAttemptOutcome::OtherFailure);
     if let AttemptObservation::Terminal { attempt_ref, .. } = &mut failed {
         *attempt_ref = Some(format!("host/{attempt}"));
     }
     // One settles first and fails delivery; two settles after it.
     let mut owner = FakeOwner {
-        observations: [failed, terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [failed, terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let limits = crate::config::GraphLimits::default();
@@ -1027,7 +1027,7 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
     let mut journal =
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let run = advance_with_budget(

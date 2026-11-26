@@ -5,7 +5,7 @@ use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, Pause};
 use provenant_fabric_runtime::{
     coordination::facade::GraphInput,
-    graph::{AttemptOutcome, GraphRun, NodeState},
+    graph::{GraphAttemptOutcome, GraphRun, NodeState},
 };
 use provenant_providers::host::LocalSignin;
 use provenant_quota::{QuotaStatus, ReadinessReason};
@@ -319,7 +319,7 @@ fn settlement(row: &mut Row, run: &GraphRun) -> bool {
         .and_then(|reference| reference.rsplit('/').next())
         .and_then(|id| id.parse().ok());
     if let Some(attempt) = attempt.filter(|attempt| attempt.outcome.is_some()) {
-        row.status = if attempt.outcome == Some(AttemptOutcome::Succeeded) && attempt.stop.is_none()
+        row.status = if attempt.outcome == Some(GraphAttemptOutcome::Succeeded) && attempt.stop.is_none()
         {
             Verdict::Pass
         } else {
@@ -329,14 +329,14 @@ fn settlement(row: &mut Row, run: &GraphRun) -> bool {
             Some(StopCause::Deadline) => Cause::Check(CheckCause::TimedOut),
             Some(stop) => Cause::Stop(stop),
             None => match attempt.outcome {
-                Some(AttemptOutcome::Succeeded) => Cause::Check(CheckCause::Completed),
-                Some(AttemptOutcome::AuthRequired) => Cause::Stop(StopCause::AuthRequired),
-                Some(AttemptOutcome::UsageLimited) => Cause::Stop(StopCause::UsageLimited),
-                Some(AttemptOutcome::AdapterUnavailable) => {
+                Some(GraphAttemptOutcome::Succeeded) => Cause::Check(CheckCause::Completed),
+                Some(GraphAttemptOutcome::AuthRequired) => Cause::Stop(StopCause::AuthRequired),
+                Some(GraphAttemptOutcome::UsageLimited) => Cause::Stop(StopCause::UsageLimited),
+                Some(GraphAttemptOutcome::AdapterUnavailable) => {
                     Cause::Stop(StopCause::AdapterUnavailable)
                 }
-                Some(AttemptOutcome::PreparationRefused(cause)) => Cause::Stop(cause.into()),
-                Some(AttemptOutcome::DeadlineExceeded) => Cause::Check(CheckCause::TimedOut),
+                Some(GraphAttemptOutcome::PreparationRefused(cause)) => Cause::Stop(cause.into()),
+                Some(GraphAttemptOutcome::DeadlineExceeded) => Cause::Check(CheckCause::TimedOut),
                 _ => Cause::Check(CheckCause::SettlementFailed),
             },
         };

@@ -62,7 +62,7 @@ fn stored_fixture() -> StoredCheckpoint {
     checkpoint.nodes[0].state = NodeState::Succeeded;
     let attempt = &mut checkpoint.nodes[0].attempts[0];
     attempt.state = AttemptState::Terminal;
-    attempt.outcome = Some(AttemptOutcome::Succeeded);
+    attempt.outcome = Some(GraphAttemptOutcome::Succeeded);
     attempt.launched = true;
     attempt.attempt_ref = Some(format!(
         "{}/{}",
@@ -1474,7 +1474,7 @@ fn launched_route_fallback_history_is_readable() {
     let mut stored: StoredCheckpoint = stored_fixture();
     let node = &mut stored.checkpoint.nodes[0];
     node.attempts[0].launched = true;
-    node.attempts[0].outcome = Some(AttemptOutcome::UsageLimited);
+    node.attempts[0].outcome = Some(GraphAttemptOutcome::UsageLimited);
     let mut next = node.attempts[0].clone();
     next.key.route_index = 1;
     next.key.attempt = 2;
@@ -1487,12 +1487,12 @@ fn launched_route_fallback_history_is_readable() {
 }
 #[test]
 fn delivery_retry_reopens_only_the_matching_failed_attempt() {
-    for outcome in [AttemptOutcome::OtherFailure, AttemptOutcome::ReviewRequired] {
+    for outcome in [GraphAttemptOutcome::OtherFailure, GraphAttemptOutcome::ReviewRequired] {
         assert_delivery_retry_reopens_matching_attempt(outcome);
     }
 }
 
-fn assert_delivery_retry_reopens_matching_attempt(outcome: AttemptOutcome) {
+fn assert_delivery_retry_reopens_matching_attempt(outcome: GraphAttemptOutcome) {
     let temp = crate::test_support::tempdir().expect("state fixture");
     let base = std::fs::canonicalize(temp.path()).expect("absolute state");
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).expect("private state");
@@ -2482,9 +2482,9 @@ mod launch_recovery {
                 Ok(AttemptObservation::Terminal {
                     attempt_ref: Some(reference),
                     outcome: if self.failed_node == Some(key.node_id.as_str()) {
-                        AttemptOutcome::OtherFailure
+                        GraphAttemptOutcome::OtherFailure
                     } else {
-                        AttemptOutcome::Succeeded
+                        GraphAttemptOutcome::Succeeded
                     },
                     launched: true,
                     result: None,

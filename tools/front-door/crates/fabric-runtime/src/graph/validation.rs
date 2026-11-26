@@ -1802,7 +1802,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     attempt.state == AttemptState::Terminal
                         && matches!(
                             attempt.outcome,
-                            Some(AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired)
+                            Some(GraphAttemptOutcome::Succeeded | GraphAttemptOutcome::ReviewRequired)
                         )
                 }) || fallback_settled(node, progress, document, checkpoint)
             }
@@ -1810,17 +1810,17 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 attempt.state == AttemptState::Terminal
                     && attempt
                         .outcome
-                        .is_some_and(|outcome| outcome != AttemptOutcome::Succeeded)
+                        .is_some_and(|outcome| outcome != GraphAttemptOutcome::Succeeded)
             }),
             NodeState::Failed => last.is_some_and(|attempt| {
                 attempt.state == AttemptState::Terminal
                     && match attempt.outcome {
                         Some(
-                            AttemptOutcome::TaskFailed
-                            | AttemptOutcome::OtherFailure
-                            | AttemptOutcome::ReviewRequired,
+                            GraphAttemptOutcome::TaskFailed
+                            | GraphAttemptOutcome::OtherFailure
+                            | GraphAttemptOutcome::ReviewRequired,
                         ) => true,
-                        Some(outcome) if outcome != AttemptOutcome::Succeeded => {
+                        Some(outcome) if outcome != GraphAttemptOutcome::Succeeded => {
                             !fallback_candidate(outcome, node.access, attempt.launched)
                                 || progress.attempts.len() == node.routes.len()
                         }

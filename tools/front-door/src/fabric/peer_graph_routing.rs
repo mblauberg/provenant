@@ -612,7 +612,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
         assert_eq!(parent.state, graph::NodeState::Failed);
         assert_eq!(
             parent.attempts[0].outcome,
-            Some(graph::AttemptOutcome::OtherFailure)
+            Some(graph::GraphAttemptOutcome::OtherFailure)
         );
         assert!(
             parent
@@ -712,7 +712,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
     assert_eq!(parent.attempts.len(), 1);
     assert_eq!(
         parent.attempts[0].outcome,
-        Some(graph::AttemptOutcome::OtherFailure)
+        Some(graph::GraphAttemptOutcome::OtherFailure)
     );
     assert!(
         parent
@@ -782,7 +782,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
     assert_eq!(parent.attempts.len(), 1);
     assert_eq!(
         parent.attempts[0].outcome,
-        Some(graph::AttemptOutcome::OtherFailure)
+        Some(graph::GraphAttemptOutcome::OtherFailure)
     );
     assert!(
         parent
@@ -1041,7 +1041,7 @@ fn exact_route_in_an_excluded_family_is_refused_before_launch()
     assert_eq!(attempt.attempt_ref, None, "the exact route was submitted");
     assert_eq!(
         attempt.outcome,
-        Some(graph::AttemptOutcome::AdapterUnavailable)
+        Some(graph::GraphAttemptOutcome::AdapterUnavailable)
     );
     let separation = verifier.separation.as_ref().ok_or("separation")?;
     assert_eq!(separation.strength, graph::FamilyStrength::Require);
@@ -1386,7 +1386,7 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
     assert_eq!(run.checkpoint.nodes[1].attempts.len(), 1);
     assert_eq!(
         run.checkpoint.nodes[1].attempts[0].outcome,
-        Some(graph::AttemptOutcome::Succeeded)
+        Some(graph::GraphAttemptOutcome::Succeeded)
     );
     assert_eq!(picked.len(), 3);
     assert_eq!(run.checkpoint.nodes[4].state, graph::NodeState::Succeeded);

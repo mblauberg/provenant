@@ -5,7 +5,7 @@
 //! delivery, and the configured deadline — stay with the owner and are applied
 //! before this projection is called.
 
-use crate::graph::AttemptOutcome;
+use crate::graph::GraphAttemptOutcome;
 use crate::run::{
     AttemptRecord, AttemptState, Outcome, SettlementSignal, PreparationFailure, CauseKind,
 };
@@ -15,7 +15,7 @@ use crate::run::{
 /// `None` means there is no terminal settlement to project (a record still
 /// queued, starting, running or settling). The caller keeps its own graph
 /// overrides and applies this projection to everything else.
-pub fn graph_outcome(record: &AttemptRecord) -> Option<AttemptOutcome> {
+pub fn graph_outcome(record: &AttemptRecord) -> Option<GraphAttemptOutcome> {
     let AttemptState::Terminal {
         outcome,
         cause,
@@ -38,35 +38,35 @@ pub fn graph_outcome(record: &AttemptRecord) -> Option<AttemptOutcome> {
         && let Some(cause) = cause
         && cause != CauseKind::CommandUnavailable
     {
-        return Some(AttemptOutcome::PreparationRefused(cause));
+        return Some(GraphAttemptOutcome::PreparationRefused(cause));
     }
     if let Some(failure) = record.preparation_failure {
         return Some(match failure {
-            PreparationFailure::AuthRequired => AttemptOutcome::AuthRequired,
-            PreparationFailure::UsageLimited => AttemptOutcome::UsageLimited,
-            PreparationFailure::AdapterUnavailable => AttemptOutcome::AdapterUnavailable,
-            PreparationFailure::GitSetup => AttemptOutcome::PreparationRefused(
+            PreparationFailure::AuthRequired => GraphAttemptOutcome::AuthRequired,
+            PreparationFailure::UsageLimited => GraphAttemptOutcome::UsageLimited,
+            PreparationFailure::AdapterUnavailable => GraphAttemptOutcome::AdapterUnavailable,
+            PreparationFailure::GitSetup => GraphAttemptOutcome::PreparationRefused(
                 cause.unwrap_or(CauseKind::PreparationRefused),
             ),
         });
     }
 
     Some(match outcome {
-        Outcome::Succeeded => AttemptOutcome::Succeeded,
-        Outcome::AuthRequired => AttemptOutcome::AuthRequired,
-        Outcome::RateLimited | Outcome::QuotaLimited => AttemptOutcome::UsageLimited,
+        Outcome::Succeeded => GraphAttemptOutcome::Succeeded,
+        Outcome::AuthRequired => GraphAttemptOutcome::AuthRequired,
+        Outcome::RateLimited | Outcome::QuotaLimited => GraphAttemptOutcome::UsageLimited,
         Outcome::TimedOut if cause == Some(CauseKind::TokenBudget) => {
-            AttemptOutcome::OtherFailure
+            GraphAttemptOutcome::OtherFailure
         }
-        Outcome::TimedOut => AttemptOutcome::OtherFailure,
-        Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
-        Outcome::Unclassified => AttemptOutcome::Unclassified,
+        Outcome::TimedOut => GraphAttemptOutcome::OtherFailure,
+        Outcome::ModelUnavailable => GraphAttemptOutcome::AdapterUnavailable,
+        Outcome::Unclassified => GraphAttemptOutcome::Unclassified,
         Outcome::Rejected if !launched => cause.or(Some(CauseKind::Unrecorded)).map_or(
-            AttemptOutcome::OtherFailure,
-            AttemptOutcome::PreparationRefused,
+            GraphAttemptOutcome::OtherFailure,
+            GraphAttemptOutcome::PreparationRefused,
         ),
         Outcome::ReviewRequired if cause == Some(CauseKind::StoppedNoWork) => {
-            AttemptOutcome::StoppedNoWork
+            GraphAttemptOutcome::StoppedNoWork
         }
         // A declared stop is one fact whether or not the writer left
         // uncommitted edits; the graph restarts it on the retained worktree.
@@ -81,16 +81,16 @@ pub fn graph_outcome(record: &AttemptRecord) -> Option<AttemptOutcome> {
                     )
                 }) =>
         {
-            AttemptOutcome::DeclaredStop
+            GraphAttemptOutcome::DeclaredStop
         }
         Outcome::Failed if cause == Some(CauseKind::ProviderStalledRetry) => {
-            AttemptOutcome::ProviderStalledRetry
+            GraphAttemptOutcome::ProviderStalledRetry
         }
-        Outcome::Failed => AttemptOutcome::TaskFailed,
-        Outcome::ReviewRequired => AttemptOutcome::ReviewRequired,
+        Outcome::Failed => GraphAttemptOutcome::TaskFailed,
+        Outcome::ReviewRequired => GraphAttemptOutcome::ReviewRequired,
         // Uncommitted edits without a declared stop need the chair, so the node
         // fails without fallback.
-        Outcome::Uncommitted => AttemptOutcome::OtherFailure,
-        _ => AttemptOutcome::OtherFailure,
+        Outcome::Uncommitted => GraphAttemptOutcome::OtherFailure,
+        _ => GraphAttemptOutcome::OtherFailure,
     })
 }

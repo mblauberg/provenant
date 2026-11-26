@@ -52,8 +52,8 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
             observations: answers
                 .into_iter()
                 .map(|answer| match answer {
-                    Some(text) => terminal_with_result(AttemptOutcome::Succeeded, text),
-                    None => terminal(AttemptOutcome::AdapterUnavailable),
+                    Some(text) => terminal_with_result(GraphAttemptOutcome::Succeeded, text),
+                    None => terminal(GraphAttemptOutcome::AdapterUnavailable),
                 })
                 .collect(),
             ..Default::default()
@@ -97,7 +97,7 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
         ]
     })).unwrap();
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::AdapterUnavailable)].into(),
+        observations: [terminal(GraphAttemptOutcome::AdapterUnavailable)].into(),
         ..Default::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -137,9 +137,9 @@ fn soft_panel_settles_and_names_its_stopped_lens() {
         observations: (0..3)
             .map(|index| {
                 if index == 1 {
-                    terminal(AttemptOutcome::DeclaredStop)
+                    terminal(GraphAttemptOutcome::DeclaredStop)
                 } else {
-                    terminal_with_result(AttemptOutcome::Succeeded, clean)
+                    terminal_with_result(GraphAttemptOutcome::Succeeded, clean)
                 }
             })
             .collect(),
@@ -220,11 +220,11 @@ fn final_panel_settlement_keeps_missing_lens_names_through_synthesis() {
     })).unwrap();
     let mut owner = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::DeclaredStop),
-            terminal_with_result(AttemptOutcome::Succeeded, clean),
-            terminal(AttemptOutcome::DeclaredStop),
-            terminal_with_result(AttemptOutcome::Succeeded, clean),
-            terminal_with_result(AttemptOutcome::Succeeded, clean),
+            terminal(GraphAttemptOutcome::DeclaredStop),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, clean),
+            terminal(GraphAttemptOutcome::DeclaredStop),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, clean),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, clean),
         ]
         .into(),
         ..Default::default()
@@ -281,9 +281,9 @@ fn protected_panel_hard_floor_requires_named_lens_even_when_count_is_met() {
         observations: (0..2)
             .map(|index| {
                 if index == 1 {
-                    terminal(AttemptOutcome::DeclaredStop)
+                    terminal(GraphAttemptOutcome::DeclaredStop)
                 } else {
-                    terminal_with_result(AttemptOutcome::Succeeded, clean)
+                    terminal_with_result(GraphAttemptOutcome::Succeeded, clean)
                 }
             })
             .collect(),
@@ -324,10 +324,10 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
         r#"{"id":"F1","severity":42,"file":"a.rs","summary":"issue","status":1},{"id":"F2","severity":"mystery","file":"b.rs","summary":"other","status":"open"},{"severity":"high"},{"id":"F3","severity":"high","file":"c.rs","summary":"valid finding","status":"open"}"#,
     );
     owner.observations = VecDeque::from([
-        terminal_with_result(AttemptOutcome::Succeeded, &malformed),
-        terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
-        terminal(AttemptOutcome::AdapterUnavailable),
-        terminal_with_result(AttemptOutcome::Succeeded, "verified"),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &malformed),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text("")),
+        terminal(GraphAttemptOutcome::AdapterUnavailable),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, "verified"),
     ]);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let lens = run
@@ -409,7 +409,7 @@ fn fan_in_requires_all_members_unless_a_minimum_is_declared() {
     for minimum in [None, Some(2)] {
         let (mut document, mut owner) = partial_review(2);
         document.nodes[0].composite.as_mut().unwrap().min_successful = minimum;
-        owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+        owner.observations[1] = terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(""));
         let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
         let synthesis = run
             .checkpoint
@@ -447,9 +447,9 @@ fn a_failed_nested_minimum_cannot_be_hidden_by_an_outer_group() {
     })).unwrap();
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::OtherFailure),
-            terminal_with_result(AttemptOutcome::Succeeded, "b"),
-            terminal_with_result(AttemptOutcome::Succeeded, "c"),
+            terminal(GraphAttemptOutcome::OtherFailure),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "b"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "c"),
         ]),
         ..Default::default()
     };
@@ -471,8 +471,8 @@ fn cancelled_member_counts_against_the_group_minimum() {
     // The host maps a cancelled attempt to OtherFailure.
     for (minimum, outcome) in [(2, GraphOutcome::Partial), (3, GraphOutcome::Failed)] {
         let (document, mut owner) = partial_review(minimum);
-        owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
-        owner.observations[2] = terminal(AttemptOutcome::OtherFailure);
+        owner.observations[1] = terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(""));
+        owner.observations[2] = terminal(GraphAttemptOutcome::OtherFailure);
         let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(run.outcome, Some(outcome));
     }
@@ -487,10 +487,10 @@ fn review_fail_and_one_unavailable_reach_evaluator() {
     }
     let fail = findings_text(&entry("")).replace("VERDICT: PASS", "VERDICT: FAIL");
     owner.observations = VecDeque::from([
-        terminal_with_result(AttemptOutcome::DeclaredStop, &fail),
-        terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
-        terminal(AttemptOutcome::AdapterUnavailable),
-        terminal_with_result(AttemptOutcome::Succeeded, "evaluated"),
+        terminal_with_result(GraphAttemptOutcome::DeclaredStop, &fail),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text("")),
+        terminal(GraphAttemptOutcome::AdapterUnavailable),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, "evaluated"),
     ]);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let lens = run
@@ -524,7 +524,7 @@ fn successful_review_with_fail_verdict_is_a_result() {
     review.required_verdict = Some("VERDICT: PASS".into());
     let result = findings_text("").replace("VERDICT: PASS", "VERDICT: FAIL");
     let mut owner = FakeOwner {
-        observations: VecDeque::from([terminal_with_result(AttemptOutcome::Succeeded, &result)]),
+        observations: VecDeque::from([terminal_with_result(GraphAttemptOutcome::Succeeded, &result)]),
         ..Default::default()
     };
     let run = advance(
@@ -565,8 +565,8 @@ fn declared_stop_requires_a_valid_review_result_and_never_accepts_a_writer() {
         // no round accepts the node.
         let mut owner = FakeOwner {
             observations: VecDeque::from([
-                terminal_with_result(AttemptOutcome::DeclaredStop, &text),
-                terminal_with_result(AttemptOutcome::DeclaredStop, &text),
+                terminal_with_result(GraphAttemptOutcome::DeclaredStop, &text),
+                terminal_with_result(GraphAttemptOutcome::DeclaredStop, &text),
             ]),
             ..Default::default()
         };
@@ -587,7 +587,7 @@ fn declared_stop_requires_a_valid_review_result_and_never_accepts_a_writer() {
 #[test]
 fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
     let (document, mut owner) = partial_review(3);
-    owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+    owner.observations[1] = terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(""));
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let verify = run
         .checkpoint
@@ -608,7 +608,7 @@ fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
 #[test]
 fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reasons() {
     let (document, mut owner) = partial_review(3);
-    owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+    owner.observations[1] = terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(""));
     let mut journal = MemoryJournal::default();
     advance(&document, &mut owner, &mut journal).unwrap();
     let checkpoint = journal.0.as_mut().unwrap();
@@ -694,7 +694,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
             .attempts
             .last()
             .and_then(|attempt| attempt.outcome),
-        Some(AttemptOutcome::AdapterUnavailable)
+        Some(GraphAttemptOutcome::AdapterUnavailable)
     );
     assert!(excerpt.contains(&format!(
         "{}: {}",
@@ -788,9 +788,9 @@ fn qualified_findings_survive_model_synthesis() {
         );
         let mut owner = FakeOwner {
             observations: VecDeque::from([
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&finding)),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&finding)),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
                 ),
             ]),
@@ -841,8 +841,8 @@ fn qualified_findings_survive_deterministic_review_reduction() {
     let result = format!("{}\nVERDICT: FAIL", findings_text(&finding));
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal_with_result(AttemptOutcome::Succeeded, &result),
-            terminal_with_result(AttemptOutcome::Succeeded, &result),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &result),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &result),
         ]),
         ..Default::default()
     };
@@ -921,8 +921,8 @@ fn composite_executes_nested_children_and_exports_only_declared_outputs() {
     .unwrap();
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "evidence"),
-            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "evidence"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "done"),
         ]
         .into(),
         ..Default::default()

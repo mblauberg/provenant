@@ -89,7 +89,7 @@ impl AttemptOwner for Owner {
         self.prompts.push(input.prompt.into());
         Ok(AttemptObservation::Terminal {
             attempt_ref: None,
-            outcome: AttemptOutcome::Succeeded,
+            outcome: GraphAttemptOutcome::Succeeded,
             launched: true,
             result: None,
             result_warning: None,

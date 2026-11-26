@@ -68,9 +68,9 @@ impl AttemptOwner for WrapUpOwner {
         Ok(AttemptObservation::Terminal {
             attempt_ref: Some(reference.into()),
             outcome: if key.attempt == 1 {
-                AttemptOutcome::TaskFailed
+                GraphAttemptOutcome::TaskFailed
             } else {
-                AttemptOutcome::Succeeded
+                GraphAttemptOutcome::Succeeded
             },
             launched: true,
             result: None,

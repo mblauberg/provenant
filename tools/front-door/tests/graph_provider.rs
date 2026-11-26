@@ -3398,7 +3398,7 @@ fn seed_composite_output_graph_with_gate(
 ) -> Result {
     use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
     use provenant_fabric_runtime::graph::{
-        AccessMode, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner, FileJournal,
+        AccessMode, AttemptKey, AttemptObservation, GraphAttemptOutcome, AttemptOwner, FileJournal,
         GraphDocument, GraphExecution, GraphRoute, NodeInput, Replay,
     };
     use provenant_os::clock::SystemClock;
@@ -3438,7 +3438,7 @@ fn seed_composite_output_graph_with_gate(
             result.push(self.response.as_bytes());
             Ok(AttemptObservation::Terminal {
                 attempt_ref: Some(format!("{}/{}", self.host, attempt_id)),
-                outcome: AttemptOutcome::Succeeded,
+                outcome: GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(result.finish())),
                 result_warning: None,

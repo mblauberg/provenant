@@ -566,7 +566,7 @@ impl FileJournal {
                         && node.attempts.last().is_some_and(|last| {
                             matches!(
                                 last.outcome,
-                                Some(AttemptOutcome::OtherFailure | AttemptOutcome::ReviewRequired)
+                                Some(GraphAttemptOutcome::OtherFailure | GraphAttemptOutcome::ReviewRequired)
                             ) && last
                                 .attempt_ref
                                 .as_deref()
@@ -593,7 +593,7 @@ impl FileJournal {
                 if let Some(last) = node.attempts.last_mut()
                     && matches!(
                         last.outcome,
-                        Some(AttemptOutcome::OtherFailure | AttemptOutcome::ReviewRequired)
+                        Some(GraphAttemptOutcome::OtherFailure | GraphAttemptOutcome::ReviewRequired)
                     )
                     && last
                         .attempt_ref

@@ -1007,7 +1007,7 @@ fn unavailable(
                 .unwrap_or_default();
             let reason = progress.advance_error.as_deref().unwrap_or_else(|| {
                 match progress.attempts.last().and_then(|a| a.outcome.as_ref()) {
-                    Some(AttemptOutcome::AdapterUnavailable) => "adapter unavailable",
+                    Some(GraphAttemptOutcome::AdapterUnavailable) => "adapter unavailable",
                     _ => "member failed",
                 }
             });

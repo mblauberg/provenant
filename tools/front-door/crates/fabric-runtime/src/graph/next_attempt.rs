@@ -74,7 +74,7 @@ fn next_fallback_evidence_retry(
 pub(super) fn custody_release_pending(
     node: &PlannedNode,
     route_index: usize,
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     launched: bool,
     mut facts: FallbackEvidence<'_>,
 ) -> bool {
@@ -86,7 +86,7 @@ pub(super) fn custody_release_pending(
             if evidence.handoff == provenant_routing::FallbackHandoff::Local
                 && !evidence.custody_released
                 && (expected_preparation_failure(outcome) == Some(evidence.failure)
-                    || (matches!(outcome, AttemptOutcome::PreparationRefused(_))
+                    || (matches!(outcome, GraphAttemptOutcome::PreparationRefused(_))
                         && evidence.failure
                             == provenant_records::run::PreparationFailure::AdapterUnavailable)) =>
         {
@@ -112,14 +112,14 @@ pub(super) fn custody_release_pending(
 }
 
 fn expected_preparation_failure(
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
 ) -> Option<provenant_records::run::PreparationFailure> {
     use provenant_records::run::PreparationFailure;
     match outcome {
-        AttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
-        AttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
-        AttemptOutcome::AdapterUnavailable
-        | AttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
+        GraphAttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
+        GraphAttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
+        GraphAttemptOutcome::AdapterUnavailable
+        | GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
             Some(PreparationFailure::AdapterUnavailable)
         }
         _ => None,
@@ -425,17 +425,17 @@ pub(crate) fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
-fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcome {
+fn routing_outcome(outcome: GraphAttemptOutcome) -> provenant_routing::FallbackOutcome {
     match outcome {
-        AttemptOutcome::AuthRequired => provenant_routing::FallbackOutcome::AuthRequired,
-        AttemptOutcome::UsageLimited => provenant_routing::FallbackOutcome::UsageLimited,
+        GraphAttemptOutcome::AuthRequired => provenant_routing::FallbackOutcome::AuthRequired,
+        GraphAttemptOutcome::UsageLimited => provenant_routing::FallbackOutcome::UsageLimited,
         // Keep the pre-launch refusal's existing route policy. Its graph
         // outcome carries the real cause; this is only fallback eligibility.
         // A local preparation failure needs a local repair, not another route.
-        AttemptOutcome::PreparationRefused(
+        GraphAttemptOutcome::PreparationRefused(
             provenant_records::run::CauseKind::PreparationRefused,
         ) => provenant_routing::FallbackOutcome::Other,
-        AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
+        GraphAttemptOutcome::AdapterUnavailable | GraphAttemptOutcome::PreparationRefused(_) => {
             provenant_routing::FallbackOutcome::AdapterUnavailable
         }
         _ => provenant_routing::FallbackOutcome::Other,
@@ -445,11 +445,11 @@ fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcom
 /// A persisted route may precede a fallback only when it did not launch.
 /// Launching the next route additionally requires live preparation evidence.
 pub(crate) fn fallback_candidate(
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     _access: AccessMode,
     launched: bool,
 ) -> bool {
-    (launched && matches!(outcome, AttemptOutcome::ProviderStalledRetry))
+    (launched && matches!(outcome, GraphAttemptOutcome::ProviderStalledRetry))
         || (!launched
             && fallback_cause(outcome)
                 .is_some_and(|cause| cause.default_next() == provenant_records::NextStep::NewRoute))
@@ -457,21 +457,21 @@ pub(crate) fn fallback_candidate(
 
 /// The stop class that decides a route fallback. A host refusal before launch
 /// is a route that cannot serve the node, whatever refused it.
-fn fallback_cause(outcome: AttemptOutcome) -> Option<provenant_records::StopCause> {
+fn fallback_cause(outcome: GraphAttemptOutcome) -> Option<provenant_records::StopCause> {
     use provenant_records::StopCause;
     match outcome {
-        AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
-        AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        AttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
+        GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
+        GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
             Some(StopCause::SpawnFailure)
         }
-        AttemptOutcome::PreparationRefused(
+        GraphAttemptOutcome::PreparationRefused(
             provenant_records::run::CauseKind::PreparationRefused,
         ) => Some(StopCause::PreparationRefused),
-        AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
+        GraphAttemptOutcome::AdapterUnavailable | GraphAttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)
         }
-        AttemptOutcome::Unclassified => Some(StopCause::Unclassified),
+        GraphAttemptOutcome::Unclassified => Some(StopCause::Unclassified),
         _ => None,
     }
 }
@@ -482,7 +482,7 @@ pub(super) fn review_substitution(node: &PlannedNode, attempt: &GraphAttempt) ->
     review_member(node)
         && attempt.state == AttemptState::Terminal
         && attempt.launched
-        && attempt.outcome == Some(AttemptOutcome::TaskFailed)
+        && attempt.outcome == Some(GraphAttemptOutcome::TaskFailed)
 }
 
 pub(super) fn review_member(node: &PlannedNode) -> bool {
@@ -506,7 +506,7 @@ pub(super) fn review_preparation_substitution(node: &PlannedNode, attempt: &Grap
 }
 
 pub(crate) fn live_fallback_allowed(
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     launched: bool,
     evidence: Option<PreparationFallbackEvidence>,
 ) -> bool {
@@ -542,7 +542,7 @@ pub(crate) fn fallback_denial(
     launched: bool,
     access: AccessMode,
     unreadable: bool,
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     cause: Option<&provenant_records::RouteExclusionReason>,
 ) -> (&'static str, String) {
     let (code, denial) = if launched && access == AccessMode::WorktreeWrite {
@@ -562,11 +562,11 @@ pub(crate) fn fallback_denial(
         )
     };
     let reason = match outcome {
-        AttemptOutcome::AuthRequired => "The lane requires authentication.",
-        AttemptOutcome::UsageLimited => "The lane reached a usage limit.",
-        AttemptOutcome::AdapterUnavailable => "The lane's adapter is unavailable.",
-        AttemptOutcome::PreparationRefused(cause) => cause.detail(),
-        AttemptOutcome::Unclassified => "The provider reported an unclassified error.",
+        GraphAttemptOutcome::AuthRequired => "The lane requires authentication.",
+        GraphAttemptOutcome::UsageLimited => "The lane reached a usage limit.",
+        GraphAttemptOutcome::AdapterUnavailable => "The lane's adapter is unavailable.",
+        GraphAttemptOutcome::PreparationRefused(cause) => cause.detail(),
+        GraphAttemptOutcome::Unclassified => "The provider reported an unclassified error.",
         _ => "The lane failed.",
     };
     let detail = cause.map(provenant_routing::exclusion_detail);
@@ -776,7 +776,7 @@ pub(super) fn next_attempt_transition(
         && progress.attempts.last().is_some_and(|attempt| {
             attempt.state == AttemptState::Terminal
                 && (attempt.launched
-                    || (attempt.outcome == Some(AttemptOutcome::UsageLimited)
+                    || (attempt.outcome == Some(GraphAttemptOutcome::UsageLimited)
                         && progress.quota_redraw_spent > 0))
         });
     let allowance = progress
@@ -790,7 +790,7 @@ pub(super) fn next_attempt_transition(
         .filter(|attempt| {
             attempt.state == AttemptState::Terminal
                 && (attempt.launched
-                    || (automatic > 0 && attempt.outcome == Some(AttemptOutcome::UsageLimited)))
+                    || (automatic > 0 && attempt.outcome == Some(GraphAttemptOutcome::UsageLimited)))
         })
         .count() as u64;
     let spent = automatic.saturating_add(launched_switches);
@@ -863,7 +863,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                     && custody_release_pending(
                         node,
                         usize::from(last.key.route_index),
-                        last.outcome.unwrap_or(AttemptOutcome::Unclassified),
+                        last.outcome.unwrap_or(GraphAttemptOutcome::Unclassified),
                         last.launched,
                         FallbackEvidence {
                             preparation: evidence,
@@ -972,32 +972,32 @@ mod tests {
             custody_released: true,
         };
         assert!(live_fallback_allowed(
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             false,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             true,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
-            AttemptOutcome::UsageLimited,
+            GraphAttemptOutcome::UsageLimited,
             false,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
-            AttemptOutcome::TaskFailed,
+            GraphAttemptOutcome::TaskFailed,
             false,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             false,
             None
         ));
         assert!(!live_fallback_allowed(
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             false,
             Some(PreparationFallbackEvidence {
                 custody_released: false,
@@ -1005,7 +1005,7 @@ mod tests {
             })
         ));
         assert!(!live_fallback_allowed(
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             false,
             Some(PreparationFallbackEvidence {
                 handoff: FallbackHandoff::UncertainOrLaunched,
@@ -1135,7 +1135,7 @@ mod tests {
         let decision = settlement_fallback_decision(
             &single,
             0,
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             false,
             FallbackEvidence {
                 preparation: None,
@@ -1169,7 +1169,7 @@ mod tests {
         let named = settlement_fallback_decision(
             &single,
             0,
-            AttemptOutcome::UsageLimited,
+            GraphAttemptOutcome::UsageLimited,
             false,
             FallbackEvidence {
                 preparation: None,

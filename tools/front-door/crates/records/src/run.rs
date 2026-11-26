@@ -2556,7 +2556,7 @@ pub struct PeerGraphAttempt {
     pub route: PeerGraphRoute,
     pub state: crate::graph::AttemptState,
     pub attempt_ref: Option<String>,
-    pub outcome: Option<crate::graph::AttemptOutcome>,
+    pub outcome: Option<crate::graph::GraphAttemptOutcome>,
     pub launch_actor: String,
 }
 

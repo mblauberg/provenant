@@ -2247,7 +2247,7 @@ pub struct GraphAttempt {
     pub route: GraphRoute,
     pub state: AttemptState,
     pub attempt_ref: Option<String>,
-    pub outcome: Option<AttemptOutcome>,
+    pub outcome: Option<GraphAttemptOutcome>,
     /// The exact typed cause the run sealed for this attempt, copied from the
     /// terminal record at settlement. Status and `next_step` can name it
     /// without re-reading the run store; the next step still keys on `stop`.

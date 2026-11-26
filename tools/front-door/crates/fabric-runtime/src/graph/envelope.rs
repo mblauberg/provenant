@@ -647,7 +647,7 @@ fn node_bound(
             // The longest stop cause name.
             stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
             attempt_ref: Some(String::new()),
-            outcome: Some(AttemptOutcome::AdapterUnavailable),
+            outcome: Some(GraphAttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),
             input_cap: Some(usize::MAX),
             input_cap_source: Some(InputCapSource::EffectiveGraphLimits),

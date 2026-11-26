@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn terminal_failure_replay_retires_generation() {
         use provenant_fabric_runtime::graph::{
-            self, AccessMode, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner,
+            self, AccessMode, AttemptKey, AttemptObservation, GraphAttemptOutcome, AttemptOwner,
             GraphDocument, GraphJournal, GraphRoute, NodeInput, Replay,
         };
         use std::{collections::HashMap, convert::Infallible};
@@ -459,7 +459,7 @@ mod tests {
             ) -> Result<AttemptObservation, Infallible> {
                 Ok(AttemptObservation::Terminal {
                     attempt_ref: Some("attempt".into()),
-                    outcome: AttemptOutcome::TaskFailed,
+                    outcome: GraphAttemptOutcome::TaskFailed,
                     launched: true,
                     result: None,
                     result_warning: None,

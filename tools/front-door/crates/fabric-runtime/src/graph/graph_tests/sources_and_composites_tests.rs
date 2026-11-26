@@ -19,8 +19,8 @@ fn synthesis_stops_when_the_pinned_integration_head_moves() {
         let mut owner = FakeOwner {
             integration_heads: [pin.clone(), second].into(),
             observations: [
-                terminal(AttemptOutcome::Succeeded),
-                terminal(AttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]
             .into(),
             ..Default::default()
@@ -55,8 +55,8 @@ fn source_and_read_roots_survive_retry_and_replay() {
             AttemptObservation::Pending {
                 attempt_ref: Some("existing".into()),
             },
-            preparation_refusal("existing", AttemptOutcome::AuthRequired),
-            terminal(AttemptOutcome::Succeeded),
+            preparation_refusal("existing", GraphAttemptOutcome::AuthRequired),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
@@ -100,7 +100,7 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
     reader.review_base = Some("moving-ref".into());
     let mut document = graph(vec![reader, writer]);
     document.schema_version = 2;
-    let mut written = terminal(AttemptOutcome::Succeeded);
+    let mut written = terminal(GraphAttemptOutcome::Succeeded);
     if let AttemptObservation::Terminal { commit, .. } = &mut written {
         *commit = Some(predecessor.clone());
     }
@@ -114,7 +114,7 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
             AttemptObservation::Pending {
                 attempt_ref: Some("host/reader".into()),
             },
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -326,7 +326,7 @@ fn implicit_writer_binding_applies_to_schema_one_when_host_supports_it() {
     let document = graph(vec![writer]);
     let mut owner = FakeOwner {
         implicit_head: Some("1".repeat(40)),
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -352,8 +352,8 @@ fn implicit_writer_binds_before_its_dependency_settles() {
             AttemptObservation::Pending {
                 attempt_ref: Some("host/gate".into()),
             },
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -412,7 +412,7 @@ fn implicit_writer_source_is_bound_at_admission_and_survives_replay() {
             AttemptObservation::Pending {
                 attempt_ref: Some("host/attempt".into()),
             },
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -458,7 +458,7 @@ fn source_requires_upstream_commit_and_fails_before_launch_when_missing() {
     });
     let document = graph(vec![node("author", route("writer")), child]);
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -496,12 +496,12 @@ fn settled_source_consumer_keeps_composite_export_when_member_retries() {
     }))
     .unwrap();
     let first_commit = "1".repeat(40);
-    let mut first_writer = terminal(AttemptOutcome::Succeeded);
+    let mut first_writer = terminal(GraphAttemptOutcome::Succeeded);
     if let AttemptObservation::Terminal { commit, .. } = &mut first_writer {
         *commit = Some(first_commit.clone());
     }
     let mut owner = FakeOwner {
-        observations: VecDeque::from([first_writer, terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([first_writer, terminal(GraphAttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -585,7 +585,7 @@ fn settled_source_consumer_keeps_composite_export_when_member_retries() {
     let restored: GraphCheckpoint =
         serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
     let second_commit = "2".repeat(40);
-    let mut second_writer = terminal(AttemptOutcome::Succeeded);
+    let mut second_writer = terminal(GraphAttemptOutcome::Succeeded);
     if let AttemptObservation::Terminal { commit, .. } = &mut second_writer {
         *commit = Some(second_commit.clone());
     }
@@ -651,9 +651,9 @@ fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
     .unwrap();
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "initial evidence"),
-            terminal_with_result(AttemptOutcome::Succeeded, "evidence A"),
-            terminal_with_result(AttemptOutcome::Succeeded, "evidence B"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "initial evidence"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "evidence A"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "evidence B"),
         ]
         .into(),
         ..Default::default()
@@ -727,9 +727,9 @@ fn required_composite_findings_need_complete_member_evidence() {
         })).unwrap();
         let mut owner = FakeOwner {
             observations: VecDeque::from([
-                terminal_with_result(AttemptOutcome::Succeeded, empty),
-                terminal_with_result(AttemptOutcome::Succeeded, second),
-                terminal(AttemptOutcome::Succeeded),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, empty),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, second),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]),
             ..Default::default()
         };
@@ -776,7 +776,7 @@ fn crash_mid_composite_resumes_without_rerunning_settled_children() {
     // reference, and the settled child must never rerun.
     let mut crashing = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "evidence A"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "evidence A"),
             AttemptObservation::Pending { attempt_ref: None },
         ]
         .into(),
@@ -797,7 +797,7 @@ fn crash_mid_composite_resumes_without_rerunning_settled_children() {
     );
     let mut resumed = FakeOwner {
         observations: [terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             "evidence B",
         )]
         .into(),
@@ -1106,8 +1106,8 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
     document.nodes[0].composite.as_mut().unwrap().exports.pop();
     let mut owner = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::TaskFailed),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::TaskFailed),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
@@ -1187,7 +1187,7 @@ fn batch_concurrency_cap_pins_max_running_and_sets_cap_wait_reason() {
     // When s1 settles as succeeded, next advance admits s3
     let mut owner2 = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
             AttemptObservation::Pending { attempt_ref: None },
             AttemptObservation::Pending { attempt_ref: None },
         ]
@@ -1276,7 +1276,7 @@ fn batch_after_ordering_sets_after_wait_reason_until_satisfied() {
     // When first settles as Succeeded, second becomes Running
     let mut owner2 = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
             AttemptObservation::Pending { attempt_ref: None },
         ]
         .into(),
@@ -1332,7 +1332,7 @@ fn batch_merge_conflict_isolation_pauses_only_conflicted_slice() {
         observations: [
             AttemptObservation::Terminal {
                 attempt_ref: None,
-                outcome: AttemptOutcome::OtherFailure,
+                outcome: GraphAttemptOutcome::OtherFailure,
                 launched: true,
                 result: None,
                 result_warning: Some(conflict_warning),

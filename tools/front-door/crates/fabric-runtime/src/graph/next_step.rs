@@ -28,7 +28,7 @@ fn declared(progress: &NodeProgress) -> bool {
         .is_some_and(|outcome| {
             matches!(
                 outcome,
-                AttemptOutcome::DeclaredStop | AttemptOutcome::StoppedNoWork
+                GraphAttemptOutcome::DeclaredStop | GraphAttemptOutcome::StoppedNoWork
             )
         })
 }
@@ -62,12 +62,12 @@ pub(super) fn stop_cause(
         });
     }
     match attempt.outcome? {
-        AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
-        AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        AttemptOutcome::AdapterUnavailable => Some(StopCause::AdapterUnavailable),
-        AttemptOutcome::PreparationRefused(cause) => Some(cause.into()),
-        AttemptOutcome::DeadlineExceeded => Some(StopCause::Deadline),
-        AttemptOutcome::Unclassified => Some(StopCause::Unclassified),
+        GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
+        GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        GraphAttemptOutcome::AdapterUnavailable => Some(StopCause::AdapterUnavailable),
+        GraphAttemptOutcome::PreparationRefused(cause) => Some(cause.into()),
+        GraphAttemptOutcome::DeadlineExceeded => Some(StopCause::Deadline),
+        GraphAttemptOutcome::Unclassified => Some(StopCause::Unclassified),
         _ => None,
     }
 }
@@ -845,7 +845,7 @@ pub(super) struct FallbackEvidence<'a> {
 pub(super) fn settlement_fallback_decision(
     node: &PlannedNode,
     route_index: usize,
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     launched: bool,
     evidence: FallbackEvidence<'_>,
 ) -> SettlementFallback {
@@ -859,7 +859,7 @@ pub(super) fn settlement_fallback_decision(
     // The run-side `retry` stall policy is an explicit, persisted request to
     // consume the next route after custody has stopped the provider. It is the
     // sole launched-attempt exception to fallback's normal safety gate.
-    if outcome == AttemptOutcome::ProviderStalledRetry {
+    if outcome == GraphAttemptOutcome::ProviderStalledRetry {
         return if launched && route_index + 1 < node.routes.len() && !review_limit_reached {
             SettlementFallback::Continue
         } else {
@@ -877,18 +877,18 @@ pub(super) fn settlement_fallback_decision(
     // still controls the next step. Launched stops use the retry-aware rule
     // in decide(); there is no same-route retry to spend before launch.
     let cause = match outcome {
-        AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
-        AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        AttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
+        GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
+        GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
             Some(StopCause::SpawnFailure)
         }
-        AttemptOutcome::PreparationRefused(
+        GraphAttemptOutcome::PreparationRefused(
             provenant_records::run::CauseKind::PreparationRefused,
         ) => Some(StopCause::PreparationRefused),
-        AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
+        GraphAttemptOutcome::AdapterUnavailable | GraphAttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)
         }
-        AttemptOutcome::Unclassified => Some(StopCause::Unclassified),
+        GraphAttemptOutcome::Unclassified => Some(StopCause::Unclassified),
         _ => None,
     };
     let custody_released = live_fallback_allowed(outcome, launched, fallback_evidence);
@@ -912,25 +912,25 @@ pub(super) fn settlement_fallback_decision(
     let allowed = step == Some(NextStep::NewRoute);
     if !allowed || route_index + 1 == node.routes.len() || review_limit_reached {
         let (mut advance_error_code, mut advance_error) = match outcome {
-            AttemptOutcome::PreparationRefused(cause) => (
+            GraphAttemptOutcome::PreparationRefused(cause) => (
                 Some("preparation_refused"),
                 Some(bounded(cause.detail(), MAX_ADVANCE_ERROR_BYTES)),
             ),
-            AttemptOutcome::AuthRequired => (
+            GraphAttemptOutcome::AuthRequired => (
                 Some("auth_required"),
                 Some("The lane requires authentication.".into()),
             ),
-            AttemptOutcome::AdapterUnavailable => (
+            GraphAttemptOutcome::AdapterUnavailable => (
                 Some("adapter_unavailable"),
                 Some("The lane's adapter is unavailable.".into()),
             ),
-            AttemptOutcome::Unclassified => (
+            GraphAttemptOutcome::Unclassified => (
                 Some("unclassified"),
                 Some("The provider reported an unclassified error.".into()),
             ),
             _ => (None, None),
         };
-        if outcome == AttemptOutcome::UsageLimited {
+        if outcome == GraphAttemptOutcome::UsageLimited {
             advance_error_code = Some("usage_limited");
             let pool = route
                 .and_then(|r| r.alias.as_deref())

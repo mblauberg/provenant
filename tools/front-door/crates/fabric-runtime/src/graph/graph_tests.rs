@@ -470,9 +470,9 @@ impl AttemptOwner for FakeOwner {
         {
             use provenant_records::run::PreparationFailure;
             let evidence = match outcome {
-                AttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
-                AttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
-                AttemptOutcome::AdapterUnavailable => Some(PreparationFailure::AdapterUnavailable),
+                GraphAttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
+                GraphAttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
+                GraphAttemptOutcome::AdapterUnavailable => Some(PreparationFailure::AdapterUnavailable),
                 _ => None,
             };
             if let Some(evidence) = evidence
@@ -624,7 +624,7 @@ fn lens_then_verify(strength: Option<FamilyStrength>) -> GraphDocument {
 fn done_as(reference: &str) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some(reference.into()),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
@@ -757,7 +757,7 @@ fn synthesis_run(text: &str) -> NodeProgress {
     let mut synthesis = node("synthesis", route("first"));
     synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
     let mut owner = FakeOwner {
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, text)].into(),
+        observations: [terminal_with_result(GraphAttemptOutcome::Succeeded, text)].into(),
         ..Default::default()
     };
     advance(
@@ -806,10 +806,10 @@ fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
     .unwrap();
     let owner = FakeOwner {
         observations: VecDeque::from([
-            terminal_with_result(AttemptOutcome::Succeeded, ok),
-            terminal_with_result(AttemptOutcome::Succeeded, "LENS-B-NO-FINDINGS"),
-            terminal(AttemptOutcome::AdapterUnavailable),
-            terminal_with_result(AttemptOutcome::Succeeded, "verified"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, ok),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "LENS-B-NO-FINDINGS"),
+            terminal(GraphAttemptOutcome::AdapterUnavailable),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "verified"),
         ]),
         ..Default::default()
     };
@@ -851,7 +851,7 @@ fn verdict_fixture(
             |line| format!("VERDICT: {line}"),
         );
         capture.push(text.as_bytes());
-        let mut observation = terminal(AttemptOutcome::Succeeded);
+        let mut observation = terminal(GraphAttemptOutcome::Succeeded);
         if let AttemptObservation::Terminal { result, .. } = &mut observation {
             *result = Some(Box::new(capture.finish()));
         }
@@ -862,7 +862,7 @@ fn verdict_fixture(
     (graph(nodes), owner)
 }
 
-fn terminal(outcome: AttemptOutcome) -> AttemptObservation {
+fn terminal(outcome: GraphAttemptOutcome) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: None,
         outcome,
@@ -878,7 +878,7 @@ fn terminal(outcome: AttemptOutcome) -> AttemptObservation {
     }
 }
 
-fn preparation_refusal(reference: &str, outcome: AttemptOutcome) -> AttemptObservation {
+fn preparation_refusal(reference: &str, outcome: GraphAttemptOutcome) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some(reference.into()),
         outcome,
@@ -894,7 +894,7 @@ fn preparation_refusal(reference: &str, outcome: AttemptOutcome) -> AttemptObser
     }
 }
 
-fn terminal_with_result(outcome: AttemptOutcome, result: &str) -> AttemptObservation {
+fn terminal_with_result(outcome: GraphAttemptOutcome, result: &str) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: None,
         outcome,
@@ -911,7 +911,7 @@ fn terminal_with_result(outcome: AttemptOutcome, result: &str) -> AttemptObserva
 }
 
 fn terminal_from(result: &str, attempt_ref: &str) -> AttemptObservation {
-    let mut observation = terminal_with_result(AttemptOutcome::Succeeded, result);
+    let mut observation = terminal_with_result(GraphAttemptOutcome::Succeeded, result);
     if let AttemptObservation::Terminal {
         attempt_ref: slot, ..
     } = &mut observation
@@ -936,7 +936,7 @@ fn parent_and_child(
     let owner = FakeOwner {
         observations: VecDeque::from([
             terminal_from("short excerpt", "host-a/attempt-1"),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         materialise,
         ..Default::default()
@@ -957,7 +957,7 @@ fn check_fallback(
     case: &str,
     access: AccessMode,
     launched: bool,
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     expected: bool,
 ) {
     let mut task = node("node", route("first"));
@@ -981,7 +981,7 @@ fn check_fallback(
                 stop: None,
                 cause: None,
             },
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
     };
@@ -993,9 +993,9 @@ fn check_fallback(
         && launched
         && matches!(
             outcome,
-            AttemptOutcome::AuthRequired
-                | AttemptOutcome::UsageLimited
-                | AttemptOutcome::AdapterUnavailable
+            GraphAttemptOutcome::AuthRequired
+                | GraphAttemptOutcome::UsageLimited
+                | GraphAttemptOutcome::AdapterUnavailable
         );
     assert_eq!(
         owner.calls.len(),
@@ -1017,7 +1017,7 @@ fn check_fallback(
         "{case}"
     );
 
-    let successful_outcome = outcome == AttemptOutcome::ReviewRequired;
+    let successful_outcome = outcome == GraphAttemptOutcome::ReviewRequired;
     assert_eq!(
         run.checkpoint.nodes[0].state,
         if expected || restarted || successful_outcome {

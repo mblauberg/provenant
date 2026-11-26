@@ -8,7 +8,7 @@
 use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, StateRoot, WaitBudget};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
 pub use provenant_records::graph::{
-    AttemptKey, AttemptOutcome, AttemptState, GraphOutcome, GraphStatus, NodeState,
+    AttemptKey, GraphAttemptOutcome, AttemptState, GraphOutcome, GraphStatus, NodeState,
 };
 use provenant_records::pause::PauseCause;
 use provenant_records::{CanonicalError, CanonicalV1, DecodeError, Limits};
@@ -2760,7 +2760,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         AttemptObservation::Terminal {
             attempt_ref: Some(reference),
             launched: false,
-            outcome: AttemptOutcome::UsageLimited,
+            outcome: GraphAttemptOutcome::UsageLimited,
             ..
         } => owner
             .preparation_skipped_accounts(key, reference)
@@ -2807,7 +2807,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
     let quota_redraw = match &observation {
         AttemptObservation::Terminal {
             attempt_ref: Some(reference),
-            outcome: AttemptOutcome::UsageLimited,
+            outcome: GraphAttemptOutcome::UsageLimited,
             ..
         } if route.alias.is_some() && route.model.is_none() => {
             quota_redraw_budget(&checkpoint.nodes[node_index])
@@ -2870,7 +2870,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         outcome,
         ..
     } = &observation
-        && *outcome != AttemptOutcome::Succeeded
+        && *outcome != GraphAttemptOutcome::Succeeded
         && !steer_refused
         && let Some(successor) = owner.continuation(reference).map_err(GraphError::Run)?
     {

@@ -31,7 +31,7 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
     let mut owner = FakeOwner {
         observations: VecDeque::from([
             parent,
-            preparation_refusal("host/first", AttemptOutcome::AuthRequired),
+            preparation_refusal("host/first", GraphAttemptOutcome::AuthRequired),
             terminal_from("done", "host/second"),
         ]),
         resolved_review_base: Some(base.clone()),
@@ -154,7 +154,7 @@ fn attempt_manifest_bounds_the_number_of_selected_values() {
     let document = graph(nodes);
     let mut owner = FakeOwner {
         observations: (0..=count)
-            .map(|_| terminal_with_result(AttemptOutcome::Succeeded, "private body"))
+            .map(|_| terminal_with_result(GraphAttemptOutcome::Succeeded, "private body"))
             .collect(),
         ..Default::default()
     };

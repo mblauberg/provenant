@@ -70,7 +70,7 @@ fn every_review_topology_preserves_partial_panel_coverage() {
                 let mut observations = VecDeque::new();
                 if frame {
                     observations.push_back(terminal_with_result(
-                        AttemptOutcome::Succeeded,
+                        GraphAttemptOutcome::Succeeded,
                         "Pinned subject and acceptance criteria",
                     ));
                 }
@@ -79,13 +79,13 @@ fn every_review_topology_preserves_partial_panel_coverage() {
                 note["triage"]["worth_fixing"] = json!(false);
                 note["triage"]["blocking_class"] = json!("none");
                 observations.push_back(terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!([note]), "VERDICT: PASS"),
                 ));
-                observations.push_back(terminal(AttemptOutcome::UsageLimited));
+                observations.push_back(terminal(GraphAttemptOutcome::UsageLimited));
                 if verify {
                     observations.push_back(terminal_with_result(
-                        AttemptOutcome::Succeeded,
+                        GraphAttemptOutcome::Succeeded,
                         &answer(
                             json!([{
                                 "id":"F1","verification":"upheld","reason":"Reproduced"
@@ -93,10 +93,10 @@ fn every_review_topology_preserves_partial_panel_coverage() {
                             "VERDICT: PASS",
                         ),
                     ));
-                    observations.push_back(terminal(AttemptOutcome::UsageLimited));
+                    observations.push_back(terminal(GraphAttemptOutcome::UsageLimited));
                 }
                 if synthesis {
-                    observations.push_back(terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([{
+                    observations.push_back(terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([{
                             "id":"F1","disposition":"rejected","reason":"Permitted by the contract"
                         }]), "VERDICT: PASS")));
                 }
@@ -158,17 +158,17 @@ fn complete_panels_reduce_verifier_verdicts_and_partial_panels_keep_fail() {
                 let mut observations = VecDeque::new();
                 if frame {
                     observations
-                        .push_back(terminal_with_result(AttemptOutcome::Succeeded, "Frame"));
+                        .push_back(terminal_with_result(GraphAttemptOutcome::Succeeded, "Frame"));
                 }
                 observations.push_back(terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!([]), "VERDICT: PASS"),
                 ));
                 observations.push_back(if quota_limited {
-                    terminal(AttemptOutcome::UsageLimited)
+                    terminal(GraphAttemptOutcome::UsageLimited)
                 } else {
                     terminal_with_result(
-                        AttemptOutcome::Succeeded,
+                        GraphAttemptOutcome::Succeeded,
                         &answer(json!([]), "VERDICT: PASS"),
                     )
                 });
@@ -181,11 +181,11 @@ fn complete_panels_reduce_verifier_verdicts_and_partial_panels_keep_fail() {
                     json!([])
                 };
                 observations.push_back(terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(findings, verdict),
                 ));
                 observations.push_back(terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!([]), "VERDICT: PASS"),
                 ));
                 let mut owner = FakeOwner {
@@ -230,11 +230,11 @@ fn complete_panels_reduce_verifier_verdicts_and_partial_panels_keep_fail() {
 fn a_contract_invalid_member_keeps_its_finding_through_verification_and_synthesis() {
     let document = panel("f0-v1-s1");
     let mut owner = FakeOwner { observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([finding(), {}]), "VERDICT: FAIL")),
-            terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), "VERDICT: PASS")),
-            terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([{"id":"F1","verification":"upheld","reason":"Reproduced"}]), "VERDICT: FAIL")),
-            terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([{"id":"F1","verification":"upheld","reason":"Independently reproduced"}]), "VERDICT: FAIL")),
-            terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([{"id":"F1","disposition":"accepted","reason":"Input x still panics"}]), "VERDICT: FAIL")),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([finding(), {}]), "VERDICT: FAIL")),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([]), "VERDICT: PASS")),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([{"id":"F1","verification":"upheld","reason":"Reproduced"}]), "VERDICT: FAIL")),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([{"id":"F1","verification":"upheld","reason":"Independently reproduced"}]), "VERDICT: FAIL")),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([{"id":"F1","disposition":"accepted","reason":"Input x still panics"}]), "VERDICT: FAIL")),
         ].into(), ..Default::default() };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
@@ -315,7 +315,7 @@ fn synthesis_cannot_restore_inconclusive_verifier_evidence() {
             "VERDICT: PASS",
             "VERDICT: PASS",
         ]
-        .map(|verdict| terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), verdict)))
+        .map(|verdict| terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([]), verdict)))
         .into(),
         ..Default::default()
     };
@@ -344,15 +344,15 @@ fn invalid_propagation_cannot_alias_an_independent_sibling_finding() {
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &answer(json!([forged]), "VERDICT: FAIL"),
             ),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &answer(json!([second]), "VERDICT: FAIL"),
             ),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &answer(json!([]), "VERDICT: INCONCLUSIVE"),
             ),
         ]
@@ -398,8 +398,8 @@ fn typed_contract_rejects_invalid_verdicts_even_without_a_pass_requirement() {
         node.required_verdict = None;
         let mut owner = FakeOwner {
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), verdict)),
-                terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), verdict)),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([]), verdict)),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([]), verdict)),
             ]
             .into(),
             ..Default::default()
@@ -411,7 +411,7 @@ fn typed_contract_rejects_invalid_verdicts_even_without_a_pass_requirement() {
         assert_eq!(progress.state, NodeState::Failed, "{verdict}");
         assert_eq!(
             progress.attempts.last().unwrap().outcome,
-            Some(AttemptOutcome::TaskFailed)
+            Some(GraphAttemptOutcome::TaskFailed)
         );
         assert_eq!(
             progress.advance_error_code.as_deref(),
@@ -437,7 +437,7 @@ fn normalised_review_verdict_settles_with_a_warning() {
         node.required_verdict = None;
         let mut owner = FakeOwner {
             observations: [terminal_with_result(
-                AttemptOutcome::Succeeded, &answer(json!([]), line),
+                GraphAttemptOutcome::Succeeded, &answer(json!([]), line),
             )].into(),
             ..Default::default()
         };
@@ -459,7 +459,7 @@ fn review_contract_accepts_verdict_followed_only_by_handoff() {
         answer(json!([]), "").trim_end()
     );
     let mut owner = FakeOwner {
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, &response)].into(),
+        observations: [terminal_with_result(GraphAttemptOutcome::Succeeded, &response)].into(),
         ..Default::default()
     };
     let run = advance(
@@ -497,7 +497,7 @@ fn review_contract_accepts_one_verdict_after_a_valid_closed_handoff() {
     let mut owner = FakeOwner {
         observations: [AttemptObservation::Terminal {
             attempt_ref: None,
-            outcome: AttemptOutcome::Succeeded,
+            outcome: GraphAttemptOutcome::Succeeded,
             launched: true,
             result: Some(Box::new(result)),
             result_warning: None,
@@ -557,7 +557,7 @@ fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
         let mut owner = FakeOwner {
             observations: [AttemptObservation::Terminal {
                 attempt_ref: None,
-                outcome: AttemptOutcome::Succeeded,
+                outcome: GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(result)),
                 result_warning: None,
@@ -612,11 +612,11 @@ fn verifier_requires_a_reasoned_assessment_of_every_finding() {
         let mut owner = FakeOwner {
             observations: [
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!([finding()]), "VERDICT: FAIL"),
                 ),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(entries, "VERDICT: INCONCLUSIVE"),
                 ),
             ]
@@ -679,7 +679,7 @@ fn typed_contract_reports_malformed_findings_and_preserves_usable_entries() {
         }
         let mut owner = FakeOwner {
             observations: [terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &answer(json!([good, bad]), "VERDICT: FAIL"),
             )]
             .into(),
@@ -723,7 +723,7 @@ fn lens_pass_conflicts_with_untriaged_boundary_and_default_path_findings() {
         let document = graph(vec![review("review.tests", "review")]);
         let mut owner = FakeOwner {
             observations: VecDeque::from([terminal_with_result(
-                AttemptOutcome::DeclaredStop,
+                GraphAttemptOutcome::DeclaredStop,
                 &answer(json!([item]), "VERDICT: PASS"),
             )]),
             ..Default::default()
@@ -753,7 +753,7 @@ fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
             if name == "review.synthesis" {
                 nodes.push(node("source", route("fixture")));
                 observations.push_back(terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!([]), "VERDICT: PASS"),
                 ));
                 reviewer.depends_on.push("source".into());
@@ -764,7 +764,7 @@ fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
             }
             nodes.push(reviewer);
             observations.push_back(terminal_with_result(
-                AttemptOutcome::DeclaredStop,
+                GraphAttemptOutcome::DeclaredStop,
                 &answer(findings.clone(), verdict),
             ));
             let mut owner = FakeOwner {
@@ -788,7 +788,7 @@ fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
                 assert_eq!(progress.state, NodeState::Succeeded);
                 assert_eq!(
                     progress.attempts.last().unwrap().outcome,
-                    Some(AttemptOutcome::Succeeded)
+                    Some(GraphAttemptOutcome::Succeeded)
                 );
             }
         }
@@ -817,16 +817,16 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
             .unwrap();
         let mut owner = FakeOwner {
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([finding()]), "")),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([finding()]), "")),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(
                         json!([finding()]),
                         if corrected { "VERDICT: FAIL" } else { "" },
                     ),
                 ),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!([]), "VERDICT: PASS"),
                 ),
             ]
@@ -956,19 +956,19 @@ fn realistic_aggregate_findings_do_not_require_overflow_proof() {
         let mut owner = FakeOwner {
             observations: [
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!(entries[..count / 2]), "VERDICT: FAIL"),
                 ),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!(entries[count / 2..]), "VERDICT: FAIL"),
                 ),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!(decisions), "VERDICT: FAIL"),
                 ),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!(decisions), "VERDICT: FAIL"),
                 ),
             ]
@@ -1037,10 +1037,10 @@ fn below_minimum_review_keeps_returned_findings_on_replay() {
         let mut owner = FakeOwner {
             observations: [
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &answer(json!([entry]), "VERDICT: FAIL"),
                 ),
-                terminal(AttemptOutcome::AdapterUnavailable),
+                terminal(GraphAttemptOutcome::AdapterUnavailable),
             ]
             .into(),
             ..Default::default()
@@ -1104,9 +1104,9 @@ fn correction_over_structural_limit_pauses_until_limit_is_raised() {
     };
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([finding()]), "")),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([finding()]), "")),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &answer(json!([]), "VERDICT: PASS"),
             ),
         ]
@@ -1178,20 +1178,20 @@ fn maximal_panel_verify_and_synthesis_prompts_fit_default_limits() {
             })
             .collect();
         observations.push_back(terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             &answer(json!(entries), "VERDICT: FAIL"),
         ));
     }
     let verified: Vec<_> = ids.iter().map(|id| json!({"id":id,"verification":"upheld","reason":"Reproduced from the pinned source"})).collect();
     for _ in 0..2 {
         observations.push_back(terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             &answer(json!(verified), "VERDICT: FAIL"),
         ));
     }
     let accepted: Vec<_> = ids.iter().map(|id| json!({"id":id,"disposition":"accepted","reason":"The unchecked dispatch remains reachable"})).collect();
     observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         &answer(json!(accepted), "VERDICT: FAIL"),
     ));
     let mut owner = FakeOwner {
@@ -1257,7 +1257,7 @@ fn oversized_blocking_findings_remain_retrievable_with_the_verdict() {
     }
     let captured = capture.finish();
     assert!(!captured.source_truncated);
-    let mut observation = terminal_with_result(AttemptOutcome::Succeeded, &response);
+    let mut observation = terminal_with_result(GraphAttemptOutcome::Succeeded, &response);
     if let AttemptObservation::Terminal {
         result,
         result_path,

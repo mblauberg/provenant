@@ -227,13 +227,13 @@ pub(super) fn append_changes(
                     input_tokens: metrics.and_then(|m| m.get("input_tokens")).and_then(Value::as_u64),
                     queue_time_ms: metrics.and_then(|m| m.get("queue_time_ms")).and_then(Value::as_u64),
                     outcome: metrics.and_then(|m| m.get("outcome")).and_then(Value::as_str).map(str::to_owned).or_else(|| match attempt.outcome? {
-                        AttemptOutcome::PreparationRefused(_) => Some("preparation_refused".into()),
+                        GraphAttemptOutcome::PreparationRefused(_) => Some("preparation_refused".into()),
                         outcome => serde_json::to_value(outcome).ok()?.as_str().map(str::to_owned),
                     }),
                     route: metrics.and_then(|m| m.get("resolved_route")).cloned().unwrap_or_else(|| serde_json::json!({"adapter":attempt.route.adapter,"model":attempt.route.model,"name":attempt.route.name,"alias":attempt.route.alias,"effort":attempt.route.effort})),
                 });
                 events.push(observation);
-                if attempt.outcome == Some(AttemptOutcome::UsageLimited) {
+                if attempt.outcome == Some(GraphAttemptOutcome::UsageLimited) {
                     events.push(event(
                         GraphEventKind::Wait,
                         &node.id,
@@ -579,7 +579,7 @@ mod tests {
         checkpoint.nodes[0].state = NodeState::Failed;
         let attempt = &mut checkpoint.nodes[0].attempts[0];
         attempt.state = AttemptState::Terminal;
-        attempt.outcome = Some(AttemptOutcome::AdapterUnavailable);
+        attempt.outcome = Some(GraphAttemptOutcome::AdapterUnavailable);
         attempt.settled = 1;
         append_changes(&directory, "g", Some(&before), &checkpoint, None).unwrap();
         append_changes(&directory, "g", Some(&checkpoint), &checkpoint, None).unwrap();

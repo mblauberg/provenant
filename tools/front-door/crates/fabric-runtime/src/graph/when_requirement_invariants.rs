@@ -39,7 +39,7 @@ impl AttemptOwner for Owner {
         capture.push(b"VERDICT: PASS");
         Ok(AttemptObservation::Terminal {
             attempt_ref: Some(key.node_id.clone()),
-            outcome: AttemptOutcome::Succeeded,
+            outcome: GraphAttemptOutcome::Succeeded,
             launched: true,
             result: Some(Box::new(capture.finish())),
             result_warning: None,

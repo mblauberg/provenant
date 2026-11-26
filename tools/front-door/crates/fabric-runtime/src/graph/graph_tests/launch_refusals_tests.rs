@@ -524,7 +524,7 @@ fn failed_parent_waits_for_sibling_before_blocking_join() {
     let document = graph(vec![first, second, join]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::TaskFailed),
+            terminal(GraphAttemptOutcome::TaskFailed),
             AttemptObservation::Pending { attempt_ref: None },
         ]),
         ..Default::default()
@@ -542,7 +542,7 @@ fn failed_parent_waits_for_sibling_before_blocking_join() {
     );
     owner
         .observations
-        .push_back(terminal(AttemptOutcome::Succeeded));
+        .push_back(terminal(GraphAttemptOutcome::Succeeded));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(
         run.checkpoint
@@ -618,8 +618,8 @@ fn launched_reader_stop_restart_replays_file_checkpoint_without_new_work() {
         .unwrap();
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::UsageLimited),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::UsageLimited),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -695,8 +695,8 @@ fn order_only_edge_waits_for_failure_without_hiding_it() {
     });
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::TaskFailed),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::TaskFailed),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };

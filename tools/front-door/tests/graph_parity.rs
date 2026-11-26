@@ -7,7 +7,7 @@
 use crate::support;
 use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
 use provenant_fabric_runtime::graph::{
-    self, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner, AttemptState, FileJournal,
+    self, AttemptKey, AttemptObservation, GraphAttemptOutcome, AttemptOwner, AttemptState, FileJournal,
     GraphCheckpoint, GraphDocument, GraphEvent, GraphEventKind, GraphExecution, GraphJournal,
     GraphStatus, NodeState,
 };
@@ -52,7 +52,7 @@ struct Provider {
 }
 enum Step {
     Pending(Option<&'static str>),
-    Done(AttemptOutcome, bool, &'static str),
+    Done(GraphAttemptOutcome, bool, &'static str),
     Crash,
 }
 impl AttemptOwner for Provider {
@@ -293,7 +293,7 @@ fn assert_same_story(events: &[GraphEvent], checkpoint: &GraphCheckpoint) {
     );
     let limited = node
         .recorded_attempts()
-        .filter(|a| a.outcome == Some(AttemptOutcome::UsageLimited))
+        .filter(|a| a.outcome == Some(GraphAttemptOutcome::UsageLimited))
         .count();
     assert_eq!(
         codes(events, GraphEventKind::Wait)
@@ -323,7 +323,7 @@ fn lane(routes: usize) -> serde_json::Value {
 fn success() -> Result {
     let h = Harness::new("parity-success", lane(1))?;
     let mut p = Provider {
-        script: [Step::Done(AttemptOutcome::Succeeded, true, "h/1")].into(),
+        script: [Step::Done(GraphAttemptOutcome::Succeeded, true, "h/1")].into(),
         ..Default::default()
     };
     let run = h.advance(&mut p)?;
@@ -332,7 +332,7 @@ fn success() -> Result {
     let node = &checkpoint.nodes[0];
     assert_eq!(node.state, NodeState::Succeeded);
     assert_eq!(node.attempts.len(), 1);
-    assert_eq!(node.attempts[0].outcome, Some(AttemptOutcome::Succeeded));
+    assert_eq!(node.attempts[0].outcome, Some(GraphAttemptOutcome::Succeeded));
     assert_eq!(node.advance_error_code, None);
     let events = h.events()?;
     assert_same_story(&events, &checkpoint);
@@ -352,7 +352,7 @@ fn rerun_after_success_or_cancellation_launches_unless_the_launch_is_replayed() 
             let first_step = if cancelled {
                 Step::Pending(Some("h/first"))
             } else {
-                Step::Done(AttemptOutcome::Succeeded, true, "h/first")
+                Step::Done(GraphAttemptOutcome::Succeeded, true, "h/first")
             };
             let mut p = Provider {
                 script: [first_step].into(),
@@ -373,7 +373,7 @@ fn rerun_after_success_or_cancellation_launches_unless_the_launch_is_replayed() 
             };
             h.id = rerun_id.clone();
             h.document.graph_id = rerun_id;
-            p.script = [Step::Done(AttemptOutcome::Succeeded, true, "h/second")].into();
+            p.script = [Step::Done(GraphAttemptOutcome::Succeeded, true, "h/second")].into();
             let rerun = h.advance(&mut p)?;
             let checkpoint = h.checkpoint()?;
             if replayed {
@@ -404,7 +404,7 @@ fn rerun_after_success_or_cancellation_launches_unless_the_launch_is_replayed() 
 fn failure() -> Result {
     let h = Harness::new("parity-failure", lane(2))?;
     let mut p = Provider {
-        script: [Step::Done(AttemptOutcome::TaskFailed, true, "h/1")].into(),
+        script: [Step::Done(GraphAttemptOutcome::TaskFailed, true, "h/1")].into(),
         ..Default::default()
     };
     h.advance(&mut p)?;
@@ -413,7 +413,7 @@ fn failure() -> Result {
     assert_eq!(node.state, NodeState::Failed);
     // A launched task failure is the task's answer: no second member is tried.
     assert_eq!(node.attempts.len(), 1);
-    assert_eq!(node.attempts[0].outcome, Some(AttemptOutcome::TaskFailed));
+    assert_eq!(node.attempts[0].outcome, Some(GraphAttemptOutcome::TaskFailed));
     assert_same_story(&h.events()?, &checkpoint);
     Ok(())
 }
@@ -423,8 +423,8 @@ fn quota_limit_retries_on_another_member() -> Result {
     let h = Harness::new("parity-quota", lane(2))?;
     let mut p = Provider {
         script: [
-            Step::Done(AttemptOutcome::UsageLimited, true, "h/1"),
-            Step::Done(AttemptOutcome::Succeeded, true, "h/2"),
+            Step::Done(GraphAttemptOutcome::UsageLimited, true, "h/1"),
+            Step::Done(GraphAttemptOutcome::Succeeded, true, "h/2"),
         ]
         .into(),
         ..Default::default()
@@ -437,11 +437,11 @@ fn quota_limit_retries_on_another_member() -> Result {
     // Superseded attempts are history; the retry is the node's current one.
     let attempts: Vec<_> = node.recorded_attempts().collect();
     assert_eq!(attempts.len(), 2);
-    assert_eq!(attempts[0].outcome, Some(AttemptOutcome::UsageLimited));
+    assert_eq!(attempts[0].outcome, Some(GraphAttemptOutcome::UsageLimited));
     // The retry runs on the other member, whatever its key's route index.
     assert_eq!(attempts[0].route.adapter.as_deref(), Some("member0"));
     assert_eq!(attempts[1].route.adapter.as_deref(), Some("member1"));
-    assert_eq!(attempts[1].outcome, Some(AttemptOutcome::Succeeded));
+    assert_eq!(attempts[1].outcome, Some(GraphAttemptOutcome::Succeeded));
     let events = h.events()?;
     assert_eq!(codes(&events, GraphEventKind::Wait), ["quota"]);
     assert_same_story(&events, &checkpoint);
@@ -500,7 +500,7 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
             let partial_commit = "2".repeat(40);
             let mut first = Provider {
                 script: [
-                    Step::Done(AttemptOutcome::UsageLimited, true, "h/quota"),
+                    Step::Done(GraphAttemptOutcome::UsageLimited, true, "h/quota"),
                     Step::Pending(Some("h/continuation")),
                 ]
                 .into(),
@@ -521,7 +521,7 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
             assert_eq!(node.previous_attempts.len(), 1);
             assert_eq!(
                 node.previous_attempts[0].outcome,
-                Some(AttemptOutcome::UsageLimited)
+                Some(GraphAttemptOutcome::UsageLimited)
             );
             assert_eq!(
                 node.previous_attempts[0].attempt_ref.as_deref(),
@@ -564,7 +564,7 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
             // predecessor and original launch actor preserved in the row.
             let mut resumed = Provider {
                 script: [Step::Done(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     true,
                     "h/continuation",
                 )]
@@ -595,7 +595,7 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
                     .previous_attempts
             );
             assert_eq!(node.attempts.len(), 1);
-            assert_eq!(node.attempts[0].outcome, Some(AttemptOutcome::Succeeded));
+            assert_eq!(node.attempts[0].outcome, Some(GraphAttemptOutcome::Succeeded));
             if writer {
                 let output = node.outputs.as_ref().unwrap();
                 assert_eq!(output.branch.as_deref(), Some("lane/parity"));
@@ -642,7 +642,7 @@ fn interrupted_run_resumes_the_same_attempt() -> Result {
     // A fresh supervisor observes the same key and the stored reference; it
     // must not start a second attempt or consume the next member.
     let mut second = Provider {
-        script: [Step::Done(AttemptOutcome::Succeeded, true, "h/1")].into(),
+        script: [Step::Done(GraphAttemptOutcome::Succeeded, true, "h/1")].into(),
         ..Default::default()
     };
     let run = h.advance(&mut second)?;
@@ -724,7 +724,7 @@ fn stop_then_retry_observes_the_same_attempt() -> Result {
     );
     // Retry reopens admission; the same key is observed, not relaunched.
     let mut retry = Provider {
-        script: [Step::Done(AttemptOutcome::Succeeded, true, "h/1")].into(),
+        script: [Step::Done(GraphAttemptOutcome::Succeeded, true, "h/1")].into(),
         ..Default::default()
     };
     let run = h.resume(&mut retry)?;
@@ -765,7 +765,7 @@ fn supervisor_crash_then_recovery() -> Result {
     h.advance(&mut early)?;
     assert!(early.calls.is_empty(), "still waiting for its wake");
     let mut recovered = Provider {
-        script: [Step::Done(AttemptOutcome::Succeeded, true, "h/1")].into(),
+        script: [Step::Done(GraphAttemptOutcome::Succeeded, true, "h/1")].into(),
         now: Some(provenant_core::WallTime::from_micros(
             t0.as_micros() + 6_000_000,
         )?),

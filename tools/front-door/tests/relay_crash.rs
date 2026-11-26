@@ -40,7 +40,7 @@ impl AttemptOwner for Provider {
             assert_eq!(replay.stored_ref, Some("fixture/accepted-child"));
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: replay.stored_ref.map(str::to_owned),
-                outcome: graph::AttemptOutcome::Succeeded,
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: None,
                 result_warning: None,

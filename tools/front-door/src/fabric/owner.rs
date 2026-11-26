@@ -2900,7 +2900,7 @@ impl BoundGraphOwner<'_> {
         replay: provenant_fabric_runtime::graph::Replay<'_>,
         refusal: Option<&GraphRefusalScope>,
     ) -> Result<StartedAttempt, FacadeError> {
-        use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
+        use provenant_fabric_runtime::graph::{AttemptObservation, GraphAttemptOutcome};
         let operation_id = graph_operation("graph-attempt-operation", key)?;
         let cancel = self.cancel;
         let blocked = |owner: &BinaryRunOwner<'_>| -> Result<Option<String>, FacadeError> {
@@ -3227,7 +3227,7 @@ impl BoundGraphOwner<'_> {
         {
             return Ok(StartedAttempt::Refused(AttemptObservation::Terminal {
                 attempt_ref: None,
-                outcome: AttemptOutcome::AdapterUnavailable,
+                outcome: GraphAttemptOutcome::AdapterUnavailable,
                 launched: false,
                 result: None,
                 result_warning: None,
@@ -4088,7 +4088,7 @@ impl BoundGraphOwner<'_> {
         expected_origin: provenant_records::WorkKey,
         facts: TerminalFacts<'_>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, FacadeError> {
-        use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
+        use provenant_fabric_runtime::graph::{AttemptObservation, GraphAttemptOutcome};
         let TerminalFacts {
             required_verdict,
             deadline_seconds,
@@ -4237,7 +4237,7 @@ impl BoundGraphOwner<'_> {
                     launched,
                     attempt_ref: reference,
                     outcome: if result_warning.is_some() {
-                        AttemptOutcome::OtherFailure
+                        GraphAttemptOutcome::OtherFailure
                     } else if outcome == Outcome::Succeeded
                         && effective_delivery.is_some_and(|delivery| {
                             matches!(
@@ -4247,15 +4247,15 @@ impl BoundGraphOwner<'_> {
                             )
                         })
                     {
-                        AttemptOutcome::OtherFailure
+                        GraphAttemptOutcome::OtherFailure
                     } else if outcome == Outcome::TimedOut
                         && deadline_seconds.is_some()
                         && preparation_cause != Some(provenant_records::run::CauseKind::TokenBudget)
                     {
-                        AttemptOutcome::DeadlineExceeded
+                        GraphAttemptOutcome::DeadlineExceeded
                     } else {
                         provenant_records::settlement::project::graph_outcome(&attempt)
-                            .unwrap_or(AttemptOutcome::OtherFailure)
+                            .unwrap_or(GraphAttemptOutcome::OtherFailure)
                     },
                     result,
                     result_warning,

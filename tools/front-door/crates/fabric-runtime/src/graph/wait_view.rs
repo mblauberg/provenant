@@ -1,5 +1,5 @@
 //! Read-only projection of the waits recorded in a graph checkpoint.
-use super::{AttemptOutcome, CiState, GraphCheckpoint, NodeState};
+use super::{GraphAttemptOutcome, CiState, GraphCheckpoint, NodeState};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -40,7 +40,7 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
             let attempt = node.attempts.last();
             let quota = node.state == NodeState::Failed
                 && attempt.and_then(|attempt| attempt.outcome)
-                    == Some(AttemptOutcome::UsageLimited);
+                    == Some(GraphAttemptOutcome::UsageLimited);
             let approval = checkpoint
                 .asks
                 .iter()

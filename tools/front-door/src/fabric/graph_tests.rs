@@ -251,7 +251,7 @@ mod graph_writer_admission_tests {
                         settlement_class: Some(
                             provenant_records::run::SettlementClass::Completed,
                         ),
-                        outcome: provenant_fabric_runtime::graph::AttemptOutcome::Succeeded,
+                        outcome: provenant_fabric_runtime::graph::GraphAttemptOutcome::Succeeded,
                         launched: true,
                         result: None,
                         result_warning: None,
@@ -2274,7 +2274,7 @@ mod result_tests {
             .attempts
             .last_mut()
             .unwrap()
-            .outcome = Some(provenant_fabric_runtime::graph::AttemptOutcome::ReviewRequired);
+            .outcome = Some(provenant_fabric_runtime::graph::GraphAttemptOutcome::ReviewRequired);
         assert!(super::graph_human::graph_human_full(&review).contains("outcome=ReviewRequired"));
         assert!(rows[1].contains("route=none attempt=none"));
         assert!(rows[2].contains("CI waiting elapsed=12s checks=build head=abc"));
@@ -2946,7 +2946,7 @@ mod result_tests {
                 Ok(graph::AttemptObservation::Terminal {
                     attempt_ref: producer.then(|| self.reference.clone()),
                     settlement_class: Some(provenant_records::run::SettlementClass::Completed),
-                    outcome: graph::AttemptOutcome::Succeeded,
+                    outcome: graph::GraphAttemptOutcome::Succeeded,
                     launched: true,
                     result: Some(Box::new(capture.finish())),
                     result_warning: None,
@@ -3558,7 +3558,7 @@ mod retry_allowance_tests {
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: None,
                 settlement_class: Some(provenant_records::run::SettlementClass::Completed),
-                outcome: graph::AttemptOutcome::Succeeded,
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: false,
                 result: None,
                 result_warning: None,

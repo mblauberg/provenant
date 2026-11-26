@@ -38,7 +38,7 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
                 })
             } else {
                 assert_eq!(self.calls[0], self.calls[self.calls.len() - 1]);
-                Ok(terminal(AttemptOutcome::Succeeded))
+                Ok(terminal(GraphAttemptOutcome::Succeeded))
             }
         }
     }
@@ -175,7 +175,7 @@ fn transient_launch_error_waits_and_retries_the_same_attempt_once_due() {
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
         errors: busy_times(1),
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -249,7 +249,7 @@ fn node_review_base_is_pinned_before_launch_and_reused_on_replay() {
             AttemptObservation::Pending {
                 attempt_ref: Some("host/review".into()),
             },
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -326,7 +326,7 @@ fn writer_lock_contention_retries_the_same_attempt_after_release() {
             crate::coordination::facade::FacadeError::WriterLockBusy { holder: None },
         )]
         .into(),
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -609,7 +609,7 @@ fn expired_launch_replays_an_accepted_operation() {
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
         errors: busy_times(1),
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -649,7 +649,7 @@ fn launch_succeeds_after_more_than_three_transient_failures() {
                     )
                 })
                 .collect(),
-            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+            observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
             ..Default::default()
         };
         let mut journal = MemoryJournal::default();
@@ -738,7 +738,7 @@ fn launch_retry_without_a_wall_clock_keeps_the_prior_checkpoint() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         errors: busy_times(1),
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -806,7 +806,7 @@ fn a_saved_attempt_reference_never_gains_a_launch_retry_or_a_second_row() {
             AttemptObservation::Pending {
                 attempt_ref: Some("host/1".into()),
             },
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };

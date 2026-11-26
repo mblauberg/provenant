@@ -275,14 +275,14 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
         journal.0 = Some(valid);
         let mut owner = FakeOwner {
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, "review passed"),
-                terminal(AttemptOutcome::OtherFailure),
-                terminal(AttemptOutcome::UsageLimited),
-                terminal(AttemptOutcome::UsageLimited),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, "review passed"),
+                terminal(GraphAttemptOutcome::OtherFailure),
+                terminal(GraphAttemptOutcome::UsageLimited),
+                terminal(GraphAttemptOutcome::UsageLimited),
                 // A usage limit hands the slice to another agent until the
                 // graph-wide restart budget is spent.
-                terminal(AttemptOutcome::UsageLimited),
-                terminal(AttemptOutcome::UsageLimited),
+                terminal(GraphAttemptOutcome::UsageLimited),
+                terminal(GraphAttemptOutcome::UsageLimited),
             ]
             .into(),
             ..Default::default()
@@ -393,13 +393,13 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     })).unwrap();
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "prepared result"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "prepared result"),
             terminal_with_result(
-                AttemptOutcome::TaskFailed,
+                GraphAttemptOutcome::TaskFailed,
                 "TOKEN_SENTINEL /private/source \u{1b}",
             ),
-            terminal_with_result(AttemptOutcome::Succeeded, "static result"),
-            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "static result"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "done"),
         ]
         .into(),
         ..Default::default()
@@ -520,7 +520,7 @@ fn restart_after_fallback_expansion_does_not_duplicate_work_or_admit_dependants_
     let mut journal = MemoryJournal::default();
     let mut first_owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief"),
+            terminal_with_result(GraphAttemptOutcome::TaskFailed, "planner rejected the brief"),
             AttemptObservation::Pending { attempt_ref: None },
         ]
         .into(),
@@ -551,9 +551,9 @@ fn restart_after_fallback_expansion_does_not_duplicate_work_or_admit_dependants_
 
     let mut second_owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "first result"),
-            terminal_with_result(AttemptOutcome::Succeeded, "second result"),
-            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "first result"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "second result"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "done"),
         ]
         .into(),
         ..Default::default()
@@ -582,7 +582,7 @@ fn restart_after_invalid_fragment_fallback_reuses_the_persisted_expansion() {
     let mut journal = MemoryJournal::default();
     let mut first_owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "```fragment\n{not json}\n```"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "```fragment\n{not json}\n```"),
             AttemptObservation::Pending { attempt_ref: None },
         ]
         .into(),
@@ -610,9 +610,9 @@ fn restart_after_invalid_fragment_fallback_reuses_the_persisted_expansion() {
 
     let mut second_owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "first result"),
-            terminal_with_result(AttemptOutcome::Succeeded, "second result"),
-            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "first result"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "second result"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "done"),
         ]
         .into(),
         ..Default::default()
@@ -644,7 +644,7 @@ fn restart_rejects_a_fallback_expansion_that_differs_from_the_spec() {
     let mut journal = MemoryJournal::default();
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief"),
+            terminal_with_result(GraphAttemptOutcome::TaskFailed, "planner rejected the brief"),
             AttemptObservation::Pending { attempt_ref: None },
         ]
         .into(),
@@ -672,7 +672,7 @@ fn fallback_expansion_over_a_structural_limit_pauses_with_a_reason() {
     let mut owner = fixture_owner(&["planner rejected the brief"]);
     let mut owner = {
         owner.observations = [terminal_with_result(
-            AttemptOutcome::TaskFailed,
+            GraphAttemptOutcome::TaskFailed,
             "planner rejected the brief",
         )]
         .into();
@@ -709,7 +709,7 @@ fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
     };
     let mut owner = FakeOwner {
         observations: [terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             "planner returned no fragment block",
         )]
         .into(),
@@ -843,7 +843,7 @@ fn ordinary_advance_clears_pause_after_admitting_retried_fallback() {
     };
     let mut owner = FakeOwner {
         observations: [terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             "planner returned no fragment block",
         )]
         .into(),
@@ -957,7 +957,7 @@ fn fixture_owner(results: &[&str]) -> FakeOwner {
     FakeOwner {
         observations: results
             .iter()
-            .map(|text| terminal_with_result(AttemptOutcome::Succeeded, text))
+            .map(|text| terminal_with_result(GraphAttemptOutcome::Succeeded, text))
             .collect(),
         ..Default::default()
     }
@@ -1050,7 +1050,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
             assert!(run.checkpoint.nodes[0].fragment.as_ref().unwrap().len() > 4096);
         }
         owner.observations.extend(
-            ["a", "b", "checked"].map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)),
+            ["a", "b", "checked"].map(|text| terminal_with_result(GraphAttemptOutcome::Succeeded, text)),
         );
         let mut journal =
             FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
@@ -1114,7 +1114,7 @@ fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
         observations: [
             AttemptObservation::Terminal {
                 attempt_ref: None,
-                outcome: AttemptOutcome::Succeeded,
+                outcome: GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(result)),
                 result_warning: None,
@@ -1127,7 +1127,7 @@ fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
             },
             AttemptObservation::Terminal {
                 attempt_ref: None,
-                outcome: AttemptOutcome::Succeeded,
+                outcome: GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(clean())),
                 result_warning: None,
@@ -1890,7 +1890,7 @@ fn continuation_budget_pauses_then_extends_without_duplicating_prior_work() {
     );
     owner.observations.extend(
         ["VERDICT: PASS", "checked"]
-            .map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)),
+            .map(|text| terminal_with_result(GraphAttemptOutcome::Succeeded, text)),
     );
     limits.continuations = 2;
     let resumed = resume_with_budget(
@@ -1907,7 +1907,7 @@ fn continuation_budget_pauses_then_extends_without_duplicating_prior_work() {
     assert_eq!(owner.calls.len(), 4);
     limits.continuations = 0;
     let mut owner = super::FakeOwner {
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, STOP)].into(),
+        observations: [terminal_with_result(GraphAttemptOutcome::Succeeded, STOP)].into(),
         ..Default::default()
     };
     let disabled = advance_with_budget(
@@ -2106,7 +2106,7 @@ fn expansion_completes_at_node_budget() {
     let mut owner = fixture_owner(&vec![output.as_str(); count]);
     owner
         .observations
-        .extend((0..count).map(|_| terminal_with_result(AttemptOutcome::Succeeded, "done")));
+        .extend((0..count).map(|_| terminal_with_result(GraphAttemptOutcome::Succeeded, "done")));
     let mut journal = MemoryJournal::default();
     let run =
         advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
@@ -2192,7 +2192,7 @@ fn fragment_gate_recovery_is_a_completion_dependency_for_consumers() {
             );
             owner.observations.extend(
                 ["repaired", "checked"]
-                    .map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)),
+                    .map(|text| terminal_with_result(GraphAttemptOutcome::Succeeded, text)),
             );
         }
         let run = advance(&planner(3), &mut owner, &mut journal).unwrap();
@@ -2211,9 +2211,9 @@ fn order_only_planner_consumer_waits_for_failed_fragment_without_blocking() {
     let output = result(vec![slice("child", &[])]);
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &output),
-            terminal(AttemptOutcome::TaskFailed),
-            terminal_with_result(AttemptOutcome::Succeeded, "checked"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &output),
+            terminal(GraphAttemptOutcome::TaskFailed),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "checked"),
         ]
         .into(),
         ..Default::default()
@@ -3181,7 +3181,7 @@ fn replacing_an_unstarted_writer_with_a_false_condition_settles_it_as_skipped()
     let mut owner = FakeOwner::default();
     owner
         .observations
-        .push_back(terminal(AttemptOutcome::Succeeded));
+        .push_back(terminal(GraphAttemptOutcome::Succeeded));
     let run = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap();
     let row = run.checkpoint.nodes.iter().find(|row| row.id == "b").unwrap();
     assert_eq!(row.state, NodeState::Skipped, "{row:?}");
@@ -4389,8 +4389,8 @@ fn pending_writer_continuation_reopens_and_excludes_its_predecessor_model() {
     let saved = serde_json::to_vec(&run.checkpoint).unwrap();
     journal.0 = Some(serde_json::from_slice(&saved).unwrap());
     owner.observations.extend([
-        terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"),
-        terminal_with_result(AttemptOutcome::Succeeded, "checked"),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: PASS"),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, "checked"),
     ]);
     let reopened = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(reopened.status, GraphStatus::Complete);
@@ -4403,13 +4403,13 @@ fn declared_writer_stop_restarts_with_handoff_and_excludes_the_used_pool_model()
     let doc = writer_graph();
     let mut observation = terminal_from(STOP, "stopped-writer");
     if let AttemptObservation::Terminal { outcome, .. } = &mut observation {
-        *outcome = AttemptOutcome::DeclaredStop;
+        *outcome = GraphAttemptOutcome::DeclaredStop;
     }
     let mut owner = FakeOwner {
         observations: [
             observation,
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"),
-            terminal_with_result(AttemptOutcome::Succeeded, "checked"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: PASS"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "checked"),
         ]
         .into(),
         models: [("stopped-writer".into(), "codex/previous".into())].into(),

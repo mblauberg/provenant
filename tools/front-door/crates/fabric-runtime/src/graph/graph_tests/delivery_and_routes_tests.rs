@@ -11,7 +11,7 @@ fn matched_required_contract_cannot_override_ambiguous_verdict_evidence() {
     );
     let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: FAIL"));
     capture.push(text.as_bytes());
-    let mut observation = terminal(AttemptOutcome::Succeeded);
+    let mut observation = terminal(GraphAttemptOutcome::Succeeded);
     if let AttemptObservation::Terminal { result, .. } = &mut observation {
         *result = Some(Box::new(capture.finish()));
     }
@@ -48,7 +48,7 @@ fn graph_delivers_nodes_and_opens_one_final_pr_only_after_success() {
     document.integration_branch = Some("integration".into());
     document.delivery = Some(DeliveryMode::Pr);
     let mut owner = FakeOwner {
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -62,7 +62,7 @@ fn graph_delivers_nodes_and_opens_one_final_pr_only_after_success() {
     advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(owner.deliveries, 1);
     let mut failed = FakeOwner {
-        observations: VecDeque::from([terminal(AttemptOutcome::OtherFailure)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::OtherFailure)]),
         ..Default::default()
     };
     let result = advance(&document, &mut failed, &mut MemoryJournal::default()).unwrap();
@@ -105,7 +105,7 @@ fn graph_pr_identity_save_failure_reconciles_without_a_second_creation() {
     document.integration_branch = Some("integration".into());
     document.delivery = Some(DeliveryMode::Pr);
     let mut owner = FakeOwner {
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let mut journal = FailingJournal::default();
@@ -146,7 +146,7 @@ fn graph_pr_delivery_never_saves_missing_or_clipped_identity() {
         document.integration_branch = Some("integration".into());
         document.delivery = Some(DeliveryMode::Pr);
         let mut owner = FakeOwner {
-            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+            observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
             delivery_identity: Some(identity),
             ..Default::default()
         };
@@ -237,10 +237,10 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
     }]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            preparation_refusal("host/a", AttemptOutcome::AuthRequired),
-            preparation_refusal("host/b", AttemptOutcome::UsageLimited),
-            preparation_refusal("host/c", AttemptOutcome::AdapterUnavailable),
-            terminal(AttemptOutcome::Succeeded),
+            preparation_refusal("host/a", GraphAttemptOutcome::AuthRequired),
+            preparation_refusal("host/b", GraphAttemptOutcome::UsageLimited),
+            preparation_refusal("host/c", GraphAttemptOutcome::AdapterUnavailable),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
     };
@@ -259,13 +259,13 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
     );
     let attempts = &run.checkpoint.nodes[0].attempts;
     assert_eq!(attempts.len(), 4);
-    assert_eq!(attempts[0].outcome, Some(AttemptOutcome::AuthRequired));
-    assert_eq!(attempts[1].outcome, Some(AttemptOutcome::UsageLimited));
+    assert_eq!(attempts[0].outcome, Some(GraphAttemptOutcome::AuthRequired));
+    assert_eq!(attempts[1].outcome, Some(GraphAttemptOutcome::UsageLimited));
     assert_eq!(
         attempts[2].outcome,
-        Some(AttemptOutcome::AdapterUnavailable)
+        Some(GraphAttemptOutcome::AdapterUnavailable)
     );
-    assert_eq!(attempts[3].outcome, Some(AttemptOutcome::Succeeded));
+    assert_eq!(attempts[3].outcome, Some(GraphAttemptOutcome::Succeeded));
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
 }
 
@@ -273,8 +273,8 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
 // Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
 fn typed_preparation_failures_fall_back_to_the_next_route() {
     for (suffix, failure) in [
-        ("auth", AttemptOutcome::AuthRequired),
-        ("adapter", AttemptOutcome::AdapterUnavailable),
+        ("auth", GraphAttemptOutcome::AuthRequired),
+        ("adapter", GraphAttemptOutcome::AdapterUnavailable),
     ] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version": 1, "graph_id": format!("signed-out-{suffix}"), "nodes": [{
@@ -288,7 +288,7 @@ fn typed_preparation_failures_fall_back_to_the_next_route() {
         let mut owner = FakeOwner {
             observations: VecDeque::from([
                 preparation_refusal("host/a", failure),
-                terminal(AttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]),
             ..FakeOwner::default()
         };
@@ -299,7 +299,7 @@ fn typed_preparation_failures_fall_back_to_the_next_route() {
         assert_eq!(run.checkpoint.nodes[0].attempts[0].outcome, Some(failure));
         assert_eq!(
             run.checkpoint.nodes[0].attempts[1].outcome,
-            Some(AttemptOutcome::Succeeded)
+            Some(GraphAttemptOutcome::Succeeded)
         );
     }
 }
@@ -317,8 +317,8 @@ fn route_fallback_preserves_each_selected_account() {
     .unwrap();
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            preparation_refusal("host/first", AttemptOutcome::AuthRequired),
-            terminal(AttemptOutcome::Succeeded),
+            preparation_refusal("host/first", GraphAttemptOutcome::AuthRequired),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
     };
@@ -346,7 +346,7 @@ fn single_route_form_remains_valid() {
     )
     .expect("legacy single-route document parses");
     let mut owner = FakeOwner {
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
         ..FakeOwner::default()
     };
     let mut journal = MemoryJournal::default();
@@ -370,9 +370,9 @@ fn pool_only_and_mixed_routes_advance_in_order() {
     })).unwrap();
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::Succeeded),
-            preparation_refusal("host/1", AttemptOutcome::AuthRequired),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            preparation_refusal("host/1", GraphAttemptOutcome::AuthRequired),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
     };
@@ -542,7 +542,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
         ..Default::default()
         }]);
         let mut owner = FakeOwner {
-            observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
+            observations: VecDeque::from([first, terminal(GraphAttemptOutcome::Succeeded)]),
             ..FakeOwner::default()
         };
         let mut journal = MemoryJournal::default();
@@ -570,8 +570,8 @@ fn writer_limit_after_launch_restarts_in_place_on_the_second_route() {
     let document = graph(vec![writer]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::UsageLimited),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::UsageLimited),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
     };
@@ -591,7 +591,7 @@ fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
     let document = graph(vec![node("task", pool)]);
     let mut owner = FakeOwner {
         retry_limit: Some(0),
-        observations: VecDeque::from([terminal_with_result(AttemptOutcome::UsageLimited, "")]),
+        observations: VecDeque::from([terminal_with_result(GraphAttemptOutcome::UsageLimited, "")]),
         ..FakeOwner::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -636,8 +636,8 @@ fn exhausted_pool_names_the_cause_and_the_pool() {
     lens.routes = Some(vec![alias.clone(), alias]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            preparation_refusal("host/1", AttemptOutcome::UsageLimited),
-            preparation_refusal("host/2", AttemptOutcome::UsageLimited),
+            preparation_refusal("host/1", GraphAttemptOutcome::UsageLimited),
+            preparation_refusal("host/2", GraphAttemptOutcome::UsageLimited),
         ]),
         ..FakeOwner::default()
     };
@@ -663,91 +663,91 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
             "writer usage limit before launch",
             AccessMode::WorktreeWrite,
             false,
-            AttemptOutcome::UsageLimited,
+            GraphAttemptOutcome::UsageLimited,
             true,
         ),
         (
             "writer auth refusal before launch",
             AccessMode::WorktreeWrite,
             false,
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             true,
         ),
         (
             "writer unavailable adapter before launch",
             AccessMode::WorktreeWrite,
             false,
-            AttemptOutcome::AdapterUnavailable,
+            GraphAttemptOutcome::AdapterUnavailable,
             true,
         ),
         (
             "reader usage limit after launch",
             AccessMode::ReadOnly,
             true,
-            AttemptOutcome::UsageLimited,
+            GraphAttemptOutcome::UsageLimited,
             false,
         ),
         (
             "reader auth refusal after launch",
             AccessMode::ReadOnly,
             true,
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             false,
         ),
         (
             "reader unavailable adapter after launch",
             AccessMode::ReadOnly,
             true,
-            AttemptOutcome::AdapterUnavailable,
+            GraphAttemptOutcome::AdapterUnavailable,
             false,
         ),
         (
             "writer usage limit after launch",
             AccessMode::WorktreeWrite,
             true,
-            AttemptOutcome::UsageLimited,
+            GraphAttemptOutcome::UsageLimited,
             false,
         ),
         (
             "reader task failure after launch",
             AccessMode::ReadOnly,
             true,
-            AttemptOutcome::TaskFailed,
+            GraphAttemptOutcome::TaskFailed,
             false,
         ),
         (
             "reader review required before launch",
             AccessMode::ReadOnly,
             false,
-            AttemptOutcome::ReviewRequired,
+            GraphAttemptOutcome::ReviewRequired,
             false,
         ),
         (
             "reader unclassified failure after launch",
             AccessMode::ReadOnly,
             true,
-            AttemptOutcome::OtherFailure,
+            GraphAttemptOutcome::OtherFailure,
             false,
         ),
         (
             "reader deadline before launch",
             AccessMode::ReadOnly,
             false,
-            AttemptOutcome::DeadlineExceeded,
+            GraphAttemptOutcome::DeadlineExceeded,
             false,
         ),
         (
             "writer auth refusal after launch",
             AccessMode::WorktreeWrite,
             true,
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             false,
         ),
         (
             "writer unavailable adapter after launch",
             AccessMode::WorktreeWrite,
             true,
-            AttemptOutcome::AdapterUnavailable,
+            GraphAttemptOutcome::AdapterUnavailable,
             false,
         ),
     ] {
@@ -761,7 +761,7 @@ fn launched_reader_reports_pinned_route() {
     let mut owner = FakeOwner {
         observations: VecDeque::from([AttemptObservation::Terminal {
             attempt_ref: Some("host/attempt".into()),
-            outcome: AttemptOutcome::UsageLimited,
+            outcome: GraphAttemptOutcome::UsageLimited,
             launched: true,
             result: None,
             result_warning: None,
@@ -800,7 +800,7 @@ fn reader_auth_restart_uses_the_declared_successor_account() {
         observations: VecDeque::from([
             AttemptObservation::Terminal {
                 attempt_ref: Some("host/attempt".into()),
-                outcome: AttemptOutcome::AuthRequired,
+                outcome: GraphAttemptOutcome::AuthRequired,
                 launched: true,
                 result: None,
                 result_warning: None,
@@ -811,7 +811,7 @@ fn reader_auth_restart_uses_the_declared_successor_account() {
                 stop: None,
             cause: None,
             },
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
     };
@@ -840,7 +840,7 @@ fn fallback_reports_unreadable_evidence() {
         fail_fallback_evidence: true,
         observations: VecDeque::from([AttemptObservation::Terminal {
             attempt_ref: Some("host/attempt".into()),
-            outcome: AttemptOutcome::AuthRequired,
+            outcome: GraphAttemptOutcome::AuthRequired,
             launched: false,
             result: None,
             result_warning: None,
@@ -887,7 +887,7 @@ fn missing_fallback_evidence_waits_briefly_then_refuses() {
     let mut owner = FakeOwner {
         observations: VecDeque::from([preparation_refusal(
             "host/attempt",
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
         )]),
         omit_fallback_evidence: true,
         fallback_cause: Some(provenant_records::RouteExclusionReason::StaleAvailability),
@@ -922,7 +922,7 @@ fn preparation_refusal_without_evidence_fails_immediately_with_its_cause() {
     let document = graph(vec![task]);
     let cause = provenant_records::run::CauseKind::AccessPolicyRefused;
     let mut owner = FakeOwner {
-        observations: VecDeque::from([preparation_refusal("host/attempt", AttemptOutcome::PreparationRefused(cause))]),
+        observations: VecDeque::from([preparation_refusal("host/attempt", GraphAttemptOutcome::PreparationRefused(cause))]),
         omit_fallback_evidence: true,
         now: Some(at(0)),
         ..Default::default()
@@ -943,7 +943,7 @@ fn preparation_refusal_with_pending_adapter_evidence_waits() {
     task.routes = Some(vec![route("first"), route("second")]);
     let document = graph(vec![task]);
     let mut owner = FakeOwner {
-        observations: VecDeque::from([preparation_refusal("host/attempt", AttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::AccessPolicyRefused))]),
+        observations: VecDeque::from([preparation_refusal("host/attempt", GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::AccessPolicyRefused))]),
         fallback_evidence: [("host/attempt".into(), provenant_records::run::PreparationFailure::AdapterUnavailable)].into(),
         fallback_custody_pending: true,
         now: Some(at(0)),
@@ -966,7 +966,7 @@ fn fallback_evidence_reobservation_is_bounded_across_live_and_resumed_attempts()
             task.routes = Some(vec![route("first"), route("second")]);
             let document = graph(vec![task]);
             let mut owner = FakeOwner {
-                observations: VecDeque::from([preparation_refusal("host/attempt", AttemptOutcome::AuthRequired)]),
+                observations: VecDeque::from([preparation_refusal("host/attempt", GraphAttemptOutcome::AuthRequired)]),
                 omit_fallback_evidence: true,
                 now: Some(at(0)),
                 ..Default::default()
@@ -988,7 +988,7 @@ fn fallback_evidence_reobservation_is_bounded_across_live_and_resumed_attempts()
             if appears {
                 owner.omit_fallback_evidence = false;
                 owner.fallback_evidence.insert(retry.attempt_ref.clone(), provenant_records::run::PreparationFailure::AuthRequired);
-                owner.observations.push_back(terminal(AttemptOutcome::Succeeded));
+                owner.observations.push_back(terminal(GraphAttemptOutcome::Succeeded));
             }
             let settled = advance(&document, &mut owner, &mut journal).unwrap();
             assert_eq!(settled.checkpoint.nodes[0].state, if appears { NodeState::Succeeded } else { NodeState::Failed });

@@ -51,7 +51,7 @@ pub(super) fn retained_findings(node: &PlannedNode, progress: &NodeProgress) -> 
                 && progress
                     .attempts
                     .last()
-                    .is_some_and(|attempt| attempt.outcome == Some(AttemptOutcome::TaskFailed))))
+                    .is_some_and(|attempt| attempt.outcome == Some(GraphAttemptOutcome::TaskFailed))))
         && progress
             .outputs
             .as_ref()
