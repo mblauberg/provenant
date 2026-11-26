@@ -11,6 +11,7 @@ fn document(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
         review: None,
         review_subject_missing: false,
+        subject: None,
         exclude: Vec::new(),
         network: None,
         capability: Vec::new(),

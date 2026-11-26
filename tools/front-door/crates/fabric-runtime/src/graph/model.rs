@@ -152,6 +152,9 @@ pub struct GraphDocument {
     /// The graph requested a review without a resolvable review subject.
     #[serde(default, skip_serializing_if = "is_false")]
     pub review_subject_missing: bool,
+    /// Written by the host at admission; a caller-supplied value is overwritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<provenant_records::subject::PinnedSubject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1922,6 +1925,9 @@ pub struct GraphCheckpoint {
     /// GraphExecution and never stored in the checkpoint.
     #[serde(skip)]
     pub bases: Option<GraphBaseBinding>,
+    /// Runtime projection of execution.document.subject; never stored.
+    #[serde(skip)]
+    pub subject: Option<provenant_records::subject::PinnedSubject>,
     /// Integration head pinned when the first integration source was resolved.
     /// Synthesis and writers that start from that commit stop if it moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2620,6 +2626,8 @@ impl Serialize for GraphRun {
 struct GraphCheckpointProjection<'a> {
     #[serde(flatten)]
     checkpoint: &'a GraphCheckpoint,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject: Option<&'a provenant_records::subject::PinnedSubject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bound_review_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2630,6 +2638,7 @@ impl<'a> From<&'a GraphCheckpoint> for GraphCheckpointProjection<'a> {
     fn from(checkpoint: &'a GraphCheckpoint) -> Self {
         Self {
             checkpoint,
+            subject: checkpoint.subject.as_ref(),
             bound_review_base: checkpoint
                 .bases
                 .and_then(|bases| bases.review)
@@ -2763,5 +2772,18 @@ impl CiPollBackoff {
         )
         .delay(pending_observations)
         .as_secs()
+    }
+}
+
+#[cfg(test)]
+mod subject_wire_tests {
+    use super::GraphDocument;
+
+    #[test]
+    fn document_without_subject_keeps_its_wire_bytes() {
+        let original = r#"{"schema_version":1,"graph_id":"legacy","nodes":[]}"#;
+        let document: GraphDocument = serde_json::from_str(original).unwrap();
+        assert!(document.subject.is_none());
+        assert_eq!(serde_json::to_string(&document).unwrap(), original);
     }
 }

@@ -360,6 +360,11 @@ pub enum OutputAudience {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum PeerAction {
+    SmokeFixture {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        op: SmokeFixtureOp,
+    },
     Health {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
@@ -482,7 +487,20 @@ pub enum PeerAction {
     },
 }
 
+/// Fixture operations are fenced independently of the base peer protocol.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum SmokeFixtureOp {
+    Create { nonce: String },
+    Remove { nonce: String },
+}
+
 peer_feature_protocols! {
+    SMOKE_FIXTURE_PROTOCOL = 16 => [
+        (SmokeFixture, "smoke_fixture", PeerAction::SmokeFixture {
+            extra: Default::default(), op: SmokeFixtureOp::Create { nonce: "0".repeat(12) },
+        }),
+    ],
     OUTPUT_AUDIENCE_PROTOCOL = 15 => [
         (Output, "output", PeerAction::Output {
             extra: Default::default(),
@@ -738,6 +756,11 @@ impl PeerReadiness {
 // while retaining extensions on the result envelope as well as its payload.
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum PeerResult {
+    SmokeFixture {
+        data: SmokeFixtureReceipt,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
     Inbox {
         data: crate::inbox::InboxReply,
         #[serde(flatten)]
@@ -811,6 +834,21 @@ pub enum PeerResult {
         extra: provenant_records::ExtraFields,
     },
 }
+/// Fixture creation returns its commits; removal may report a reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmokeFixtureReceipt {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    /// Create: the fixture's base commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<provenant_core::GitOid>,
+    /// Create: the fixture's head commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<provenant_core::GitOid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PeerResultError {
     pub error: facade::FacadeError,
@@ -1288,6 +1326,7 @@ pub fn encode_peer_response(
             }
             _ => {}
         },
+        PeerResult::SmokeFixture { data, .. } => texts.extend(data.reason.iter_mut()),
         PeerResult::SessionHandoff { data, .. } => match data {
             crate::handoff::HandoffReceipt::Refused { message, .. } => texts.push(message),
             crate::handoff::HandoffReceipt::Delivered {
@@ -2959,6 +2998,12 @@ mod tests {
     #[test]
     fn peer_feature_declaration_drives_every_protocol_fence() {
         let features = declared_feature_actions();
+        assert!(
+            features
+                .iter()
+                .any(|(name, protocol, _)| *name == "smoke_fixture"
+                    && *protocol == SMOKE_FIXTURE_PROTOCOL)
+        );
         let newest = features
             .iter()
             .map(|(_, protocol, _)| *protocol)

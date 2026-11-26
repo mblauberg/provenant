@@ -1263,6 +1263,11 @@ mod tests {
             (grace.min, grace.max, &grace.default),
             (Some(0), Some(600), &json!(60))
         );
+        let pr_head = field("domains.wait.pr_head");
+        assert_eq!(
+            (pr_head.kind, &pr_head.default),
+            ("string", &json!("pinned"))
+        );
         let idle = field("gc.idle");
         assert_eq!(
             (idle.kind, idle.min, idle.max, &idle.default),

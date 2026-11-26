@@ -367,6 +367,7 @@
       "max_targets": {"type": "int", "allowed": "1 to 1024", "min": 1, "max": 1024, "default": "64", "effect": "Maximum number of targets a single wait may track."},
       "pr_read_timeout_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "60", "effect": "Timeout for one pull request read before the wait retries."},
       "actions_grace_seconds": {"type": "int", "allowed": "0 to 600 seconds", "min": 0, "max": 600, "default": "60", "effect": "How long a pull request wait holds a settling reading while Actions reports no run for its head; zero settles at once."},
+      "pr_head": {"type":"string","allowed":"pinned or follow_latest","default":"pinned","effect":"What a pull request wait does when the pull request moves past the head it pinned at admission: pinned settles unsuccessful with cause head_moved naming both heads; follow_latest re-pins to the new head and warns PR_HEAD_FOLLOWED. --head always pins."},
       "preflight_busy_timeout_ms": {"type": "int", "allowed": "0 to 60000 milliseconds", "min": 0, "max": 60000, "default": "2000", "effect": "How long a wait tolerates a momentarily busy store during preflight before it reports the store busy; the final snapshot stays nonblocking. Zero fails at once."}
     }
   },

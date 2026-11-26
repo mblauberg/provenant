@@ -107,6 +107,7 @@ pub(super) fn checkpoint_bound(
         .unwrap_or_else(|| unreachable!("nonempty graph bases produce a binding"));
     let skeleton = GraphCheckpoint {
         bases: None,
+        subject: None,
         extra: Default::default(),
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),

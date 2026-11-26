@@ -2440,6 +2440,7 @@ fn decode_verified_checkpoint(
 
     let mut stored = stored;
     stored.checkpoint.bases = stored.execution.bases;
+    stored.checkpoint.subject = stored.execution.document.subject.clone();
     Ok(stored)
 }
 

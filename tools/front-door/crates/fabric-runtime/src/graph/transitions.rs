@@ -915,6 +915,7 @@ pub(super) fn initial_checkpoint(
 ) -> GraphCheckpoint {
     GraphCheckpoint {
         bases,
+        subject: None,
         extra: Default::default(),
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),

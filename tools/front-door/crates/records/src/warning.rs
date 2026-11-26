@@ -331,6 +331,16 @@ pub const AFFECTED_SELECTION_UNAVAILABLE: WarningCode =
 pub const TEMP_CHECKOUT_RETAINED: WarningCode = WarningCode("TEMP_CHECKOUT_RETAINED");
 /// A smoke-test scratch project binding could not be removed.
 pub const SMOKE_BINDING_RETAINED: WarningCode = WarningCode("SMOKE_BINDING_RETAINED");
+/// The caller project was ignored for hermetic smoke.
+pub const SMOKE_PROJECT_IGNORED: WarningCode = WarningCode("SMOKE_PROJECT_IGNORED");
+/// The peer could not verify the smoke fixture.
+pub const SMOKE_FIXTURE_UNVERIFIED: WarningCode = WarningCode("SMOKE_FIXTURE_UNVERIFIED");
+/// A pull request wait followed a new head.
+pub const PR_HEAD_FOLLOWED: WarningCode = WarningCode("PR_HEAD_FOLLOWED");
+/// A pull request wait has not yet pinned a head.
+pub const PR_HEAD_UNPINNED: WarningCode = WarningCode("PR_HEAD_UNPINNED");
+/// A live read source was pinned for a peer.
+pub const READ_SOURCE_PINNED_FOR_PEER: WarningCode = WarningCode("READ_SOURCE_PINNED_FOR_PEER");
 /// A build ledger rotated and some rotation entries expired.
 pub const BUILD_LEDGER_ROTATED: WarningCode = WarningCode("BUILD_LEDGER_ROTATED");
 /// The recent CI duration cache was unavailable; a slower cadence applied.

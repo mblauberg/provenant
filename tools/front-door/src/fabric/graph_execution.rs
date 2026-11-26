@@ -1263,6 +1263,7 @@ impl Factory {
                     pending_steers: Default::default(),
 
                     bases: None,
+                    subject: None,
                     extra: Default::default(),
                     expansions: Vec::new(),
                     remaining: None,

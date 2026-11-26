@@ -688,6 +688,13 @@ pub fn peer(
             chair: None,
         };
         let result = match &request.action {
+            PeerAction::SmokeFixture { .. } => PeerResult::Error {
+                data: provenant_fabric_runtime::hosts::PeerResultError {
+                    extra: Default::default(),
+                    error: FacadeError::invalid(InvalidInputDetail::Field("smoke_fixture".into())),
+                },
+                extra: Default::default(),
+            },
             PeerAction::Inbox { input, .. } => {
                 use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
                 let graph_steer = matches!(
