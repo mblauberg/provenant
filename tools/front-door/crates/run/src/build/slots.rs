@@ -12,7 +12,6 @@ use provenant_supervisor::census::{
     MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     ffi::{OsStr, OsString},
@@ -380,24 +379,12 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
     }
     drop(store_lock);
     let prepare = context.strategy.port.prepare.clone();
-    let digest = digest_prepare(&prepare);
+    let digest = super::prepare::digest(&prepare);
     if record.prepare_digest.as_deref() != Some(&digest) {
         let build_context = build_context(job, context);
         let env = super::rust::job_env(&job.env, &build_context, &paths);
-        for argv in &prepare {
-            if argv.is_empty() {
-                continue;
-            }
-            let status = Command::new(&argv[0])
-                .args(&argv[1..])
-                .current_dir(&paths.repo)
-                .env_clear()
-                .envs(env.iter().cloned())
-                .output();
-            if !status.is_ok_and(|output| output.status.success()) {
-                return Err(Exception::PoolUnavailable.into());
-            }
-        }
+        super::prepare::execute(&prepare, &paths.repo, &env)
+            .map_err(|_| Exception::PoolUnavailable)?;
         record.prepare_digest = Some(digest);
     }
     fs::create_dir_all(&paths.target).map_err(|_| Exception::PoolUnavailable)?;
@@ -1073,13 +1060,6 @@ fn slot_lock(path: &Path) -> std::io::Result<provenant_os::fs::LockGuard> {
     directory
         .try_lock(name, provenant_os::fs::LockMode::Exclusive)
         .map_err(std::io::Error::other)
-}
-fn digest_prepare(prepare: &[Vec<String>]) -> String {
-    let bytes = serde_json::to_vec(prepare).unwrap_or_default();
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 fn build_context(job: &Job, context: &RunContext) -> BuildContext {
     let get = |name: &str| {

@@ -140,11 +140,10 @@ fn fixture() -> Result<TestRig> {
     .join("\n");
     fs::write(&session, format!("{transcript}\n"))?;
     start_chair_session(&rig, "s1")?;
-    // Chair start queues usage ingest on a detached incremental worker and
-    // returns. Ingest takes ingest.lock nonblockingly, so an explicit ingest
-    // issued here races that worker and can be refused with Outcome::Error.
-    // Wait for the worker's rows instead: this is the production path, where
-    // mileage reads the usage the hook already recorded.
+    // Chair start queues a detached incremental ingest worker and returns.
+    // Wait for its verified rows instead of starting a second ingest against
+    // the same store, which races the child on a fast runner. This is the
+    // production path, where mileage reads usage the hook already recorded.
     provenant_test_support::wait_for(
         "detached chair ingest rows",
         Duration::from_secs(30),

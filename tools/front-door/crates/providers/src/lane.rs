@@ -463,7 +463,7 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
             ProviderError::InvalidPath,
         )
     };
-    let mut bytes = b"#!/bin/sh\n".to_vec();
+    let mut bytes = b"#!/bin/sh\nunset LEFTHOOK\n".to_vec();
     if options.scrub {
         if let Some(bound) = &options.bound {
             let exports = bound_exports(bound).map_err(|_| {
@@ -523,6 +523,50 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     bytes.push(b'\n');
     bytes.extend_from_slice(
         br#"
+_provenant_git_is_hooks_path_config() {
+    case "$1" in
+        [cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]|[cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]=*) return 0 ;;
+    esac
+    return 1
+}
+
+_provenant_git_refuse_hook_bypass() {
+    printf '%s\n' 'Warning: Git hook bypass requested; hooks-are-part-of-push applies.' >&2
+    printf '%s\n' 'Refusing Git hook bypass; hooks are part of commit and push (rule: hooks-are-part-of-push).' >&2
+    exit 2
+}
+
+_provenant_git_check_hook_bypass() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --) return ;;
+            --no-verify) _provenant_git_refuse_hook_bypass ;;
+            -c|--config-env)
+                shift
+                if [ "$#" -gt 0 ] && _provenant_git_is_hooks_path_config "$1"; then
+                    _provenant_git_refuse_hook_bypass
+                fi ;;
+            -c?*)
+                _provenant_git_config=${1#-c}
+                if _provenant_git_is_hooks_path_config "$_provenant_git_config"; then
+                    _provenant_git_refuse_hook_bypass
+                fi ;;
+            --config-env=*)
+                _provenant_git_config=${1#--config-env=}
+                if _provenant_git_is_hooks_path_config "$_provenant_git_config"; then
+                    _provenant_git_refuse_hook_bypass
+                fi ;;
+        esac
+        # A trailing -c/--config-env has no value to walk past. dash treats a
+        # shift past the last argument as a fatal error, which would abort the
+        # wrapper and hide the Git command from the lane.
+        [ "$#" -gt 0 ] || break
+        shift
+    done
+}
+
+_provenant_git_check_hook_bypass "$@"
+
 _provenant_git_retry_safe() {
     [ "$#" -gt 0 ] || return 1
     _provenant_git_explicit_config=0
@@ -1382,6 +1426,87 @@ mod tests {
                 .unwrap()
                 .contains("GIT_EXEC_PATH")
         );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_keeps_hooks_enabled_and_rejects_bypass_options()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()?;
+        let git = dir.path().join("git");
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(&git, b"#!/bin/sh\nprintf '%s\\n' \"${LEFTHOOK-unset}\"\n")?;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+
+        let run = |args: &[&str]| {
+            provenant_os::fixture::git_command_at(&wrapper)
+                .args(args)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("LEFTHOOK", "1")
+                .output()
+        };
+        let allowed = run(&["version"])?;
+        assert!(allowed.status.success());
+        assert_eq!(allowed.stdout, b"unset\n");
+        let pathspec = run(&["commit", "--", "--no-verify"])?;
+        assert!(pathspec.status.success());
+
+        for args in [
+            vec!["--no-verify", "commit"],
+            vec!["push", "--no-verify"],
+            vec!["-c", "core.hooksPath=/tmp/hooks", "status"],
+            vec!["-ccore.hooksPath=/tmp/hooks", "status"],
+            vec!["--config-env=core.hooksPath=HOOKS", "status"],
+        ] {
+            let refused = run(&args)?;
+            assert_eq!(refused.status.code(), Some(2), "{args:?}");
+            let stderr = String::from_utf8_lossy(&refused.stderr);
+            let warning = stderr
+                .find("Warning: Git hook bypass requested")
+                .ok_or("missing hook bypass warning")?;
+            let refusal = stderr
+                .find("rule: hooks-are-part-of-push")
+                .ok_or("missing hook bypass rule")?;
+            assert!(warning < refusal, "warning must precede refusal: {stderr}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_scans_a_trailing_config_option_without_aborting()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let git = dir.path().join("git");
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(&git, b"#!/bin/sh\nprintf '%s\\n' \"$*\"\n")?;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let run = |args: &[&str]| {
+            provenant_os::fixture::git_command_at(&wrapper)
+                .args(args)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+        };
+        // A value-taking option with no value still reaches Git: the scan must
+        // stop, not shift past the end of the argument list (dash exits there).
+        for args in [vec!["-c"], vec!["--config-env"]] {
+            let output = run(&args)?;
+            assert!(output.status.success(), "{args:?}");
+            assert_eq!(output.stdout, format!("{}\n", args.join(" ")).into_bytes());
+        }
+        // Consuming a real value must not skip a later bypass flag.
+        let refused = run(&["-c", "a=b", "--no-verify", "commit"])?;
+        assert_eq!(refused.status.code(), Some(2));
+        Ok(())
     }
 
     #[test]
