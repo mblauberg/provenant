@@ -339,11 +339,14 @@ steer covers session identity (provider, model, effort, account, host-native
 lane), not route-selection history, so a same-identity continuation always
 resumes.
 
-Delivery is a queued turn at the next boundary, not live injection and never an
-interrupt. The owner refuses a route that advertises unsupported continuation
-when `domains.fabric.steer.fallback = "refuse"`, with a typed unsupported
-receipt before saving the steer. Otherwise its text is durable at once and the
-live attempt keeps running. The host's shared
+Delivery is a queued turn at the next boundary by default: no live injection
+and no interrupt. `domains.fabric.steer.delivery = "queued" | "now"` sets the
+host default (`queued`), and `provenant steer --now` overrides it for one call.
+`provenant steer --explain` reports the effective delivery mode and the layer
+that set it without steering. The owner refuses a route that advertises
+unsupported continuation when `domains.fabric.steer.fallback = "refuse"`, with
+a typed unsupported receipt before saving the steer. Otherwise its text is
+durable at once and the live attempt keeps running. The host's shared
 adapter stream decoder records the first validated session identity against the
 admitted route and spawned process; after settlement the graph resumes the
 same provider, model, account and session with the saved text as the next user
@@ -367,6 +370,16 @@ same worktree (`provenant run implement --worktree ... --brief-file FILE`). A
 finished task is terminal for this rule: success never admits a follow-up
 attempt, even when the steering was queued while the writer was live; the note
 stays accepted and resolves as not-continued.
+
+`--now` keeps the session-preserving restart. Once the text is durable, it
+requests a `Steered` stop through custody only when the running attempt holds a
+validated, live session bound to its exact route; settlement then resumes that
+same session with the saved text. The typed `STEER_INTERRUPTS_ATTEMPT` warning
+announces the interrupt and names the delivery and fallback sources before it
+happens. Without a retained session the attempt is left running and the call is
+refused with `steer_session_unavailable`, because an interrupt could not resume
+the same session. No other path writes a `Steered` stop for a steer: the queued
+default never interrupts, with or without a session.
 
 A writer's continuation reuses the retained worktree, including edits left
 uncommitted when a turn finishes naturally. Admission waits for

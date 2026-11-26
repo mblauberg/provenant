@@ -667,6 +667,7 @@ pub(super) fn queue_live_fix(
         requester_agent: factory.context.identity.inbox.agent.clone(),
         requester_actor: factory.context.identity.inbox.actor,
         text,
+        now: false,
         refusal: None,
     };
     if checkpoint

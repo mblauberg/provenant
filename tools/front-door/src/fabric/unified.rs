@@ -1947,8 +1947,16 @@ pub(crate) fn unified_graph_command(
 enum SteerResult {
     Queued(Value),
     Pending(Value),
+    /// `--explain`: the effective delivery mode and where each value came from.
+    Explained {
+        data: Value,
+        human: String,
+    },
     Refused(&'static str),
     NoTurn,
+    /// A `--now` target has no retained session, so interrupting would strand
+    /// the accepted text; the attempt stays running.
+    SessionUnavailable(String),
     /// The target's graph will run no further attempt; no future turn can read
     /// the steering text, so it must be refused with a way to start a round.
     CompleteRefused {
@@ -2154,6 +2162,58 @@ fn settled_steer_result(
     }
 }
 
+/// Effective delivery for one steer. The shipped default queues; `--now` is a
+/// per-call override, and `domains.fabric.steer.delivery` sets the host default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SteerMode {
+    Queued,
+    Now,
+}
+
+impl SteerMode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Now => "now",
+        }
+    }
+    fn from_config(value: provenant_fabric_runtime::config::SteerDelivery) -> Self {
+        use provenant_fabric_runtime::config::SteerDelivery as D;
+        match value {
+            D::Queued => Self::Queued,
+            D::Now => Self::Now,
+        }
+    }
+}
+
+/// The host's `domains.fabric.steer.delivery` setting and where it came from.
+/// An unreadable host config is advisory: warn, use the shipped `queued`
+/// default and keep steering rather than dropping the instruction.
+fn steer_delivery_setting(factory: &super::Factory) -> (SteerMode, String) {
+    const FIELD: &str = "domains.fabric.steer.delivery";
+    let default = || {
+        (
+            SteerMode::Queued,
+            provenant_cli::config_reads::setting_source(&Default::default(), FIELD),
+        )
+    };
+    let config = match provenant_cli::config_reads::read_for(&factory.context.roots, "steer") {
+        Ok(config) => config,
+        Err(error) => {
+            let safe = provenant_records::diagnostic::safe_text(&error.to_string());
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                provenant_records::warning::CONFIG_UNAVAILABLE,
+                format!("steer delivery setting unavailable ({safe}); using default queued"),
+            ));
+            return default();
+        }
+    };
+    (
+        SteerMode::from_config(config.domains.fabric.steer.delivery),
+        provenant_cli::config_reads::setting_source(&config.origins, FIELD),
+    )
+}
+
 /// Queue steering for one attempt. Steering a settled lane is handled by
 /// `settled_steer_result`; steering text is bounded at 4 KiB.
 pub(crate) fn unified_graph_steer(
@@ -2163,6 +2223,28 @@ pub(crate) fn unified_graph_steer(
 ) -> u8 {
     let result = (|| -> Result<SteerResult, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
+        let (host_mode, source) = steer_delivery_setting(&factory);
+        let mode = if args.now { SteerMode::Now } else { host_mode };
+        if args.explain {
+            let mode_source = if args.now {
+                "command line (--now)".to_owned()
+            } else {
+                source
+            };
+            return Ok(SteerResult::Explained {
+                data: json!({
+                    "delivery": mode.name(),
+                    "source": mode_source,
+                    "host_default": host_mode.name(),
+                }),
+                human: format!(
+                    "steer delivery: {} (source: {})\n",
+                    mode.name(),
+                    mode_source
+                ),
+            });
+        }
+        let now = mode == SteerMode::Now;
         let (resolved, checkpoint) =
             resolve_with_checkpoint(&factory, &args.target, Want::Attempt { settled: false })?;
         let project = factory.context.identity.project;
@@ -2339,6 +2421,7 @@ pub(crate) fn unified_graph_steer(
                     attempt: id.parse().map_err(|_| FacadeError::StateCorrupt)?,
                     text: text.clone(),
                     operation_id: Some(operation_id.clone()),
+                    now,
                 };
                 BoundFacade { factory }.inbox_owner(input, Some(host.into()), budget, &cancel)
             };
@@ -2368,6 +2451,9 @@ pub(crate) fn unified_graph_steer(
                 }
                 Ok(_) => return Err(FacadeError::StateCorrupt.into()),
                 Err(error) if super::steer::steer_delivery_unavailable(&error) => {}
+                Err(error) if super::steer::steer_session_unavailable(&error) => {
+                    return Ok(SteerResult::SessionUnavailable(error.to_string()));
+                }
                 Err(error) if error.code() == "steer_no_turn" => return Ok(SteerResult::NoTurn),
                 Err(provenant_fabric_runtime::relay::ServiceError::InboxOwner { .. }) => {
                     return Ok(SteerResult::Refused(
@@ -2407,6 +2493,7 @@ pub(crate) fn unified_graph_steer(
             requester_agent: factory.context.identity.inbox.agent.clone(),
             requester_actor: factory.context.identity.inbox.actor,
             text: text.clone(),
+            now,
             refusal: None,
         };
         match current
@@ -2441,6 +2528,12 @@ pub(crate) fn unified_graph_steer(
         }
     })();
     match result {
+        Ok(SteerResult::Explained { data, human }) => crate::emit(
+            &provenant_records::CommandResult::new("steer", provenant_records::Outcome::Ok, data),
+            globals,
+            &human,
+            false,
+        ),
         Ok(SteerResult::Queued(data)) => crate::emit(
             &provenant_records::CommandResult::new("steer", provenant_records::Outcome::Ok, data),
             globals,
@@ -2483,6 +2576,14 @@ pub(crate) fn unified_graph_steer(
             "steer_no_turn",
             "the attempt has no graph continuation turn for steering",
             "start a new graph round with the instruction in its brief",
+            globals,
+        ),
+        Ok(SteerResult::SessionUnavailable(message)) => crate::fail(
+            "steer",
+            provenant_records::Outcome::Refused,
+            "steer_session_unavailable",
+            &message,
+            "start a new round on the same worktree with `provenant run implement --worktree WORKTREE --brief-file FILE`",
             globals,
         ),
         Ok(SteerResult::CompleteRefused { message, repair }) => crate::fail(

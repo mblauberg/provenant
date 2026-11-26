@@ -830,6 +830,10 @@ pub struct RouteRecord {
     pub ci_scope: Option<CiScopeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_policy: Option<PrPolicyReceipt>,
+    /// The project's declared no-build checks and the layer/key that declared
+    /// them, carried on the launch receipt beside `ci_scope` and `pr_policy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_checks: Option<StaticChecksReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxModeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1157,6 +1161,35 @@ pub struct PrPolicyReceipt {
     pub source: crate::Layer,
     #[serde(default)]
     pub key: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// One project-declared no-build check recorded on the launch receipt.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StaticCheckReceipt {
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub timeout_seconds: u64,
+    /// The layer and file/key that declared this check.
+    #[serde(default)]
+    pub source: crate::Layer,
+    #[serde(default)]
+    pub key: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// The no-build checks declared for a writer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StaticChecksReceipt {
+    #[serde(default)]
+    pub checks: Vec<StaticCheckReceipt>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -3534,6 +3567,17 @@ mod tests {
             (
                 "ci_scope",
                 serde_json::json!({"value":"none","source":"default","key":"lanes.ci_scope"}),
+            ),
+            (
+                "static_checks",
+                serde_json::json!({
+                    "checks":[{
+                        "argv":["scripts/check-extra-fields"],"cwd":".","timeout_seconds":30,
+                        "source":"project","key":".provenant/ports.json#verify.static_checks",
+                        "future_nested":{"kept":true}
+                    }],
+                    "future_nested":{"kept":true}
+                }),
             ),
             (
                 "sandbox",

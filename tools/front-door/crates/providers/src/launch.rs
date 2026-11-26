@@ -1084,8 +1084,16 @@ pub(crate) fn private_git_objects(
         .map(|grants| grants.root())
         .filter(|root| input.cwd.starts_with(root))
         .unwrap_or(input.cwd);
+    // `GIT_DIR` names the lane's registration below its private common
+    // directory, not the common directory itself. Git therefore reports a
+    // linked worktree (`--git-dir` differs from `--git-common-dir`, and
+    // `worktree list` resolves the checkout) to tooling that re-applies the
+    // shim after clearing `GIT_*`, while refs, config and objects stay private.
+    let private_git_dir = git_common
+        .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+        .join(provenant_core::LANE_GIT_REGISTRATION);
     let mut bound = vec![
-        ("GIT_DIR".into(), git_common.clone().into()),
+        ("GIT_DIR".into(), private_git_dir.into()),
         ("GIT_COMMON_DIR".into(), git_common.clone().into()),
         ("GIT_WORK_TREE".into(), worktree.into()),
         ("GIT_OBJECT_DIRECTORY".into(), git_objects.into()),
