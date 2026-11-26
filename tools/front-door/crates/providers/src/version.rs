@@ -9,10 +9,16 @@ use std::{
 };
 
 /// Read one harness's `--version` output. Non-zero exits, timeouts, truncated
-/// captures and control characters are not a usable version.
-pub fn probe(executor: &dyn Executor, executable: &Path, cwd: &Path) -> Option<String> {
+/// captures and control characters are not a usable version. The caller bounds
+/// the read so a weekly-changing harness CLI cannot stall a command.
+pub fn probe(
+    executor: &dyn Executor,
+    executable: &Path,
+    cwd: &Path,
+    timeout: Duration,
+) -> Option<String> {
     let argv = [executable.into(), "--version".into()];
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
+    let mut options = ExecOptions::new(&argv, cwd, timeout);
     options.stdout = StreamPolicy::Capture { limit: 128 };
     options.stderr = StreamPolicy::Discard;
     let result = executor.execute(options).ok()?;
@@ -35,7 +41,13 @@ impl VersionCache {
         Self::default()
     }
 
-    pub fn read(&self, executor: &dyn Executor, executable: &Path, cwd: &Path) -> Option<String> {
+    pub fn read(
+        &self,
+        executor: &dyn Executor,
+        executable: &Path,
+        cwd: &Path,
+        timeout: Duration,
+    ) -> Option<String> {
         let metadata = std::fs::metadata(executable).ok()?;
         let modified = metadata.modified().ok()?;
         let length = metadata.len();
@@ -46,7 +58,7 @@ impl VersionCache {
         {
             return cached.clone();
         }
-        let version = probe(executor, executable, cwd);
+        let version = probe(executor, executable, cwd, timeout);
         if let Ok(mut entries) = self.entries.lock() {
             entries.insert(
                 executable.to_path_buf(),
@@ -97,11 +109,15 @@ mod tests {
         let cache = VersionCache::new();
 
         assert_eq!(
-            cache.read(&executor, &executable, temp.path()).as_deref(),
+            cache
+                .read(&executor, &executable, temp.path(), Duration::from_secs(4))
+                .as_deref(),
             Some("codex 0.61.0")
         );
         assert_eq!(
-            cache.read(&executor, &executable, temp.path()).as_deref(),
+            cache
+                .read(&executor, &executable, temp.path(), Duration::from_secs(4))
+                .as_deref(),
             Some("codex 0.61.0")
         );
         assert_eq!(executor.calls.load(Ordering::Relaxed), 1);
@@ -110,7 +126,11 @@ mod tests {
         let file = std::fs::File::options().write(true).open(&executable)?;
         file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(10))?;
         drop(file);
-        assert!(cache.read(&executor, &executable, temp.path()).is_some());
+        assert!(
+            cache
+                .read(&executor, &executable, temp.path(), Duration::from_secs(4))
+                .is_some()
+        );
         assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
 
         // A changed length is a new binary even without an mtime change.
@@ -118,8 +138,47 @@ mod tests {
         let file = std::fs::File::options().write(true).open(&executable)?;
         file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(10))?;
         drop(file);
-        assert!(cache.read(&executor, &executable, temp.path()).is_some());
+        assert!(
+            cache
+                .read(&executor, &executable, temp.path(), Duration::from_secs(4))
+                .is_some()
+        );
         assert_eq!(executor.calls.load(Ordering::Relaxed), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn probe_uses_the_callers_timeout() -> Result<(), Box<dyn std::error::Error>> {
+        struct Recorder(std::sync::Mutex<Option<Duration>>);
+        impl Executor for Recorder {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                *self.0.lock().map_err(|_| ExecError::Cancelled)? = Some(options.timeout);
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: CapturedStream {
+                        bytes: b"codex 0.61.0\n".to_vec(),
+                        ..CapturedStream::default()
+                    },
+                    stderr: CapturedStream::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 1,
+                })
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let recorder = Recorder(std::sync::Mutex::new(None));
+        let timeout = Duration::from_secs(17);
+        assert_eq!(
+            probe(&recorder, &temp.path().join("codex"), temp.path(), timeout).as_deref(),
+            Some("codex 0.61.0")
+        );
+        assert_eq!(
+            *recorder.0.lock().map_err(|_| "lock poisoned")?,
+            Some(timeout)
+        );
         Ok(())
     }
 }

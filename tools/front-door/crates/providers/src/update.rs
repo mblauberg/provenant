@@ -400,7 +400,8 @@ fn check_inner(
         save(&dir, &record_name(provider), &record)?;
         return Ok(Some((&record).into()));
     };
-    if let Some(old_version) = crate::version::probe(executor, executable, state) {
+    let probe_timeout = settings.version_probe_timeout(provider);
+    if let Some(old_version) = crate::version::probe(executor, executable, state, probe_timeout) {
         record.old_version = Some(old_version.clone());
         record.new_version = Some(old_version);
     }
@@ -422,8 +423,8 @@ fn check_inner(
     let result = executor.execute(options);
     let succeeded =
         result.is_ok_and(|out| out.termination == Termination::Exit(0) && !out.timed_out);
-    record.new_version =
-        crate::version::probe(executor, executable, state).or_else(|| record.old_version.clone());
+    record.new_version = crate::version::probe(executor, executable, state, probe_timeout)
+        .or_else(|| record.old_version.clone());
     record.outcome = if succeeded { "updated" } else { "failed" }.into();
     save(&dir, &record_name(provider), &record)?;
     Ok(Some((&record).into()))

@@ -5097,8 +5097,27 @@ pub(super) fn prepare_candidates_inner(
             push_launch_warning(&mut route, warning.to_string());
         }
         let cache = VERSIONS.get_or_init(provenant_providers::version::VersionCache::new);
-        let version = cache.read(&git_executor, &executable, &cwd);
-        let assessment = compatible.assess(adapter.id(), version.as_deref());
+        // The probe is a per-adapter host setting: when it is off we assess an
+        // unreadable version and name the key in the reason, without running
+        // the harness binary. The bound comes from the same settings row.
+        let probe_enabled = provider_settings.is_none_or(|settings| settings.version_probe);
+        let version = provider_settings
+            .filter(|settings| settings.version_probe)
+            .and_then(|settings| {
+                cache.read(
+                    &git_executor,
+                    &executable,
+                    &cwd,
+                    settings.version_probe_timeout(adapter.id()),
+                )
+            });
+        let mut assessment = compatible.assess(adapter.id(), version.as_deref());
+        if !probe_enabled {
+            assessment.reason = Some(format!(
+                "version probe disabled by providers.{}.version_probe",
+                adapter.id()
+            ));
+        }
         if let Some(code) = provenant_routing::compatibility::policy_code(assessment.status) {
             use provenant_routing::compatibility::CompatibilityStatus as Status;
             let status = match assessment.status {

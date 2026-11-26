@@ -4,24 +4,166 @@
 //! every enum spelling and every declaration's reason and source. The markdown
 //! view holds only static declarations so the checked section of
 //! `docs/specs/run-launch.md` never depends on the host.
+use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
 use provenant_core::WallTime;
 use provenant_os::exec::SystemExecutor;
 use provenant_records::{
-    ADAPTER_SPECS, AdapterFact, AdapterSpec, AnsweringModelSource, HarnessInstall,
+    ADAPTER_SPECS, AdapterFact, AdapterSpec, AnsweringModelSource, HarnessInstall, Sourced,
     TerminalEventStrength, UsageAttribution,
     control::ControlSupport,
     run::{AttemptState, NetworkAccess},
 };
 use provenant_routing::compatibility::{CompatibilityStatus, CompatibilityTable};
 use provenant_run::{LaneQuery, RunStore};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path};
 
-/// At most this many attempts are inspected, and at most this many samples per
-/// adapter are kept. `LaneQuery` bounds a page to 100 rows, so reading is paged.
-const MAX_ATTEMPTS: u64 = 2000;
-const MAX_SAMPLES: usize = 200;
 const PAGE_SIZE: u64 = 100;
+
+/// The host-controlled part of the matrix, under
+/// `[domains.adapter.capabilities]`. Plain values parse like every other
+/// domain; [`MatrixSettings`] is the sourced projection the matrix publishes.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CapabilitiesSettings {
+    /// Read terminal attempts for latency samples at all.
+    pub measurements: bool,
+    /// At most this many latency samples are kept per adapter.
+    pub measurement_samples: u32,
+    /// At most this many attempts are inspected in total.
+    pub measurement_records: u32,
+}
+
+impl Default for CapabilitiesSettings {
+    fn default() -> Self {
+        Self {
+            measurements: true,
+            measurement_samples: 200,
+            measurement_records: 2000,
+        }
+    }
+}
+
+impl DomainConfig for CapabilitiesSettings {
+    fn validate(&self) -> Vec<SectionError> {
+        let mut errors = Vec::new();
+        if !(1..=2000).contains(&self.measurement_samples) {
+            errors.push(SectionError {
+                detail: None,
+                field: "capabilities.measurement_samples".into(),
+                code: "range",
+            });
+        }
+        if !(1..=20000).contains(&self.measurement_records) {
+            errors.push(SectionError {
+                detail: None,
+                field: "capabilities.measurement_records".into(),
+                code: "range",
+            });
+        }
+        errors
+    }
+}
+
+/// The `domains.adapter` section: only its `capabilities` table is owned here.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    pub capabilities: CapabilitiesSettings,
+}
+
+impl DomainConfig for Settings {
+    fn validate(&self) -> Vec<SectionError> {
+        self.capabilities.validate()
+    }
+}
+
+pub const SECTION: DomainSection = DomainSection::new::<Settings>(
+    "adapter",
+    |_| {
+        "[capabilities]\nmeasurements = true\nmeasurement_samples = 200\nmeasurement_records = 2000\n"
+    },
+)
+.with_fields(&[
+    FieldMetadata::new("capabilities.measurements", "bool"),
+    FieldMetadata::int("capabilities.measurement_samples", 1, 2000),
+    FieldMetadata::int("capabilities.measurement_records", 1, 20000),
+]);
+
+/// The effective matrix settings with the layer and origin of each value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatrixSettings {
+    pub measurements: Sourced<bool>,
+    pub samples: Sourced<u32>,
+    pub records: Sourced<u32>,
+}
+
+impl Default for MatrixSettings {
+    fn default() -> Self {
+        let defaults = CapabilitiesSettings::default();
+        let source = provenant_records::Source {
+            layer: provenant_records::Layer::Default,
+            origin: None,
+        };
+        Self {
+            measurements: Sourced {
+                value: defaults.measurements,
+                source: source.clone(),
+            },
+            samples: Sourced {
+                value: defaults.measurement_samples,
+                source: source.clone(),
+            },
+            records: Sourced {
+                value: defaults.measurement_records,
+                source: source,
+            },
+        }
+    }
+}
+
+/// Resolve the binary's closed configuration aggregate once for a matrix read.
+fn resolve_config(
+    state: &Path,
+    project: Option<&Path>,
+) -> Option<provenant_config::ResolvedConfig<crate::domains::Domains>> {
+    let base = project.unwrap_or(state);
+    let mut inputs = provenant_core::RootInputs::new(base.to_path_buf(), base.to_path_buf());
+    inputs.state_dir = Some(state.to_path_buf());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver).ok()?;
+    provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS).ok()
+}
+
+impl MatrixSettings {
+    fn from_resolved(resolved: &provenant_config::ResolvedConfig<crate::domains::Domains>) -> Self {
+        let settings = &resolved.domains.adapter.capabilities;
+        let source = |key: &str| crate::config_reads::origin_source(resolved.origins.get(key), key);
+        Self {
+            measurements: Sourced {
+                value: settings.measurements,
+                source: source("domains.adapter.capabilities.measurements"),
+            },
+            samples: Sourced {
+                value: settings.measurement_samples,
+                source: source("domains.adapter.capabilities.measurement_samples"),
+            },
+            records: Sourced {
+                value: settings.measurement_records,
+                source: source("domains.adapter.capabilities.measurement_records"),
+            },
+        }
+    }
+
+    /// The effective settings for one matrix read; an unreadable configuration
+    /// leaves every value at its compiled default, reported as the default layer.
+    pub fn resolve(state: &Path, project: Option<&Path>) -> Self {
+        resolve_config(state, project)
+            .as_ref()
+            .map(Self::from_resolved)
+            .unwrap_or_default()
+    }
+}
 
 fn declaration(value: Value, reason: &'static str, source: &'static str) -> Value {
     json!({ "value": value, "reason": reason, "source": source })
@@ -129,10 +271,12 @@ fn p50(mut samples: Vec<u64>) -> Option<u64> {
     samples.get(samples.len() / 2).copied()
 }
 
-fn measurements(store: Option<&RunStore>) -> BTreeMap<String, Value> {
+fn measurements(store: Option<&RunStore>, settings: &MatrixSettings) -> BTreeMap<String, Value> {
     let Some(store) = store else {
         return BTreeMap::new();
     };
+    let max_attempts = u64::from(settings.records.value);
+    let max_samples = settings.samples.value as usize;
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = provenant_run::Request {
@@ -178,11 +322,11 @@ fn measurements(store: Option<&RunStore>) -> BTreeMap<String, Value> {
                 continue;
             }
             let launches = samples.entry(provider.to_owned()).or_default();
-            if launches.len() < MAX_SAMPLES {
+            if launches.len() < max_samples {
                 launches.push(launch_ms as u64);
             }
             let settles = settle.entry(provider.to_owned()).or_default();
-            if settles.len() < MAX_SAMPLES {
+            if settles.len() < max_samples {
                 settles.push(settle_ms as u64);
             }
             newest
@@ -195,7 +339,7 @@ fn measurements(store: Option<&RunStore>) -> BTreeMap<String, Value> {
                 .or_insert(finished_at);
         }
         match page.next {
-            Some(next) if read < MAX_ATTEMPTS => query.after = next,
+            Some(next) if read < max_attempts => query.after = next,
             _ => break,
         }
     }
@@ -224,19 +368,49 @@ fn which(name: &str) -> Option<std::path::PathBuf> {
 /// The `data` of result envelope v2 for `provenant adapter capabilities --json`.
 pub fn matrix(state: &Path, project: Option<&Path>, store: Option<&RunStore>) -> Value {
     let (table, _) = CompatibilityTable::effective(state, project);
+    let resolved = resolve_config(state, project);
+    let settings = resolved
+        .as_ref()
+        .map(MatrixSettings::from_resolved)
+        .unwrap_or_default();
+    let providers = resolved.as_ref().map(|config| &config.providers);
     let executor = SystemExecutor::new(1).ok();
     let cwd = project.unwrap_or(state);
-    let measured = measurements(store);
+    let cache = provenant_providers::version::VersionCache::new();
+    let measured = if settings.measurements.value {
+        measurements(store, &settings)
+    } else {
+        BTreeMap::new()
+    };
     let adapters = ADAPTER_SPECS
         .iter()
         .map(|spec| {
-            let version = executor
-                .as_ref()
-                .and_then(|executor| which(spec.identity.binary).map(|binary| (executor, binary)))
-                .and_then(|(executor, binary)| {
-                    provenant_providers::version::probe(executor, &binary, cwd)
+            let provider_settings = providers.and_then(|map| map.get(spec.identity.name));
+            let probe_enabled = provider_settings.is_none_or(|settings| settings.version_probe);
+            let version = provider_settings
+                .filter(|settings| settings.version_probe)
+                .and_then(|settings| {
+                    executor
+                        .as_ref()
+                        .and_then(|executor| {
+                            which(spec.identity.binary).map(|binary| (executor, binary))
+                        })
+                        .and_then(|(executor, binary)| {
+                            cache.read(
+                                executor,
+                                &binary,
+                                cwd,
+                                settings.version_probe_timeout(spec.identity.name),
+                            )
+                        })
                 });
-            let assessment = table.assess(spec.identity.name, version.as_deref());
+            let mut assessment = table.assess(spec.identity.name, version.as_deref());
+            if !probe_enabled {
+                assessment.reason = Some(format!(
+                    "version probe disabled by providers.{}.version_probe",
+                    spec.identity.name
+                ));
+            }
             json!({
                 "adapter": spec.identity.name,
                 "family": spec.identity.family,
@@ -458,5 +632,66 @@ mod tests {
         assert_eq!(p50(vec![10, 20, 30]), Some(20));
         assert_eq!(p50(vec![5, 7]), Some(7));
         assert_eq!(p50(Vec::new()), None);
+    }
+
+    #[test]
+    fn matrix_settings_defaults_are_sourced_from_the_default_layer() {
+        let settings = MatrixSettings::default();
+        assert!(settings.measurements.value);
+        assert_eq!(settings.samples.value, 200);
+        assert_eq!(settings.records.value, 2000);
+        for source in [
+            &settings.measurements.source,
+            &settings.samples.source,
+            &settings.records.source,
+        ] {
+            assert_eq!(source.layer, provenant_records::Layer::Default);
+        }
+    }
+
+    #[test]
+    fn configured_matrix_settings_report_the_host_layer() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&state)?;
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[domains.adapter.capabilities]\nmeasurements=false\nmeasurement_samples=12\nmeasurement_records=30\n",
+        )?;
+        let settings = MatrixSettings::resolve(&state, None);
+        assert!(!settings.measurements.value);
+        assert_eq!(settings.samples.value, 12);
+        assert_eq!(settings.records.value, 30);
+        assert_eq!(
+            settings.samples.source.layer,
+            provenant_records::Layer::Host
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_disabled_version_probe_reaches_the_assessment() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&state)?;
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[providers.codex]\nversion_probe=false\n",
+        )?;
+        let resolved = resolve_config(&state, None).expect("config resolves");
+        let settings = resolved.providers.get("codex").expect("codex settings");
+        assert!(!settings.version_probe);
+        let mut assessment = CompatibilityTable::bundled().assess("codex", None);
+        if !settings.version_probe {
+            assessment.reason =
+                Some("version probe disabled by providers.codex.version_probe".to_owned());
+        }
+        assert_eq!(assessment.status, CompatibilityStatus::VersionUnread);
+        assert_eq!(
+            assessment.reason.as_deref(),
+            Some("version probe disabled by providers.codex.version_probe")
+        );
+        Ok(())
     }
 }

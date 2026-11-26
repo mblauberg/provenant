@@ -590,6 +590,7 @@ fn status_text(status: CompatibilityStatus) -> &'static str {
 fn compatibility_findings(
     state: &Path,
     project: &Path,
+    providers: &BTreeMap<String, provenant_config::ProviderSettings>,
 ) -> Result<Vec<Finding>, Box<dyn std::error::Error>> {
     let (table, _warnings) = compatibility::CompatibilityTable::effective(state, Some(project));
     let project_key = provenant_config::ports::project_key_for(project).unwrap_or_default();
@@ -607,8 +608,25 @@ fn compatibility_findings(
         else {
             continue;
         };
-        let version = cache.read(&executor, &executable, state);
-        let assessment = table.assess(spec.identity.name, version.as_deref());
+        let settings = providers.get(spec.identity.name);
+        let probe_enabled = settings.is_none_or(|settings| settings.version_probe);
+        let version = settings
+            .filter(|settings| settings.version_probe)
+            .and_then(|settings| {
+                cache.read(
+                    &executor,
+                    &executable,
+                    state,
+                    settings.version_probe_timeout(spec.identity.name),
+                )
+            });
+        let mut assessment = table.assess(spec.identity.name, version.as_deref());
+        if !probe_enabled {
+            assessment.reason = Some(format!(
+                "version probe disabled by providers.{}.version_probe",
+                spec.identity.name
+            ));
+        }
         let Some(code) = compatibility::policy_code(assessment.status) else {
             continue;
         };
@@ -669,7 +687,11 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
         )?;
         let mut rows = select(inventory(&resolved.roots)?, &args.routes)?;
         let config = provenant_cli::config_reads::read_for(&resolved.roots, "check providers")?;
-        let findings = compatibility_findings(resolved.roots.state.as_ref(), &resolved.project)?;
+        let findings = compatibility_findings(
+            resolved.roots.state.as_ref(),
+            &resolved.project,
+            &config.providers,
+        )?;
         let (wait, origin) = provenant_cli::wait::Settings::resolved(&config);
         let cadence = origin.local_cadence(&wait);
         let cadence = &cadence;

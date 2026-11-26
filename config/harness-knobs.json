@@ -41,6 +41,11 @@
       "providers.{provider}.runtime_deadline_seconds",
       "providers.{provider}.stall_after_seconds",
       "providers.{provider}.stall_policy",
+      "providers.{provider}.version_probe",
+      "providers.{provider}.version_probe_timeout_seconds",
+      "domains.adapter.capabilities.measurements",
+      "domains.adapter.capabilities.measurement_samples",
+      "domains.adapter.capabilities.measurement_records",
       "providers.codex.clean_config",
       "gc.graph_checkpoint_days"
   ],
@@ -368,6 +373,14 @@
       "pr_read_timeout_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "60", "effect": "Timeout for one pull request read before the wait retries."},
       "actions_grace_seconds": {"type": "int", "allowed": "0 to 600 seconds", "min": 0, "max": 600, "default": "60", "effect": "How long a pull request wait holds a settling reading while Actions reports no run for its head; zero settles at once."},
       "preflight_busy_timeout_ms": {"type": "int", "allowed": "0 to 60000 milliseconds", "min": 0, "max": 60000, "default": "2000", "effect": "How long a wait tolerates a momentarily busy store during preflight before it reports the store busy; the final snapshot stays nonblocking. Zero fails at once."}
+    }
+  },
+  "domain_adapter_settings": {
+    "path": "domains.adapter.capabilities",
+    "settings": {
+      "measurements": {"type": "bool", "allowed": "true or false", "default": true, "effect": "Read terminal attempts from the run store for the adapter capability matrix. false reports measurements as null without opening the store."},
+      "measurement_samples": {"type": "int", "allowed": "1 to 2000 samples per adapter", "min": 1, "max": 2000, "default": "200", "effect": "At most this many latency samples are kept per adapter in the capability matrix; out-of-range values warn and use the compiled default."},
+      "measurement_records": {"type": "int", "allowed": "1 to 20000 attempts", "min": 1, "max": 20000, "default": "2000", "effect": "At most this many terminal attempts are inspected for the capability matrix; out-of-range values warn and use the compiled default."}
     }
   },
   "host_graph_settings": {
