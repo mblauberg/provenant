@@ -72,7 +72,8 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(lane.metadata.attempt.state, "queued")
         XCTAssertEqual(lane.laneId.key?.graph, "board-fixture")
         XCTAssertEqual(lane.metadata.attempt.requestedRoute?.summary, "fixture/model · high")
-        XCTAssertEqual(lane.wait?.waitingFor, "launch: not yet handed to a guardian")
+        XCTAssertEqual(lane.wait?.waitingFor?.kind, "launch_preparation")
+        XCTAssertEqual(lane.wait?.waitingFor?.label, "launch preparation")
         XCTAssertEqual(board.highWater, 101)
         XCTAssertEqual(replay.recorded.first, ["console", "board", "--limit", "25", "--all", "--cursor", "C1", "--json"])
     }

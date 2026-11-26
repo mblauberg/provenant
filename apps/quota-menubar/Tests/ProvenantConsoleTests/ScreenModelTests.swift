@@ -473,7 +473,7 @@ final class ScreenModelTests: XCTestCase {
         // Two saved records for one host session collapse to the later save.
         XCTAssertEqual(snapshot?.sessions.first?.summaryLine, "Implementing the console")
         XCTAssertEqual(snapshot?.sessions.first?.record.summary?.now, "Implementing the console")
-        XCTAssertEqual(snapshot?.sessions.first?.record.lastSavedAt, "2026-11-02T02:18:00Z")
+        XCTAssertEqual(snapshot?.sessions.first?.record.lastSavedAt, "2026-11-02T02:18:00.000000Z")
         XCTAssertEqual(snapshot?.projects.count, 1)
         XCTAssertNil(snapshot?.projectName("no-such-project"))
     }
