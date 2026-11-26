@@ -5095,7 +5095,7 @@ fn one_subject_per_origin_survives_a_push() -> Result {
                 .push(b"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n");
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: Some("fixture/reader".into()),
-                outcome: graph::AttemptOutcome::Succeeded,
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(result.finish())),
                 result_warning: None,
@@ -5104,6 +5104,7 @@ fn one_subject_per_origin_survives_a_push() -> Result {
                 commit: None,
                 settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }
