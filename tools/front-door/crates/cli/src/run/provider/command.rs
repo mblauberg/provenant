@@ -66,22 +66,25 @@ pub(super) fn prepare_command(
             "{provider} has no named model-less entries{hint}"
         )));
     }
-    AdapterSpec::get(provider)
-        .ok_or_else(|| {
-            format!(
-                "unknown adapter `{provider}`{}",
-                provenant_routing::close_matches_hint(&provenant_routing::adapter_candidates(
-                    provider
-                ))
-            )
-        })?
-        .check_launch(&provenant_records::LaunchRequest {
-            resume: resume.is_some(),
-            write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
-            network: task.access.network,
-            skill_location: task.profile.require_skill_location,
-            ..Default::default()
-        })?;
+    let spec = AdapterSpec::get(provider).ok_or_else(|| {
+        format!(
+            "unknown adapter `{provider}`{}",
+            provenant_routing::close_matches_hint(&provenant_routing::adapter_candidates(provider))
+        )
+    })?;
+    let mut launch_gap_warning = None;
+    if let Err(gap) = spec.check_launch(&provenant_records::LaunchRequest {
+        resume: resume.is_some(),
+        write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
+        network: task.access.network,
+        skill_location: task.profile.require_skill_location,
+        ..Default::default()
+    }) {
+        if gap.decision().is_refusal() {
+            return Err(PrepareError::Unsupported(gap));
+        }
+        launch_gap_warning = Some(gap.degrade_warning());
+    }
     let adapter = REGISTRY
         .iter()
         .find(|entry| entry.adapter.id() == provider)
@@ -335,6 +338,7 @@ pub(super) fn prepare_command(
         super::preparation::image_input_warning(provider, &task.access.attachments)
             .into_iter()
             .collect::<Vec<_>>();
+    launch_warnings.extend(launch_gap_warning);
     launch_warnings.extend(protection_warnings);
     launch_warnings.extend(super::preparation::ignore_file_warnings(
         provider,

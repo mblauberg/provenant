@@ -151,6 +151,20 @@ beside the applied route, and points at `providers.codex.clean_config`.
 - Owner: `crates/providers/src/codex.rs`, `crates/providers/src/stream.rs`,
   `crates/cli/src/run.rs`, `crates/cli/src/run/output.rs`
 
+## Launch capability gaps degrade or refuse by field
+
+`AdapterSpec::check_launch` returns a typed decision for each gap. A gap in
+model selector, effort, image input or resume is advisory: dispatch proceeds,
+the control is dropped or an eligible fallback is selected, and the applied
+route records a warning naming the adapter row as source. A gap in write,
+network or skill location refuses before a writer is prepared, because
+confinement and authority depend on those controls; it is a plain capability
+refusal, not an authority boundary.
+- Why: an exact pin with an unsupported effort must still launch, and the
+  operator must see why a control did not apply in the result envelope.
+- Owner: `crates/records/src/adapters.rs`, `crates/run/src/service.rs`,
+  `crates/routing/src/resolve.rs`, `crates/cli/src/run/provider/preparation.rs`
+
 ## Lane Git and import
 
 Writers of one verified worktree incarnation share its files and hold occupancy together.

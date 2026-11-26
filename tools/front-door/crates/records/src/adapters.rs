@@ -789,7 +789,7 @@ pub struct LaunchCapabilities {
     pub write: bool,
 }
 
-/// The fields of a launch request an adapter can refuse.
+/// The fields of a launch request an adapter may not support.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LaunchRequest<'a> {
     pub model: Option<&'a str>,
@@ -798,12 +798,15 @@ pub struct LaunchRequest<'a> {
     pub network: Option<NetworkAccess>,
     pub write: bool,
     pub skill_location: bool,
+    /// The launch carries image attachments for the model to read.
+    pub image_input: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchField {
     Model,
     Effort,
+    Image,
     Resume,
     Network,
     Write,
@@ -814,22 +817,42 @@ impl LaunchField {
         match self {
             Self::Model => "model",
             Self::Effort => "effort",
+            Self::Image => "image_input",
             Self::Resume => "resume",
             Self::Network => "network",
             Self::Write => "write",
             Self::SkillLocation => "skill location",
         }
     }
-    /// A fixed refusal for callers that cannot carry the adapter name.
-    pub fn refusal(self) -> &'static str {
+    /// How a gap in this field is handled. Advisory controls degrade with a
+    /// sourced warning; enforced confinement and authority controls refuse.
+    pub fn decision(self) -> LaunchDecision {
         match self {
-            Self::Model => "model is not supported by the route's adapter",
-            Self::Effort => "effort is not supported by the route's adapter",
-            Self::Resume => "resume is not supported by the route's adapter",
-            Self::Network => "network mode is not supported by the route's adapter",
-            Self::Write => "worktree-write is not supported by the route's adapter",
-            Self::SkillLocation => "skill location is not supported by the route's adapter",
+            Self::Model | Self::Effort | Self::Image | Self::Resume => {
+                LaunchDecision::Degrade(self)
+            }
+            Self::Network | Self::Write | Self::SkillLocation => LaunchDecision::Refuse(self),
         }
+    }
+}
+
+/// The typed answer for one unsupported launch field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchDecision {
+    /// Drop the control or select the routing fallback, and record a warning
+    /// naming the adapter row as its source.
+    Degrade(LaunchField),
+    /// Confinement or authority depends on the field: refuse the launch.
+    Refuse(LaunchField),
+}
+impl LaunchDecision {
+    pub fn field(self) -> LaunchField {
+        match self {
+            Self::Degrade(field) | Self::Refuse(field) => field,
+        }
+    }
+    pub fn is_refusal(self) -> bool {
+        matches!(self, Self::Refuse(_))
     }
 }
 
@@ -837,6 +860,21 @@ impl LaunchField {
 pub struct UnsupportedLaunch {
     pub adapter: &'static str,
     pub field: LaunchField,
+}
+impl UnsupportedLaunch {
+    /// The typed decision for this gap, so callers can degrade or refuse.
+    pub fn decision(&self) -> LaunchDecision {
+        self.field.decision()
+    }
+    /// A warning naming the declared adapter row as its source.
+    pub fn degrade_warning(&self) -> String {
+        format!(
+            "{} launch table does not support {}; source=adapter:{}",
+            self.adapter,
+            self.field.name(),
+            self.adapter
+        )
+    }
 }
 impl std::fmt::Display for UnsupportedLaunch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -860,15 +898,12 @@ impl AdapterSpec {
         self.registered_account && self.local_login && key == "local"
     }
     /// Check a request against the declared table before any side effect.
+    /// Enforced gaps are reported first so an advisory gap can never mask a
+    /// confinement or authority refusal. Callers use the typed decision on the
+    /// returned gap to degrade or refuse.
     pub fn check_launch(&self, request: &LaunchRequest<'_>) -> Result<(), UnsupportedLaunch> {
         let caps = &self.launch;
-        let field = if request.model.is_some() && !caps.model {
-            Some(LaunchField::Model)
-        } else if request.effort.is_some() && !caps.effort {
-            Some(LaunchField::Effort)
-        } else if request.resume && !caps.resume {
-            Some(LaunchField::Resume)
-        } else if request
+        let field = if request
             .network
             .is_some_and(|mode| !caps.network.contains(&mode))
         {
@@ -877,6 +912,14 @@ impl AdapterSpec {
             Some(LaunchField::Write)
         } else if request.skill_location && self.skills.is_none() {
             Some(LaunchField::SkillLocation)
+        } else if request.resume && !caps.resume {
+            Some(LaunchField::Resume)
+        } else if request.model.is_some() && !caps.model {
+            Some(LaunchField::Model)
+        } else if request.effort.is_some() && !caps.effort {
+            Some(LaunchField::Effort)
+        } else if request.image_input && !caps.image_input {
+            Some(LaunchField::Image)
         } else {
             None
         };
@@ -2202,6 +2245,50 @@ mod launch_tests {
             .unwrap_err();
         assert_eq!(error.adapter, "command");
         assert_eq!(error.field, LaunchField::Effort);
+    }
+
+    #[test]
+    fn only_enforced_controls_refuse_and_advisory_gaps_warn_with_a_source() {
+        // Effort, model, image and resume are advisory: drop the control or
+        // select a fallback. Only confinement/authority controls refuse.
+        for field in [
+            LaunchField::Model,
+            LaunchField::Effort,
+            LaunchField::Image,
+            LaunchField::Resume,
+        ] {
+            assert_eq!(field.decision(), LaunchDecision::Degrade(field));
+        }
+        for field in [
+            LaunchField::Network,
+            LaunchField::Write,
+            LaunchField::SkillLocation,
+        ] {
+            assert_eq!(field.decision(), LaunchDecision::Refuse(field));
+        }
+        let command = AdapterSpec::get("command").unwrap();
+        let gap = command
+            .check_launch(&LaunchRequest {
+                effort: Some("high"),
+                image_input: true,
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert_eq!(gap.decision(), LaunchDecision::Degrade(LaunchField::Effort));
+        let warning = gap.degrade_warning();
+        assert!(warning.contains("command"), "{warning}");
+        assert!(warning.contains("effort"), "{warning}");
+        assert!(warning.contains("source=adapter:command"), "{warning}");
+
+        // An enforced gap is reported even when an advisory gap is also present.
+        let gap = command
+            .check_launch(&LaunchRequest {
+                effort: Some("high"),
+                write: true,
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert_eq!(gap.decision(), LaunchDecision::Refuse(LaunchField::Write));
     }
 
     #[test]

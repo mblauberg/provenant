@@ -99,16 +99,25 @@ impl<'a> Service<'a> {
         };
         let mut contribution_branch = None;
         let mut nested_refusal = None;
-        // Refuse unsupported launches before preparing a writer.
+        // Refuse enforced capability gaps before preparing a writer; advisory
+        // gaps degrade with a sourced warning recorded during preparation.
         {
             let task = &input.task;
             let route = Self::route(task.route.clone())?;
-            if let Err(error) = check_launch_capabilities(task, &route) {
+            if let Err(gap) = check_launch_capabilities(task, &route)
+                && gap.decision().is_refusal()
+            {
+                let error = input_error(ErrorKind::Unsupported, gap.to_string());
                 if input.parent_attempt.is_none() {
                     return self.preflight_refusal(&input, task, cwd, error, call);
                 }
                 nested_refusal.get_or_insert((error, task.worktree.clone()));
             }
+            // Advisory gaps (effort, model, image, resume) degrade: the
+            // resolving prepare step drops the control and records the sourced
+            // warning in applied_route.launch_warnings. Only write, network and
+            // skill location refuse here, because confinement and authority
+            // depend on them.
         }
         Self::warn_for_secrets("task.prompt", &input.task.prompt);
         let (request, prompt) = {
@@ -1093,10 +1102,14 @@ fn fresh<T>(make: impl FnOnce([u8; 16]) -> T) -> Result<T> {
         .map_err(RunError::from)
 }
 
-/// Refuse a request outside an adapter's declared launch table. This runs
-/// before any writer is prepared or any run, reservation or receipt exists.
-/// Named routes resolve their adapter later, where routing checks effort.
-fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Result<()> {
+/// Check a request against an adapter's declared launch table before any
+/// writer is prepared or any run, reservation or receipt exists. The typed gap
+/// is returned so the caller can degrade advisory controls or refuse enforced
+/// ones. Named routes resolve their adapter later, where routing checks effort.
+fn check_launch_capabilities(
+    task: &DispatchTask,
+    route: &RequestedRoute,
+) -> std::result::Result<(), provenant_records::UnsupportedLaunch> {
     let write = Service::has_writes(task.worktree.is_some(), &task.access.write_roots);
     let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
@@ -1109,8 +1122,8 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
             network: task.access.network,
             write,
             skill_location: task.profile.require_skill_location,
+            ..Default::default()
         })
-        .map_err(|error| input_error(ErrorKind::Unsupported, error.to_string()))
     };
     match route {
         RequestedRoute::Model {

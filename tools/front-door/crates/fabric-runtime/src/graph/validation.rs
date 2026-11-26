@@ -693,7 +693,11 @@ pub(super) fn validate_flat_plan(
                     ..Default::default()
                 })
             {
-                return Err(node_plan_error(node, error.field.refusal()));
+                // Advisory gaps are dropped or routed around with a sourced
+                // warning; only an enforced gap invalidates the node plan.
+                if error.decision().is_refusal() {
+                    return Err(node_plan_error(node, error.to_string()));
+                }
             }
         }
 

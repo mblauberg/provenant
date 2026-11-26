@@ -2540,7 +2540,6 @@ fn candidate(
 ) -> Result<RouteAlternative, RoutingError> {
     check_declared_effort(model, effort, context)?;
     let (effort, dropped_effort) = normalised_effort(model, effort, context);
-    let entry = admissible(model, effort, context)?;
     #[cfg(test)]
     let spec = context
         .launch_specs
@@ -2548,11 +2547,28 @@ fn candidate(
         .or_else(|| provenant_records::AdapterSpec::get(model.adapter()).copied());
     #[cfg(not(test))]
     let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
-    if let Some(spec) = spec {
-        intent
-            .check_launch(&spec, model.model(), effort)
-            .map_err(|error| RoutingError::UnsupportedLaunch(error.to_string()))?;
-    }
+    // An advisory gap drops the control and warns with the adapter row as
+    // source; an enforced gap still refuses the candidate.
+    let mut degrade_warnings = Vec::new();
+    let (effort, dropped_effort) = if let Some(spec) = spec {
+        match intent.check_launch(&spec, model.model(), effort) {
+            Ok(()) => (effort, dropped_effort),
+            Err(gap) if gap.decision().is_refusal() => {
+                return Err(RoutingError::UnsupportedLaunch(gap.to_string()));
+            }
+            Err(gap) => {
+                degrade_warnings.push(gap.degrade_warning());
+                if gap.field() == provenant_records::LaunchField::Effort {
+                    (None, effort)
+                } else {
+                    (effort, dropped_effort)
+                }
+            }
+        }
+    } else {
+        (effort, dropped_effort)
+    };
+    let entry = admissible(model, effort, context)?;
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
     // Several registered accounts may serve one adapter: take a ready one with
     // the most pacing headroom, so exhausted accounts are skipped rather than
@@ -2706,6 +2722,7 @@ fn candidate(
         },
     };
     let mut diagnostics = RouteDiagnostics::default();
+    diagnostics.launch_warnings.extend(degrade_warnings);
     // Carry the fact resolve actually judged onto the route. Preparation must
     // not re-read a different availability list and lose the recorded offers.
     if let Some(a) = availability

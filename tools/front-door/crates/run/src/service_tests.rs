@@ -587,6 +587,29 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
 }
 
 #[test]
+fn exact_pin_with_unsupported_effort_launches_without_it() -> TestResult {
+    // fixture-provider declares `effort: false`. An exact pin carrying effort
+    // used to be refused at preflight; the advisory gap must now degrade so
+    // the launch proceeds (the resolve step drops the control and records the
+    // sourced warning in the result envelope).
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = submission("capabilities with unsupported effort");
+    input.task.route = RequestedRoute::Model {
+        required_family: None,
+        extra: Default::default(),
+        provider: "fixture-provider".into(),
+        model: "fixture-provider/m".into(),
+        effort: Some("high".into()),
+    };
+    let record = Service::new(&store).dispatch(input, temp.path(), &call)?;
+    assert_ne!(record.state, OperationState::Refused);
+    Ok(())
+}
+
+#[test]
 fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -823,19 +846,19 @@ fn the_task_is_checked_before_a_writer_is_prepared() -> TestResult {
     let mut input = submission("invalid route");
     let operation = input.operation_id.clone();
     // The writer path cannot resolve, so reaching its preparation would fail
-    // with a different error than the route check.
+    // with a different error than the route check. A write gap is enforced,
+    // unlike the advisory model/effort gaps that now degrade.
     input.task.worktree = Some(temp.path().join("no-such-writer"));
-    input.task.route = RequestedRoute::Model {
+    input.task.route = RequestedRoute::Adapter {
         required_family: None,
         extra: Default::default(),
         provider: "command".into(),
-        model: "command/m".into(),
-        effort: Some("high".into()),
+        name: "fmt-check".into(),
     };
     let error = Service::new(&store)
         .dispatch(input, temp.path(), &call)
         .unwrap_err();
-    assert_eq!(error.to_string(), "command does not support model");
+    assert_eq!(error.to_string(), "command does not support write");
     assert_eq!(
         store
             .operation(&operation, &call)?

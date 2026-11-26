@@ -15,8 +15,10 @@ A request names one exact model or route. A shipped pool resolves its
 model-family selectors against the effective catalogue; a user model pin stays
 exact. The selected provider, model and effort are recorded before launch. An
 adapter may declare that a valid but unsupported catalogued effort is dropped
-before admission, and the route and launch record keep its warning and source;
-invalid controls remain errors. A family comes only from provider protocol
+before admission, and the route and launch record keep its warning and source.
+A gap in an advisory control (model selector, effort, image input, resume)
+degrades with a warning naming the adapter row as source; only write, network
+and skill-location gaps refuse. Invalid controls remain errors. A family comes only from provider protocol
 evidence at the catalogue revision, never from a name or output text. A pool
 draw is seeded from the operation, so a retry picks the same member without
 stored state. Capability facts never grant filesystem or network authority, and
@@ -203,10 +205,14 @@ read-only execution keeps clean configuration where extensions could exceed its
 authority. The applied route records the choice and source without widening
 credential or filesystem grants.
 
-Unavailable adapter, model and effort capabilities may select an eligible
-fallback, and invalid invocation syntax remains an operation error. Neither
-establishes an authority boundary; account, route, continuation, explicit
-read-only and pinned-source bindings still do.
+Unavailable adapter, model, effort, image-input and resume capabilities
+degrade: the control is dropped or an eligible fallback is selected, and the
+applied route records a warning naming the adapter row as source. A write,
+network or skill-location gap refuses, because confinement and authority depend
+on those controls; the refusal is a plain capability refusal, not an authority
+boundary. Invalid invocation syntax remains an operation error. None of these
+capability outcomes establishes an authority boundary; account, route,
+continuation, explicit read-only and pinned-source bindings still do.
 
 Authorised task text reaches provider stdin or argv unchanged, including
 secret-shaped prose and whitespace, and cloud handoff instructions append to the

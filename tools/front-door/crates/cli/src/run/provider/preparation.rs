@@ -240,13 +240,26 @@ fn resolve_pacing_source(
 }
 
 pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
-    (!attachments.is_empty()
-        && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
-    .then(|| {
-        format!(
-            "warning: adapter {adapter} does not support image_input; attachments remain readable"
-        )
-    })
+    if attachments.is_empty() {
+        return None;
+    }
+    let spec = AdapterSpec::get(adapter)?;
+    // Image input goes through the same typed check as other launch controls:
+    // an advisory gap degrades with a warning naming the adapter row as source.
+    let gap = spec
+        .check_launch(&provenant_records::LaunchRequest {
+            image_input: true,
+            ..Default::default()
+        })
+        .err()?;
+    debug_assert_eq!(
+        gap.decision(),
+        provenant_records::LaunchDecision::Degrade(provenant_records::LaunchField::Image)
+    );
+    Some(format!(
+        "{}; attachments remain readable",
+        gap.degrade_warning()
+    ))
 }
 
 fn opencode_access_message(access: &provenant_records::LaneAccessReceipt) -> String {
@@ -2143,11 +2156,12 @@ fn prepare_inner(
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    let mut delegated_gap_warning = None;
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
         && AdapterSpec::get(provider)
             .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::DelegatedAgent)
     {
-        AdapterSpec::get(provider)
+        if let Err(gap) = AdapterSpec::get(provider)
             .ok_or("unknown adapter")?
             .check_launch(&provenant_records::LaunchRequest {
                 resume: resume.is_some(),
@@ -2155,7 +2169,13 @@ fn prepare_inner(
                 network: task.access.network,
                 skill_location: task.profile.require_skill_location,
                 ..Default::default()
-            })?;
+            })
+        {
+            if gap.decision().is_refusal() {
+                return Err(PrepareError::Unsupported(gap));
+            }
+            delegated_gap_warning = Some(gap.degrade_warning());
+        }
         let roots = registry.roots.ok_or("routing context is unavailable")?;
         let config =
             crate::config_reads::read_for(roots, "run").map_err(|error| error.to_string())?;
@@ -4045,17 +4065,23 @@ pub(super) fn prepare_candidates_inner(
             continue;
         }
         if let Some(spec) = AdapterSpec::get(&route.adapter)
-            && let Err(error) =
+            && let Err(gap) =
                 request
                     .intent
                     .check_launch(spec, &route.model, route.effort.as_deref())
         {
-            reason_boundaries.insert(
-                reasons.len(),
-                provenant_records::diagnostic::BoundaryClass::Authority,
-            );
-            reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
-            continue;
+            if gap.decision().is_refusal() {
+                // An enforced capability gap is a plain capability refusal,
+                // not an authority boundary: no rule or rule-set was crossed.
+                reasons.push(skip(&label, SkipKind::Refused, gap.to_string()));
+                continue;
+            }
+            // Advisory gaps degrade: drop the control and record a warning
+            // naming the adapter row as source.
+            push_launch_warning(&mut route, gap.degrade_warning());
+            if gap.field() == provenant_records::LaunchField::Effort {
+                route.effort = None;
+            }
         }
         let effective = config.domains.routing.model_policy.effective(
             &catalogue,
@@ -5715,6 +5741,9 @@ pub(super) fn prepare_candidates_inner(
         for warning in &protection_warnings {
             push_launch_warning(&mut route, warning.clone());
         }
+        if let Some(warning) = delegated_gap_warning {
+            push_launch_warning(&mut route, warning);
+        }
         // The record was created before launch preparation added diagnostics.
         provider.launch_warnings = route.diagnostics.launch_warnings.clone();
         // Install on the host only once the head, route and lane setup are
@@ -6976,6 +7005,7 @@ mod attachment_tests {
         let images = vec![PathBuf::from("/outside/image.png")];
         let warning = image_input_warning("cursor", &images).unwrap();
         assert!(warning.contains("cursor") && warning.contains("image_input"));
+        assert!(warning.contains("source=adapter:cursor"), "{warning}");
         assert!(image_input_warning("claude", &images).is_none());
         assert!(image_input_warning("cursor", &[]).is_none());
     }

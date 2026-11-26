@@ -36,6 +36,10 @@ impl RouteIntent {
             network: self.network,
             write: self.writes,
             skill_location: self.skill_location,
+            // Image input is handled where attachments are known, in
+            // preparation; a preference for image-capable adapters is not a
+            // launch requirement.
+            image_input: false,
         })
     }
 }
