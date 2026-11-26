@@ -69,6 +69,9 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
                                 format!(
                                     "configuration unreadable; using compiled defaults: {error}"
                                 ),
+                                provenant_records::warning::detected_source(
+                                    provenant_records::warning::CONFIG_KEY_IGNORED,
+                                ),
                             )
                             .subject("adapter capabilities"),
                         );
@@ -86,11 +89,9 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
                 // unknown ids must reach the envelope as typed warnings.
                 for warning in warnings {
                     provenant_records::warning::warn(
-                        provenant_records::warning::Warning::new(
-                            provenant_records::warning::WarningCode("ADAPTER_CAPABILITIES_OVERLAY"),
-                            warning.to_string(),
-                        )
-                        .subject("adapter capabilities"),
+                        warning
+                            .into_typed(provenant_records::warning::ADAPTER_CAPABILITIES_OVERLAY)
+                            .subject("adapter capabilities"),
                     );
                 }
                 let human = human(&value);
