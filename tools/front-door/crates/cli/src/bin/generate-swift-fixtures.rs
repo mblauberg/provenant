@@ -366,7 +366,7 @@ mod fixtures {
             let record = attempt(id, graph, state.clone(), title)?;
             let presence = matches!(&record.state, provenant_run::AttemptState::Running { .. })
                 .then_some(provenant_records::wire::LanePresence::Unknown);
-            let row = lane_with_facts(&record, true, &[])?;
+            let row = lane_with_facts(&record, &[])?;
             let (active, attention) = p::overview_activity(presence, &record.state);
             overview_running += usize::from(active);
             overview_attention += usize::from(attention);
@@ -406,7 +406,7 @@ mod fixtures {
             ),
         ];
 
-        let summary =
+        let make_summary =
             |now: &str, next: &str, updated_at: &str| provenant_workflow::session::Summary {
                 schema_version: 1,
                 revision: 1,
@@ -417,12 +417,12 @@ mod fixtures {
                 risk: "none".to_owned(),
                 extra: Default::default(),
             };
-        let summary = summary(
+        let summary = make_summary(
             "Implementing console",
             "Review",
             "2026-11-02T01:58:26.745295Z",
         );
-        let later = summary(
+        let later = make_summary(
             "Implementing the console",
             "Review",
             "2026-11-02T02:18:00.000000Z",
@@ -2306,6 +2306,24 @@ mod tests {
         assert_eq!(
             conflicts["data"]["unfetched_children"][0]["detail"],
             "synthetic child store unavailable"
+        );
+    }
+
+    #[test]
+    fn synthetic_sessions_preserve_each_structured_summary() {
+        let generated = fixtures::console().expect("synthetic console fixtures");
+        let (_, sessions) = generated
+            .iter()
+            .find(|(name, _)| *name == "console-sessions")
+            .expect("sessions fixture");
+        let rows = sessions["data"]["sessions"]
+            .as_array()
+            .expect("session rows");
+
+        assert_eq!(rows[0]["record"]["summary"]["now"], "Implementing console");
+        assert_eq!(
+            rows[1]["record"]["summary"]["now"],
+            "Implementing the console"
         );
     }
 
