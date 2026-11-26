@@ -112,6 +112,8 @@ pub const ACCOUNT_SWITCH_RECONCILE_FAILED: WarningCode =
 pub const CHANGE_SIGNAL_UNPUBLISHED: WarningCode = WarningCode("CHANGE_SIGNAL_UNPUBLISHED");
 /// A detached worker's process-budget probe failed; the limit is unknown.
 pub const PROCESS_BUDGET_PROBE_FAILED: WarningCode = WarningCode("PROCESS_BUDGET_PROBE_FAILED");
+/// A provider setting was outside its declared range, so the compiled default applied.
+pub const PROVIDER_SETTING_OUT_OF_RANGE: WarningCode = WarningCode("PROVIDER_SETTING_OUT_OF_RANGE");
 
 // Warnings from the remaining library crates (w2-warn-lib-b): full meaning and
 // the sites that use each code are recorded beside the conversion in that

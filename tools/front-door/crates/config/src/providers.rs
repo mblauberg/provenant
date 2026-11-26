@@ -1,6 +1,7 @@
 //! Host provider updates, separate from self-update inside confined lanes.
+use provenant_records::warning::{PROVIDER_SETTING_OUT_OF_RANGE, Warning, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
@@ -46,6 +47,12 @@ pub struct ProviderSettings {
     pub stall_after_seconds: u64,
     /// Opt-in action once an attempt is stalled. The default only warns.
     pub stall_policy: crate::StallPolicy,
+    /// Whether a harness `--version` probe runs. false reports an unreadable
+    /// version with a reason naming this key instead of running the binary.
+    pub version_probe: bool,
+    /// Bounds one `--version` probe. An out-of-range value warns and uses the
+    /// compiled default; it never refuses the configuration.
+    pub version_probe_timeout_seconds: u64,
 }
 
 impl Default for ProviderSettings {
@@ -60,6 +67,8 @@ impl Default for ProviderSettings {
             runtime_deadline_seconds: None,
             stall_after_seconds: provenant_records::DEFAULT_STALL_AFTER_SECONDS,
             stall_policy: crate::StallPolicy::default(),
+            version_probe: true,
+            version_probe_timeout_seconds: 4,
         }
     }
 }
@@ -117,6 +126,26 @@ pub(crate) fn validate(providers: &BTreeMap<String, ProviderSettings>) -> Result
 }
 
 impl ProviderSettings {
+    /// The bounded `--version` timeout for one adapter. A value outside 1-60
+    /// seconds warns with the setting and uses the compiled four seconds; this
+    /// is advisory, so `validate` does not refuse it.
+    pub fn version_probe_timeout(&self, provider: &str) -> Duration {
+        const DEFAULT_SECONDS: u64 = 4;
+        let seconds = self.version_probe_timeout_seconds;
+        if (1..=60).contains(&seconds) {
+            return Duration::from_secs(seconds);
+        }
+        let key = format!("providers.{provider}.version_probe_timeout_seconds");
+        warn(
+            Warning::new(
+                PROVIDER_SETTING_OUT_OF_RANGE,
+                format!("{key} = {seconds} is outside 1-60; using {DEFAULT_SECONDS}"),
+            )
+            .subject(key),
+        );
+        Duration::from_secs(DEFAULT_SECONDS)
+    }
+
     pub fn pin_warning(&self, provider: &str, model: &str) -> Option<String> {
         (!self.permits_model(model) && self.out_of_scope_pin == OutOfScopePin::Warn).then(|| {
             format!("warning: {provider}/{model} is outside providers.{provider}.models; providers.{provider}.out_of_scope_pin = warn")
@@ -153,5 +182,58 @@ impl ProviderSettings {
                 .iter()
                 .any(|p| matches(p.as_bytes(), model.as_bytes()))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn version_probe_defaults_are_on_with_a_four_second_bound() {
+        let settings = ProviderSettings::default();
+        assert!(settings.version_probe);
+        assert_eq!(settings.version_probe_timeout_seconds, 4);
+        assert_eq!(
+            settings.version_probe_timeout("codex"),
+            Duration::from_secs(4)
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_version_probe_timeout_warns_and_uses_the_default() {
+        for seconds in [0, 61, 500] {
+            let settings = ProviderSettings {
+                version_probe_timeout_seconds: seconds,
+                ..ProviderSettings::default()
+            };
+            let (timeout, warnings) =
+                provenant_records::warning::capture(|| settings.version_probe_timeout("codex"));
+            assert_eq!(timeout, Duration::from_secs(4));
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(
+                warnings[0].code.as_ref(),
+                PROVIDER_SETTING_OUT_OF_RANGE.as_str()
+            );
+            assert!(
+                warnings[0]
+                    .message
+                    .contains("providers.codex.version_probe_timeout_seconds")
+            );
+            assert!(warnings[0].message.contains(&seconds.to_string()));
+        }
+    }
+
+    #[test]
+    fn a_configured_version_probe_timeout_in_range_is_honoured() {
+        let settings = ProviderSettings {
+            version_probe_timeout_seconds: 9,
+            ..ProviderSettings::default()
+        };
+        let (timeout, warnings) =
+            provenant_records::warning::capture(|| settings.version_probe_timeout("codex"));
+        assert_eq!(timeout, Duration::from_secs(9));
+        assert!(warnings.is_empty());
     }
 }

@@ -14,6 +14,8 @@ pub struct Domains {
     pub steward: crate::steward::Settings,
     #[serde(default)]
     pub wait: crate::wait::Settings,
+    #[serde(default)]
+    pub adapter: crate::adapter_capabilities::Settings,
     pub accounts: provenant_providers::accounts::Settings,
     pub quota: provenant_quota::Settings,
     pub routing: provenant_routing::RoutingConfig,
@@ -798,9 +800,10 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
 ]);
 
-static ENTRIES: [DomainSection; 10] = [
+static ENTRIES: [DomainSection; 11] = [
     provenant_config::policy::SECTION,
     crate::wait::SECTION,
+    crate::adapter_capabilities::SECTION,
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
     provenant_routing::SECTION,
@@ -862,6 +865,10 @@ mod tests {
                 typed_paths::<provenant_config::policy::Settings>(),
             ),
             ("wait", typed_paths::<crate::wait::Settings>()),
+            (
+                "adapter",
+                typed_paths::<crate::adapter_capabilities::Settings>(),
+            ),
             (
                 "accounts",
                 typed_paths::<provenant_providers::accounts::Settings>(),
@@ -1262,6 +1269,12 @@ mod tests {
         assert_eq!(
             (grace.min, grace.max, &grace.default),
             (Some(0), Some(600), &json!(60))
+        );
+        let adapter_samples = field("domains.adapter.capabilities.measurement_samples");
+        assert_eq!(adapter_samples.kind, "int");
+        assert_eq!(
+            (adapter_samples.min, adapter_samples.max),
+            (Some(1), Some(2000))
         );
         let idle = field("gc.idle");
         assert_eq!(
