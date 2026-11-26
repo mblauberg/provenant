@@ -11,6 +11,7 @@
 use super::*;
 use provenant_core::{close_matches, valid_name};
 use provenant_records::Precedence;
+use provenant_records::Sourced;
 use provenant_records::warning::{NAME_CASE_FOLDED, Warning, warn};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +28,76 @@ pub const IMPLEMENT_PLAN_DEFAULT: &str = "implement-plan-default";
 pub const BATCH_MAX_PARALLEL_DEFAULT: &str = "batch-max-parallel-default";
 /// Node field naming the template a leaf was compiled from; carried to attempts.
 pub const TEMPLATE_FIELD: &str = "template";
+
+/// Brief text appended at the final escalation rung. A wider scope is a
+/// permission within the rung's actual authority, never a grant of new write
+/// roots: strict scope and custody still bind and out-of-scope edits are
+/// reported at settlement.
+/// Spec: docs/specs/delivery-queue.md#shared-types (`escalate`).
+pub const FINAL_RUNG_SCOPE_BRIEF: &str = "At this final route rung you may widen the change within your actual authority and the node's literal write scope. Strict scope and custody still bind: keep every write inside the supplied scope and report out-of-scope edits in the handoff.";
+
+/// Instruction carried by every repair brief. Single-test repairs dominate
+/// observed round counts, so a repair must sweep the whole defect class.
+/// Spec: docs/specs/delivery-queue.md#shared-contracts.
+pub const REPAIR_SWEEP_INSTRUCTION: &str = "Sweep the whole defect class, not only the failing case: check other tests, help text and documentation that assert the changed behaviour, fix the root cause wherever it appears, and report any copy you could not reach.";
+
+/// Precedence for sealing the delivery queue knobs. The shipped default is the
+/// floor; host, project and launch layers shadow it in that order. A candidate
+/// from a layer this family does not declare is warned and ignored.
+pub const QUEUE_KNOB_PRECEDENCE: Precedence =
+    Precedence(&[Layer::Default, Layer::Host, Layer::Project, Layer::Launch]);
+
+/// A widened brief for the final rung: the base brief followed by the bounded
+/// scope permission. Callers seal this text with the rung's authority; the
+/// helper only formats it.
+pub fn widen_final_rung_brief(brief: &str) -> String {
+    format!("{brief}\n\n{FINAL_RUNG_SCOPE_BRIEF}")
+}
+
+/// A repair brief carrying the failing head and a bounded excerpt of the
+/// failure. Both inputs are untrusted, so the head stays one bounded line and
+/// the excerpt keeps its tail (the last failure line) within a bounded size.
+/// The sweep-the-class instruction is always appended.
+pub fn repair_brief(failing_head: &str, failure_excerpt: &str) -> String {
+    let head = provenant_core::bounded_line(failing_head, 128);
+    let excerpt = provenant_core::bounded_tail(failure_excerpt, 4096);
+    format!(
+        "Repair from failing head {head}.\nFailure excerpt (untrusted):\n{excerpt}\n{REPAIR_SWEEP_INSTRUCTION}"
+    )
+}
+
+/// Seal one queue knob from its layered candidates over the shipped default.
+/// The winner's source travels with its value so explain/status can name it.
+/// A candidate from an undeclared layer is warned, never silently dropped.
+pub fn seal_queue_knob(
+    default: usize,
+    candidates: impl IntoIterator<Item = Sourced<usize>>,
+) -> Sourced<usize> {
+    use provenant_records::warn_ignored;
+    let merge = QUEUE_KNOB_PRECEDENCE.merge_over_default(default, candidates);
+    warn_ignored(&merge.ignored, "delivery queue knob");
+    merge.winner
+}
+
+/// Resolve and seal all three queue knobs. `overrides` is keyed by the config
+/// keys in `model.rs` (`domains.fabric.queue.*`) and holds one candidate per
+/// declaring layer. Absent keys keep the shipped default and its source.
+/// TODO(#3972-s4): interface.rs supplies these candidates from the resolved
+/// config together with each knob's config origin; this slice owns the seal.
+pub fn seal_queue_knobs(overrides: &BTreeMap<&str, Vec<Sourced<usize>>>) -> QueueKnobs {
+    let shipped = QueueKnobs::default();
+    let seal = |key: &str, default: Sourced<usize>| {
+        seal_queue_knob(
+            default.value,
+            overrides.get(key).cloned().unwrap_or_default(),
+        )
+    };
+    QueueKnobs {
+        max_parallel: seal(QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel),
+        ci_slots: seal(QUEUE_CI_SLOTS_KEY, shipped.ci_slots),
+        prep_retries: seal(QUEUE_PREP_RETRIES_KEY, shipped.prep_retries),
+    }
+}
 
 /// Ask the compiled schema whether a field is recognised, independently of its
 /// authored value (which may still contain parameter placeholders). Null either
@@ -84,6 +155,7 @@ pub fn separate_document_fields(node: &mut Value) -> Result<(), String> {
     if let Some(fields) = node.as_object_mut() {
         for key in [
             "schema_version",
+            "queue",
             "graph_id",
             "templates",
             "integration_branch",
@@ -795,7 +867,8 @@ pub(super) fn review_verifier(node: &PlannedNode) -> bool {
 }
 
 pub(super) fn review_node(node: &PlannedNode) -> bool {
-    review_behaviour(node).is_some()
+    node.delivery_review.is_some()
+        || review_behaviour(node).is_some()
         || node.role.as_deref().is_some_and(|role| {
             role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
         })
@@ -2313,6 +2386,14 @@ impl<'a> Compiler<'a> {
             until: String,
             max_rounds: usize,
             #[serde(default)]
+            previous_bindings: BTreeMap<String, String>,
+            #[serde(default)]
+            retry_on: Vec<String>,
+            #[serde(default)]
+            selected_publication: Option<String>,
+            #[serde(default)]
+            initial_publication: Option<String>,
+            #[serde(default)]
             max_extension_rounds: Option<usize>,
             #[serde(default)]
             review_repair: bool,
@@ -2353,6 +2434,26 @@ impl<'a> Compiler<'a> {
         spec.insert("body".into(), Value::Array(body));
         spec.insert("until".into(), Value::String(repeat.until));
         spec.insert("max_rounds".into(), repeat.max_rounds.into());
+        if !repeat.previous_bindings.is_empty() {
+            let bindings = repeat
+                .previous_bindings
+                .into_iter()
+                .map(|(body_node, initial_node)| (body_node, Value::String(initial_node)))
+                .collect();
+            spec.insert("previous_bindings".into(), Value::Object(bindings));
+        }
+        if !repeat.retry_on.is_empty() {
+            spec.insert(
+                "retry_on".into(),
+                Value::Array(repeat.retry_on.into_iter().map(Value::String).collect()),
+            );
+        }
+        if let Some(publication) = repeat.selected_publication {
+            spec.insert("selected_publication".into(), Value::String(publication));
+        }
+        if let Some(publication) = repeat.initial_publication {
+            spec.insert("initial_publication".into(), Value::String(publication));
+        }
         if review_repair {
             if repeat.max_rounds == 0 {
                 return Err("review repair cycles must be at least 1".into());

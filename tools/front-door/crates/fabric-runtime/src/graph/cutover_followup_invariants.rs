@@ -71,10 +71,12 @@ impl CiStatus for Owner {
         &mut self,
         _target: &str,
         _checks: &[String],
+        _: bool,
         _: usize,
         _: usize,
     ) -> CiObservation {
         CiObservation {
+            quota_reset_at: None,
             extra: Default::default(),
             state: CiState::Passed,
             summary: "passed".into(),
@@ -231,6 +233,7 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
                 route_index: 0,
                 attempt: 1,
             },
+            escalation_rung: None,
             route: plan.nodes[0].routes[0].clone(),
             state: AttemptState::Terminal,
             attempt_ref: Some("provider/1".into()),

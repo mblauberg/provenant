@@ -47,7 +47,12 @@ The [human inbox](human-inbox.md#delivery-service) owns how the hook offers answ
 The hook reports checkpoint and lane state. An unavailable section is not an
 empty one: inspect the source before acting. The checkpoint points to authority
 but does not create it. Record delivered PRs in the checkpoint so the digest can
-find them.
+find them. The custody list is printed once: when the derived digest is shown,
+the autosave's copy of that section is withheld. If the response reaches its
+8 KiB cap, derived state shrinks first and the chair's `## Intent` (up to 3 KiB)
+and `## Now` (up to 1 KiB) remain intact; the rest of the checkpoint excerpt is
+then trimmed with a notice. A fresh checkpoint with nothing actionable omits the
+"no save needed by freshness policy" boilerplate but keeps the save command.
 
 ## Autosave and compaction
 

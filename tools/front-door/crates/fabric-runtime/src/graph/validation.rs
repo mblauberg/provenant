@@ -2,7 +2,19 @@ use super::*;
 
 pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
-        node.review_base.is_some()
+        node.escalate.is_some()
+            || node.delivery_review.is_some()
+            || node.delivery_adoption.is_some()
+            || matches!(node.kind, Some(NodeKind::Hygiene | NodeKind::Publish))
+            || matches!(node.condition, Some(GateCondition::Conflict { .. }))
+            || node.loop_body.as_ref().is_some_and(|spec| {
+                spec.outcome_edge.is_some()
+                    || !spec.previous_bindings.is_empty()
+                    || !spec.retry_on.is_empty()
+                    || spec.selected_publication.is_some()
+                    || spec.initial_publication.is_some()
+            })
+            || node.review_base.is_some()
             || node.family_group.is_some()
             || node
                 .inputs
@@ -46,7 +58,20 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
 fn value_has_v2(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {
-            map.contains_key("family_group")
+            map.contains_key("escalate")
+                || map.contains_key("delivery_review")
+                || map.contains_key("delivery_adoption")
+                || matches!(
+                    map.get("kind").and_then(serde_json::Value::as_str),
+                    Some("hygiene" | "publish")
+                )
+                || map.get("type").and_then(serde_json::Value::as_str) == Some("conflict")
+                || map.contains_key("outcome_edge")
+                || map.contains_key("previous_bindings")
+                || map.contains_key("retry_on")
+                || map.contains_key("selected_publication")
+                || map.contains_key("initial_publication")
+                || map.contains_key("family_group")
                 || map.contains_key("review_base")
                 || map
                     .get("required_outputs")
@@ -70,7 +95,10 @@ pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
 }
 
 pub(super) fn document_requires_review_fields(document: &GraphDocument) -> bool {
-    document.review_base.is_some() || nodes_have_v2(&document.nodes)
+    document.queue.is_some()
+        || document.review_base.is_some()
+        || document.queue_ci_wait.is_some()
+        || nodes_have_v2(&document.nodes)
 }
 
 pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
@@ -97,6 +125,14 @@ pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
         OutputKind::Remaining,
     ];
     if node.kind == Some(NodeKind::Loop) {
+        if node
+            .loop_body
+            .as_ref()
+            .is_some_and(|spec| spec.selected_publication.is_some())
+        {
+            kinds.push(OutputKind::Branch);
+            kinds.push(OutputKind::Commit);
+        }
         return kinds;
     }
     let write = node.access == AccessMode::WorktreeWrite;
@@ -104,7 +140,14 @@ pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
         kinds.push(OutputKind::Branch);
     }
     let pinned = node.source.is_some();
-    if write || pinned || node.kind == Some(NodeKind::Land) {
+    if write
+        || pinned
+        || node.kind == Some(NodeKind::Land)
+        || matches!(
+            node.condition,
+            Some(GateCondition::Ci { .. } | GateCondition::Conflict { .. })
+        )
+    {
         kinds.push(OutputKind::Commit);
     }
     kinds
@@ -219,11 +262,16 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Admi
 }
 
 pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), AdmissionError> {
-    let has_v2 = document.review_base.is_some() || nodes_have_v2(&document.nodes);
+    let has_v2 = document_requires_review_fields(document);
     // Version 2 is a superset: it may omit every v2 field, but version 1
     // cannot carry one.
     if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {
         return Err(AdmissionError::Schema("schema version".into()));
+    }
+    if let Some(wait) = &document.queue_ci_wait
+        && (document.queue.is_none() || !(1..=14_400).contains(&wait.value))
+    {
+        return Err(AdmissionError::Schema("queue CI wait bounds".into()));
     }
     Ok(())
 }
@@ -304,9 +352,94 @@ fn node_plan_error(node: &GraphNode, reason: impl std::fmt::Display) -> Admissio
     AdmissionError::Plan(format!("node {}: {reason}", node.id))
 }
 
+pub(super) fn recovery_scope(
+    target: &str,
+    nodes: &[PlannedNode],
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<std::collections::BTreeSet<usize>> {
+    let target_index = *positions.get(target)?;
+    let owner = &nodes[target_index];
+    if owner.loop_body.is_none() && owner.composite.is_none() {
+        return None;
+    }
+
+    let mut scope = std::collections::BTreeSet::new();
+    let mut pending = vec![target_index];
+    while let Some(index) = pending.pop() {
+        if !scope.insert(index) {
+            continue;
+        }
+        let member = &nodes[index];
+        for child in &member.composite_members {
+            if let Some(child_index) = positions.get(child) {
+                pending.push(*child_index);
+            }
+        }
+        if member.loop_body.is_some() {
+            pending.extend(nodes.iter().enumerate().filter_map(|(child, node)| {
+                node.round
+                    .as_ref()
+                    .is_some_and(|round| round.loop_id == member.id)
+                    .then_some(child)
+            }));
+        }
+    }
+    Some(scope)
+}
+
+fn settled_retry_hygiene_source(
+    node: &GraphNode,
+    source_id: &str,
+    document: &GraphDocument,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    let Some(round) = node.round.as_ref().filter(|round| round.round > 1) else {
+        return false;
+    };
+    let Some(loop_index) = positions.get(&round.loop_id).copied() else {
+        return false;
+    };
+    let Some(spec) = document.nodes[loop_index].loop_body.as_ref() else {
+        return false;
+    };
+    let Some(source_index) = positions.get(source_id).copied() else {
+        return false;
+    };
+    let source = &document.nodes[source_index];
+    let Some(source_round) = source.round.as_ref() else {
+        return false;
+    };
+    node.after_settled.iter().any(|parent| parent == source_id)
+        && source.kind == Some(NodeKind::Hygiene)
+        && source.worktree == node.worktree
+        && source_round.loop_id == round.loop_id
+        && source_round.round + 1 == round.round
+        && spec.retry_on.contains(&source_round.node_id)
+        && spec.body.iter().any(|member| {
+            member.id == source_round.node_id && member.kind == Some(NodeKind::Hygiene)
+        })
+}
+
 pub(super) fn validate_flat_plan(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
+) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), AdmissionError> {
+    validate_flat_plan_inner(document, limits, false)
+}
+
+// The complete expanded graph is validated again with all queue bindings.
+// This preliminary pass checks only the local structure of a loop body.
+pub(super) fn validate_loop_body(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
+) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), AdmissionError> {
+    validate_flat_plan_inner(document, limits, true)
+}
+
+fn validate_flat_plan_inner(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
+    isolated_loop_body: bool,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), AdmissionError> {
     if !matches!(document.schema_version, 1 | 2) {
         return Err(AdmissionError::Plan("schema version".into()));
@@ -403,6 +536,12 @@ pub(super) fn validate_flat_plan(
             return Err(node_plan_error(node, reason));
         }
         plans::validate_spec(node).map_err(|reason| node_plan_error(node, reason))?;
+        if node.delivery_review.is_some() && node.access != AccessMode::ReadOnly {
+            return Err(node_plan_error(
+                node,
+                "delivery review requires read-only access",
+            ));
+        }
         let is_composite = node.kind == Some(NodeKind::Composite);
         if is_composite != node.composite.is_some() {
             return Err(node_plan_error(
@@ -435,9 +574,81 @@ pub(super) fn validate_flat_plan(
             ));
         }
         land::validate_node(node).map_err(|reason| node_plan_error(node, reason))?;
+        let is_hygiene = node.kind == Some(NodeKind::Hygiene);
+        if is_hygiene {
+            let writer = match &node.source {
+                Some(SourceBinding::Node { node: source }) if node.depends_on.contains(source) => {
+                    positions.get(source).map(|index| &document.nodes[*index])
+                }
+                _ => None,
+            };
+            if node.access != AccessMode::WorktreeWrite
+                || node.route.is_some()
+                || node.routes.is_some()
+                || node.attempt.is_some()
+                || !node.prompt.is_empty()
+                || node.delivery.is_some()
+                || node.required_verdict.is_some()
+                || writer.is_none_or(|writer| {
+                    writer.access != AccessMode::WorktreeWrite
+                        || !matches!(writer.kind, None | Some(NodeKind::Task))
+                        || writer.worktree.is_none()
+                        || writer.worktree != node.worktree
+                })
+            {
+                return Err(node_plan_error(
+                    node,
+                    "hygiene requires a direct writer source and its retained worktree, with no agent configuration",
+                ));
+            }
+        }
+        let is_publish = node.kind == Some(NodeKind::Publish);
+        if is_publish {
+            let seed = node.delivery_adoption.as_ref();
+            let hygiene = match &node.source {
+                Some(SourceBinding::Node { node: source }) if node.depends_on.contains(source) => {
+                    positions.get(source).map(|index| &document.nodes[*index])
+                }
+                _ => None,
+            };
+            let valid_seed = seed.is_some_and(|intent| {
+                document.queue.is_some()
+                    && document
+                        .integration_branch
+                        .as_deref()
+                        .is_some_and(|branch| branch == intent.branch)
+                    && intent.valid()
+                    && node.source.is_none()
+                    && node.worktree.as_deref() == Some(intent.worktree.as_str())
+            });
+            let valid_publication = seed.is_some() && valid_seed
+                || seed.is_none()
+                    && hygiene.is_some_and(|source| {
+                        source.kind == Some(NodeKind::Hygiene)
+                            && source.worktree.is_some()
+                            && source.worktree == node.worktree
+                    });
+            if document.queue.is_none() && !isolated_loop_body
+                || document.integration_branch.is_none()
+                || node.access != AccessMode::WorktreeWrite
+                || node.route.is_some()
+                || node.routes.is_some()
+                || node.attempt.is_some()
+                || !node.prompt.is_empty()
+                || node.delivery.is_some()
+                || node.required_verdict.is_some()
+                || node.on_fail.is_some()
+                || !valid_publication
+            {
+                return Err(node_plan_error(
+                    node,
+                    "publish requires either a direct hygiene source or a host-verified queue adoption intent, with a retained worktree and sealed integration branch",
+                ));
+            }
+        }
         let is_gate = node.kind == Some(NodeKind::Gate);
         if is_gate != node.condition.is_some()
-            || !is_gate && node.loop_body.is_none() && node.on_fail.is_some()
+            || !is_gate && !is_hygiene && node.loop_body.is_none() && node.on_fail.is_some()
             || is_gate
                 && (node.route.is_some()
                     || node.routes.is_some()
@@ -501,8 +712,36 @@ pub(super) fn validate_flat_plan(
                 }
                 ci::validate_target(target, node, document)
                     .map_err(|reason| node_plan_error(node, reason))?;
+                if document.queue.is_some()
+                    && !matches!(target, CiTarget::Node { node: published, .. }
+                        if positions.get(published).is_some_and(|index| document.nodes[*index].kind == Some(NodeKind::Publish)))
+                {
+                    return Err(node_plan_error(
+                        node,
+                        "delivery CI requires a publication node target",
+                    ));
+                }
                 if !(1..=604800).contains(timeout_seconds) || !node.inputs.is_empty() {
                     return Err(node_plan_error(node, "invalid CI gate target or timeout"));
+                }
+            }
+            Some(GateCondition::Conflict { target, .. }) => {
+                ci::validate_target(target, node, document)
+                    .map_err(|reason| node_plan_error(node, reason))?;
+                if document.queue.is_some()
+                    && !matches!(target, CiTarget::Node { node: published, .. }
+                        if positions.get(published).is_some_and(|index| document.nodes[*index].kind == Some(NodeKind::Publish)))
+                {
+                    return Err(node_plan_error(
+                        node,
+                        "delivery conflict gate requires a publication node target",
+                    ));
+                }
+                if !node.inputs.is_empty() {
+                    return Err(node_plan_error(
+                        node,
+                        "conflict gate has no selected inputs",
+                    ));
                 }
             }
             Some(GateCondition::Budget { .. }) if !node.inputs.is_empty() => {
@@ -562,10 +801,13 @@ pub(super) fn validate_flat_plan(
             {
                 return Err(node_plan_error(node, "source requires a full commit ID"));
             }
-            Some(SourceBinding::Node { node: source }) if !node.depends_on.contains(source) => {
+            Some(SourceBinding::Node { node: source })
+                if !node.depends_on.contains(source)
+                    && !settled_retry_hygiene_source(node, source, document, &positions) =>
+            {
                 return Err(node_plan_error(
                     node,
-                    "source node must be a direct dependency",
+                    "source node must be a direct dependency or a settled prior retry hygiene result",
                 ));
             }
             Some(SourceBinding::Integration) if document.integration_branch.is_none() => {
@@ -603,7 +845,14 @@ pub(super) fn validate_flat_plan(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err(node_plan_error(node, "graph PR is exclusive with node PRs"));
         }
-        if !is_gate && !is_loop && !is_composite && !is_decide && !is_land && node.prompt.is_empty()
+        if !is_gate
+            && !is_loop
+            && !is_composite
+            && !is_decide
+            && !is_land
+            && !is_hygiene
+            && !is_publish
+            && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
             return Err(node_plan_error(node, "prompt size"));
@@ -622,9 +871,18 @@ pub(super) fn validate_flat_plan(
         }
 
         let routes = match (&node.route, &node.routes) {
-            (None, None) if is_gate || is_loop || is_composite || is_decide || is_land => {
+            (None, None)
+                if is_gate
+                    || is_loop
+                    || is_composite
+                    || is_decide
+                    || is_land
+                    || is_hygiene
+                    || is_publish =>
+            {
                 Vec::new()
             }
+            (None, None) if !when::holds(&node.when) => Vec::new(),
             (Some(route), None) => vec![route.clone()],
             (None, Some(routes)) if !routes.is_empty() => routes.clone(),
             (Some(_), Some(_)) => {
@@ -782,6 +1040,9 @@ pub(super) fn validate_flat_plan(
             write_scope: node.write_scope.clone(),
             acceptance_checks: node.acceptance_checks.clone(),
             loop_body: node.loop_body.clone(),
+            escalate: node.escalate.clone(),
+            delivery_review: node.delivery_review.clone(),
+            delivery_adoption: node.delivery_adoption.clone(),
             decide: node.decide.clone(),
             continues: node.continues.clone(),
             land: node.land.clone(),
@@ -794,7 +1055,9 @@ pub(super) fn validate_flat_plan(
                     | NodeKind::Loop
                     | NodeKind::Composite
                     | NodeKind::Decide
-                    | NodeKind::Land,
+                    | NodeKind::Land
+                    | NodeKind::Hygiene
+                    | NodeKind::Publish,
                 ) => node.kind,
                 _ => None,
             },
@@ -874,6 +1137,8 @@ pub(super) fn validate_flat_plan(
         });
     }
     land::validate_relations(&nodes, &positions).map_err(AdmissionError::Plan)?;
+    land::validate_conflict_recovery(&nodes, &positions, document.queue.is_some())
+        .map_err(AdmissionError::Plan)?;
 
     // Dependencies are conjunctive. Reject nodes that require mutually
     // exclusive branches, including through transitive dependencies.
@@ -883,6 +1148,7 @@ pub(super) fn validate_flat_plan(
         let Some(target) = &node.on_fail else {
             continue;
         };
+        let recovery_scope = recovery_scope(target, &nodes, &positions);
         let mut required = vec![None; nodes.len()];
         let mut pending: std::collections::VecDeque<_> = children[gate]
             .iter()
@@ -894,11 +1160,26 @@ pub(super) fn validate_flat_plan(
                         && !nodes[*child]
                             .round
                             .as_ref()
-                            .is_some_and(|r| &r.loop_id == target),
+                            .is_some_and(|round| &round.loop_id == target)
+                        && !recovery_scope
+                            .as_ref()
+                            .is_some_and(|scope| scope.contains(child)),
                 )
             })
             .collect();
+        if let Some(scope) = &recovery_scope {
+            pending.extend(scope.iter().map(|index| (*index, false)));
+        }
         while let Some((index, outcome)) = pending.pop_front() {
+            // Composite and loop recovery members inherit the owner's entry
+            // dependencies, but enter only through the owner's failure edge.
+            if outcome
+                && recovery_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.contains(&index))
+            {
+                continue;
+            }
             if let Some(prior) = required[index] {
                 if prior != outcome {
                     return Err(AdmissionError::Plan(format!(
@@ -912,8 +1193,22 @@ pub(super) fn validate_flat_plan(
             pending.extend(
                 children[index]
                     .iter()
-                    .filter(|child| nodes[**child].depends_on.contains(&nodes[index].id))
-                    .map(|child| (*child, outcome)),
+                    .filter(|child| {
+                        nodes[**child].depends_on.contains(&nodes[index].id)
+                            // A later round is entered on the prior until gate's
+                            // failure, not its success. Its path cannot inherit
+                            // the successful ancestry of the prior round.
+                            && !loops::round_failure_edge(&nodes[**child], &nodes[index])
+                    })
+                    .map(|child| {
+                        (
+                            *child,
+                            outcome
+                                && !recovery_scope
+                                    .as_ref()
+                                    .is_some_and(|scope| scope.contains(child)),
+                        )
+                    }),
             );
         }
     }
@@ -933,6 +1228,7 @@ pub(super) fn validate_flat_plan(
             integration_branch: document.integration_branch.clone(),
             delivery: document.delivery.clone(),
             decision_session: document.decision_session.clone(),
+            queue: document.queue.clone(),
             schema_version: document.schema_version,
             graph_id: document.graph_id.clone(),
             nodes: topological_nodes,
@@ -1235,635 +1531,5 @@ pub(super) fn validate_expanded_rows<R: Error + 'static, J: Error + 'static>(
     Ok(())
 }
 
-pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
-    document: &GraphDocument,
-    checkpoint: &GraphCheckpoint,
-    plan: &PlannedGraph,
-    digest: &str,
-) -> Result<(), GraphError<R, J>> {
-    if checkpoint.schema_version != 2
-        || checkpoint.graph_id != plan.graph_id
-        || checkpoint.delivery_required
-            != (plan.delivery == Some(provenant_records::run::DeliveryMode::Pr))
-    {
-        return Err(GraphError::BadCheckpoint {
-            node: plan.graph_id.clone(),
-            invariant: "schema, graph identity and delivery policy must match plan",
-        });
-    }
-    if checkpoint.plan_digest != digest {
-        return Err(GraphError::PlanChanged);
-    }
-    if checkpoint.nodes.len() != plan.nodes.len()
-        || plan
-            .decision_session
-            .as_ref()
-            .is_some_and(|session| crate::inbox::session_id(session).is_err())
-    {
-        return Err(GraphError::BadCheckpoint {
-            node: plan.graph_id.clone(),
-            invariant: "node count and decision session must match plan",
-        });
-    }
-    asks::validate(checkpoint, plan).map_err(|_| GraphError::BadCheckpoint {
-        node: plan.graph_id.clone(),
-        invariant: "asks must match checkpoint identities and decision sessions",
-    })?;
-    let positions: std::collections::BTreeMap<String, usize> = plan
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(i, node)| (node.id.clone(), i))
-        .collect();
-    let active_expansions = checkpoint
-        .nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                node.expansion_cause,
-                Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
-            )
-        })
-        .count();
-    if active_expansions > 1
-        || (active_expansions == 1
-            && !checkpoint.nodes.iter().any(|node| {
-                matches!(
-                    node.expansion_cause,
-                    Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
-                ) && Some(plans::expansion_pause_cause(node)) == checkpoint.pause_cause()
-            }))
-        || (active_expansions == 0
-            && checkpoint.pause_cause() == Some(PauseCause::InvalidPlanExpansion))
-    {
-        return Err(GraphError::BadCheckpoint {
-            node: checkpoint.graph_id.clone(),
-            invariant: "active expansion pause must own the graph pause",
-        });
-    }
-    if let Some(cause) = checkpoint
-        .pause_cause()
-        .and_then(NodeDecisionCause::from_pause)
-        && (!checkpoint
-            .nodes
-            .iter()
-            .any(|node| node.loop_cause.as_ref() == Some(&cause)))
-    {
-        return Err(GraphError::BadCheckpoint {
-            node: checkpoint.graph_id.clone(),
-            invariant: "loop pause code must have a matching typed node cause",
-        });
-    }
-    for (index, (progress, node)) in checkpoint.nodes.iter().zip(&plan.nodes).enumerate() {
-        let mut historical;
-        let checkpoint = if progress.state.settled() {
-            if let Some(snapshots) = (!progress.settled_dependency_snapshots.is_empty())
-                .then_some(&progress.settled_dependency_snapshots)
-            {
-                historical = checkpoint.clone();
-                for (id, snapshot) in snapshots {
-                    let position = *positions.get(id).ok_or_else(|| GraphError::BadCheckpoint {
-                        node: node.id.clone(),
-                        invariant: "dependency snapshot must name a graph node",
-                    })?;
-                    let mut prior = snapshot.clone();
-                    if prior.id != *id || !prior.state.settled() {
-                        return Err(GraphError::BadCheckpoint {
-                            node: node.id.clone(),
-                            invariant: "dependency snapshot must retain settled identity",
-                        });
-                    }
-                    prior.round = historical.nodes[position].round.clone();
-                    historical.nodes[position] = prior;
-                }
-                &historical
-            } else {
-                checkpoint
-            }
-        } else {
-            checkpoint
-        };
-        let bad = |invariant| GraphError::BadCheckpoint {
-            node: node.id.clone(),
-            invariant,
-        };
-        let valid_loop_cause = match (
-            &progress.loop_cause,
-            progress.loop_pause_code.as_deref(),
-            &progress.loop_pause,
-        ) {
-            (None, None, None) => true,
-            (Some(NodeDecisionCause::LoopPaused), Some("loop_paused"), Some(_)) => {
-                node.loop_body.is_some()
-            }
-            (Some(NodeDecisionCause::LoopAskClosed), Some("loop_ask_closed"), Some(_)) => {
-                node.loop_body.is_some()
-            }
-            (
-                Some(NodeDecisionCause::InvalidLoopDecision),
-                Some("invalid_loop_decision"),
-                Some(_),
-            ) => node.loop_body.is_some(),
-            _ => false,
-        };
-        let valid_expansion_cause = match (&progress.expansion_cause, &progress.expansion_pause) {
-            (None, None) => true,
-            (
-                Some(NodeDecisionCause::PlanExpansionPaused {
-                    active,
-                    fallback,
-                    fragment_error,
-                    structural_limit,
-                }),
-                pause,
-            ) => {
-                plans::agent(node)
-                    && (pause.is_some() || (*active && *fallback))
-                    && structural_limit.is_none_or(|limit| limit.actual > limit.max)
-                    && fragment_error.is_none_or(|fact| match fact {
-                        PlanFailureFact::Structural(limit) => limit.actual > limit.max,
-                        PlanFailureFact::Envelope(limit) => {
-                            limit.bound > MAX_CHECKPOINT_BYTES as usize
-                        }
-                        _ => true,
-                    })
-            }
-            _ => false,
-        };
-        let valid_truncation_owner = match &progress.truncation_cause {
-            None => true,
-            Some(NodeDecisionCause::CompositeFindingsTruncated { .. }) => node.composite.is_some(),
-            _ => false,
-        };
-        for (invalid, invariant) in [
-            (
-                !valid_expansion_cause,
-                "expansion pause cause must match its node",
-            ),
-            (
-                !valid_loop_cause,
-                "loop pause cause must match its code and loop boundary",
-            ),
-            (
-                !valid_truncation_owner,
-                "truncation cause requires a composite boundary",
-            ),
-            (
-                !valid_compacted_findings(index, plan, checkpoint, &positions),
-                "compacted findings must reconstruct from the node inputs",
-            ),
-            (
-                progress.round != node.round,
-                "round must match expanded plan",
-            ),
-            (
-                progress.children != node.composite_members,
-                "composite children must match expanded plan membership",
-            ),
-            (
-                progress.min_successful.is_some()
-                    && progress.min_successful
-                        != node.composite.as_ref().and_then(|spec| spec.min_successful),
-                "composite minimum must match expanded plan",
-            ),
-            (
-                node.composite.is_some()
-                    && (node.composite_members.is_empty()
-                        || node
-                            .composite_members
-                            .iter()
-                            .any(|id| !node.after_expansion.contains(id))),
-                "composite completion edges must include every member",
-            ),
-            (
-                document.schema_version >= 2 && progress.source_binding != node.source,
-                "source selection must match the expanded plan",
-            ),
-            (
-                progress.new_worktree_base.as_deref().is_some_and(|base| {
-                    node.attempt
-                        .as_ref()
-                        .is_none_or(|spec| spec.new_worktree.is_none())
-                        || base.parse::<provenant_core::GitOid>().is_err()
-                }),
-                "writer provisioning must retain a full commit base",
-            ),
-            (
-                progress.source_commit.is_some()
-                    && node.source.is_none()
-                    && progress.writer_binding.is_none(),
-                "resolved source requires a source binding",
-            ),
-            (
-                progress
-                    .source_commit
-                    .as_ref()
-                    .is_some_and(|commit| commit.parse::<provenant_core::GitOid>().is_err()),
-                "resolved source must be a full commit ID",
-            ),
-            (
-                progress.id != node.id,
-                "row identity must match expanded plan order",
-            ),
-            (
-                progress.worktree != node.worktree,
-                "worktree must match expanded plan",
-            ),
-            (
-                progress.attempts.len() > node.routes.len(),
-                "attempt count must not exceed configured routes",
-            ),
-            (
-                progress
-                    .outputs
-                    .as_ref()
-                    .is_some_and(|outputs| outputs.schema_version != 2),
-                "output schema must be version 2",
-            ),
-        ] {
-            if invalid {
-                return Err(bad(invariant));
-            }
-        }
-        if let Some(condition) = &node.condition {
-            let valid = match (&progress.gate, progress.state) {
-                (None, NodeState::Pending | NodeState::Blocked | NodeState::Skipped) => {
-                    progress.outputs.is_none() && progress.ci.is_none()
-                }
-                (None, NodeState::Running) => {
-                    matches!(node.condition, Some(GateCondition::Ci { .. }))
-                        && progress.ci.as_ref().is_some_and(|ci| {
-                            ci.state == CiState::Pending
-                                && ci.wake_at.is_some()
-                                && ci.pending_observations > 0
-                        })
-                        && progress.outputs.is_none()
-                        && dependency_state(node, plan, checkpoint, &positions).is_none()
-                }
-                (Some(result), NodeState::Succeeded | NodeState::Failed) => {
-                    let mut expected = if matches!(condition, GateCondition::Ci { .. }) {
-                        ci::outputs(result.passed, progress.ci.as_ref())
-                    } else {
-                        gate_outputs(result.passed)
-                    };
-                    // Older checkpoints lack availability evidence; retain
-                    // that unknown state rather than reconstructing it.
-                    if progress
-                        .outputs
-                        .as_ref()
-                        .is_some_and(|outputs| outputs.findings_available.is_none())
-                    {
-                        expected.findings_available = None;
-                    }
-                    result.passed == (progress.state == NodeState::Succeeded)
-                        && result.passed == result.reason.is_none()
-                        && result.on_fail == node.on_fail
-                        && progress.outputs == Some(expected)
-                        && dependency_state(node, plan, checkpoint, &positions).is_none()
-                }
-                _ => false,
-            };
-            if !valid
-                || (progress.state != NodeState::Running
-                    && progress.ci.as_ref().is_some_and(|ci| ci.wake_at.is_some()))
-                || progress
-                    .ci
-                    .as_ref()
-                    .is_some_and(|evidence| !ci::valid_evidence(evidence, condition))
-                || !progress.attempts.is_empty()
-                || progress.advance_error.is_some()
-                || (progress.ci.is_some()
-                    && !matches!(node.condition, Some(GateCondition::Ci { .. })))
-                || (matches!(node.condition, Some(GateCondition::Ci { .. }))
-                    && progress.gate.is_some()
-                    && progress.ci.is_none())
-            {
-                return Err(bad(
-                    "gate evidence must match state, dependencies and condition",
-                ));
-            }
-        } else if progress.gate.is_some() && !repair::is_repair(node) || progress.ci.is_some() {
-            return Err(bad("only gate nodes may carry gate or CI evidence"));
-        }
-        if !when::holds(&node.when) {
-            // A node its own condition skips is a leaf of the live graph: it
-            // never runs, whatever its former parents do.
-            if progress.state != NodeState::Skipped
-                || !progress.attempts.is_empty()
-                || progress.outputs.is_some()
-            {
-                return Err(bad(
-                    "a node skipped by its when condition has no attempts or outputs",
-                ));
-            }
-            continue;
-        }
-        if progress.state == NodeState::Skipped
-            && (dependency_state(node, plan, checkpoint, &positions) != Some(NodeState::Skipped)
-                && !loops::inactive_round(node, plan, checkpoint, &positions)
-                && !repair::inactive_lens(node, plan, checkpoint, &positions)
-                && !patch::skipped_by_patch(checkpoint, &node.id)
-                || !progress.attempts.is_empty()
-                || progress.outputs.is_some())
-        {
-            return Err(bad(
-                "skipped node must have an inactive dependency and no attempts or outputs",
-            ));
-        }
-        if node.loop_body.is_some() {
-            loops::validate_progress(progress, node, checkpoint, &positions)
-                .map_err(|_| bad("loop progress must match round state"))?;
-            continue;
-        }
-        if node.composite.is_some() {
-            composites::validate_progress(progress, node, plan, checkpoint, &positions)
-                .map_err(|_| bad("composite state and outputs must match member settlement"))?;
-            continue;
-        }
-        if node.decide.is_some() {
-            asks::validate_progress(progress, node, checkpoint)
-                .map_err(|_| bad("decision progress must match its ask"))?;
-            continue;
-        }
-        if node.land.is_some() {
-            land::validate_progress(progress, checkpoint)
-                .map_err(|_| bad("land progress must match its record"))?;
-            continue;
-        } else if progress.land.is_some() {
-            return Err(bad("land record requires a land node"));
-        }
-        let requests_review_base =
-            node.access == AccessMode::ReadOnly && node.review_base.is_some();
-        if progress.review_base_pending
-            && (!requests_review_base
-                || progress.review_base.is_some()
-                || !progress.attempts.is_empty())
-        {
-            return Err(bad(
-                "pending review base must belong to an unlaunched reader",
-            ));
-        }
-        if document.schema_version >= 2
-            && requests_review_base
-            && progress.review_base.is_none()
-            && !progress.review_base_pending
-        {
-            return Err(bad("reader must retain its review base binding"));
-        }
-        if progress.writer_binding_pending
-            && (!plans::writer(node)
-                || progress.writer_binding.is_some()
-                || !progress.attempts.is_empty())
-        {
-            return Err(bad(
-                "pending writer binding must belong to an unlaunched writer",
-            ));
-        }
-        if let Some(binding) = &progress.writer_binding {
-            if !plans::writer(node)
-                || !std::path::Path::new(&binding.worktree).is_absolute()
-                || binding.worktree.len() > 4096
-                || binding.head.parse::<provenant_core::GitOid>().is_err()
-                || binding.shared_worktree.as_ref().is_some_and(|subject| {
-                    subject
-                        .worktree_identity()
-                        .is_none_or(|identity| identity.path != binding.worktree)
-                        || binding.source_directory_identity.is_none()
-                })
-                || (node.source.is_none()
-                    && node.continues.is_none()
-                    && progress.source_commit.as_ref() != Some(&binding.head))
-            {
-                return Err(bad(
-                    "writer binding must retain its worktree and initial head",
-                ));
-            }
-        } else if document.schema_version >= 2
-            && plans::writer(node)
-            && !peer_owned_writer(node.access, node.worktree.as_deref(), node.attempt.as_ref())
-            && !progress.writer_binding_pending
-        {
-            return Err(bad("writer must retain its binding"));
-        }
-        if !progress.attempts.is_empty()
-            && node.source.is_some()
-            && progress.source_commit.is_none()
-        {
-            return Err(bad(
-                "launched source-bound node must retain its resolved source commit",
-            ));
-        }
-        if let Some(commit) = &progress.source_commit {
-            let expected = match &node.source {
-                Some(SourceBinding::Commit { commit }) => Some(commit),
-                Some(SourceBinding::Node { node: source }) => positions
-                    .get(source)
-                    .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
-                    .and_then(|outputs| outputs.commit.as_ref()),
-                _ => None,
-            };
-            if matches!(
-                node.source,
-                Some(SourceBinding::Commit { .. } | SourceBinding::Node { .. })
-            ) && expected != Some(commit)
-            {
-                return Err(bad("resolved source commit must match its binding"));
-            }
-        }
-        if node.condition.is_some() {
-            continue;
-        }
-        let mut previous_number = 0;
-        for attempt in progress.recorded_attempts() {
-            if attempt.key.graph_id != plan.graph_id
-                || attempt.key.node_id != node.id
-                || attempt.key.attempt <= previous_number
-            {
-                return Err(bad(
-                    "attempts must retain distinct WorkKey identities for this node",
-                ));
-            }
-            previous_number = attempt.key.attempt;
-        }
-        for (index, attempt) in progress.attempts.iter().enumerate() {
-            if document.schema_version >= 2 && attempt.input_manifest.is_none() {
-                return Err(bad("attempt must retain its input manifest"));
-            }
-            if let Some(manifest) = &attempt.input_manifest {
-                let count: usize = node.inputs.iter().map(|input| input.outputs.len()).sum();
-                if manifest.schema_version != 1
-                    || manifest.inputs.len() > MANIFEST_INPUT_LIMIT
-                    || manifest.inputs.len().saturating_add(manifest.omitted) != count
-                    || manifest.source_commit != progress.source_commit
-                    || manifest.review_base != progress.review_base
-                    || manifest
-                        .inputs
-                        .iter()
-                        .zip(
-                            node.inputs.iter().flat_map(|input| {
-                                input.outputs.iter().map(move |kind| (input, kind))
-                            }),
-                        )
-                        .any(|(evidence, (input, kind))| {
-                            evidence.producer_node != input.node
-                                || evidence.kind != *kind
-                                || evidence.required != input.required_outputs.contains(kind)
-                        })
-                    || (attempt.state != AttemptState::Starting
-                        && manifest
-                            .inputs
-                            .iter()
-                            .any(|input| input.file_delivery == InputDelivery::Pending))
-                {
-                    return Err(bad(
-                        "attempt input manifest must match its selected inputs and pins",
-                    ));
-                }
-            }
-            if attempt.key.graph_id != plan.graph_id
-                || attempt.key.node_id != node.id
-                || usize::from(attempt.key.route_index) != index
-                || attempt.route != node.routes[index]
-                || (attempt.review_substitution
-                    && (index == 0
-                        || !(review_substitution(node, &progress.attempts[index - 1])
-                            || review_preparation_substitution(
-                                node,
-                                &progress.attempts[index - 1],
-                            ))))
-                || (index > 0
-                    && review_substitution(node, &progress.attempts[index - 1])
-                    && !attempt.review_substitution)
-                || (attempt.state == AttemptState::Terminal) != attempt.outcome.is_some()
-                || (index + 1 < progress.attempts.len()
-                    && (attempt.state != AttemptState::Terminal
-                        || !(review_substitution(node, attempt)
-                            || attempt.outcome.is_some_and(|outcome| {
-                                fallback_candidate(outcome, node.access, attempt.launched)
-                            }))))
-            {
-                return Err(bad(
-                    "attempt key, route, terminal outcome and fallback order must match plan",
-                ));
-            }
-        }
-        let last = progress.attempts.last();
-        let state_is_consistent = match progress.state {
-            NodeState::Pending | NodeState::Skipped => progress.attempts.is_empty(),
-            NodeState::Blocked => {
-                progress.attempts.is_empty()
-                    || (matches!(
-                        progress.advance_error_code.as_deref(),
-                        Some("launch_refused" | "launch_retry_exhausted")
-                    ) && last.is_some_and(|attempt| {
-                        attempt.state != AttemptState::Terminal && attempt.attempt_ref.is_none()
-                    }))
-                    || (progress.advance_error_code.as_deref()
-                        == Some("steer_continuation_refused")
-                        && progress.advance_error.is_some()
-                        && last.is_some_and(|attempt| {
-                            attempt.state == AttemptState::Terminal && attempt.attempt_ref.is_some()
-                        }))
-            }
-            NodeState::Running => match last {
-                Some(attempt) if attempt.state != AttemptState::Terminal => true,
-                Some(attempt) => {
-                    (review_substitution(node, attempt)
-                        || attempt.outcome.is_some_and(|outcome| {
-                            fallback_candidate(outcome, node.access, attempt.launched)
-                        }))
-                        && progress.attempts.len() < node.routes.len()
-                }
-                // Writer binding and provisioning wait before the first
-                // attempt exists. Only the bounded contention state emitted by
-                // defer_launch_contention may replay as Running here.
-                None => {
-                    plans::writer(node)
-                        && progress.writer_binding_pending
-                        && progress.outputs.is_none()
-                        && progress.advance_error.is_none()
-                        && progress
-                            .advance_owner_code
-                            .as_deref()
-                            .is_some_and(super::next_attempt::launch_contention_code)
-                        && progress.launch_retry.as_ref().is_some_and(|retry| {
-                            retry.failures > 0
-                                && matches!((retry.wake_at, retry.deadline),
-                                    (Some(wake), Some(deadline)) if wake <= deadline)
-                                && retry.reason.as_ref().is_some_and(|reason| {
-                                    !reason.is_empty() && reason.len() <= MAX_ADVANCE_ERROR_BYTES
-                                })
-                        })
-                }
-            },
-            // A planner whose failure was settled by its static fallback is
-            // succeeded though its last attempt failed (or never launched).
-            NodeState::Succeeded => {
-                last.is_some_and(|attempt| {
-                    attempt.state == AttemptState::Terminal
-                        && matches!(
-                            attempt.outcome,
-                            Some(AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired)
-                        )
-                }) || fallback_settled(node, progress, document, checkpoint)
-            }
-            NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {
-                attempt.state == AttemptState::Terminal
-                    && attempt
-                        .outcome
-                        .is_some_and(|outcome| outcome != AttemptOutcome::Succeeded)
-            }),
-            NodeState::Failed => last.is_some_and(|attempt| {
-                attempt.state == AttemptState::Terminal
-                    && match attempt.outcome {
-                        Some(
-                            AttemptOutcome::TaskFailed
-                            | AttemptOutcome::OtherFailure
-                            | AttemptOutcome::ReviewRequired,
-                        ) => true,
-                        Some(outcome) if outcome != AttemptOutcome::Succeeded => {
-                            !fallback_candidate(outcome, node.access, attempt.launched)
-                                || progress.attempts.len() == node.routes.len()
-                        }
-                        _ => false,
-                    }
-            }),
-        };
-        if !state_is_consistent {
-            return Err(bad(
-                "node state must agree with terminal attempt outcome or validated planner fallback",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// A planner settled by its static fallback: it recorded the reason and
-/// persisted exactly the stage its fallback spec derives from the document.
-fn fallback_settled(
-    node: &PlannedNode,
-    progress: &NodeProgress,
-    document: &GraphDocument,
-    checkpoint: &GraphCheckpoint,
-) -> bool {
-    let Some(spec) = node.plan.as_ref().filter(|spec| spec.fallback.is_some()) else {
-        return false;
-    };
-    progress
-        .outputs
-        .as_ref()
-        .is_some_and(|outputs| outputs.plan.is_some())
-        && plans::fallback_expansion_for_generation(
-            &node.id,
-            spec,
-            document,
-            node.require_skill_location,
-            progress.retry_generation,
-        )
-        .is_ok_and(|derived| {
-            checkpoint
-                .expansions
-                .iter()
-                .any(|expansion| expansion.source == node.id && *expansion == derived)
-        })
-}
+mod checkpoint;
+pub(super) use checkpoint::validate_checkpoint;

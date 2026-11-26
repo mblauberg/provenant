@@ -393,6 +393,14 @@
       "writer_provision_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "120", "effect": "Independent allowance for provisioning each writer in a graph; also bounds how long a launch waits for a contended writer lock."}
     }
   },
+  "host_delivery_queue_settings": {
+    "path": "domains.fabric.queue",
+    "settings": {
+      "max_parallel": {"type": "int", "allowed": "1 to 64", "min": 1, "max": 64, "default": "4", "effect": "Maximum number of active delivery item graphs."},
+      "ci_slots": {"type": "int", "allowed": "0 to 64", "min": 0, "max": 64, "default": "1", "effect": "Admission cap for delivery queue CI observations; zero disables the cap."},
+      "prep_retries": {"type": "int", "allowed": "0 to 64", "min": 0, "max": 64, "default": "2", "effect": "Number of queue item launch preparation retries before parking."}
+    }
+  },
   "host_model_policy_settings": {
     "path": "domains.routing.model_policy",
     "settings": {
@@ -477,6 +485,18 @@
         "effect": "Read-and-execute directory subtrees relative to the primary checkout. Entries escaping that checkout, missing, protected, credential or writable targets are ignored with a warning naming the configuration key."
       },
       "projects.{project}.user_skills": {"type": "enum", "default": "host user_skills", "effect": "Override host user skill discovery for this project."}
+    }
+  },
+  "native_hook_settings": {
+    "path": "domains.hooks",
+    "settings": {
+      "timeout_secs": {
+        "type": "int",
+        "min": 1,
+        "max": 300,
+        "default": 10,
+        "effect": "Timeout in seconds written into every installed chair hook (chair-start, chair-stop, chair-prompt) and the chair switch settings, with its source shown in `provenant doctor`. The hook runtime uses one local budget of 60% of this value, warns and records an overrun before the host kills the hook, and returns before the budget expires. Inspect value, default and origin with config show or config schema."
+      }
     }
   },
   "host_lane_build_settings": {

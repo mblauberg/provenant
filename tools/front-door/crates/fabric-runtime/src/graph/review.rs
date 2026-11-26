@@ -6,6 +6,91 @@ use super::*;
 /// tolerates only a lone verdict after the handoff, so prompts never invite it.
 pub(super) const VERDICT_THEN_HANDOFF: &str = "After all findings and prose, write exactly one verdict line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. Then put the shared closed handoff block last, with nothing after it.";
 
+/// A delivery review is acceptable only with complete structured evidence.
+/// Keep the original verdict in the record; this policy affects the gate only.
+pub(super) fn delivery_matches(
+    policy: &DeliveryReviewSpec,
+    outputs: &NodeOutputs,
+    expected: &str,
+) -> bool {
+    use provenant_records::workflow::ReviewVerdict;
+    if ReviewVerdict::from_token(expected) != Some(ReviewVerdict::Approve) {
+        return outputs.verdict.as_deref().is_some_and(|actual| {
+            match (
+                ReviewVerdict::from_token(actual),
+                ReviewVerdict::from_token(expected),
+            ) {
+                (Some(actual), Some(expected)) => actual == expected,
+                _ => actual == expected,
+            }
+        });
+    }
+    if outputs.partial
+        || outputs.findings_available != Some(true)
+        || outputs.verdict_error.is_some()
+        || outputs.findings.iter().any(|finding| {
+            severity_class(&finding.severity) == Some(SeverityClass::Blocking)
+                || repair::blocks_acceptance(finding)
+        })
+    {
+        return false;
+    }
+    match outputs
+        .verdict
+        .as_deref()
+        .and_then(ReviewVerdict::from_token)
+    {
+        Some(ReviewVerdict::Approve) => true,
+        Some(ReviewVerdict::Inconclusive) => policy.accept_inconclusive_without_blocking,
+        _ => false,
+    }
+}
+
+pub(super) fn malformed_delivery_evidence_error(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some(
+            "review_verdict_invalid"
+                | "review_findings_invalid"
+                | "review_triage_missing"
+                | "review_verdict_conflict"
+                | "review_propagation_invalid"
+                | "findings_required"
+                | "disposition_overflow_incomplete"
+                | "disposition_overflow_inconsistent"
+                | "verification_invalid"
+                | "verification_incomplete"
+        )
+    )
+}
+
+/// A composite delivery-review boundary has no attempt settlement to own its
+/// evidence failure. Treat failed coverage and partial or unparseable aggregate
+/// evidence as malformed so the graph can park the boundary through the inbox.
+/// A complete, parseable FAIL remains a review decision and can route to repair.
+pub(super) fn malformed_composite_delivery_evidence(
+    node: &PlannedNode,
+    progress: &NodeProgress,
+) -> bool {
+    if node.composite.is_none() || node.delivery_review.is_none() {
+        return false;
+    }
+    match progress.state {
+        NodeState::Pending | NodeState::Running | NodeState::Skipped => false,
+        NodeState::Failed | NodeState::Blocked => true,
+        NodeState::Succeeded => progress.outputs.as_ref().is_none_or(|outputs| {
+            outputs.partial
+                || outputs.findings_available != Some(true)
+                || outputs.verdict_error.is_some()
+                || outputs
+                    .verdict
+                    .as_deref()
+                    .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+                    .is_none()
+        }),
+    }
+}
+
 pub(super) fn partial(outputs: &NodeOutputs) -> bool {
     outputs.partial
 }
@@ -78,7 +163,10 @@ pub(super) fn contract_error(
     outputs: &NodeOutputs,
 ) -> Option<(&'static str, String)> {
     let repair_triage = node.repair_triage;
-    if template::review_behaviour(node).is_none() && !repair_triage {
+    if template::review_behaviour(node).is_none()
+        && node.delivery_review.is_none()
+        && !repair_triage
+    {
         return None;
     }
     // ResultCapture has already counted `VERDICT:` lines outside fenced
@@ -405,4 +493,55 @@ pub(super) fn composite_review(
                 .as_ref()
                 .is_some_and(|spec| composite_review(spec, plan, positions))
     })
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+
+    #[test]
+    fn delivery_review_requires_complete_nonblocking_evidence() {
+        let mut policy = DeliveryReviewSpec::default();
+        let mut outputs = NodeOutputs {
+            verdict: Some("VERDICT: INCONCLUSIVE".into()),
+            findings_available: Some(true),
+            ..Default::default()
+        };
+        assert!(delivery_matches(&policy, &outputs, "VERDICT: PASS"));
+        policy.accept_inconclusive_without_blocking = false;
+        assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
+        policy.accept_inconclusive_without_blocking = true;
+        outputs.findings_available = None;
+        assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
+        outputs.findings_available = Some(true);
+        outputs.partial = true;
+        assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
+        outputs.partial = false;
+        outputs.findings.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"F1", "severity":"blocking", "file":"a.rs", "line":1,
+                "summary":"defect", "status":"open"
+            }))
+            .unwrap(),
+        );
+        assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
+        outputs.findings.clear();
+        outputs.verdict = Some("VERDICT: FAIL".into());
+        assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
+    }
+
+    #[test]
+    fn delivery_review_evidence_parks_contract_errors_but_not_valid_failures() {
+        assert!(malformed_delivery_evidence_error(Some(
+            "review_verdict_invalid"
+        )));
+        assert!(malformed_delivery_evidence_error(Some(
+            "review_findings_invalid"
+        )));
+        assert!(malformed_delivery_evidence_error(Some(
+            "review_triage_missing"
+        )));
+        assert!(!malformed_delivery_evidence_error(None));
+        assert!(!malformed_delivery_evidence_error(Some("review_failed")));
+    }
 }

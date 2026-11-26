@@ -503,6 +503,7 @@ impl Owner<'_> {
         if context.plan.plan.candidate == CandidateKind::Single {
             settings.batch_size = 1;
         }
+        let delivery_queue = context.request.delivery_queue;
         policy.landing = Some(context);
         let numbers: Vec<u64> = members.iter().map(|member| member.pr).collect();
         let pins: BTreeMap<u64, Pin> = members
@@ -537,6 +538,7 @@ impl Owner<'_> {
                 gate: &gate,
                 shadow: self.shadow,
                 state: self.state,
+                delivery_queue,
                 approvals: Approvals::new(&settings.approval_sources, &reviews)
                     .governed(settings.approval_tier, &exempt, None)
                     .with_carry(self.state, &settings.approval_carry)
@@ -1236,6 +1238,7 @@ mod tests {
                 &mut world.gate,
                 &mut world.alarms,
                 driver::Request {
+                    delivery_queue: false,
                     numbers: &[1],
                     target: &snapshot.target,
                     settings: &world.settings,
