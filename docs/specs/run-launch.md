@@ -296,8 +296,16 @@ with `disable = [...]` and a `reason`; a later layer replaces the whole entry by
 an unknown adapter or capability name warns and is skipped. Widening is not expressible.
 `on_gap.model`, `on_gap.effort` and `on_gap.image_input` set a degradable gap to `warn`, `off`
 or `refuse`; the `policy.LAUNCH_MODEL_UNSUPPORTED`, `policy.LAUNCH_EFFORT_UNSUPPORTED` and
-`policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED` rows set the same action globally, warn by default,
-and an adapter entry overrides the policy for that adapter. Write, network, resume and
+`policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED` rows set the same action for every adapter. One
+resolver decides each gap. Precedence, lowest first: the compiled default (`warn`); the policy
+row, layered host, project and dispatch by the policy table; the adapter's `on_gap` key, host
+then project. The adapter entry is the narrower setting, so it wins for that adapter at any
+layer, and the policy candidate it replaced is reported as shadowed. A gap names the layer and
+setting that chose its action; a default names both settings that can change it, for example
+`warn by default; set policy.LAUNCH_EFFORT_UNSUPPORTED or [[adapter_capabilities]]
+on_gap.effort`. `provenant adapter capabilities` reports each adapter's effective rules, and
+`run --explain` reports, per node and pinned adapter, the gaps that launch would meet with
+those sources. Write, network, resume and
 skill-location gaps always refuse because they are authority and continuity boundaries, so an
 `on_gap` key for them warns and is skipped. Admission and graph validation read the row facts;
 routing and preparation apply the overlay and gap policy before the provider starts.

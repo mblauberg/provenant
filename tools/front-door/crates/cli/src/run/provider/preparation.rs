@@ -1603,7 +1603,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         reason: "fixture limitation",
         source: provenant_records::ADAPTER_ROW_SOURCE,
         warn: true,
-        origin: provenant_records::GapOrigin::Default,
+        action_source: provenant_records::Source::default(),
     })
     .into_refusal();
     assert_eq!(unsupported.boundary_class, BoundaryClass::None);

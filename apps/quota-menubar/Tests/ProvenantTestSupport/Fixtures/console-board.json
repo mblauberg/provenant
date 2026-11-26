@@ -45,6 +45,7 @@
             "delivery_id": null,
             "exit_code": null,
             "finished_at": null,
+            "first_output_at": null,
             "git_grants_digest": null,
             "graph": "board-fixture",
             "head": null,

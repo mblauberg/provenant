@@ -396,6 +396,48 @@
       "measurement_records": {"type": "int", "allowed": "1 to 20000 attempts", "min": 1, "max": 20000, "default": "2000", "effect": "At most this many terminal attempts are inspected for the capability matrix; out-of-range values warn and use the compiled default."}
     }
   },
+  "adapter_capabilities_settings": {
+    "path": "adapter_capabilities",
+    "where": "`[[adapter_capabilities]]` entries in the host or project configuration (a project entry replaces the host entry for the same adapter)",
+    "settings": {
+      "adapter": {
+        "type": "string",
+        "allowed": "an adapter id from `provenant adapter capabilities`",
+        "default": "required",
+        "effect": "The adapter this entry narrows. An unknown adapter warns and the entry is skipped"
+      },
+      "disable": {
+        "type": "string_list",
+        "allowed": "model, effort, image_input, resume, write, live_input",
+        "default": "[]",
+        "effect": "Report these capabilities as unsupported for the adapter, with this entry's reason and source. A row's fact cannot be widened; an unknown name warns and is skipped"
+      },
+      "reason": {
+        "type": "string",
+        "allowed": "free text",
+        "default": "none",
+        "effect": "Why the entry narrows the adapter; shown by `provenant adapter capabilities`"
+      },
+      "on_gap.model": {
+        "type": "enum",
+        "allowed": "warn, off, refuse",
+        "default": "policy.LAUNCH_MODEL_UNSUPPORTED (warn)",
+        "effect": "Action when a launch asks this adapter for a model it does not support. Wins over policy.LAUNCH_MODEL_UNSUPPORTED for this adapter; the replaced policy value is shown as shadowed"
+      },
+      "on_gap.effort": {
+        "type": "enum",
+        "allowed": "warn, off, refuse",
+        "default": "policy.LAUNCH_EFFORT_UNSUPPORTED (warn)",
+        "effect": "Action when a launch asks this adapter for an effort it does not support. Wins over policy.LAUNCH_EFFORT_UNSUPPORTED for this adapter; the replaced policy value is shown as shadowed"
+      },
+      "on_gap.image_input": {
+        "type": "enum",
+        "allowed": "warn, off, refuse",
+        "default": "policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED (warn)",
+        "effect": "Action when a launch attaches images for an adapter without image input. Wins over policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED for this adapter; the replaced policy value is shown as shadowed"
+      }
+    }
+  },
   "host_graph_settings": {
     "path": "domains.fabric.graph",
     "settings": {

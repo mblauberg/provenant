@@ -200,10 +200,12 @@ fn human(value: &Value) -> String {
             ("effort", "effort"),
             ("image input", "image_input"),
         ] {
+            let rule = &adapter["on_gap"][key];
             lines.push(format!(
-                "  on_gap {field}: {} ({})",
-                adapter["on_gap"][key]["action"].as_str().unwrap_or("-"),
-                adapter["on_gap"][key]["origin"].as_str().unwrap_or("-")
+                "  on_gap {field}: {} (layer={} origin={})",
+                rule["action"].as_str().unwrap_or("-"),
+                rule["layer"].as_str().unwrap_or("-"),
+                rule["origin"].as_str().unwrap_or("-")
             ));
         }
         let compatibility = &adapter["compatibility"];
@@ -288,9 +290,9 @@ mod tests {
                 },
                 "overlay": null,
                 "on_gap": {
-                    "model": {"action": "warn", "origin": "default"},
-                    "effort": {"action": "warn", "origin": "default"},
-                    "image_input": {"action": "warn", "origin": "default"}
+                    "model": {"action": "warn", "layer": "default", "origin": "policy.LAUNCH_MODEL_UNSUPPORTED", "shadowed": []},
+                    "effort": {"action": "warn", "layer": "default", "origin": "policy.LAUNCH_EFFORT_UNSUPPORTED", "shadowed": []},
+                    "image_input": {"action": "warn", "layer": "default", "origin": "policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED", "shadowed": []}
                 },
                 "compatibility": {"status": "version_unread", "version": null, "layer": "default", "origin": null},
                 "measurements": null
@@ -301,6 +303,11 @@ mod tests {
         assert!(text.contains("model: no —"));
         assert!(text.contains("effort: yes"));
         assert!(text.contains("compatibility: version_unread"));
+        assert!(
+            text.contains(
+                "on_gap model: warn (layer=default origin=policy.LAUNCH_MODEL_UNSUPPORTED)"
+            )
+        );
         assert!(text.contains("measurements: no samples"));
     }
 }

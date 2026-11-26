@@ -762,12 +762,12 @@ impl Targets {
                 if !self.configured_homes.contains(&target.harness) {
                     self.environment_homes.insert(target.harness);
                     let instruction = target
-                        .instruction
+                        .instruction_file
                         .as_ref()
                         .and_then(|p| p.file_name())
                         .map(|n| base.join(n));
                     target.skills_dir = base.join("skills");
-                    target.instruction = instruction;
+                    target.instruction_file = instruction;
                     target.hook_file = default_hooks(target.harness, base);
                 }
                 if !self.configured_homes.contains(&target.harness)
@@ -810,8 +810,8 @@ pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serial
                     targets.configured_homes.insert(target.harness);
                     target.skills_dir = base.join("skills");
                     target.hook_file = default_hooks(target.harness, base);
-                    target.instruction = target
-                        .instruction
+                    target.instruction_file = target
+                        .instruction_file
                         .as_ref()
                         .and_then(|p| p.file_name())
                         .map(|n| base.join(n));

@@ -75,8 +75,9 @@ impl Layer {
 
 /// A layer plus the exact place, for example
 /// `~/.config/provenant/config.toml#lanes.writer_dirty`,
-/// `.provenant/ports.json#verify.remote` or `--max-turns`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `.provenant/ports.json#verify.remote` or `--max-turns`. The default is the
+/// compiled default with no named place.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Source {
     /// The layer that set the value.
     pub layer: Layer,

@@ -159,7 +159,7 @@ pub struct HarnessTarget {
     pub skills_dir: PathBuf,
     pub config_file: PathBuf,
     pub hook_file: Option<PathBuf>,
-    pub instruction: Option<PathBuf>,
+    pub instruction_file: Option<PathBuf>,
 }
 /// A registered account's configuration directory. The process edge reads the
 /// registrations; install, sync and `check install` keep every one identical.
@@ -245,7 +245,7 @@ impl HarnessTarget {
             config_file: crate::harness::default_config(harness, home, base),
             hook_file: crate::harness::default_hooks(harness, base),
             skills_dir: base.join("skills"),
-            instruction: instruction.map(|name| base.join(name)),
+            instruction_file: instruction.map(|name| base.join(name)),
         }
     }
 }
@@ -327,7 +327,11 @@ impl Targets {
             target.skills_dir = destination(&target.skills_dir)?;
             target.config_file = destination(&target.config_file)?;
             target.hook_file = target.hook_file.as_deref().map(destination).transpose()?;
-            target.instruction = target.instruction.as_deref().map(destination).transpose()?;
+            target.instruction_file = target
+                .instruction_file
+                .as_deref()
+                .map(destination)
+                .transpose()?;
         }
         let global = destination(&self.shared_instruction)?;
         if self
@@ -389,7 +393,7 @@ impl Targets {
             }
             for path in std::iter::once(&h.config_file)
                 .chain(h.hook_file.iter())
-                .chain(h.instruction.iter())
+                .chain(h.instruction_file.iter())
             {
                 if !file_paths.insert(path.clone()) {
                     return Err(InstallError::Conflict(path.clone()));
@@ -400,7 +404,7 @@ impl Targets {
             if let Some(path) = &h.hook_file {
                 normal_absolute(path)?;
             }
-            if let Some(p) = &h.instruction {
+            if let Some(p) = &h.instruction_file {
                 normal_absolute(p)?;
             }
         }
@@ -473,8 +477,8 @@ impl Targets {
                         .as_ref()
                         .map(AbsolutePath::to_path_buf)
                         .transpose()?,
-                    instruction: target
-                        .instruction
+                    instruction_file: target
+                        .instruction_file
                         .as_ref()
                         .map(AbsolutePath::to_path_buf)
                         .transpose()?,
@@ -531,7 +535,7 @@ fn recorded_home(receipt: &InstallReceipt, state_root: &Path) -> Result<PathBuf,
             Some(&target.skills_dir),
             Some(&target.config_file),
             target.hook_file.as_ref(),
-            target.instruction.as_ref(),
+            target.instruction_file.as_ref(),
         ];
         for path in recorded.into_iter().flatten() {
             paths.push(path.to_path_buf()?);
@@ -910,7 +914,7 @@ fn desired(
                 "skill".into(),
             )?;
         }
-        if let Some(path) = &target.instruction
+        if let Some(path) = &target.instruction_file
             && release.files.contains_key(Path::new(INSTRUCTION_ASSET))
         {
             insert(
@@ -1393,8 +1397,8 @@ pub fn plan_install(
                     .as_deref()
                     .map(AbsolutePath::new)
                     .transpose()?,
-                instruction: target
-                    .instruction
+                instruction_file: target
+                    .instruction_file
                     .as_deref()
                     .map(AbsolutePath::new)
                     .transpose()?,
@@ -2137,7 +2141,7 @@ fn decode_receipt_shape(bytes: &[u8]) -> Result<(InstallReceipt, PathBuf), Insta
         if let Some(path) = &target.hook_file {
             normal_absolute(&path.to_path_buf()?)?;
         }
-        if let Some(path) = &target.instruction {
+        if let Some(path) = &target.instruction_file {
             normal_absolute(&path.to_path_buf()?)?;
         }
     }
@@ -2271,7 +2275,7 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
             Some(&target.skills_dir),
             Some(&target.config_file),
             target.hook_file.as_ref(),
-            target.instruction.as_ref(),
+            target.instruction_file.as_ref(),
         ];
         for path in target_paths.into_iter().flatten() {
             let path = path.to_path_buf()?;
@@ -2327,7 +2331,7 @@ fn distinct_target_paths<'a>(
     let mut seen = BTreeSet::new();
     for target in targets {
         let instruction = target
-            .instruction
+            .instruction_file
             .as_ref()
             .map(AbsolutePath::to_path_buf)
             .transpose()?;
@@ -2476,7 +2480,7 @@ fn permitted_for(
         return Ok(true);
     }
     if entry.selector == "instruction"
-        && let Some(instruction) = &target.instruction
+        && let Some(instruction) = &target.instruction_file
     {
         let instruction = instruction.to_path_buf()?;
         return Ok(if path == instruction {

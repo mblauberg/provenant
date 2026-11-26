@@ -580,28 +580,42 @@ mod gap_policy_tests {
                 };
                 let expected_warn =
                     expected_action == LaunchAction::Refuse || action == GapAction::Warn;
+                let key = field.on_gap_key().unwrap();
+                let entry_origin =
+                    format!("config.toml#adapter_capabilities[adapter=command].on_gap.{key}");
+                // The entry wins over the policy floor and records it as shadowed.
+                assert_eq!(
+                    entry_request.gap_policy.rule(field).unwrap().shadowed,
+                    [crate::Sourced {
+                        value: GapAction::Warn,
+                        source: Source {
+                            layer: Layer::Default,
+                            origin: Some(format!("policy.{}", policy_code(field))),
+                        },
+                    }]
+                );
                 for (request, origin) in [
-                    (policy_request, GapOrigin::Policy),
-                    (entry_request, GapOrigin::AdapterEntry),
+                    (policy_request, format!("policy.{}", policy_code(field))),
+                    (entry_request, entry_origin),
                 ] {
                     let check = spec.check_launch(&request);
                     let gap = &check.gaps[0];
                     assert_eq!(gap.field, field);
                     assert_eq!(gap.action, expected_action, "{field:?} {action:?}");
                     assert_eq!(gap.warn, expected_warn, "{field:?} {action:?}");
-                    assert_eq!(gap.origin, origin, "{field:?} {action:?}");
+                    assert_eq!(
+                        gap.action_source,
+                        Source {
+                            layer: Layer::Host,
+                            origin: Some(origin.clone()),
+                        },
+                        "{field:?} {action:?}"
+                    );
                     let text = gap.to_string();
-                    match origin {
-                        GapOrigin::Policy => assert!(
-                            text.contains(&format!("policy.{}", policy_code(field))),
-                            "{text}"
-                        ),
-                        GapOrigin::AdapterEntry => assert!(
-                            text.contains("action set by an adapter_capabilities entry"),
-                            "{text}"
-                        ),
-                        GapOrigin::Default => panic!("origin set by a layer"),
-                    }
+                    assert!(
+                        text.contains(&format!("action set by {origin} (host configuration)")),
+                        "{text}"
+                    );
                     if expected_action == LaunchAction::Refuse {
                         assert_eq!(check.refusal().map(|gap| gap.field), Some(field));
                     } else {
@@ -629,8 +643,17 @@ mod gap_policy_tests {
                 .gaps[0];
             assert_eq!(gap.action, field.default_action());
             assert!(gap.warn, "{gap:?}");
-            assert_eq!(gap.origin, GapOrigin::Default);
-            assert!(!gap.to_string().contains("action set by"), "{}", gap);
+            assert_eq!(gap.action_source.layer, Layer::Default);
+            // A default names the two settings that can change it.
+            let text = gap.to_string();
+            assert!(
+                text.ends_with(&format!(
+                    "; warn by default; set policy.{} or [[adapter_capabilities]] on_gap.{}",
+                    policy_code(field),
+                    field.on_gap_key().unwrap()
+                )),
+                "{text}"
+            );
         }
     }
 
@@ -696,8 +719,12 @@ mod gap_policy_tests {
         for gap in &check.gaps {
             assert_eq!(gap.action, LaunchAction::Refuse);
             assert!(gap.warn, "{gap:?}");
-            assert_eq!(gap.origin, GapOrigin::Default);
-            assert!(!gap.to_string().contains("action set by"), "{}", gap);
+            assert_eq!(gap.action_source, Source::default());
+            let text = gap.to_string();
+            assert!(
+                !text.contains("action set by") && !text.contains("by default; set"),
+                "{text}"
+            );
         }
     }
 
@@ -1119,7 +1146,11 @@ mod batch_invariant_tests {
                     .find(|gap| gap.field == field)
                     .unwrap_or_else(|| panic!("{field:?} produced no gap"));
                 assert_eq!(gap.action, LaunchAction::Refuse, "{field:?} {action:?}");
-                assert_eq!(gap.origin, GapOrigin::Default, "{field:?} {action:?}");
+                assert_eq!(
+                    gap.action_source,
+                    crate::Source::default(),
+                    "{field:?} {action:?}"
+                );
                 assert!(gap.warn, "{gap:?}");
             }
         }
@@ -1175,6 +1206,30 @@ mod batch_invariant_tests {
         for key in ["measurements", "measurement_samples", "measurement_records"] {
             let rule = domain
                 .get(key)
+                .unwrap_or_else(|| panic!("{key} undocumented"));
+            assert!(!rule["default"].is_null(), "{key}");
+            assert!(
+                !rule["allowed"].as_str().unwrap_or_default().is_empty(),
+                "{key}"
+            );
+        }
+        // Every [[adapter_capabilities]] key, including each settable on_gap
+        // field, is in the registry the reference and config tools read.
+        let entries = registry["adapter_capabilities_settings"]["settings"]
+            .as_object()
+            .expect("adapter capability entry settings");
+        let keys = ["adapter", "disable", "reason"]
+            .map(str::to_owned)
+            .into_iter()
+            .chain(
+                LaunchField::DEGRADABLE
+                    .iter()
+                    .filter_map(|field| field.on_gap_key())
+                    .map(|key| format!("on_gap.{key}")),
+            );
+        for key in keys {
+            let rule = entries
+                .get(&key)
                 .unwrap_or_else(|| panic!("{key} undocumented"));
             assert!(!rule["default"].is_null(), "{key}");
             assert!(

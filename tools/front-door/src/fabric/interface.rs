@@ -2635,12 +2635,24 @@ impl Factory {
                     }));
                 }
             }
+            let capability_gaps = provenant_cli::adapter_capabilities::explain_capability_gaps(
+                &self.context.roots,
+                &self.context.identity.project.to_string(),
+                &config,
+                &expanded.nodes,
+            )
+            .map_err(|reason| FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason,
+            })?;
             let source_admission = self.explain_source_admission(&expanded.nodes)?;
             let refused = source_admission
                 .iter()
                 .any(|row| row["status"] == "refused");
             return Ok(json!({
                 "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
+                "capability_gaps": capability_gaps,
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,

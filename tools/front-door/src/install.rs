@@ -1106,8 +1106,8 @@ fn detected_batches(
                             .hook_file
                             .map(|path| path.to_path_buf())
                             .transpose()?,
-                        instruction: record
-                            .instruction
+                        instruction_file: record
+                            .instruction_file
                             .map(|path| path.to_path_buf())
                             .transpose()?,
                     })

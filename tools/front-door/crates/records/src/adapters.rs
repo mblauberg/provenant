@@ -889,7 +889,7 @@ pub struct Capabilities {
     pub session_reference: AdapterFact<SessionReference>,
     pub caveats: &'static [Caveat],
 }
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct LaunchRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
@@ -927,6 +927,26 @@ impl LaunchField {
             Self::SkillLocation => "skill location",
         }
     }
+    /// The fields whose gap action an owner may set.
+    pub const DEGRADABLE: [Self; 3] = [Self::Model, Self::Effort, Self::ImageInput];
+    /// The policy rule that sets this field's gap action.
+    pub const fn policy_code(self) -> Option<&'static str> {
+        match self {
+            Self::Model => Some("LAUNCH_MODEL_UNSUPPORTED"),
+            Self::Effort => Some("LAUNCH_EFFORT_UNSUPPORTED"),
+            Self::ImageInput => Some("LAUNCH_IMAGE_INPUT_UNSUPPORTED"),
+            _ => None,
+        }
+    }
+    /// The `[[adapter_capabilities]] on_gap` key for this field.
+    pub const fn on_gap_key(self) -> Option<&'static str> {
+        match self {
+            Self::Model => Some("model"),
+            Self::Effort => Some("effort"),
+            Self::ImageInput => Some("image_input"),
+            _ => None,
+        }
+    }
     pub fn default_action(self) -> LaunchAction {
         match self {
             Self::Model | Self::Effort | Self::ImageInput => LaunchAction::Degrade,
@@ -944,8 +964,9 @@ pub struct LaunchGap {
     /// Whether the caller should surface this gap as a warning. Refusals always
     /// warn; a degrades-only gap can be silenced by `off`.
     pub warn: bool,
-    /// Which layer chose the action, so the text can name that layer.
-    pub origin: GapOrigin,
+    /// The layer and setting that chose the action. A refuse-only field
+    /// always carries the compiled default: no setting can change it.
+    pub action_source: crate::Source,
 }
 impl std::fmt::Display for LaunchGap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -956,11 +977,40 @@ impl std::fmt::Display for LaunchGap {
             self.field.name(),
             self.reason,
             self.source,
-            self.origin.suffix(self.field)
+            self.action_suffix()
         )
     }
 }
 impl std::error::Error for LaunchGap {}
+impl LaunchGap {
+    /// The setting that chose a degradable field's action, or, for the
+    /// compiled default, the two settings that can change it. A refuse-only
+    /// field names none: no setting changes it.
+    fn action_suffix(&self) -> String {
+        let (Some(code), Some(key)) = (self.field.policy_code(), self.field.on_gap_key()) else {
+            return String::new();
+        };
+        if self.action_source.layer == crate::Layer::Default {
+            let action = match (self.action, self.warn) {
+                (LaunchAction::Refuse, _) => GapAction::Refuse,
+                (_, true) => GapAction::Warn,
+                (_, false) => GapAction::Off,
+            };
+            return format!(
+                "; {} by default; set policy.{code} or [[adapter_capabilities]] on_gap.{key}",
+                action.as_str()
+            );
+        }
+        format!(
+            "; action set by {} ({})",
+            self.action_source
+                .origin
+                .as_deref()
+                .unwrap_or("an unnamed setting"),
+            self.action_source.layer.description()
+        )
+    }
+}
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchCheck {
     pub gaps: Vec<LaunchGap>,
@@ -1024,50 +1074,48 @@ pub enum GapAction {
     Refuse,
 }
 
-/// Which layer chose a gap's action, so the gap can name that layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GapOrigin {
-    #[default]
-    Default,
-    Policy,
-    AdapterEntry,
-}
-impl GapOrigin {
-    fn suffix(self, field: LaunchField) -> &'static str {
+impl GapAction {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Default => "",
-            Self::Policy => match field {
-                LaunchField::Model => "; action set by policy.LAUNCH_MODEL_UNSUPPORTED",
-                LaunchField::Effort => "; action set by policy.LAUNCH_EFFORT_UNSUPPORTED",
-                LaunchField::ImageInput => "; action set by policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED",
-                _ => "; action set by policy",
-            },
-            Self::AdapterEntry => "; action set by an adapter_capabilities entry",
+            Self::Warn => "warn",
+            Self::Off => "off",
+            Self::Refuse => "refuse",
         }
     }
 }
 
-/// One degradable field's action and the layer that chose it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// One degradable field's action, where it was set, and the lower-precedence
+/// candidates it shadowed (lowest first), so a gap and `--explain` can name
+/// every setting that took part.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GapRule {
     pub action: GapAction,
-    pub origin: GapOrigin,
+    pub source: crate::Source,
+    pub shadowed: Vec<crate::Sourced<GapAction>>,
 }
 
 /// The effective gap actions. Resume, network, write and skill location have no
 /// rule: they always keep their default refusal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// One resolver, [`CapabilityOverlay::gap_policy`], decides each degradable
+/// field. Precedence, lowest first: the compiled default; then
+/// `policy.LAUNCH_<FIELD>_UNSUPPORTED`, itself layered host, project and
+/// dispatch by the policy table; then the adapter's `[[adapter_capabilities]]`
+/// `on_gap.<field>`, host then project. The per-adapter entry is the narrower
+/// setting, so it wins over the policy rule for every layer.
+/// Spec: docs/specs/run-launch.md#capability-overrides-and-gap-policy
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GapPolicy {
     pub model: GapRule,
     pub effort: GapRule,
     pub image_input: GapRule,
 }
 impl GapPolicy {
-    pub fn rule(&self, field: LaunchField) -> Option<GapRule> {
+    pub fn rule(&self, field: LaunchField) -> Option<&GapRule> {
         match field {
-            LaunchField::Model => Some(self.model),
-            LaunchField::Effort => Some(self.effort),
-            LaunchField::ImageInput => Some(self.image_input),
+            LaunchField::Model => Some(&self.model),
+            LaunchField::Effort => Some(&self.effort),
+            LaunchField::ImageInput => Some(&self.image_input),
             LaunchField::Resume
             | LaunchField::Network
             | LaunchField::Write
@@ -1112,39 +1160,63 @@ impl CapabilityOverlay {
         self.entries.iter().find(|row| row.adapter == adapter)
     }
 
-    /// Each degradable field takes its policy strength first (with Policy
-    /// origin when a layer overrode the compiled default), then the adapter
-    /// entry's `on_gap` (AdapterEntry origin). Other fields have no rule.
+    /// The one resolver for degradable gap actions; [`GapPolicy`] states the
+    /// precedence. The policy rule's action is the floor, named by its layer
+    /// and key; an adapter entry's `on_gap` replaces it and records it as
+    /// shadowed. Other fields have no rule.
     pub fn gap_policy(&self, adapter: &str, policy: &crate::policy::Policy) -> GapPolicy {
         let mut gap = GapPolicy::default();
-        for (field, code) in [
-            (LaunchField::Model, "LAUNCH_MODEL_UNSUPPORTED"),
-            (LaunchField::Effort, "LAUNCH_EFFORT_UNSUPPORTED"),
-            (LaunchField::ImageInput, "LAUNCH_IMAGE_INPUT_UNSUPPORTED"),
-        ] {
+        let entry = self.entry(adapter);
+        for field in LaunchField::DEGRADABLE {
+            let (Some(code), Some(key)) = (field.policy_code(), field.on_gap_key()) else {
+                continue;
+            };
             let effective = policy.rule(code);
             let action = match effective.rule.strength {
                 crate::policy::Strength::Warn => GapAction::Warn,
                 crate::policy::Strength::Off => GapAction::Off,
                 crate::policy::Strength::Refuse => GapAction::Refuse,
             };
-            let origin = if effective.source == crate::policy::Source::CompiledDefault {
-                GapOrigin::Default
-            } else {
-                GapOrigin::Policy
+            let mut rule = GapRule {
+                action,
+                source: crate::Source {
+                    layer: effective.source.layer(),
+                    origin: Some(format!("policy.{code}")),
+                },
+                shadowed: Vec::new(),
             };
-            gap.set(field, GapRule { action, origin });
-        }
-        if let Some(entry) = self.entry(adapter) {
-            for (field, action) in &entry.on_gap {
-                gap.set(
-                    *field,
+            if let Some((entry, action)) = entry.and_then(|entry| {
+                entry
+                    .on_gap
+                    .iter()
+                    .find(|(gap_field, _)| *gap_field == field)
+                    .map(|(_, action)| (entry, *action))
+            }) {
+                let place = entry
+                    .source
+                    .origin
+                    .as_deref()
+                    .unwrap_or("[[adapter_capabilities]]");
+                let floor = std::mem::replace(
+                    &mut rule,
                     GapRule {
-                        action: *action,
-                        origin: GapOrigin::AdapterEntry,
+                        action,
+                        source: crate::Source {
+                            layer: entry.source.layer,
+                            origin: Some(format!(
+                                "{place}[adapter={}].on_gap.{key}",
+                                entry.adapter
+                            )),
+                        },
+                        shadowed: Vec::new(),
                     },
                 );
+                rule.shadowed.push(crate::Sourced {
+                    value: floor.action,
+                    source: floor.source,
+                });
             }
+            gap.set(field, rule);
         }
         gap
     }
@@ -1226,7 +1298,7 @@ impl AdapterSpec {
                 field,
                 action,
                 warn,
-                origin: rule.map_or(GapOrigin::Default, |rule| rule.origin),
+                action_source: rule.map(|rule| rule.source.clone()).unwrap_or_default(),
                 reason,
                 source,
             })

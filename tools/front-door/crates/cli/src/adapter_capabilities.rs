@@ -9,8 +9,9 @@ use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError}
 use provenant_core::WallTime;
 use provenant_os::exec::SystemExecutor;
 use provenant_records::{
-    ADAPTER_SPECS, AdapterFact, AdapterSpec, AnsweringModelSource, GapAction, GapOrigin, GapRule,
-    HarnessInstall, SessionReference, Sourced, TerminalEventStrength, UsageAttribution,
+    ADAPTER_SPECS, AdapterFact, AdapterSpec, AnsweringModelSource, GapAction, GapPolicy, GapRule,
+    HarnessInstall, LaunchRequest, SessionReference, Sourced, TerminalEventStrength,
+    UsageAttribution,
     control::ControlSupport,
     run::{AttemptState, NetworkAccess},
 };
@@ -227,18 +228,129 @@ fn caveat(value: &provenant_records::Caveat) -> Value {
     json!({ "code": value.code, "note": value.note, "source": value.source })
 }
 
-fn gap_rule(rule: GapRule) -> Value {
-    let action = match rule.action {
-        GapAction::Warn => "warn",
-        GapAction::Off => "off",
-        GapAction::Refuse => "refuse",
+/// One gap rule as the matrix and `run --explain` show it: the action, the
+/// layer and setting that chose it, and the candidates it shadowed.
+pub fn gap_rule(rule: &GapRule) -> Value {
+    let sourced = |action: GapAction, source: &provenant_records::Source| {
+        json!({
+            "action": action.as_str(),
+            "layer": source.layer.as_str(),
+            "origin": source.origin,
+        })
     };
-    let origin = match rule.origin {
-        GapOrigin::Default => "default",
-        GapOrigin::Policy => "policy",
-        GapOrigin::AdapterEntry => "adapter_entry",
+    let mut value = sourced(rule.action, &rule.source);
+    value["shadowed"] = rule
+        .shadowed
+        .iter()
+        .map(|candidate| sourced(candidate.value, &candidate.source))
+        .collect();
+    value
+}
+
+/// `run --explain`: each live node's capability gaps on its pinned adapter,
+/// with the setting that chose each action, under that node's dispatch policy.
+/// An unpinned route is checked when it resolves, so it is reported pending.
+pub fn explain_capability_gaps(
+    roots: &provenant_core::Roots,
+    project: &str,
+    config: &provenant_config::ResolvedConfig<crate::domains::Domains>,
+    nodes: &[provenant_fabric_runtime::graph::GraphNode],
+) -> Result<Vec<Value>, String> {
+    let overlay = crate::config_reads::capability_overlay(roots);
+    let mut rows = Vec::new();
+    for node in nodes {
+        if !provenant_fabric_runtime::graph::when::holds(&node.when) {
+            continue;
+        }
+        let spec = node.attempt.clone().unwrap_or_default();
+        let profile = config
+            .dispatch_profile(&spec.lane_knobs())
+            .map_err(|error| error.to_string())?;
+        let policy = provenant_config::policy::read(
+            roots.state.as_path(),
+            project,
+            &provenant_config::policy::dispatch(&profile),
+        );
+        let routes: Vec<Option<&provenant_fabric_runtime::graph::GraphRoute>> = node
+            .routes
+            .as_ref()
+            .map(|routes| routes.iter().map(Some).collect())
+            .unwrap_or_else(|| vec![node.route.as_ref()]);
+        for route in routes {
+            let Some(adapter) = route.and_then(|route| route.adapter.as_deref()) else {
+                rows.push(json!({ "node": node.id, "status": "pending_route" }));
+                continue;
+            };
+            let request = LaunchRequest {
+                model: route.and_then(|route| route.model.as_deref()),
+                effort: route.and_then(|route| route.effort.as_deref()),
+                image_input: !node.attachments.is_empty(),
+                write: node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
+                skill_location: node.require_skill_location,
+                ..Default::default()
+            };
+            let mut row = launch_gaps(adapter, request, &overlay, &policy);
+            row["node"] = json!(node.id);
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+/// The effective gap rule for each degradable field of one adapter.
+pub fn gap_rules(gaps: &GapPolicy) -> Value {
+    json!({
+        "model": gap_rule(&gaps.model),
+        "effort": gap_rule(&gaps.effort),
+        "image_input": gap_rule(&gaps.image_input),
+    })
+}
+
+/// The capability gaps one launch would meet on `adapter` after the owner's
+/// overlay, each with its action and the setting that chose it, plus the
+/// adapter's effective gap rules. `run --explain` shows this so a degraded or
+/// refused control is visible before anything launches.
+pub fn launch_gaps(
+    adapter: &str,
+    request: LaunchRequest<'_>,
+    overlay: &provenant_records::CapabilityOverlay,
+    policy: &provenant_records::policy::Policy,
+) -> Value {
+    let Some(spec) = AdapterSpec::get(adapter) else {
+        return json!({ "adapter": adapter, "status": "unknown_adapter" });
     };
-    json!({ "action": action, "origin": origin })
+    let spec = spec.with_overlay(overlay);
+    let gap_policy = overlay.gap_policy(spec.identity.name, policy);
+    let rules = gap_rules(&gap_policy);
+    let check = spec.check_launch(&LaunchRequest {
+        gap_policy,
+        ..request
+    });
+    let gaps = check
+        .gaps
+        .iter()
+        .map(|gap| {
+            json!({
+                "field": gap.field.name(),
+                "action": match gap.action {
+                    provenant_records::LaunchAction::Refuse => "refuse",
+                    provenant_records::LaunchAction::Degrade => "degrade",
+                },
+                "warn": gap.warn,
+                "reason": gap.reason,
+                "source": gap.source,
+                "action_layer": gap.action_source.layer.as_str(),
+                "action_origin": gap.action_source.origin,
+                "message": gap.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "adapter": spec.identity.name,
+        "status": if check.refusal().is_some() { "refused" } else if gaps.is_empty() { "supported" } else { "degraded" },
+        "gaps": gaps,
+        "on_gap": rules,
+    })
 }
 
 fn control_name(value: ControlSupport) -> &'static str {
@@ -520,11 +632,7 @@ pub fn matrix_with(
             "family": effective.identity.family,
             "capabilities": capabilities(&effective),
             "overlay": overlay_block,
-            "on_gap": {
-                "model": gap_rule(gaps.model),
-                "effort": gap_rule(gaps.effort),
-                "image_input": gap_rule(gaps.image_input),
-            },
+            "on_gap": gap_rules(&gaps),
             "compatibility": {
                 "version": assessment.version,
                 "status": assessment.status.as_str(),
@@ -884,7 +992,12 @@ mod tests {
         for adapter in value["adapters"].as_array().unwrap() {
             assert!(adapter["overlay"].is_null(), "{adapter}");
             assert_eq!(adapter["on_gap"]["model"]["action"], json!("warn"));
-            assert_eq!(adapter["on_gap"]["model"]["origin"], json!("default"));
+            assert_eq!(adapter["on_gap"]["model"]["layer"], json!("default"));
+            assert_eq!(
+                adapter["on_gap"]["model"]["origin"],
+                json!("policy.LAUNCH_MODEL_UNSUPPORTED")
+            );
+            assert_eq!(adapter["on_gap"]["model"]["shadowed"], json!([]));
             assert_eq!(adapter["on_gap"]["effort"]["action"], json!("warn"));
             assert_eq!(adapter["on_gap"]["image_input"]["action"], json!("warn"));
             assert!(adapter["capabilities"]["caveats"].is_array());
