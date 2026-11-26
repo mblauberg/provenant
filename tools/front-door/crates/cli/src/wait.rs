@@ -11,6 +11,8 @@ pub const SECTION_KEY: &str = "domains.wait";
 pub const MAX_TIMEOUT_KEY: &str = "domains.wait.max_timeout_seconds";
 /// The default budget for `--pr --until complete`, long enough for a normal CI run.
 pub const COMPLETE_TIMEOUT_KEY: &str = "domains.wait.pr_complete_timeout_seconds";
+/// The key whose effective source a pinned wait publishes on its subject.
+pub const PR_HEAD_POLICY_KEY: &str = "domains.wait.pr_head_policy";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]

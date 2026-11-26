@@ -1606,6 +1606,7 @@ mod tests {
             7,
             &Ok("owner/repo".into()),
             provenant_records::subject::SubjectPolicy::Pinned,
+            "domains.wait.pr_head_policy from the compiled test profile",
             false,
             detail,
         );
@@ -1673,6 +1674,7 @@ mod tests {
                 7,
                 &Ok("owner/repo".into()),
                 provenant_records::subject::SubjectPolicy::Pinned,
+                "domains.wait.pr_head_policy from the compiled test profile",
                 false,
                 recovered,
             );

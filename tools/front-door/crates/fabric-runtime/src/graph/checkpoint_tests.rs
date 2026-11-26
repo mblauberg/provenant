@@ -225,6 +225,10 @@ fn subject_with_base(
         },
         pinned_at: provenant_core::WallTime::from_micros(1).unwrap(),
         policy: provenant_records::subject::SubjectPolicy::Pinned,
+        repository: None,
+        base_ref: None,
+        policy_source: None,
+        followed_from: Vec::new(),
     }
 }
 

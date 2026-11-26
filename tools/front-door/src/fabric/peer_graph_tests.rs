@@ -408,6 +408,8 @@ fn peer_reader_is_pinned_to_the_initiator_subject() -> TestResult {
         "op":"submit", "operation_id":"peer-reader-subject-pin",
         "origin_work_key":origin_key(),
         "task":{"prompt":"Read the pinned subject", "access":"read_only", "head":head,
+            "subject":{"head":head,"origin":{"kind":"explicit"},
+                "pinned_at":"2000-01-01T00:00:00.000000Z","policy":"pinned"},
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
             "context":{"graph_id":"origin-graph", "node_id":"read", "attempt":1,
@@ -462,6 +464,16 @@ fn peer_reader_is_pinned_to_the_initiator_subject() -> TestResult {
         request.task.head.as_deref(),
         Some(head.as_str()),
         "peer task head must be the initiator subject, never None"
+    );
+    assert_eq!(
+        request
+            .task
+            .subject
+            .as_ref()
+            .map(|subject| subject.head.to_string())
+            .as_deref(),
+        request.task.head.as_deref(),
+        "peer task subject must name the same pinned head"
     );
     Ok(())
 }

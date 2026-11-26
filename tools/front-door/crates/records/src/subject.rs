@@ -13,6 +13,22 @@ pub struct PinnedSubject {
     pub pinned_at: WallTime,
     #[serde(default)]
     pub policy: SubjectPolicy,
+    /// Credential-free forge repository id (`owner/name`), when the route had one.
+    /// It is provenance only, never a credential and never a lookup key here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// The ref name the base came from, when the route named one. The head's
+    /// ref name already lives in `origin`; this names the comparison side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    /// `KEY from SOURCE` for the policy that fixed this head, so every policy
+    /// reports its source at the point of use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_source: Option<String>,
+    /// Earlier pinned heads in order, oldest first, recorded when a
+    /// `follow_latest` policy re-pins; empty for a subject that never moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followed_from: Vec<GitOid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +52,11 @@ pub enum SubjectOrigin {
     },
     /// A full OID supplied by the caller.
     Explicit,
+    /// Reserved for continuation admission (#3972); no producer yet. The
+    /// predecessor graph name travels as provenance for the derived head.
+    Continuation {
+        predecessor: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,5 +142,48 @@ mod tests {
         let value = serde_json::json!({"head": "1".repeat(40), "origin": {"kind": "explicit"}, "pinned_at": WallTime::from_micros(1).unwrap(), "policy": "pinned", "future": {"value": 42}});
         let subject: PinnedSubject = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(subject).unwrap(), value);
+    }
+
+    /// Every slice-8 capability field is absent when unset, so a record
+    /// written before them keeps its exact wire shape and digest.
+    #[test]
+    fn empty_capability_fields_keep_the_slice_zero_wire_shape() {
+        let subject = PinnedSubject {
+            extra: Default::default(),
+            base: None,
+            head: GitOid::parse(&"1".repeat(40)).unwrap(),
+            origin: SubjectOrigin::Explicit,
+            pinned_at: WallTime::from_micros(1).unwrap(),
+            policy: SubjectPolicy::Pinned,
+            repository: None,
+            base_ref: None,
+            policy_source: None,
+            followed_from: Vec::new(),
+        };
+        let expected = serde_json::json!({
+            "head": "1".repeat(40),
+            "origin": {"kind": "explicit"},
+            "pinned_at": WallTime::from_micros(1).unwrap(),
+            "policy": "pinned",
+        });
+        assert_eq!(
+            serde_json::to_string(&subject).unwrap(),
+            expected.to_string()
+        );
+    }
+
+    /// The reserved continuation origin round-trips without a producer, so a
+    /// future continuation reader can deserialise it without a schema bump.
+    #[test]
+    fn continuation_origin_round_trips() {
+        let origin = SubjectOrigin::Continuation {
+            predecessor: "smoke/G".into(),
+        };
+        let wire = serde_json::to_string(&origin).unwrap();
+        assert_eq!(wire, r#"{"kind":"continuation","predecessor":"smoke/G"}"#);
+        assert_eq!(
+            serde_json::from_str::<SubjectOrigin>(&wire).unwrap(),
+            origin
+        );
     }
 }

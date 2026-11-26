@@ -3554,19 +3554,25 @@ impl BoundGraphOwner<'_> {
         };
         // Peer roots retain the exact requested route, including family
         // exclusions, rather than resolving a second, broader alias.
-        let peer_root = provenant_fabric_runtime::graph::FileJournal::execution(
+        let execution = provenant_fabric_runtime::graph::FileJournal::execution(
             &self.factory.context.roots.state,
             self.factory.context.identity.project,
             &key.graph_id,
         )
-        .map_err(graph_journal_error)?
-        .is_some_and(|execution| {
+        .map_err(graph_journal_error)?;
+        let peer_root = execution.as_ref().is_some_and(|execution| {
             execution
                 .peer_origin_context
                 .as_ref()
                 .and_then(|origin| origin.node_id.as_deref())
                 == Some(key.node_id.as_str())
         });
+        // Graph tasks carry the admitted subject beside the source commit so a
+        // peer can later compare its own head with the one admission pinned.
+        // In-flight graphs predating subject keep the field absent.
+        let admitted_subject = execution
+            .as_ref()
+            .and_then(|execution| execution.document.subject.clone());
         if !accepted {
             // This owner is admitting a new leaf from the host-owned graph
             // scheduler. Bind the graph marker to the work key here; the
@@ -3625,6 +3631,7 @@ impl BoundGraphOwner<'_> {
                 base,
                 fixture,
                 head: source_commit.map(str::to_owned),
+                subject: admitted_subject,
                 source_head,
                 account: route
                     .account
@@ -5762,6 +5769,7 @@ mod recovery_rebuild_tests {
                                     base: None,
                                     fixture: None,
                                     base_ref: None,
+                                    subject: None,
                                     route: provenant_records::run::RequestedRoute::Named {
                                         required_family: None,
                                         extra: Default::default(),

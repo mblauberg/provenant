@@ -3705,6 +3705,7 @@ fn persisted_attempt_with(
                 head: None,
                 source_head: None,
                 base_ref: None,
+                subject: None,
                 profile: HarnessProfile::default(),
                 prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
                 route: RequestedRoute::Model {

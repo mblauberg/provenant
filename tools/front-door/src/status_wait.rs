@@ -36,6 +36,9 @@ enum Source {
         /// Whether the pull request has reported the pinned head at least once.
         /// Only after that does a different head count as a move.
         pinned_head_seen: bool,
+        /// `KEY from SOURCE` for the policy that fixed this head, carried on
+        /// every sample so a first pin reports the same source as admission.
+        policy_source: String,
         complete: bool,
     },
 }
@@ -343,30 +346,46 @@ fn pr_subject(
     number: u64,
     repository: &Result<String, String>,
     policy: SubjectPolicy,
+    policy_source: &str,
     now: WallTime,
     command_head: Option<&str>,
     forge: Option<(String, String)>,
     local_tip: Option<String>,
 ) -> Option<PinnedSubject> {
-    let make = |head: GitOid, origin: SubjectOrigin, policy: SubjectPolicy| PinnedSubject {
-        extra: Default::default(),
-        base: None,
-        head,
-        origin,
-        pinned_at: now,
-        policy,
-    };
+    let make =
+        |head: GitOid, origin: SubjectOrigin, policy: SubjectPolicy, source: &str| PinnedSubject {
+            extra: Default::default(),
+            base: None,
+            head,
+            origin,
+            pinned_at: now,
+            policy,
+            repository: repository.as_ref().ok().cloned(),
+            base_ref: None,
+            policy_source: Some(source.to_owned()),
+            followed_from: Vec::new(),
+        };
     if let Some(head) = command_head {
-        return GitOid::parse(head)
-            .ok()
-            .map(|head| make(head, SubjectOrigin::Explicit, SubjectPolicy::Pinned));
+        return GitOid::parse(head).ok().map(|head| {
+            make(
+                head,
+                SubjectOrigin::Explicit,
+                SubjectPolicy::Pinned,
+                "--head",
+            )
+        });
     }
     let (sha, branch) = forge?;
     if let Some(local) = local_tip
         && local != sha
         && let Ok(head) = GitOid::parse(&local)
     {
-        return Some(make(head, SubjectOrigin::LocalRef { name: branch }, policy));
+        return Some(make(
+            head,
+            SubjectOrigin::LocalRef { name: branch },
+            policy,
+            policy_source,
+        ));
     }
     GitOid::parse(&sha).ok().map(|head| {
         make(
@@ -376,6 +395,7 @@ fn pr_subject(
                 number,
             },
             policy,
+            policy_source,
         )
     })
 }
@@ -388,6 +408,8 @@ fn pr_subject(
 fn apply_subject_sample(
     subject: &mut Option<PinnedSubject>,
     pinned_head_seen: &mut bool,
+    head_check_seen: &mut Option<HeadCheck>,
+    policy_source: &str,
     line: &mut crate::pr::status::Line,
     number: u64,
     repository: &Result<String, String>,
@@ -408,6 +430,10 @@ fn apply_subject_sample(
                 },
                 pinned_at: now,
                 policy,
+                repository: repository.as_ref().ok().cloned(),
+                base_ref: None,
+                policy_source: Some(policy_source.to_owned()),
+                followed_from: Vec::new(),
             });
         }
         *pinned_head_seen = true;
@@ -418,10 +444,12 @@ fn apply_subject_sample(
         (subject.head, subject.policy)
     };
     let pinned_text = pinned.to_string();
-    match head_check(
+    let observed = head_check(
         &pinned,
         GitOid::parse(&line.head).map_err(|error| error.to_string()),
-    ) {
+    );
+    *head_check_seen = Some(observed.clone());
+    match observed {
         HeadCheck::Unmoved => *pinned_head_seen = true,
         HeadCheck::Moved { current, .. } => {
             if *pinned_head_seen {
@@ -441,6 +469,7 @@ fn apply_subject_sample(
                             ),
                         );
                         let subject = subject.as_mut().expect("subject pinned before sampling");
+                        subject.followed_from.push(pinned);
                         subject.head = current;
                         subject.pinned_at = now;
                         *pinned_head_seen = false;
@@ -597,6 +626,7 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
 fn pr_reading(
     label: &str,
     subject: &Option<PinnedSubject>,
+    head_check: &Option<HeadCheck>,
     line: crate::pr::status::Line,
     complete: bool,
     head_moved: bool,
@@ -613,6 +643,7 @@ fn pr_reading(
     };
     let mut data = json!(line);
     data["subject"] = json!(subject);
+    data["head_check"] = json!(head_check);
     Reading {
         settle,
         line: format!(
@@ -637,13 +668,19 @@ fn read_pr(
     cancel: &CancelToken,
 ) -> Reading {
     let label = source.label();
-    let (number, repository, complete) = match &*source {
+    let (number, repository, complete, policy_source) = match &*source {
         Source::Pr {
             number,
             repository,
             complete,
+            policy_source,
             ..
-        } => (*number, repository.clone(), *complete),
+        } => (
+            *number,
+            repository.clone(),
+            *complete,
+            policy_source.clone(),
+        ),
         _ => return Reading::unavailable(&label, "not a pull request source"),
     };
     let Ok(repository) = repository else {
@@ -662,6 +699,7 @@ fn read_pr(
         Ok(line) => line,
         Err(error) => return Reading::unavailable(&label, &error.to_string()),
     };
+    let mut head_check_seen = None;
     let head_moved = match &mut *source {
         Source::Pr {
             subject,
@@ -670,6 +708,8 @@ fn read_pr(
         } => apply_subject_sample(
             subject,
             pinned_head_seen,
+            &mut head_check_seen,
+            &policy_source,
             &mut line,
             number,
             &Ok(repository),
@@ -687,7 +727,14 @@ fn read_pr(
         Source::Pr { subject, .. } => subject.clone(),
         _ => unreachable!("checked above"),
     };
-    pr_reading(&label, &subject, line, complete, head_moved)
+    pr_reading(
+        &label,
+        &subject,
+        &head_check_seen,
+        line,
+        complete,
+        head_moved,
+    )
 }
 
 /// Read one source after a native event or a configured fallback tick.
@@ -746,6 +793,7 @@ pub(crate) fn reading_pr_event(
     number: u64,
     repository: &Result<String, String>,
     policy: SubjectPolicy,
+    policy_source: &str,
     complete: bool,
     detail: Value,
 ) -> Reading {
@@ -784,16 +832,26 @@ pub(crate) fn reading_pr_event(
     .collect();
     match serde_json::from_value::<crate::pr::status::Line>(status.clone()) {
         Ok(mut line) => {
+            let mut head_check_seen = None;
             let head_moved = apply_subject_sample(
                 subject,
                 pinned_head_seen,
+                &mut head_check_seen,
+                policy_source,
                 &mut line,
                 number,
                 repository,
                 policy,
                 wall_now(),
             );
-            let mut reading = pr_reading(&label, subject, line, complete, head_moved);
+            let mut reading = pr_reading(
+                &label,
+                subject,
+                &head_check_seen,
+                line,
+                complete,
+                head_moved,
+            );
             if !malformed.is_empty() {
                 reading.line = format!(
                     "{} warning: invalid display fields {}",
@@ -1908,6 +1966,11 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
     let actions_grace = Duration::from_secs(settings.actions_grace_seconds);
     let pr_head_policy = settings.pr_head_policy;
+    let pr_policy_source = if command.head.is_some() {
+        "--head".to_owned()
+    } else {
+        origin.describe(provenant_cli::wait::PR_HEAD_POLICY_KEY)
+    };
     if sources.len() + prs.len() > settings.max_targets as usize {
         return crate::fail(
             "wait",
@@ -1960,6 +2023,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 number,
                 &repository,
                 pr_head_policy,
+                &pr_policy_source,
                 wall_now(),
                 command.head.as_deref(),
                 forge,
@@ -1976,6 +2040,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 repository: repository.clone(),
                 subject,
                 pinned_head_seen: false,
+                policy_source: pr_policy_source.clone(),
                 complete,
             }
         }));
@@ -2317,13 +2382,19 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 // Own the source so the subject and `pinned_head_seen` survive across
                 // samples: they are the wait's one pinned decision.
                 let mut source = (*source).clone();
-                let (number, repository, complete) = match &source {
+                let (number, repository, complete, policy_source) = match &source {
                     Source::Pr {
                         number,
                         repository,
                         complete,
+                        policy_source,
                         ..
-                    } => (*number, repository.clone(), *complete),
+                    } => (
+                        *number,
+                        repository.clone(),
+                        *complete,
+                        policy_source.clone(),
+                    ),
                     _ => return,
                 };
                 let label = source.label();
@@ -2408,6 +2479,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                             number,
                                             &repository,
                                             pr_head_policy,
+                                            &policy_source,
                                             complete,
                                             detail,
                                         ),
@@ -2736,6 +2808,7 @@ mod tests {
             number,
             &Ok("owner/repo".into()),
             SubjectPolicy::Pinned,
+            "domains.wait.pr_head_policy from the compiled test profile",
             complete,
             detail,
         )
@@ -2998,6 +3071,7 @@ mod tests {
             repository: Ok("owner/repo".into()),
             subject: None,
             pinned_head_seen: false,
+            policy_source: "domains.wait.pr_head_policy from the compiled test profile".into(),
             complete: false,
         };
         for (with_pull, expected) in [(false, Outcome::Ok), (true, Outcome::Timeout)] {
@@ -3642,6 +3716,12 @@ mod tests {
             },
             pinned_at: WallTime::from_micros(0).expect("fixture time"),
             policy,
+            repository: Some("owner/repo".into()),
+            base_ref: None,
+            policy_source: Some(
+                "domains.wait.pr_head_policy from the compiled test profile".into(),
+            ),
+            followed_from: Vec::new(),
         }
     }
 
@@ -3656,6 +3736,8 @@ mod tests {
         let moved = apply_subject_sample(
             &mut subject,
             &mut pinned_head_seen,
+            &mut None,
+            "domains.wait.pr_head_policy from the compiled test profile",
             &mut line,
             7,
             &Ok("owner/repo".into()),
@@ -3678,6 +3760,8 @@ mod tests {
         assert!(!apply_subject_sample(
             &mut subject,
             &mut pinned_head_seen,
+            &mut None,
+            "domains.wait.pr_head_policy from the compiled test profile",
             &mut first_sample,
             7,
             &Ok("owner/repo".into()),
@@ -3691,6 +3775,8 @@ mod tests {
             apply_subject_sample(
                 &mut subject,
                 &mut pinned_head_seen,
+                &mut None,
+                "domains.wait.pr_head_policy from the compiled test profile",
                 &mut moved_line,
                 7,
                 &Ok("owner/repo".into()),
@@ -3715,7 +3801,7 @@ mod tests {
             warnings.is_empty(),
             "a pinned wait does not follow: {warnings:?}"
         );
-        let reading = pr_reading("#7", &subject, moved_line, false, moved);
+        let reading = pr_reading("#7", &subject, &None, moved_line, false, moved);
         assert_eq!(reading.settle, Settle::Unsuccessful);
         assert!(
             reading.line.contains("cause=head_moved"),
@@ -3730,11 +3816,14 @@ mod tests {
         let second = oid(&"b".repeat(40));
         let mut subject = Some(pinned_subject(first, SubjectPolicy::FollowLatest));
         let mut pinned_head_seen = true;
+        let mut head_check_seen = None;
         let mut line = pr_line(second, true);
         let (moved, warnings) = warning::capture(|| {
             apply_subject_sample(
                 &mut subject,
                 &mut pinned_head_seen,
+                &mut head_check_seen,
+                "domains.wait.pr_head_policy from the compiled test profile",
                 &mut line,
                 7,
                 &Ok("owner/repo".into()),
@@ -3745,6 +3834,32 @@ mod tests {
         assert!(!moved, "follow_latest never settles head_moved");
         let subject = subject.expect("subject stays pinned");
         assert_eq!(subject.head, second, "the new head is pinned");
+        assert_eq!(
+            subject.followed_from,
+            vec![first],
+            "the earlier pin is recorded in order"
+        );
+        assert_eq!(
+            head_check_seen,
+            Some(HeadCheck::Moved {
+                pinned: first,
+                current: second
+            }),
+            "the reading records the move it followed"
+        );
+        let reading = pr_reading(
+            "#7",
+            &Some(subject.clone()),
+            &head_check_seen,
+            line.clone(),
+            false,
+            false,
+        );
+        assert_eq!(
+            reading.data["head_check"],
+            json!({"state": "moved", "pinned": first.to_string(), "current": second.to_string()}),
+            "the wait reading publishes the head check"
+        );
         assert!(
             !pinned_head_seen,
             "the new head must be observed before it can move"
@@ -3768,6 +3883,7 @@ mod tests {
             7,
             &Ok("owner/repo".into()),
             SubjectPolicy::Pinned,
+            "domains.wait.pr_head_policy from the compiled test profile",
             now,
             None,
             Some((forge.clone(), "feature".into())),
@@ -3783,12 +3899,15 @@ mod tests {
             }
         );
         assert_eq!(subject.policy, SubjectPolicy::Pinned);
+        assert_eq!(subject.repository.as_deref(), Some("owner/repo"));
+        assert!(subject.policy_source.is_some());
 
         let explicit = "d".repeat(40);
         let forced = pr_subject(
             7,
             &Ok("owner/repo".into()),
             SubjectPolicy::FollowLatest,
+            "--head",
             now,
             Some(&explicit),
             Some((forge.clone(), "feature".into())),
@@ -3798,12 +3917,14 @@ mod tests {
         assert_eq!(forced.head, oid(&explicit));
         assert_eq!(forced.origin, SubjectOrigin::Explicit);
         assert_eq!(forced.policy, SubjectPolicy::Pinned, "--head always pins");
+        assert_eq!(forced.policy_source.as_deref(), Some("--head"));
 
         let local = "e".repeat(40);
         let local_subject = pr_subject(
             7,
             &Ok("owner/repo".into()),
             SubjectPolicy::Pinned,
+            "domains.wait.pr_head_policy from the compiled test profile",
             now,
             None,
             Some((forge, "feature".into())),
@@ -3828,6 +3949,8 @@ mod tests {
         let moved = apply_subject_sample(
             &mut subject,
             &mut pinned_head_seen,
+            &mut None,
+            "domains.wait.pr_head_policy from the compiled test profile",
             &mut line,
             7,
             &Ok("owner/repo".into()),
@@ -3846,7 +3969,7 @@ mod tests {
             }
         );
         assert!(pinned_head_seen);
-        let reading = pr_reading("#7", &Some(subject.clone()), line, false, moved);
+        let reading = pr_reading("#7", &Some(subject.clone()), &None, line, false, moved);
         assert_eq!(reading.data["subject"], json!(subject));
         assert_eq!(reading.settle, Settle::Succeeded);
     }
@@ -3858,6 +3981,7 @@ mod tests {
             repository: Ok("owner/repo".into()),
             subject: None,
             pinned_head_seen: false,
+            policy_source: "domains.wait.pr_head_policy from the compiled test profile".into(),
             complete: false,
         }];
         let pending = Reading {
@@ -3915,6 +4039,7 @@ mod tests {
                 repository: Ok("owner/repo".into()),
                 subject: None,
                 pinned_head_seen: false,
+                policy_source: "domains.wait.pr_head_policy from the compiled test profile".into(),
                 complete,
             }]
         };

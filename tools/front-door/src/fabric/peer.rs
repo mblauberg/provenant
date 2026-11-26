@@ -1600,6 +1600,9 @@ pub(crate) fn peer_submit_graph(
     // A reader compares against the sender's pinned base. A peer-owned writer
     // starts from its own freshly provisioned worktree and has no review base.
     document.review_base = if peer_writer { None } else { task.base.clone() };
+    // The initiator's admitted subject travels with the task so this host's
+    // graph tasks carry the same provenance beside their pinned head.
+    document.subject = task.subject.clone();
     document.peer_origin_work_key = Some(origin_work_key.clone());
     // A reader is pinned to the sender's source commit. A peer-owned writer
     // provisions its own worktree from the branch and base instead, so a

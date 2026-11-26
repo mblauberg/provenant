@@ -2777,6 +2777,7 @@ fn seed_attempt_in_state(
                     head: None,
                     source_head: None,
                     base_ref: None,
+                    subject: None,
                     writer: None,
                     profile: provenant_records::run::HarnessProfile::default(),
                     prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),

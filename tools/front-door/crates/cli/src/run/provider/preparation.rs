@@ -6200,6 +6200,7 @@ mod lane_access_tests {
             head: None,
             source_head: None,
             base_ref: None,
+            subject: None,
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(b"test"),
             route: run::RequestedRoute::Model {

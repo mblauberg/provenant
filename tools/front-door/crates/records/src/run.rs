@@ -267,6 +267,11 @@ pub struct TaskRequest {
     /// The caller's Git ref, retained for idempotent operation identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
+    /// Provenance of the subject admitted beside `head`. Consumers still use
+    /// `head`; this is the slot for a later peer-side head check. A peer that
+    /// does not declare the field keeps it in `extra` on deserialisation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<crate::subject::PinnedSubject>,
     pub route: RequestedRoute,
     /// Optional dispatch override; normal placement comes from routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3881,6 +3886,7 @@ mod tests {
             base: None,
             fixture: None,
             base_ref: None,
+            subject: None,
             route: RequestedRoute::Named {
                 extra: Default::default(),
                 required_family: None,

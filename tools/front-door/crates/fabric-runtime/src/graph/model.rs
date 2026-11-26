@@ -2635,6 +2635,10 @@ struct GraphCheckpointProjection<'a> {
     checkpoint: &'a GraphCheckpoint,
     #[serde(skip_serializing_if = "Option::is_none")]
     subject: Option<&'a provenant_records::subject::PinnedSubject>,
+    /// Slot for a later result-read or settlement head comparison; status
+    /// reads stored data only in this batch, so it is always `None` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    head_check: Option<provenant_records::subject::HeadCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bound_review_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2646,6 +2650,7 @@ impl<'a> From<&'a GraphCheckpoint> for GraphCheckpointProjection<'a> {
         Self {
             checkpoint,
             subject: checkpoint.subject.as_ref(),
+            head_check: None,
             bound_review_base: checkpoint
                 .bases
                 .and_then(|bases| bases.review)

@@ -2832,6 +2832,10 @@ fn bind_refuses_a_subject_that_disagrees_with_the_bound_review_base() {
         },
         pinned_at: provenant_core::WallTime::from_micros(1).unwrap(),
         policy: provenant_records::subject::SubjectPolicy::Pinned,
+        repository: None,
+        base_ref: None,
+        policy_source: None,
+        followed_from: Vec::new(),
     });
 
     let make_execution = |graph_id: &str, review: &str| GraphExecution {
