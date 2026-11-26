@@ -1716,7 +1716,7 @@ fn rev5_checkpoint_save_names_the_standing_and_intent_gaps() -> Result {
         ],
         0,
     )?;
-    // Spec: docs/specs/cli.md#warnings-are-typed-values: advisories travel as
+    // Spec: docs/specs/cli.md#warnings-are-typed-values advisories travel as
     // typed values in the envelope, not as bare strings in the data payload.
     let warnings = saved["warnings"].as_array().ok_or("warnings envelope")?;
     assert_eq!(warnings.len(), 2, "{warnings:?}");
