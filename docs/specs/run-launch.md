@@ -224,18 +224,26 @@ sender's graph does not bind or provision a local worktree for that writer; its 
 the peer provisioning intent for replay. A graph reader without an explicit worktree or attempt
 directory uses its selected project as its source; `upgrade --verify` selects a temporary
 committed scratch project for its smoke graph and binds a fixed review range so no lens fails on
-an empty range. A bundled smoke review runs after the write node and reads the commit the writer
-produced in its scratch worktree, so its diff is the writer's own scratch commit and needs no
-delivered pr or push; its base is the commit the writer branched from unless `--set diff_base=BASE`
-pins another one, with the chosen source shown in the warnings.
+an empty range. A remote reader binds the peer's **own** checkout HEAD, not the sender's pinned
+commit: the sender's head names a commit in its scratch project that the peer clone may never
+have seen, and the source view materialiser refuses an absent commit rather than substituting a
+nearby ref. The peer's HEAD first parent supplies its review base; when Git evidence is missing,
+the launch warns and falls back to the sender's pins. A bundled smoke review runs after the write
+node and reads the commit the writer produced in its scratch worktree, so its diff is the writer's
+own scratch commit and needs no delivered pr or push; its base is the commit the writer branched
+from unless `--set diff_base=BASE` pins another one, with the chosen source shown in the warnings.
 A manual smoke launch with no writer has no scratch commit to review, so review is skipped with a
 reason and the other eligible nodes continue. A node may name a small project-relative fixture;
 the host stages its bytes with the task, so a peer places the same file in its own candidate
-scratch and the brief names its path instead of leaking a caller path.
+scratch and the brief names its path instead of leaking a caller path. The upgrade smoke fixture
+carries a fresh random fact that exists only in those staged bytes, never in a committed tree or
+the bundled template, so a reader that reconstructs the answer from source cannot report it; the
+review asserts that exact token against the read lane's report.
 - Why: a verification graph must run on a real install and exercise a writer, a skipped node must
   not refuse the run it does not take part in, and a smoke review must stay bounded by its own
   scratch change rather than the caller checkout. A fixture must reach every host that runs a
-  reader, not just the host that owns the checkout.
+  reader, not just the host that owns the checkout; a stale peer clone must still read a valid
+  tree, and a smoke pass must be evidence that the staged fixture was actually read.
 
 Every refusal of a launch input names the field that caused it, or the decoded path of a document
 or patch field; an unnamed `invalid input` is a defect. A refused bind keeps its typed cause to

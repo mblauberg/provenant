@@ -46,7 +46,50 @@ def check(config, workflow, packages):
     for job in always | ungated:
         if 'needs.scope.outputs.suites' in str(jobs.get(job, {}).get('if', '')):
             errors.append(f'{job} must not bind a suite')
-    return errors + unwatched_packages(config, jobs, packages)
+    return errors + unwatched_packages(config, jobs, packages) + gate_edges(config, jobs)
+
+
+def job_needs(job):
+    value = job.get('needs', [])
+    if isinstance(value, str):
+        value = [value]
+    return [n for n in value if isinstance(n, str)] if isinstance(value, list) else []
+
+
+def gate_edges(config, jobs):
+    """A failed cheap gate must leave every gated suite's job unstarted.
+
+    Follow the workflow's needs graph transitively: a job that inherits the
+    gate through an intermediate job counts, but a gated job cannot escape it
+    with one indirect hop. A job that needs the gate directly must name the
+    gate's result in its condition, or a covered gate suite would skip a gated
+    suite that was independently selected to run.
+    """
+    edges = {name: job_needs(job) for name, job in jobs.items()}
+    errors = []
+    for gate in config.get('gate', []):
+        gate_job = gate['job']
+        for name in gate['suites']:
+            suite = next((s for s in config['suite'] if s['name'] == name), None)
+            if suite is None:
+                errors.append(f'gate names unknown suite {name}')
+                continue
+            for job in suite['jobs']:
+                if job == gate_job:
+                    errors.append(f'gate job {gate_job} is itself gated')
+                    continue
+                seen, stack = set(), list(edges.get(job, []))
+                while stack:
+                    dep = stack.pop()
+                    if dep in seen:
+                        continue
+                    seen.add(dep)
+                    stack.extend(edges.get(dep, []))
+                if gate_job not in seen:
+                    errors.append(f'{job} does not wait for gate {gate_job}')
+                if gate_job in edges.get(job, []) and f'needs.{gate_job}.result' not in str(jobs.get(job, {}).get('if', '')):
+                    errors.append(f'{job} does not handle skipped gate {gate_job}')
+    return errors
 
 
 def unwatched_packages(config, jobs, packages):

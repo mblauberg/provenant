@@ -161,7 +161,12 @@ non-empty range; its write node runs in a worktree the verification creates on a
 branch of that fixture. On a peer the writer runs in a worktree the peer creates
 in its own clone from a scratch branch supplied by the launch's sourced default;
 pass `--branch B --base REF` to override it, while a caller worktree path is
-refused. A manual
+refused. A remote smoke reader is pinned to the peer clone's own checkout HEAD
+and its first parent, never to the sender's scratch commit, so a stale peer
+still reads a valid tree and sees the fixture staged into its lane scratch. The
+staged fixture carries a fresh random fact absent from the committed tree and
+the bundled template: a reader that reconstructs the answer from source cannot
+report it. A manual
 `run smoke` reviews the writer's own scratch commit: the review node runs after
 the write and reads the commit the writer produced in its scratch worktree
 against the commit it branched from, so the cost is bounded by the smoke change

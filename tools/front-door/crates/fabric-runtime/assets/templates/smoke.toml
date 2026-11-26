@@ -1,11 +1,11 @@
 doc = "Exercise the main lane paths with small, disposable work."
 nodes = [
-  { id = "read", use = "task", tier = "junior", fixture = "fixture.txt", prompt = "Read the supplied fixture and report its single stated fact." },
+  { id = "read", use = "task", tier = "junior", fixture = "fixture.txt", prompt = "Read the supplied fixture and report its single stated fact verbatim." },
   { id = "write", use = "implement", tier = "junior", worktree = "${worktree}", attempt = "${write_attempt}", when = { smoke-write = true }, prompt = "In the supplied scratch worktree, create exactly one file named smoke.txt containing 'smoke ok', then commit it." },
   # A node source reads the commit the writer produced in its scratch worktree.
   # A head source would require a delivered pr/push writer, which a smoke writer
   # never is, so it would refuse the graph before any attempt ran.
-  { id = "review", use = "review", tier = "junior", review_base = "${diff_base}", source = { type = "node", node = "write" }, when = { smoke-write = true, smoke-review = true }, over = ["correctness", "tests"], min_ok = 2, after = ["write"], prompt = "Review the smoke writer's scratch commit: the only expected fact is that smoke checks work." },
+  { id = "review", use = "review", tier = "junior", fixture = "fixture.txt", review_base = "${diff_base}", source = { type = "node", node = "write" }, when = { smoke-write = true, smoke-review = true }, over = ["correctness", "tests"], min_ok = 2, after = ["read", "write"], prompt = "Review the smoke writer's scratch commit and the staged fixture. The writer's scratch change must be exactly one file smoke.txt containing 'smoke ok'. The fixture's single stated fact is a random token carried only by the staged bytes, absent from the committed tree and the source; FAIL unless the read lane reported that exact token, so a reconstructed 'smoke checks work' answer is a defect." },
   { id = "retry-route", use = "task", tier = "junior", after = ["read"], when = { smoke-retry = true }, fixture = "fixture.txt", prompt = "Report the supplied fixture's single stated fact. This node checks that the smoke run has a free-capable route for the retry path; it does not itself retry a failed node." },
   { id = "steer-route", use = "task", tier = "junior", after = ["read"], when = { smoke-steer = true }, fixture = "fixture.txt", prompt = "Report the supplied fixture's single stated fact. This node checks that the smoke run has a free-capable route for the steer path; it does not itself steer a running lane." },
 ]

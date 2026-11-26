@@ -2646,6 +2646,22 @@ mod tests {
         assert!(text.starts_with(super::hooks::SUMMARY_INSTRUCTION));
         assert!(text.contains("/t/session.jsonl"));
     }
+    #[test]
+    fn pre_compact_summary_instruction_keeps_the_tail_and_stale_items_honest() {
+        let (_temp, root, project) = setup();
+        let response = run_hook(&root, project, "PreCompact", 0);
+        let text = String::from_utf8(response.stdout).unwrap();
+        for clause in [
+            "State what was done since the last checkpoint save as done. Never list as next a step that the tail shows done.",
+            "The verbatim tail after this summary is newer than this summary; where they disagree, the tail wins.",
+            "List waits in flight (handle, what each blocks) instead of re-deriving them.",
+            "Do not replay user messages already saved as rulings in the checkpoint; cite them as 'see checkpoint Intent'.",
+            "Drop items untouched for 24 h unless they are owner asks; move them to the tracker.",
+            "Keep the summary under 12k characters.",
+        ] {
+            assert!(text.contains(clause), "PreCompact stdout misses: {clause}");
+        }
+    }
     const FIXTURES: [(&str, HookEvent); 4] = [
         (
             include_str!(concat!(
