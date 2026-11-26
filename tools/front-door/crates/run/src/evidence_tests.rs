@@ -69,7 +69,7 @@ fn seal_pins(dir: &Directory, base: GitOid) -> TestResult {
     };
     let value = serde_json::json!({
         "schema_version": 1,
-        "scope": serde_json::to_value(&scope)?,
+        "scope": serde_json::to_value(scope)?,
         "base": base.to_string(),
     });
     let bytes = provenant_records::CanonicalV1::bytes(&value)?

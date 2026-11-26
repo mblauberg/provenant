@@ -30,8 +30,10 @@ use provenant_records::settlement::{
 use provenant_records::stop::StopCause;
 use provenant_records::wire::lane::LaneRow;
 
-const BASE: &str = "1111111111111111111111111111111111111111";
-const HEAD: &str = "2222222222222222222222222222222222222222";
+// Fixture heads are built with the infallible enum constructor: a parse here
+// would put a fallible operation in every helper that pins an attempt.
+const BASE: GitOid = GitOid::Sha1([0x11; 20]);
+const HEAD: GitOid = GitOid::Sha1([0x22; 20]);
 
 fn handoff(status: HandoffStatus, note: &str) -> Handoff {
     Handoff {
@@ -95,10 +97,10 @@ fn base(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> Settlemen
     }
 }
 
-fn git_at(pinned: Option<&str>, head: Option<&str>) -> Option<GitEvidence> {
+fn git_at(pinned: Option<GitOid>, head: Option<GitOid>) -> Option<GitEvidence> {
     Some(GitEvidence {
-        input_head: pinned.map(|text| GitOid::parse(text).unwrap()),
-        writer_head: head.map(|text| GitOid::parse(text).unwrap()),
+        input_head: pinned,
+        writer_head: head,
         uncommitted: None,
         uncommitted_paths: Vec::new(),
         pushed_head: None,
@@ -167,8 +169,8 @@ fn rows() -> Vec<Row> {
 
     let mut stray = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     stray.git = Some(GitEvidence {
-        input_head: Some(GitOid::parse(BASE).unwrap()),
-        writer_head: Some(GitOid::parse(HEAD).unwrap()),
+        input_head: Some(BASE),
+        writer_head: Some(HEAD),
         uncommitted: None,
         uncommitted_paths: Vec::new(),
         pushed_head: None,
@@ -192,8 +194,8 @@ fn rows() -> Vec<Row> {
 
     let mut uncommitted = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     uncommitted.git = Some(GitEvidence {
-        input_head: Some(GitOid::parse(BASE).unwrap()),
-        writer_head: Some(GitOid::parse(HEAD).unwrap()),
+        input_head: Some(BASE),
+        writer_head: Some(HEAD),
         uncommitted: Some("M src/lib.rs".into()),
         uncommitted_paths: vec!["src/lib.rs".into()],
         pushed_head: None,
@@ -481,7 +483,7 @@ fn progress_is_pin_relative_and_never_reads_remote_state() {
 
     // A push, a moved remote ref or a settlement base is not a field of the
     // record. Only the sealed head changes when it is re-read after a restart.
-    evidence.git.as_mut().unwrap().writer_head = Some(GitOid::parse(HEAD).unwrap());
+    evidence.git.as_mut().unwrap().writer_head = Some(HEAD);
     let fact = settle(&evidence);
     assert_eq!(fact.head_progress, Some(HeadProgress::Moved));
     assert_ne!(fact.cause, Some(CauseKind::StoppedNoWork));
@@ -523,7 +525,7 @@ fn pushed_head_and_uncommitted_paths_are_not_settlement_evidence() {
 
     let mut varied = evidence.clone();
     let git = varied.git.as_mut().unwrap();
-    git.pushed_head = Some(GitOid::parse(HEAD).unwrap());
+    git.pushed_head = Some(HEAD);
     git.uncommitted_paths = vec!["src/lib.rs".into()];
     assert_eq!(
         settle(&varied),
@@ -726,7 +728,7 @@ fn a_route_mismatch_outranks_a_stall_policy_and_is_never_delivered() {
 fn terminal_record(
     fact: &provenant_records::settlement::OutcomeFact,
     launched: bool,
-) -> AttemptRecord {
+) -> Result<AttemptRecord, Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
     let mut record: AttemptRecord = serde_json::from_value(serde_json::json!({
         "schema_version": 1,
@@ -734,21 +736,20 @@ fn terminal_record(
         "run_id": "02020202020202020202020202020202",
         "task_id": "04040404040404040404040404040404",
         "project_id": ProjectId::from_bytes([3; 16]),
-        "key": provenant_records::WorkKey::new(ProjectId::from_bytes([3; 16]), "graph", "node", 1).unwrap(),
+        "key": provenant_records::WorkKey::new(ProjectId::from_bytes([3; 16]), "graph", "node", 1)?,
         "operation_id": "projection",
         "attempt_number": 1,
         "revision": 1,
         "generation": 0,
         "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
         "authority_digest": Digest::from_bytes([5; 32]),
-        "queued_at": WallTime::from_micros(1).unwrap(),
+        "queued_at": WallTime::from_micros(1)?,
         "state": {"state":"running"},
         "usage": {},
         "read_only_writable": [],
         "protected_paths": [], "trace": {},
         "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
-    }))
-    .unwrap();
+    }))?;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
         cause: fact.cause,
@@ -756,21 +757,21 @@ fn terminal_record(
         stop: fact.stop.clone(),
         outcome: fact.outcome,
         exit_code: None,
-        finished_at: WallTime::from_micros(2).unwrap(),
+        finished_at: WallTime::from_micros(2)?,
         reason: fact.reason.clone(),
     };
     record.settlement_class = Some(fact.settlement_class);
     record.signals = fact.signals.clone();
     record.provider_launched = Some(launched);
-    record
+    Ok(record)
 }
 
 // Spec: docs/specs/run-settlement.md, test 6 (projections agree).
 #[test]
-fn every_projection_of_a_settled_row_agrees() {
+fn every_projection_of_a_settled_row_agrees() -> Result<(), Box<dyn std::error::Error>> {
     for row in rows() {
         let fact = settle(&row.evidence);
-        let record = terminal_record(&fact, row.evidence.custody.launched);
+        let record = terminal_record(&fact, row.evidence.custody.launched)?;
         let graph = graph_outcome(&record).expect("a terminal record projects");
         let stop = fact.stop.as_ref().map(provenant_records::Stop::cause);
         let (state, reason) = LaneRow::state_and_reason(&record.state);
@@ -834,4 +835,5 @@ fn every_projection_of_a_settled_row_agrees() {
             assert_ne!(stop, Some(StopCause::StoppedNoWork), "{}: stop", row.name);
         }
     }
+    Ok(())
 }

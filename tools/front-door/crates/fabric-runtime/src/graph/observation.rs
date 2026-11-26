@@ -35,8 +35,9 @@ pub enum AttemptObservation {
         /// Exact settlement classification persisted by the run store.
         settlement_class: Option<provenant_records::run::SettlementClass>,
         /// The exact typed cause the run sealed, copied into the graph's
-        /// attempt row at settlement.
-        cause: Option<provenant_records::run::CauseKind>,
+        /// attempt row at settlement. Boxed: a cause can carry two Git oids,
+        /// and this payload must not inflate every observed attempt.
+        cause: Option<Box<provenant_records::run::CauseKind>>,
     },
 }
 

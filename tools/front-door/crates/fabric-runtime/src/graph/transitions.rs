@@ -327,7 +327,7 @@ pub(super) fn apply_attempt_observation(
                 attempt.usage = usage;
                 attempt.launched = launched;
                 attempt.stop = stop;
-                attempt.cause = cause;
+                attempt.cause = cause.map(|cause| *cause);
                 attempt.state = AttemptState::Terminal;
                 attempt.attempt_ref = attempt_ref;
                 // Provider success alone does not satisfy an explicit result contract.

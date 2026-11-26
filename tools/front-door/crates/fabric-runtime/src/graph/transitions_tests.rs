@@ -962,7 +962,7 @@ fn sealed_cause_lands_on_the_attempt_and_the_code_comes_from_the_outcome() {
             commit: None,
             stop: Some(provenant_records::StopCause::StoppedNoWork),
             settlement_class: Some(provenant_records::run::SettlementClass::DeclaredStop),
-            cause: Some(provenant_records::run::CauseKind::StoppedNoWork),
+            cause: Some(Box::new(provenant_records::run::CauseKind::StoppedNoWork)),
         },
         ObservationFacts {
             route_index: 0,
