@@ -1202,7 +1202,7 @@ pub fn check_go_allowance(
     let floor = config.opencode_go.min_monthly_allowance_usd;
     if floor == 0
         || !provenant_records::AdapterSpec::get(model.adapter())
-            .and_then(|spec| spec.allowance_prefix)
+            .and_then(|spec| spec.accounts.allowance_prefix)
             .is_some_and(|prefix| model.model().starts_with(prefix))
     {
         return Ok(());
@@ -1829,7 +1829,7 @@ impl Catalogue {
         // Every OpenCode path component before the model name is its namespace.
         fn parts(id: &ModelId) -> (&str, &str) {
             if provenant_records::AdapterSpec::get(id.adapter())
-                .is_some_and(|spec| spec.namespaced_models)
+                .is_some_and(|spec| spec.identity.namespaced_models)
             {
                 id.model().rsplit_once('/').unwrap_or(("", id.model()))
             } else {
@@ -1974,7 +1974,7 @@ impl Catalogue {
                 || row.quota_pool.as_deref().is_some_and(|pool| {
                     !identifier(pool)
                         || !provenant_records::AdapterSpec::get(row.model.adapter())
-                            .is_some_and(|spec| spec.grouped_quota_pools)
+                            .is_some_and(|spec| spec.accounts.grouped_quota_pools)
                 })
                 || row.superseded_by.len() > 16
                 || row.superseded_by.iter().any(|newer| {
@@ -2111,7 +2111,7 @@ impl Catalogue {
             return Vec::new();
         }
         if !provenant_records::AdapterSpec::get(id.adapter())
-            .is_some_and(|spec| spec.namespaced_models)
+            .is_some_and(|spec| spec.identity.namespaced_models)
         {
             return Vec::new();
         }
@@ -2221,7 +2221,7 @@ impl Catalogue {
 /// Only OpenCode draws on the keyless free allowance, whatever a pool lists.
 pub fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
     provenant_records::AdapterSpec::get(adapter)
-        .and_then(|spec| spec.free_pool)
+        .and_then(|spec| spec.accounts.free_pool)
         .filter(|_| free())
         .map(|pool| vec![pool.to_owned()])
         .unwrap_or_default()
@@ -2266,8 +2266,8 @@ pub fn canonical_route_model(
         // namespaced adapter (OpenCode's PROVIDER/MODEL) an id whose model
         // has no `/` is a short PROVIDER/NAME form instead: it resolves below
         // through the adapter-qualified catalogue match first.
-        let namespaced =
-            provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.namespaced_models);
+        let namespaced = provenant_records::AdapterSpec::get(adapter)
+            .is_some_and(|spec| spec.identity.namespaced_models);
         if !namespaced || parsed.model().contains('/') {
             return (
                 model.to_owned(),

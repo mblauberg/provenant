@@ -174,7 +174,8 @@ const MAX_LINE_BYTES: usize = provenant_os::exec::PROVIDER_LINE_LIMIT;
 /// whatever a command printed) is not evidence; every other oversized line
 /// still fails closed. The item type sits in the first bytes of the frame.
 fn oversize_ignorable(adapter: &str, head: &[u8]) -> bool {
-    provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.oversize_command_frames)
+    provenant_records::AdapterSpec::get(adapter)
+        .is_some_and(|spec| spec.launch.oversize_command_frames)
         && (head.starts_with(br#"{"type":"item.completed","item":{"id":""#)
             || head.starts_with(br#"{"type":"item.started","item":{"id":""#))
         && head[..head.len().min(256)]
@@ -284,7 +285,7 @@ impl StreamState {
     }
     fn raw_stream(&self) -> bool {
         provenant_records::AdapterSpec::get(self.adapter)
-            .is_some_and(|spec| spec.stream == provenant_records::StreamContract::Raw)
+            .is_some_and(|spec| spec.launch.stream == provenant_records::StreamContract::Raw)
     }
     pub(crate) fn observe(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
         if self.raw_stream() {
@@ -441,11 +442,11 @@ impl StreamState {
                 ProviderEvent::ToolActivity => self.last_assistant_text = None,
                 ProviderEvent::Text(text)
                     if provenant_records::AdapterSpec::get(self.adapter)
-                        .is_some_and(|spec| spec.answer_from_text) =>
+                        .is_some_and(|spec| spec.launch.answer_from_text) =>
                 {
                     self.result_text_seen |= !text.trim().is_empty();
                     if provenant_records::AdapterSpec::get(self.adapter)
-                        .is_some_and(|spec| spec.result_event_usage)
+                        .is_some_and(|spec| spec.launch.result_event_usage)
                         && let Some(model) = self.resolve_answer_model(text)?
                     {
                         answer_model = Some(model);
@@ -611,14 +612,14 @@ impl StreamState {
         // Recover only a clean, complete terminal stream, using the same
         // answer identity checks as an ordinary result event.
         if provenant_records::AdapterSpec::get(self.adapter)
-            .is_some_and(|spec| spec.answer_from_text)
+            .is_some_and(|spec| spec.launch.answer_from_text)
             && status == OutcomeStatus::Success
             && !self.early_stop
             && !self.result_text_seen
             && let Some(text) = self.last_assistant_text.take()
         {
             if provenant_records::AdapterSpec::get(self.adapter)
-                .is_some_and(|spec| spec.result_event_usage)
+                .is_some_and(|spec| spec.launch.result_event_usage)
                 && let Some(model) = self.resolve_answer_model(&text)?
             {
                 final_events.push(ProviderEvent::Model(model));

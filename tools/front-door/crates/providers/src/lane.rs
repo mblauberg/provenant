@@ -1232,8 +1232,10 @@ mod tests {
             .collect();
         let declared: BTreeSet<_> = provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|spec| spec.install.is_some() || spec.named_entry == NamedEntry::Command)
-            .map(|spec| spec.name)
+            .filter(|spec| {
+                spec.install.is_some() || spec.identity.named_entry == NamedEntry::Command
+            })
+            .map(|spec| spec.identity.name)
             .collect();
         assert_eq!(implemented, declared);
     }
@@ -2504,7 +2506,7 @@ mod tests {
             route.account_key = None;
             let plan = crate::tests::fixture_access_plan(
                 access,
-                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication),
+                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.login.authentication),
                 false,
             );
             let mut spec = entry.adapter.prepare(crate::tests::fixture_input(

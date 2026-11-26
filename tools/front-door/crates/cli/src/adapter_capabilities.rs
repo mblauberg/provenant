@@ -229,14 +229,14 @@ pub fn matrix(state: &Path, project: Option<&Path>, store: Option<&RunStore>) ->
         .map(|spec| {
             let version = executor
                 .as_ref()
-                .and_then(|executor| which(spec.binary).map(|binary| (executor, binary)))
+                .and_then(|executor| which(spec.identity.binary).map(|binary| (executor, binary)))
                 .and_then(|(executor, binary)| {
                     provenant_providers::version::probe(executor, &binary, cwd)
                 });
-            let assessment = table.assess(spec.name, version.as_deref());
+            let assessment = table.assess(spec.identity.name, version.as_deref());
             json!({
-                "adapter": spec.name,
-                "family": spec.family,
+                "adapter": spec.identity.name,
+                "family": spec.identity.family,
                 "capabilities": capabilities(spec),
                 "compatibility": {
                     "version": assessment.version,
@@ -246,7 +246,7 @@ pub fn matrix(state: &Path, project: Option<&Path>, store: Option<&RunStore>) ->
                     "recommended": assessment.recommended,
                     "source": assessment.source.as_str(),
                 },
-                "measurements": measured.get(spec.name).cloned().unwrap_or(Value::Null),
+                "measurements": measured.get(spec.identity.name).cloned().unwrap_or(Value::Null),
             })
         })
         .collect::<Vec<_>>();
@@ -318,7 +318,7 @@ pub fn markdown() -> String {
         );
         rows.push(format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
-            spec.name,
+            spec.identity.name,
             bool_cell(launch.model, "model", &mut notes),
             bool_cell(launch.effort, "effort", &mut notes),
             bool_cell(launch.image_input, "image input", &mut notes),

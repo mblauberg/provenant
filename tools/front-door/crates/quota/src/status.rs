@@ -153,7 +153,7 @@ pub fn effective_status(input: &StatusInput<'_>) -> Result<EffectiveStatus, Quot
                     .and_then(|details| details.plan.as_deref()),
             )
         })
-        .and_then(|spec| spec.free_pool);
+        .and_then(|spec| spec.accounts.free_pool);
     let in_free =
         |refusal: &&RefusalRow| free_pool.is_some_and(|pool| refusal.pool.as_deref() == Some(pool));
     let free_refused = refusals.iter().any(|row| in_free(&row));

@@ -62,7 +62,7 @@ impl LocalReader<'_> {
             host,
             self.config,
             self.agent_label,
-            Some(self.harness.spec().name),
+            Some(self.harness.spec().identity.name),
         )?;
         if found.record.host != host || found.record.chair_actor != address.actor {
             return Ok(None);

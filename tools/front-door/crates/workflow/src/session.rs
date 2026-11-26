@@ -1277,7 +1277,7 @@ mod tests {
                         "--file",
                         "checkpoint.md",
                         "--client",
-                        harness.spec().name,
+                        harness.spec().identity.name,
                     ],
                 "{text}"
             );

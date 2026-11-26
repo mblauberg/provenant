@@ -909,7 +909,7 @@ fn usage_events(events: &[ProviderEvent]) -> Vec<&ProviderEvent> {
 /// semantics, so a recorded fixture's total is checked at the public boundary.
 fn usage_total(events: &[ProviderEvent], adapter: &str) -> provenant_records::Tokens {
     let spec = provenant_records::AdapterSpec::get(adapter).expect("declared adapter");
-    let mut accumulator = UsageAccumulator::new(spec.usage);
+    let mut accumulator = UsageAccumulator::new(spec.launch.usage);
     for event in usage_events(events) {
         let ProviderEvent::Usage(report) = event else {
             panic!("a usage event");
@@ -1121,8 +1121,8 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
             .iter()
             // Host-native delegates; the feature-gated fixture is injected by its test.
             .filter(|spec| spec.id != provenant_records::Harness::HostNative)
-            .filter(|spec| spec.name != "fixture-provider")
-            .map(|spec| spec.name)
+            .filter(|spec| spec.identity.name != "fixture-provider")
+            .map(|spec| spec.identity.name)
             .collect()
     );
     for entry in REGISTRY {

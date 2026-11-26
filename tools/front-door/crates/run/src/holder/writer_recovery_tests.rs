@@ -710,7 +710,7 @@ fn budget_warning_records_the_steer_refusal_for_lane_providers()
         assert_eq!(receipt.state, ControlState::Unsupported);
         let support = provenant_records::ADAPTER_SPECS
             .iter()
-            .find(|spec| spec.name == provider)
+            .find(|spec| spec.identity.name == provider)
             .map_or(ControlSupport::Unsupported, |spec| {
                 spec.capabilities.control.for_launch(LaunchKind::Lane)
             });

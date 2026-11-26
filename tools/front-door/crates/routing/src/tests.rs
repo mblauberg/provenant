@@ -191,7 +191,9 @@ fn profile_preview_with_status(
     record.adapter = id.adapter().into();
     record.account_key = Some(account.into());
     record.plan = fixture_plan(&id);
-    if provenant_records::AdapterSpec::get(id.adapter()).is_some_and(|spec| spec.offered_models) {
+    if provenant_records::AdapterSpec::get(id.adapter())
+        .is_some_and(|spec| spec.identity.offered_models)
+    {
         record.observed_models = Vec::new();
     }
     let records = [record];

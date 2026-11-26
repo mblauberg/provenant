@@ -120,7 +120,7 @@ fn prepared(
 
 /// The credential mechanism each adapter's fixture plan selects.
 fn login(id: &str) -> Option<&'static str> {
-    provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication)
+    provenant_records::AdapterSpec::get(id).and_then(|spec| spec.login.authentication)
 }
 
 struct Case {

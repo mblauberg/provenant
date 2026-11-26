@@ -775,7 +775,7 @@ fn persist_success(
     if next.last_error == Some(ProbeFailure::AccountMismatch)
         && !(login_probe
             && provenant_records::AdapterSpec::get(adapter)
-                .is_some_and(|spec| spec.login_check_names_account))
+                .is_some_and(|spec| spec.login.login_check_names_account))
     {
         return Ok(());
     }
@@ -1457,14 +1457,15 @@ fn credential_metadata(
     let mut paths = vec![directory.clone()];
     if let Some(spec) = spec {
         paths.extend(
-            spec.credential_files
+            spec.login
+                .credential_files
                 .iter()
                 .map(|name| directory.join(name)),
         );
-        if spec.credential_profile_sibling {
+        if spec.login.credential_profile_sibling {
             paths.push(directory.with_extension("json"));
         }
-        if spec.credential_host_keychain
+        if spec.login.credential_host_keychain
             && cfg!(target_os = "macos")
             && let Some(home) = home
         {
@@ -1623,7 +1624,8 @@ fn login_repair_with_expired_session(
         return "account-specific login remedy unavailable; consult the provider's sign-in instructions".into();
     };
     if expired
-        && let (Some(refresh), Some(login)) = (spec.login_refresh_template, spec.login_template)
+        && let (Some(refresh), Some(login)) =
+            (spec.login.login_refresh_template, spec.login.login_template)
     {
         return format!(
             "try a short interactive session with `{}`; if that does not refresh the login, run `{}` interactively",
@@ -1631,15 +1633,15 @@ fn login_repair_with_expired_session(
             login.replace("{directory}", &quoted),
         );
     }
-    if let Some(template) = spec.login_template {
+    if let Some(template) = spec.login.login_template {
         format!(
             "run `{}` interactively",
             template.replace("{directory}", &quoted)
         )
-    } else if !spec.login_hint.is_empty() {
+    } else if !spec.login.login_hint.is_empty() {
         format!(
             "consult the provider's sign-in instructions (`{}`)",
-            spec.login_hint
+            spec.login.login_hint
         )
     } else {
         "account-specific login remedy unavailable; consult the provider's sign-in instructions"
@@ -3065,7 +3067,7 @@ fn reset_label(resets_at: &str, now: i64, time_zone: &jiff::tz::TimeZone) -> Opt
 
 fn refusal_reset_source(adapter: &str) -> &'static str {
     provenant_records::AdapterSpec::get(adapter)
-        .map_or("provider reset", |spec| spec.refusal_reset_source)
+        .map_or("provider reset", |spec| spec.accounts.refusal_reset_source)
 }
 
 /// Avoid repeating the account-level free-pool expiry already printed beside its status.
@@ -3074,7 +3076,7 @@ fn displayed_refusals(row: &provenant_quota::AccountRow) -> Vec<&provenant_quota
         .resets_at
         .as_ref()
         .and_then(|_| provenant_records::AdapterSpec::get(&row.account.adapter))
-        .and_then(|spec| spec.free_pool);
+        .and_then(|spec| spec.accounts.free_pool);
     row.refusals
         .iter()
         .filter(|refusal| free_pool.is_none_or(|pool| refusal.pool.as_deref() != Some(pool)))
@@ -3131,7 +3133,7 @@ fn pool_states(snapshot: &provenant_quota::QuotaSnapshot) -> Option<String> {
 /// the account read as wholly exhausted.
 fn shared_pool_exhaustions(snapshot: &provenant_quota::QuotaSnapshot) -> Option<String> {
     let grouped = provenant_records::AdapterSpec::get(&snapshot.account.adapter)
-        .is_some_and(|spec| spec.grouped_quota_pools);
+        .is_some_and(|spec| spec.accounts.grouped_quota_pools);
     let pools = pool_usage(snapshot);
     if !grouped || pools.len() <= 1 {
         return None;
@@ -3329,7 +3331,7 @@ pub fn run(
                         enabled
                             && entry.quota_source.is_some()
                             && provenant_records::AdapterSpec::get(id).is_some_and(|spec| {
-                                spec.quota_probe != provenant_records::QuotaProbeKind::None
+                                spec.accounts.quota_probe != provenant_records::QuotaProbeKind::None
                             })
                             && adapter.adapter.as_deref().is_none_or(|filter| filter == id)
                             && accounts.iter().any(|account| account.adapter == id)
@@ -5013,18 +5015,18 @@ mod tests {
         let dir = child(&root, OsStr::new("quota"))?;
         let spec = provenant_records::ADAPTER_SPECS
             .iter()
-            .find(|spec| spec.free_pool.is_some())
+            .find(|spec| spec.accounts.free_pool.is_some())
             .ok_or("free pool adapter")?;
-        let pool = spec.free_pool.expect("pool").to_owned();
+        let pool = spec.accounts.free_pool.expect("pool").to_owned();
         let catalogue = provenant_routing::Catalogue::bundled()?;
         let free = catalogue
             .models()
             .iter()
-            .find(|entry| entry.free && entry.model.adapter() == spec.name)
+            .find(|entry| entry.free && entry.model.adapter() == spec.identity.name)
             .ok_or("free model")?;
         let account = AccountScope {
             extra: Default::default(),
-            adapter: spec.name.into(),
+            adapter: spec.identity.name.into(),
             account_key: "key".into(),
             label: "zen".into(),
         };
@@ -5056,7 +5058,7 @@ mod tests {
             &mut Vec::new(),
         )?;
         let route = provenant_records::run::RouteRecord {
-            provider: Some(spec.name.into()),
+            provider: Some(spec.identity.name.into()),
             model: Some(free.model.as_str().to_owned()),
             account_label: Some("zen".into()),
             account_key: Some("key".into()),
@@ -5086,7 +5088,7 @@ mod tests {
         let paid = catalogue
             .models()
             .iter()
-            .find(|entry| !entry.free && entry.model.adapter() == spec.name)
+            .find(|entry| !entry.free && entry.model.adapter() == spec.identity.name)
             .ok_or("paid model")?;
         persist_provider_refusal(temp.path(), &route, Some(&pool), 200, Some(1000))?;
         persist_provider_success(

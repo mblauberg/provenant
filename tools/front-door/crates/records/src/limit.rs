@@ -429,7 +429,7 @@ impl LaneLimits {
                 "attempt".into()
             },
             notice: spec
-                .and_then(|spec| spec.token_budget_notice)
+                .and_then(|spec| spec.launch.token_budget_notice)
                 .map(str::to_owned),
         })
     }

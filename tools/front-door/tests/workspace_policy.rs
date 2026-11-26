@@ -1307,7 +1307,7 @@ fn adapter_policy_excludes_fixture_items_but_scans_production_neighbours() {
 fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
     let names = provenant_records::ADAPTER_SPECS
         .iter()
-        .map(|spec| regex::escape(spec.name))
+        .map(|spec| regex::escape(spec.identity.name))
         .collect::<Vec<_>>()
         .join("|");
     let literal = format!(r#""(?:{names})""#);
@@ -1322,10 +1322,10 @@ fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
 fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(), Box<dyn Error>> {
     let comparison = adapter_identity_comparison()?;
     for spec in provenant_records::ADAPTER_SPECS {
-        assert!(comparison.is_match(&format!("adapter == \"{}\"", spec.name)));
-        assert!(comparison.is_match(&format!("\"{}\" => action()", spec.name)));
+        assert!(comparison.is_match(&format!("adapter == \"{}\"", spec.identity.name)));
+        assert!(comparison.is_match(&format!("\"{}\" => action()", spec.identity.name)));
     }
-    assert!(comparison.is_match("adapter == Harness::Codex.spec().name"));
+    assert!(comparison.is_match("adapter == Harness::Codex.spec().identity.name"));
     assert!(comparison.is_match("matches!(adapter, \"codex\")"));
     assert!(comparison.is_match("matches!(adapter, Some(\"codex\"))"));
     assert!(comparison.is_match("matches!(adapter, None | Some(\"codex\"))"));
@@ -1333,7 +1333,7 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     assert!(comparison.is_match("adapter.eq(\"codex\")"));
     assert!(comparison.is_match("adapter.eq_ignore_ascii_case(\"codex\")"));
     assert!(comparison.is_match("\"codex\" if ready => action()"));
-    assert!(comparison.is_match("Harness::Agy.spec().name != adapter"));
+    assert!(comparison.is_match("Harness::Agy.spec().identity.name != adapter"));
     assert!(comparison.is_match("provider == Harness::Claude"));
     for pattern in [
         "Harness::Claude => action()",
@@ -1345,7 +1345,7 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     ] {
         assert!(comparison.is_match(pattern), "{pattern}");
     }
-    assert!(!comparison.is_match("default_value = Harness::Claude.spec().name"));
+    assert!(!comparison.is_match("default_value = Harness::Claude.spec().identity.name"));
     assert!(!comparison.is_match("true => Some(Harness::Codex),\nfalse => None"));
     Ok(())
 }
@@ -1367,7 +1367,7 @@ fn adapter_policy_detects_provider_and_config_identity_branches() -> Result<(), 
     for source in [
         "crate::adapter!(Agy, \"agy\", prepare);",
         "adapter: \"agy\",",
-        "provenant_records::Harness::Agy.spec().name",
+        "provenant_records::Harness::Agy.spec().identity.name",
     ] {
         assert!(!comparison.is_match(source), "false positive: {source}");
     }
@@ -1381,7 +1381,7 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let names = provenant_records::ADAPTER_SPECS
         .iter()
-        .map(|spec| regex::escape(spec.name))
+        .map(|spec| regex::escape(spec.identity.name))
         .collect::<Vec<_>>()
         .join("|");
     let literal = regex::Regex::new(&format!(r#""(?:{names})""#))?;

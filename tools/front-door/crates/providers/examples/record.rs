@@ -328,7 +328,7 @@ fn expected(profile: &ProviderProfile, writer: bool) -> BTreeMap<FixtureOperatio
             (O::KeychainRead, Denied),
         ]);
     }
-    if !spec.authentication.is_empty() {
+    if !spec.login.authentication.is_empty() {
         map.insert(O::AuthenticationRead, Allowed);
     }
     if !spec.runtime_reads.is_empty() {
@@ -654,7 +654,7 @@ fn probes(
     );
     fork.stdin = Some(b"x\n");
     list.push(fork);
-    if !spec.authentication.is_empty() {
+    if !spec.login.authentication.is_empty() {
         let auth = spec
             .authentication
             .iter()
@@ -1144,7 +1144,7 @@ fn main() -> Result<()> {
             args.root.join(format!("raw-{session}.jsonl")),
             &run.outcome.stdout.bytes,
         )?;
-        let mut stream = spec.stream;
+        let mut stream = spec.launch.stream;
         adapter.observe(&mut stream, &run.outcome.stdout.bytes)?;
         let outcome = adapter.finish(stream, exit(&run.outcome))?;
         let model = answering_model(

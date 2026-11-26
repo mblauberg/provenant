@@ -114,11 +114,11 @@ fn unobserved_adapters(accounts: &[LoginAccount], installed: impl Fn(&str) -> bo
     provenant_records::ADAPTER_SPECS
         .iter()
         .filter(|spec| {
-            !spec.binary.is_empty()
-                && installed(spec.binary)
-                && !accounts.iter().any(|row| row.adapter == spec.name)
+            !spec.identity.binary.is_empty()
+                && installed(spec.identity.binary)
+                && !accounts.iter().any(|row| row.adapter == spec.identity.name)
         })
-        .map(|spec| spec.name.to_owned())
+        .map(|spec| spec.identity.name.to_owned())
         .collect()
 }
 fn installed_sign_ins(
@@ -133,7 +133,7 @@ fn installed_sign_ins(
         .iter()
         .filter_map(|name| {
             let spec = provenant_records::AdapterSpec::get(name)?;
-            let executable = executable(spec.binary)?;
+            let executable = executable(spec.identity.binary)?;
             let account_dir = spec
                 .default_account_directory
                 .map(|(env, fallback)| {
@@ -143,7 +143,7 @@ fn installed_sign_ins(
                 })
                 .unwrap_or_else(|| home.to_owned());
             let state = provenant_providers::host::local_signin(
-                spec.login_reprobe,
+                spec.login.login_reprobe,
                 executor,
                 &executable,
                 home,
@@ -261,7 +261,7 @@ fn managed(roots: &provenant_core::Roots, home: &Path) -> (Vec<Managed>, Option<
             statuses
                 .into_iter()
                 .map(|status| Managed {
-                    adapter: status.harness.spec().name.to_owned(),
+                    adapter: status.harness.spec().identity.name.to_owned(),
                     label: status.label,
                     state: status.state,
                     findings: status.findings.len() as u64,
@@ -281,7 +281,7 @@ fn agy_accounts(
         .values()
         .filter(|entry| {
             provenant_records::AdapterSpec::get(&entry.adapter)
-                .is_some_and(|spec| spec.isolated_login_keychain)
+                .is_some_and(|spec| spec.accounts.isolated_login_keychain)
         })
         .map(|entry| {
             let keychain = entry.directory.join("Library/Keychains/login.keychain-db");
@@ -633,7 +633,9 @@ fn discard_remote_repairs(report: &mut Report) {
 fn ignore_file_warnings(globals: &Globals, roots: &provenant_core::Roots) -> Vec<String> {
     let installed: Vec<_> = provenant_records::ADAPTER_SPECS
         .iter()
-        .filter(|spec| !spec.ignore_files.is_empty() && executable(spec.binary).is_some())
+        .filter(|spec| {
+            !spec.launch.ignore_files.is_empty() && executable(spec.identity.binary).is_some()
+        })
         .collect();
     if installed.is_empty() {
         return Vec::new();

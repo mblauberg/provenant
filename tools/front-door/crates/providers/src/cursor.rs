@@ -19,6 +19,7 @@ fn authentication_endpoints(home: &Path) -> Vec<provenant_confinement::permissio
         .flat_map(|directory| {
             provenant_records::Harness::Cursor
                 .spec()
+                .login
                 .credential_files
                 .iter()
                 .map(|file| exact(directory.join(file)))

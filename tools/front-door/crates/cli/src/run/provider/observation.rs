@@ -131,7 +131,7 @@ pub(super) fn find_native_codex_rollout(
     if model.is_empty() {
         return Err(ProviderError::UnknownIdentity);
     }
-    let provider = provenant_records::Harness::Codex.spec().name;
+    let provider = provenant_records::Harness::Codex.spec().identity.name;
     let selected =
         match native_session_location_for_route(provider_state, provider, model, account_key) {
             Ok(home) => home,
@@ -381,7 +381,7 @@ pub(super) fn default_directory_error(
         };
         return AccountObservationError::ConfiguredDirectory(format!(
             "configured {} account directory from {setting} is {}; {action}",
-            spec.name,
+            spec.identity.name,
             if unavailable {
                 "unavailable"
             } else {
@@ -392,7 +392,7 @@ pub(super) fn default_directory_error(
     if unavailable {
         AccountObservationError::AuthRequired(format!(
             "default {} login is missing; run `{}`",
-            spec.name, spec.login_hint
+            spec.identity.name, spec.login.login_hint
         ))
     } else {
         AccountObservationError::Other(detail)
@@ -519,7 +519,7 @@ pub(super) fn observe_account(
     let directory = canonical(&entry.directory)?;
     if directory != entry.directory
         || AdapterSpec::get(&entry.adapter)
-            .and_then(|spec| spec.account_directory_prefix)
+            .and_then(|spec| spec.accounts.account_directory_prefix)
             .is_some_and(|prefix| directory != home.join(format!("{prefix}{}", entry.label)))
     {
         return Err(format!(
@@ -530,9 +530,9 @@ pub(super) fn observe_account(
     }
     // Adapters without registered accounts, and an unregistered local login
     // (agy's synthetic `local` entry), have no registered identity to probe.
-    let (detected, org) = if AdapterSpec::get(&entry.adapter)
-        .is_none_or(|spec| !spec.registered_account || spec.is_unregistered_local(&entry.key))
-    {
+    let (detected, org) = if AdapterSpec::get(&entry.adapter).is_none_or(|spec| {
+        !spec.accounts.registered_account || spec.is_unregistered_local(&entry.key)
+    }) {
         (entry.key.clone(), None)
     } else {
         provenant_providers::accounts::detect_with_org(
@@ -758,7 +758,7 @@ pub(super) fn check_launch_prompt(
     if paths.lane_depth > 1
         && adapter
             .and_then(AdapterSpec::get)
-            .is_some_and(|spec| spec.argv_prompt)
+            .is_some_and(|spec| spec.launch.argv_prompt)
     {
         Prompt::new(text.to_owned())
             .with_argv_limit(argv_limit, argv_origin)
@@ -789,7 +789,7 @@ pub(super) fn launch_prompt(
     }
     check_launch_prompt(text, paths, Some(adapter), argv_limit, argv_origin, policy)?;
     let prompt = Prompt::new(text.to_owned()).with_argv_limit(argv_limit, argv_origin);
-    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt)
+    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.argv_prompt)
         || !prompt.argv_limit_exceeded()
         || paths.lane_depth > 1
     {
@@ -854,7 +854,7 @@ fn observed_models_for_account(
     home: &Path,
     roots: Option<&provenant_core::Roots>,
 ) -> Vec<String> {
-    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
+    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.identity.offered_models) {
         return Vec::new();
     }
     match provenant_providers::agy::cached_models_status(state_root, directory) {

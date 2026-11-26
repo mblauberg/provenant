@@ -437,7 +437,7 @@ pub(super) fn continuation_for_policy(
             &retained,
             private_state,
             policy,
-            AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only),
+            AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.retention.copy_sessions_only),
             lane_access,
             enforcement,
         )?,
@@ -477,7 +477,7 @@ pub(super) fn prior_uses_native_session_state(
             .model
             .as_deref()
             .and_then(|model| {
-                spec.and_then(|spec| spec.model_id_prefix)
+                spec.and_then(|spec| spec.identity.model_id_prefix)
                     .and_then(|prefix| model.strip_prefix(prefix))
             })
             .is_some_and(|model| {
@@ -610,7 +610,7 @@ pub(super) fn verify_native_continuation(
 }
 
 fn missing_continuation(provider: &str) -> ContinuationError {
-    if AdapterSpec::get(provider).is_some_and(|spec| spec.relocated_session_state) {
+    if AdapterSpec::get(provider).is_some_and(|spec| spec.retention.relocated_session_state) {
         format!("retained provider continuation is missing or expired; {provider} sessions now require attempt-private state, so host-backed sessions from before this release cannot resume; start a new lane").into()
     } else {
         "retained provider continuation is missing or expired; start a new lane".into()

@@ -991,7 +991,7 @@ impl Registry<'_> {
             .provider
             .as_deref()
             .and_then(provenant_records::AdapterSpec::get)
-            .is_some_and(|spec| spec.result_event_usage);
+            .is_some_and(|spec| spec.launch.result_event_usage);
         let failed = |reason: &str| run::Decoded {
             terminal_cause: None,
             outcome: run::Outcome::Failed,
@@ -1103,7 +1103,7 @@ impl Registry<'_> {
                 .as_deref()
                 .filter(|key| {
                     provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| {
-                        spec.registered_account && !spec.is_unregistered_local(key)
+                        spec.accounts.registered_account && !spec.is_unregistered_local(key)
                     })
                 })
                 .map(str::to_owned),
@@ -1189,7 +1189,8 @@ impl Registry<'_> {
 
         // Exit-time stderr quota text is evidence only for a run the adapter
         // did not accept. Live structured refusals trigger cleanup separately.
-        if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.stderr_quota)
+        if provenant_records::AdapterSpec::get(adapter.id())
+            .is_some_and(|spec| spec.launch.stderr_quota)
             && !matches!(outcome.status(), OutcomeStatus::Success)
             && let Some(event) = provenant_providers::opencode::stderr_quota(stderr)
         {
@@ -1298,7 +1299,7 @@ impl Registry<'_> {
         // The adapter declares what one report means; the accumulator is the
         // only merge. A name we do not have a spec for reports nothing live.
         let usage_semantics = provenant_records::AdapterSpec::get(adapter.id())
-            .map(|spec| spec.usage)
+            .map(|spec| spec.launch.usage)
             .unwrap_or_else(|| {
                 provenant_records::UsageSemantics::new(
                     provenant_records::UsageScope::Step,
@@ -1347,10 +1348,10 @@ impl Registry<'_> {
         // also arrive on stderr; collapsing both channels here keeps one
         // warning even when Codex prints the key twice.
         let scan_stderr = provenant_records::AdapterSpec::get(adapter.id())
-            .is_some_and(|spec| spec.stderr_config_notices);
+            .is_some_and(|spec| spec.launch.stderr_config_notices);
         report_config_notices(&events, stderr, scan_stderr);
         if provenant_records::AdapterSpec::get(adapter.id())
-            .is_some_and(|spec| spec.deduplicate_result)
+            .is_some_and(|spec| spec.launch.deduplicate_result)
         {
             // The provider can repeat the whole answer across its streamed response and
             // result, or within the result itself. Leave distinct text intact.
@@ -1367,7 +1368,9 @@ impl Registry<'_> {
                 decoded.turns.clear();
             }
         }
-        if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.exit_route) {
+        if provenant_records::AdapterSpec::get(adapter.id())
+            .is_some_and(|spec| spec.launch.exit_route)
+        {
             decoded.observed_route = Some(run::RouteRecord {
                 source: Some("command_exit".into()),
                 account_key: account_key.clone(),
@@ -1405,7 +1408,7 @@ impl Registry<'_> {
         // was renewed away or expired, not that the account needs a login.
         let lane_token = auth
             && provenant_records::AdapterSpec::get(adapter.id())
-                .is_some_and(|spec| spec.launch_token_refresh);
+                .is_some_and(|spec| spec.launch.launch_token_refresh);
         let provider_failed = outcome.status() == OutcomeStatus::Failed
             && failure_cause == provenant_providers::FailureCause::Provider;
         (decoded.outcome, decoded.reason) = match outcome.status() {
@@ -1605,7 +1608,7 @@ impl Registry<'_> {
             decoded.outcome = run::Outcome::Unclassified;
             // A diagnostic replaces the provider's untrusted text.
             let diagnosed = provenant_records::AdapterSpec::get(adapter.id())
-                .is_some_and(|spec| spec.stdout_error_diagnostic)
+                .is_some_and(|spec| spec.launch.stdout_error_diagnostic)
                 && provenant_providers::opencode::stdout_error_diagnostic(
                     stdout,
                     route.model.as_deref(),
@@ -1622,7 +1625,7 @@ impl Registry<'_> {
             });
         }
         if provenant_records::AdapterSpec::get(adapter.id())
-            .is_some_and(|spec| spec.stdout_error_diagnostic)
+            .is_some_and(|spec| spec.launch.stdout_error_diagnostic)
             && let Some(note) = provenant_providers::opencode::stdout_error_diagnostic(
                 stdout,
                 route.model.as_deref(),

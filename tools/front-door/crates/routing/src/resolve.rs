@@ -564,7 +564,9 @@ fn snapshot_offered_models<'a>(
     adapter: &str,
     account_key: Option<&str>,
 ) -> Option<&'a [String]> {
-    if !provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
+    if !provenant_records::AdapterSpec::get(adapter)
+        .is_some_and(|spec| spec.identity.offered_models)
+    {
         return None;
     }
     let key = account_key?;
@@ -587,7 +589,7 @@ fn recorded_offer_models(
     context: &RoutingContext<'_>,
 ) -> Option<(Vec<String>, i64)> {
     if !provenant_records::AdapterSpec::get(&availability.adapter)
-        .is_some_and(|spec| spec.offered_models)
+        .is_some_and(|spec| spec.identity.offered_models)
     {
         return None;
     }
@@ -658,7 +660,8 @@ fn account_serves_model(
     {
         return false;
     }
-    if provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|spec| spec.offered_models)
+    if provenant_records::AdapterSpec::get(model.adapter())
+        .is_some_and(|spec| spec.identity.offered_models)
     {
         return offered_list_serves_model(
             &record.observed_models,
@@ -697,7 +700,9 @@ fn account_hint_matches(hint: &str, adapter: &str, account_key: Option<&str>) ->
     }
 }
 fn adapter_offered_lists<'a>(context: &'a RoutingContext<'_>, adapter: &str) -> Vec<&'a [String]> {
-    if !provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
+    if !provenant_records::AdapterSpec::get(adapter)
+        .is_some_and(|spec| spec.identity.offered_models)
+    {
         return Vec::new();
     }
     let hint_in_availability = context.policy_account_hint.is_some_and(|hint| {
@@ -759,7 +764,9 @@ fn pool_member_retained_by_offerings(
         return true;
     }
     let adapter = member.model.adapter();
-    if !provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
+    if !provenant_records::AdapterSpec::get(adapter)
+        .is_some_and(|spec| spec.identity.offered_models)
+    {
         return true;
     }
     let lists = adapter_offered_lists(context, adapter);
@@ -851,7 +858,7 @@ fn pacing_policy(catalogue: &Catalogue, config: &RoutingConfig, model: &ModelId)
         return *policy;
     }
     let key = provenant_records::AdapterSpec::get(model.adapter())
-        .and_then(|spec| spec.pacing_keys)
+        .and_then(|spec| spec.accounts.pacing_keys)
         .map_or(model.adapter(), |(free, paid)| {
             if catalogue.is_free_model(model) {
                 free
@@ -952,7 +959,7 @@ fn window_matches(
         PacingWindow::Daily => window.window_seconds == Some(86_400) || name.ends_with("daily"),
         PacingWindow::Rolling => {
             provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                spec.accounts.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
             }) && (name.ends_with("five_hour") || name.ends_with("rolling"))
         }
     }
@@ -1140,7 +1147,7 @@ fn pace_snapshot_factor(
             let reset = match window.resets_unix_seconds {
                 Some(reset) if reset > now => reset,
                 None if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                    spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                    spec.accounts.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
                 }) && snapshot
                     .details
                     .as_ref()
@@ -1236,7 +1243,7 @@ fn pacing_factor_basis_points(
         _ => detail,
     };
     let detail = if provenant_records::AdapterSpec::get(model.adapter())
-        .and_then(|spec| spec.allowance_prefix)
+        .and_then(|spec| spec.accounts.allowance_prefix)
         .is_some_and(|prefix| model.model().starts_with(prefix))
     {
         let observation = go_quota_observation(model, account, context);
@@ -1657,7 +1664,8 @@ fn pacing_reserve_window(
                 && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
                     || (window.resets_unix_seconds.is_none()
                         && provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                            spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                            spec.accounts.quota_probe
+                                == provenant_records::QuotaProbeKind::LocalLedger
                         })
                         && snapshot
                             .details
@@ -1875,7 +1883,8 @@ fn recorded_offers(
     availability: &AvailabilityRecord,
     context: &RoutingContext<'_>,
 ) -> Option<provenant_records::run::AccountOfferMismatch> {
-    if !provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|spec| spec.offered_models)
+    if !provenant_records::AdapterSpec::get(model.adapter())
+        .is_some_and(|spec| spec.identity.offered_models)
     {
         return None;
     }
@@ -2510,7 +2519,7 @@ fn normalised_effort<'e>(
     let dropped = effort.filter(|value| {
         crate::request::effort_valid(value)
             && provenant_records::AdapterSpec::get(model.adapter())
-                .is_some_and(|spec| spec.drop_unsupported_effort)
+                .is_some_and(|spec| spec.launch.drop_unsupported_effort)
             && context
                 .catalogue
                 .model(model)
@@ -3115,8 +3124,8 @@ impl Excluded<'_> {
     /// Provider-family constraints apply to exact models as well as pools.
     fn family_reason(&self, model: &ModelId) -> Option<String> {
         self.required_family.and_then(|required| {
-            let actual =
-                provenant_records::AdapterSpec::get(model.adapter()).map(|spec| spec.family);
+            let actual = provenant_records::AdapterSpec::get(model.adapter())
+                .map(|spec| spec.identity.family);
             (actual != Some(required)).then(|| {
                 format!(
                     "required family {required} count 1; candidate family {}",

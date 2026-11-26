@@ -625,7 +625,7 @@ pub(crate) fn admit(
     if let Some(account) = input.account {
         account.validate_route(input.route)?;
     } else if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-        spec.registered_account
+        spec.accounts.registered_account
             && input
                 .route
                 .account_key

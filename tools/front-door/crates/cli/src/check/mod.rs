@@ -572,18 +572,18 @@ pub fn install_page(
                 format!(
                     "account {} ({}): registered directory is missing or unusable",
                     account.label,
-                    account.harness.spec().name
+                    account.harness.spec().identity.name
                 )
             }
             ("unsynced_account", Some(account)) => format!(
                 "account {} ({}): managed content is not installed; run `provenant accounts sync`",
                 account.label,
-                    account.harness.spec().name
+                    account.harness.spec().identity.name
             ),
             ("account_missing_entry", Some(account)) => format!(
                 "account {} ({}): lacks managed content its sibling accounts have; run `provenant accounts sync`",
                 account.label,
-                    account.harness.spec().name
+                    account.harness.spec().identity.name
             ),
             ("settings_drift", _) => format!(
                 "shared setting is out of step ({}); run `provenant accounts sync`",
@@ -599,7 +599,7 @@ pub fn install_page(
             (_, Some(account)) => format!(
                 "account {} ({}): managed installation differs from its recorded identity",
                 account.label,
-                    account.harness.spec().name
+                    account.harness.spec().identity.name
             ),
             ("account_missing_entry", None) => {
                 "target lacks managed content its sibling targets have; run `provenant accounts sync`".into()
@@ -661,7 +661,7 @@ mod tests {
                 }
                 let reason = support.reason;
                 let source = support.source;
-                let detail = format!("{}: {reason} (source: {source})", spec.name);
+                let detail = format!("{}: {reason} (source: {source})", spec.identity.name);
                 let inspection = provenant_config::InstallInspection {
                     error: None,
                     findings: vec![provenant_config::InstallFinding {
