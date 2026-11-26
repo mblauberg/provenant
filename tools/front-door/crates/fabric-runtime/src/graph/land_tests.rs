@@ -83,7 +83,7 @@ struct Owner {
     ci_head: Option<String>,
     ci_states: VecDeque<CiState>,
     hygiene_after_heads: VecDeque<String>,
-    hygiene_observations: Vec<(String, String, String)>,
+    hygiene_observations: Vec<(String, String, String, String)>,
     publication_heads: Vec<String>,
     gate_observations: Vec<(String, String)>,
 }
@@ -197,6 +197,7 @@ impl AttemptOwner for Owner {
         self.hygiene_observations.push((
             request.node_id.to_owned(),
             request.input_head.to_owned(),
+            request.expected_head.to_owned(),
             after_head.clone(),
         ));
         Ok(HygieneExecution {
@@ -616,6 +617,17 @@ fn bundled_deliver_repairs_findings_before_landing() {
             .launches
             .iter()
             .any(|launch| launch.node.contains("--check--correctness"))
+    );
+    let ci = node(&run.checkpoint, "delivery--outcome--recovery--ci");
+    assert_eq!(
+        ci.ci.as_ref().unwrap().head_sha.as_deref(),
+        Some(REPAIR_HEAD)
+    );
+    assert_eq!(
+        node(&run.checkpoint, "delivery--outcome--recovery--fresh-review")
+            .source_commit
+            .as_deref(),
+        Some(REPAIR_HEAD)
     );
     assert_eq!(owner.lands[0].1, REPAIR_HEAD);
 }
@@ -2276,6 +2288,7 @@ fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay()
         replay_owner.hygiene_observations,
         vec![(
             "rebase--r1--verified_clean".into(),
+            REPAIR_HEAD.into(),
             REBASE_HEAD.into(),
             REPUBLISHED_HEAD.into()
         )]

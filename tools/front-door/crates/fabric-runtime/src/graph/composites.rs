@@ -136,9 +136,13 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
                 Some(SourceBinding::Head { node }) => bind(node, &writer_aliases),
                 Some(SourceBinding::Node { node: target }) => {
                     if let Some(writer) = result_aliases.get(target) {
+                        // The exported writer is usable only after its boundary settles,
+                        // including for nested consumers with their own local edges.
+                        if !node.depends_on.contains(target) {
+                            node.after_settled.retain(|parent| parent != target);
+                            node.depends_on.push(target.clone());
+                        }
                         *target = writer.clone();
-                        // Keep the composite dependency as its settlement gate,
-                        // and retain the direct edge required by a Node source.
                         if !node.depends_on.contains(writer) {
                             node.depends_on.push(writer.clone());
                         }

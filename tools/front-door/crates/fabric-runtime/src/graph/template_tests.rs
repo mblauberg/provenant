@@ -724,7 +724,7 @@ fn delivery_composites_compile_both_review_shapes() {
             "conflict",
             "ci",
             "review",
-            "accept",
+            "outcome",
             "land",
         ]
         .iter()
@@ -2420,7 +2420,7 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
     let ci = expanded
         .nodes
         .iter()
-        .find(|node| node.id == "delivery--ci--check")
+        .find(|node| node.id == "delivery--ci")
         .unwrap();
     assert!(matches!(
         &ci.condition,
@@ -2463,7 +2463,7 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
             && input.outputs.contains(&OutputKind::Commit)
     }));
     assert!(repair.inputs.iter().any(|input| {
-        input.node == "delivery--ci--check"
+        input.node == "delivery--ci"
             && input.outputs.len() == 2
             && input.outputs.contains(&OutputKind::Findings)
             && input.outputs.contains(&OutputKind::Commit)

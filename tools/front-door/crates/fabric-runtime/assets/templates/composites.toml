@@ -126,11 +126,25 @@ nodes = [
   # One reviewer for `single`, one panel for `panel`; `delivery_review` carries
   # the shape and the inconclusive disposition through the shared type.
   { id = "review", use = "${review_template}", after = ["ci"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_inconclusive_without_blocking = true }, with = { brief = "${brief}" } },
-  { id = "accept", kind = "gate", access = "read_only", after = ["review"], on_fail = "repair", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
-  # A FAIL or blocking finding routes to a repair writer on the same ladder;
-  # it re-enters the gates and obtains fresh review. It is off the clean path.
-  { id = "repair", use = "review-repair", after = ["accept", "review"], inputs = [{ node = "review", outputs = ["findings", "verdict"] }], with = { writer = "implement", worktree = "${worktree}", write_scope = "${write_scope}", max_repair_cycles = "${max_ci_rounds}", lenses = "${lenses}" } },
-  { id = "land", kind = "land", access = "read_only", after = ["accept"], land = { node = "implement", tier = "substantial" } },
+  # Join the initial approval with the recovery path. Recovery must check the
+  # continued head through CI and review before the join can allow landing.
+  { id = "outcome", kind = "composite", access = "read_only", after = ["review", "ci", "implement"], composite = {
+    min_successful = 1,
+    exports = [{ node = "accept", outputs = ["result"] }, { node = "recovery", outputs = ["result"] }],
+    nodes = [
+      { id = "accept", kind = "gate", access = "read_only", after = ["review"], on_fail = "recovery", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
+      { id = "recovery", kind = "composite", access = "read_only", after = ["accept", "review"], inputs = [{ node = "review", outputs = ["findings", "verdict"] }], composite = {
+        exports = [{ node = "accepted", outputs = ["result"] }],
+        nodes = [
+          { id = "repair", use = "review-repair", with = { writer = "implement", worktree = "${worktree}", write_scope = "${write_scope}", max_repair_cycles = "${max_ci_rounds}", lenses = "${lenses}" } },
+          { id = "ci", kind = "gate", access = "read_only", after = ["repair"], condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
+          { id = "fresh-review", use = "${review_template}", after = ["ci"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_inconclusive_without_blocking = true }, with = { brief = "${brief}" } },
+          { id = "accepted", kind = "gate", access = "read_only", after = ["fresh-review"], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "fresh-review", outputs = ["verdict"] }] },
+        ]
+      } },
+    ]
+  } },
+  { id = "land", kind = "land", access = "read_only", after = ["outcome"], land = { node = "implement", tier = "substantial" } },
 ]
 [deliver.parameters]
 plan = { type = "boolean", default = false, doc = "Plan the brief before the writer starts." }

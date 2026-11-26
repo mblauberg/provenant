@@ -249,6 +249,10 @@ silently treated as absent. Unknown extension fields still round-trip.
   A queue item composes these graph mechanisms into one recovery owner. Each new
   repair head returns through hygiene, publication, conflict, CI and review;
   exhausted or incomplete evidence parks instead of selecting a stale head.
+  The direct-delivery template joins initial approval with the review-repair
+  path; after repair, fresh CI and review must succeed on the continued head
+  before that path permits landing. A consumer bound to a composite's exported
+  writer also waits for the composite boundary to settle.
   `NodeProgress.delivery_loop: Option<DeliveryLoopProgress>` persists `name`
   and the number of admitted attempts in `round`.
 - `GraphNode.escalate: Option<EscalateSpec>` contains `ladder: Vec<String>`
