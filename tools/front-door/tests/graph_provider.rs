@@ -6488,7 +6488,7 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
         .find(|row| row["route"] == fail)
         .ok_or("failing row")?;
     assert_eq!(passed["status"], "pass");
-    assert_eq!(passed["settlement_class"], "completed");
+    assert_eq!(passed["cause"], "completed");
     assert_eq!(failed["status"], "fail");
     assert_eq!(failed["cause"], "auth_required");
     // Both routes are probed in one invocation, each with its own attempt and
