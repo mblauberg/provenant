@@ -287,20 +287,6 @@ pub struct Decoded {
     pub reason: Option<String>,
     /// Partial-finish signals the provider decode found; run adds its own.
     pub partial_signals: Vec<PartialSignal>,
-    /// Where the provider ended each turn in `result`; empty when it does not
-    /// say. Settlement reads the handoff through these boundaries.
-    pub turns: Vec<provenant_records::handoff::TurnEnd>,
-}
-impl Decoded {
-    /// The lane's final handoff: the one rule for every provider.
-    pub fn handoff(&self) -> provenant_records::handoff::HandoffResult {
-        self.handoff_report().handoff
-    }
-
-    /// The parsed handoff together with a bounded output-order diagnostic.
-    pub fn handoff_report(&self) -> provenant_records::handoff::HandoffParse {
-        provenant_records::handoff::Handoff::from_turns_report(&self.result, &self.turns)
-    }
 }
 /// A task-local preparation refusal, retaining candidate classifications.
 #[derive(Debug, thiserror::Error)]
@@ -467,7 +453,7 @@ impl Drop for PreparedStart {
 
 fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
     format!(
-        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them; your progress handoff JSON under provider-state is yours to update throughout the task and is kept. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
+        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them. Declare your result with `provenant handoff --stdin` (schema v2 JSON; see STATUS_GUIDANCE). Field errors come back at once; fix and call again. The last accepted declaration settles the lane; prose and fenced blocks are not read. To stop early, declare `stopped_early` or `blocked`. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
         handoff = crate::completion::guidance(),
         result = directory.join("result.md").display(),
         exit = directory.join("process-exit.json").display(),
@@ -484,24 +470,27 @@ fn output_prompt_directs_scratch_outside_worktree() {
     assert!(prompt.contains("not in the worktree"));
 }
 
-/// #3844: the launch prompt must not tell a lane to stop updating its own
-/// progress handoff while it also carries the progress-handoff instruction.
-/// Harness ownership is scoped to the attempt's records, not to the lane's
-/// provider-state handoff.
+/// The launch prompt teaches the declaration command and keeps harness and
+/// lane ownership distinct: settlement seals the snapshot from declarations,
+/// never from a progress file or the answer text.
 #[cfg(test)]
 #[test]
-fn output_prompt_keeps_progress_handoff_and_attempt_record_ownership_consistent() {
-    let progress = crate::completion::handoff_progress_guidance(std::path::Path::new(
-        "/state/attempts/6/provider-state/candidate-0/handoff.json",
-    ));
-    let prompt = output_prompt(std::path::Path::new("/attempt"), &progress);
-    // The lane still owns and updates its progress handoff under provider-state.
-    assert!(prompt.contains("Progress handoff JSON:"), "{prompt}");
+fn output_prompt_teaches_the_declaration_command_and_host_ownership() {
+    let prompt = output_prompt(std::path::Path::new("/attempt"), "task");
+    assert!(prompt.contains("$TMPDIR"));
+    assert!(prompt.contains("not in the worktree"));
     assert!(
-        prompt.contains("Update this file throughout the task"),
+        prompt.contains("Declare your result with `provenant handoff --stdin`"),
         "{prompt}"
     );
-    // The harness owns the attempt's own records, including the sealed snapshot.
+    assert!(
+        prompt.contains("Field errors come back at once"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("prose and fenced blocks are not read"),
+        "{prompt}"
+    );
     assert!(
         prompt.contains("harness writes the attempt's own records"),
         "{prompt}"
@@ -511,12 +500,11 @@ fn output_prompt_keeps_progress_handoff_and_attempt_record_ownership_consistent(
         "{prompt}"
     );
     assert!(prompt.contains("the lane never writes them"), "{prompt}");
-    // No sentence tells the lane the harness writes its progress handoff.
     assert!(
-        !prompt.contains("harness-recorded handoff progress"),
+        !prompt.contains("your progress handoff JSON under provider-state"),
         "{prompt}"
     );
-    assert!(!prompt.contains("never the lane"), "{prompt}");
+    assert!(!prompt.contains("Progress handoff JSON:"), "{prompt}");
 }
 
 /// Resolve policy once for this launch from host, project and dispatch settings.
@@ -919,7 +907,6 @@ pub trait Providers {
                     "provider decoder cannot verify the retained continuation session".into(),
                 ),
                 partial_signals: Vec::new(),
-                turns: Vec::new(),
             });
         }
         self.decode_captures(

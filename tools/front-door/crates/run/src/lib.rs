@@ -12,8 +12,7 @@ mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
     BRIEF_PREAMBLE_KNOB, BriefLayer, BriefPreamble, BriefRole, BriefStaticCheck, BuildCap,
-    LaneLocation, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with,
-    route_label,
+    LaneLocation, PreambleExtras, lane_preamble, lane_preamble_with, route_label,
 };
 mod verification;
 pub use verification::{VerificationResolution, conflict_cause};

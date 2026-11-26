@@ -721,19 +721,12 @@ fn a_declared_stop_settles_review_required() -> TestResult {
     Ok(())
 }
 #[test]
-fn a_reply_to_a_late_notification_keeps_the_turn_ending_handoff() -> TestResult {
-    use provenant_records::handoff::TurnEnd;
-    let first = format!("Done: parser.\n\n{STOPPED_EARLY}");
-    let answer = format!("{first}\nThe wait was redundant; nothing changed.");
-    let turn = |at, tool_activity| TurnEnd { at, tool_activity };
-    // The declaration ended the first turn; the reply ran no tool.
-    let record = settle_with_turns(
-        &answer,
-        Some(Outcome::Succeeded),
-        Vec::new(),
-        None,
-        vec![turn(first.len(), true), turn(answer.len(), false)],
-    )?;
+fn trailing_prose_does_not_change_a_declared_stop() -> TestResult {
+    // The declaration channel settles the lane; trailing prose and a later
+    // tool call in the answer can never supersede it.
+    let answer =
+        format!("Done: parser.\n\n{STOPPED_EARLY}\nThe wait was redundant; nothing changed.");
+    let record = settle_with(&answer, Some(Outcome::Succeeded), Vec::new())?;
     assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
     assert!(matches!(
         record.state,
@@ -742,36 +735,6 @@ fn a_reply_to_a_late_notification_keeps_the_turn_ending_handoff() -> TestResult 
             ..
         }
     ));
-    // Redesigned for #3928: without boundaries the trailing prose is now
-    // tolerated, so the declaration still settles as a declared stop; later
-    // tool work explicitly invalidates the old turn's declaration.
-    let record = settle_with_turns(
-        &answer,
-        Some(Outcome::Succeeded),
-        Vec::new(),
-        None,
-        Vec::new(),
-    )?;
-    assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
-    assert!(matches!(
-        record.state,
-        AttemptState::Terminal {
-            outcome: Outcome::ReviewRequired,
-            ..
-        }
-    ));
-    let record = settle_with_turns(
-        &answer,
-        Some(Outcome::Succeeded),
-        Vec::new(),
-        None,
-        vec![turn(first.len(), true), turn(answer.len(), true)],
-    )?;
-    assert_eq!(
-        record.settlement_reason,
-        Some(provenant_records::run::SettlementReason::Completed)
-    );
-    assert!(record.partial_signals.is_empty());
     Ok(())
 }
 #[test]
@@ -1119,9 +1082,6 @@ fn admission_holds_spacing_floors_and_deadline() -> TestResult {
 }
 #[test]
 fn graph_readers_get_the_sealed_handoff_not_a_rereading_of_the_text() -> TestResult {
-    use provenant_records::handoff::TurnEnd;
-    let first = format!("Done: parser.\n\n{STOPPED_EARLY}");
-    let answer = format!("{first}\nThe wait was redundant; nothing changed.");
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -1143,27 +1103,27 @@ fn graph_readers_get_the_sealed_handoff_not_a_rereading_of_the_text() -> TestRes
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     seal_exit(&store, &observed)?;
+    let declared: serde_json::Value =
+        serde_json::from_str(STOPPED_EARLY.lines().nth(1).ok_or("declaration line")?)?;
+    store.declare(
+        id,
+        &provenant_records::declaration::DeclarationInput {
+            request_id: "graph-reader".into(),
+            payload: declared,
+        },
+    )?;
+    let answer =
+        format!("Done: parser.\n\n{STOPPED_EARLY}\nThe wait was redundant; nothing changed.");
     let fake = Fake {
         observed: Some(route()),
         outcome: Some(Outcome::Succeeded),
-        answer: Some(answer.clone()),
-        turns: vec![
-            TurnEnd {
-                at: first.len(),
-                tool_activity: true,
-            },
-            TurnEnd {
-                at: answer.len(),
-                tool_activity: false,
-            },
-        ],
+        answer: Some(answer),
         ..Fake::default()
     };
     let record = store.finish(id, &dir, &observed, &fake, &call)?;
-    // The text ends with an acknowledgement that turn boundaries keep out of
-    // the declaration; the graph's capture carries the settled one.
+    // The graph's capture reads the settled snapshot, never the prose again.
     let capture = store.stream_result(id, &call, None)?;
-    let sealed = store.handoff(&record)??.ok_or("sealed handoff")?;
+    let sealed = store.handoff(&record)??.ok_or("no sealed declaration")?;
     assert_eq!(capture.handoff, Ok(Some(sealed)));
     Ok(())
 }
