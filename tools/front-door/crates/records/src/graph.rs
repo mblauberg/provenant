@@ -82,7 +82,7 @@ impl GraphAttemptOutcome {
     /// lists the same two codes).
     pub const fn advance_code(self) -> Option<&'static str> {
         match self {
-            Self::DeclaredStop => Some("writer_declared_stop"),
+            Self::DeclaredStop => Some("declared_stop"),
             Self::StoppedNoWork => Some("stopped_no_work"),
             _ => None,
         }

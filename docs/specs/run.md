@@ -303,7 +303,7 @@ worktree and archives prior attempts. See [routing](routing.md) for route select
 A writer's declared stop settles as `stopped_early`, or, when its final handoff is blocked,
 as `blocked_environment` or `blocked_dependency` per its `blocked_on`, else `blocked` (an owner
 decision, a missing capability or no kind given). The node's advance code records whether the
-stop left committed work: `writer_declared_stop` when the head moved past its source commit,
+stop left committed work: `declared_stop` when the head moved past its source commit,
 `stopped_no_work` otherwise. Both take the `stopped_early` row unless the node overrides it:
 a new route in a fresh session on the retained worktree. A junior route escalates to senior;
 otherwise a declared route not yet launched is used, and an alias route may resolve again.
@@ -313,9 +313,9 @@ commits ahead of the node's input head count whether or not they were pushed, an
 handoff closes the brief. Neither a terminal cause nor a partial signal may call a lane with new
 commits `stopped_no_work`; with a done handoff and a moved head the node succeeds even when a stop
 was recorded. The code comes from the projected outcome, not from observed refs: a declared stop
-with work takes `writer_declared_stop`, one with no work takes `stopped_no_work`.
+with work takes `declared_stop`, one with no work takes `stopped_no_work`.
 
-The settlement-derived advance codes are `writer_declared_stop` and `stopped_no_work`, owned by
+The settlement-derived advance codes are `declared_stop` and `stopped_no_work`, owned by
 `records::graph::AttemptOutcome::advance_code`. Every other advance code comes from the owner or a
 launch refusal.
 

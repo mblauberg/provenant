@@ -2280,14 +2280,14 @@ mod tests {
                 GraphAttemptOutcome::DeclaredStop,
                 Some(head),
                 None,
-                Some("writer_declared_stop"),
+                Some("declared_stop"),
                 None,
             ),
             (
                 GraphAttemptOutcome::DeclaredStop,
                 Some(base),
                 None,
-                Some("writer_declared_stop"),
+                Some("declared_stop"),
                 None,
             ),
             (
@@ -2309,7 +2309,7 @@ mod tests {
                 GraphAttemptOutcome::DeclaredStop,
                 Some(head),
                 Some(done.clone()),
-                Some("writer_declared_stop"),
+                Some("declared_stop"),
                 None,
             ),
             // A blocked declaration travels with its note whatever the refs.
@@ -2317,7 +2317,7 @@ mod tests {
                 GraphAttemptOutcome::DeclaredStop,
                 Some(head),
                 Some(blocked.clone()),
-                Some("writer_declared_stop"),
+                Some("declared_stop"),
                 Some("waiting on owner"),
             ),
         ] {
