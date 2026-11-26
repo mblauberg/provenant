@@ -9,8 +9,8 @@ use provenant_os::fs::{Directory, FsError, LockGuard, LockMode};
 use provenant_records::{
     CanonicalV1,
     declaration::{
-        DECLARATION_JOURNAL_BYTES, DECLARATION_SCHEMA, DeclarationError, DeclarationEvidence,
-        DeclarationInput, DeclarationReceipt, JournalLine, SealedDeclaration,
+        DECLARATION_JOURNAL_BYTES, DECLARATION_SCHEMA, DeclarationCounts, DeclarationError,
+        DeclarationEvidence, DeclarationInput, DeclarationReceipt, JournalLine, SealedDeclaration,
     },
     handoff::{Handoff, HandoffError},
 };
@@ -89,6 +89,20 @@ impl JournalState {
         } else {
             DeclarationEvidence::Missing
         }
+    }
+
+    /// Counts over every line, not just the one that settles the lane: a
+    /// rejected submission followed by an accepted one reports both.
+    fn counts(lines: &[JournalLine]) -> DeclarationCounts {
+        let mut counts = DeclarationCounts::default();
+        for line in lines {
+            match line {
+                JournalLine::Accepted(_) => counts.accepted += 1,
+                JournalLine::Rejected { .. } => counts.rejected += 1,
+                JournalLine::Closed => {}
+            }
+        }
+        counts
     }
 }
 
@@ -211,14 +225,17 @@ impl RunStore {
     /// Close an attempt's declaration channel once and report what it settled
     /// on. Idempotent: a re-drive reads the sealed `Closed` line and appends
     /// nothing.
-    pub(crate) fn close_declarations(&self, attempt: &Directory) -> Result<DeclarationEvidence> {
+    pub(crate) fn close_declarations(
+        &self,
+        attempt: &Directory,
+    ) -> Result<(DeclarationEvidence, DeclarationCounts)> {
         let _lock = try_declaration_lock(attempt)?;
         let lines = read_lines(attempt)?;
         let state = JournalState::from_lines(&lines);
         if !state.closed {
             append_line(attempt, &JournalLine::Closed, lines_bytes(attempt))?;
         }
-        Ok(state.evidence())
+        Ok((state.evidence(), JournalState::counts(&lines)))
     }
 }
 
@@ -297,14 +314,17 @@ mod tests {
             ),
             Err(DeclarationError::Invalid(_))
         ));
-        let evidence = store.close_declarations(&dir)?;
+        let (evidence, counts) = store.close_declarations(&dir)?;
         let DeclarationEvidence::Accepted(sealed) = &evidence else {
             panic!("expected the accepted declaration, got {evidence:?}")
         };
         assert_eq!(sealed.request_id, "first");
         assert_eq!(sealed.handoff.status, HandoffStatus::Done);
+        assert_eq!(counts.accepted, 1);
+        assert_eq!(counts.rejected, 1);
         let again = store.close_declarations(&dir)?;
-        assert_eq!(again, evidence);
+        assert_eq!(again.0, evidence);
+        assert_eq!(again.1, counts);
         assert!(matches!(
             store.declare(
                 attempt,

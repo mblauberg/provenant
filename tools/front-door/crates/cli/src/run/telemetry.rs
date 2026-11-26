@@ -1,5 +1,34 @@
 use super::*;
 
+/// Declaration and handoff-provenance keys over the selected attempts. Counts
+/// are replayed from journals, never from prose, and an adapter has no row.
+pub(super) fn declaration_row(
+    entries: impl IntoIterator<
+        Item = (
+            Option<provenant_records::declaration::DeclarationCounts>,
+            Option<provenant_records::settlement::HandoffSource>,
+        ),
+    >,
+) -> Value {
+    let mut accepted = 0u64;
+    let mut rejected = 0u64;
+    let mut sources = BTreeMap::new();
+    for (counts, source) in entries {
+        if let Some(counts) = counts {
+            accepted += u64::from(counts.accepted);
+            rejected += u64::from(counts.rejected);
+        }
+        if let Some(source) = source {
+            let label = match source {
+                provenant_records::settlement::HandoffSource::Declared => "declared",
+                provenant_records::settlement::HandoffSource::Host => "host",
+            };
+            *sources.entry(label.to_owned()).or_default() += 1;
+        }
+    }
+    json!({"accepted": accepted, "rejected": rejected, "sources": sources})
+}
+
 /// Usage and cost over this project's terminal attempts, priced from the
 /// reviewed table shipped with the product.
 pub fn stats(command: Stats, edge: &Edge<'_>) -> Reply {
@@ -161,6 +190,12 @@ pub(super) fn stats_inner(
         context.project_id,
     )?;
     let partial = partial_signal_counts(&selected, store.as_ref(), &call);
+    let declarations = declaration_row(selected.iter().filter_map(|fact| {
+        store
+            .as_ref()
+            .and_then(|store| store.record(fact.attempt_id, &call).ok())
+            .map(|record| (record.declarations, record.handoff_source))
+    }));
     let mut route_evidence = Vec::new();
     let mut requests = BTreeMap::new();
     for fact in &selected {
@@ -465,6 +500,13 @@ pub(super) fn stats_inner(
         Err(cause) => human.push_str(&format!("partial signals: unavailable ({cause})\n")),
     }
     data["partial_signals"] = partial_signals_value(partial);
+    data["handoff_declarations_accepted"] = declarations["accepted"].clone();
+    data["handoff_declarations_rejected"] = declarations["rejected"].clone();
+    data["handoff_source"] = declarations["sources"].clone();
+    human.push_str(&format!(
+        "handoff declarations: accepted={} rejected={}\n",
+        declarations["accepted"], declarations["rejected"]
+    ));
     data["unfinished_attempts_excluded"] = json!(unfinished);
     if let Some(pipeline) = pipeline {
         human.push_str(&format!(
@@ -777,4 +819,28 @@ pub(super) fn pipeline_node_model(facts: &[provenant_records::AttemptFact]) -> O
     (models.len() == 1)
         .then(|| models.into_iter().next())
         .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::declaration_row;
+    use provenant_records::{declaration::DeclarationCounts, settlement::HandoffSource};
+    use serde_json::json;
+
+    #[test]
+    fn declaration_row_reports_both_keys_and_handoff_provenance() {
+        let row = declaration_row([
+            (
+                Some(DeclarationCounts {
+                    accepted: 1,
+                    rejected: 1,
+                }),
+                Some(HandoffSource::Declared),
+            ),
+            (None, Some(HandoffSource::Host)),
+        ]);
+        assert_eq!(row["accepted"], json!(1));
+        assert_eq!(row["rejected"], json!(1));
+        assert_eq!(row["sources"], json!({"declared": 1, "host": 1}));
+    }
 }

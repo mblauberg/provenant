@@ -1004,7 +1004,7 @@ impl RunStore {
                 schema_version: 2, attempt_id, project_id: context.project_id, attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
                 delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, steering: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, stop_work: None, warnings: Vec::new(), verified_owner: Some(context.actor_id), session: None,
                 queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, process_observation_valid: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
-                terminal_evidence: None, settlement_reason: None, progress: None, settlement_evidence: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
+                terminal_evidence: None, settlement_reason: None, progress: None, settlement_evidence: None, declarations: None, handoff_source: None, settlement_policy_applied: Vec::new(), cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                 prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: input.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                 trace: provenant_records::Trace {extra: Default::default(),
                     telemetry_context: Some(telemetry_context.clone()),
@@ -1341,6 +1341,7 @@ impl RunStore {
                 stopped_handoff: None,
             },
             handoff: provenant_records::declaration::DeclarationEvidence::Missing,
+            declarations: Default::default(),
             git: None,
             custody: CustodyFacts {
                 launched: false,
@@ -1356,6 +1357,7 @@ impl RunStore {
                     eof_fragment_unsettles: false,
                 },
             },
+            policy: provenant_records::settlement::policy::SettlementPolicy::shipped(),
         };
         let fact = settle(&evidence);
         let publication = TerminalPublication {
@@ -1706,6 +1708,10 @@ impl RunStore {
         next.settlement_reason = Some(publication.fact.settlement_reason);
         next.progress = publication.fact.progress.clone();
         next.settlement_evidence = publication.evidence;
+        next.declarations = publication.fact.declarations;
+        next.handoff_source = publication.fact.handoff_source;
+        next.settlement_policy_applied
+            .clone_from(&publication.fact.applied);
         next.publication_error = None;
         next.exit_evidence = durable_exit;
         let attempt = self.attempt_dir(id, false)?;
@@ -1955,6 +1961,7 @@ impl RunStore {
                 stopped_handoff: None,
             },
             handoff: provenant_records::declaration::DeclarationEvidence::Missing,
+            declarations: Default::default(),
             git: None,
             custody: CustodyFacts {
                 launched: !exit.never_spawned,
@@ -1970,6 +1977,7 @@ impl RunStore {
                     eof_fragment_unsettles: false,
                 },
             },
+            policy: provenant_records::settlement::policy::SettlementPolicy::shipped(),
         };
         let fact = settle(&evidence);
         let publication = TerminalPublication {

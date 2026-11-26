@@ -1,0 +1,88 @@
+//! The configurable settlement policy, sealed with the evidence it decides.
+//!
+//! Slice 8 declares the shape and the shipped values. Slice 9 resolves the
+//! layers and applies the actions; `settle` reads only this sealed value.
+use serde::{Deserialize, Serialize};
+
+use crate::provenance::{Layer, Precedence, Source, Sourced};
+use crate::run::PartialSignal;
+
+/// Settlement knobs, lowest layer first. Host beats the default, project beats
+/// host and a route's model policy beats both.
+pub const SETTLEMENT_PRECEDENCE: Precedence =
+    Precedence(&[Layer::Default, Layer::Host, Layer::Project, Layer::Route]);
+
+/// What a recorded signal does to the outcome. The signal itself is always
+/// recorded; only the decision and the warning change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalAction {
+    Hold,
+    Review,
+    Fail,
+    Warn,
+    Off,
+}
+
+/// Whether an unchanged, known head may settle as no-work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoWork {
+    Detect,
+    Off,
+}
+
+/// The effective policy for one attempt. Every field carries its layer so a
+/// re-drive and an audit reproduce the same decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementPolicy {
+    pub handoff_missing: Sourced<SignalAction>,
+    pub handoff_malformed: Sourced<SignalAction>,
+    pub empty_result: Sourced<SignalAction>,
+    pub uncommitted_work: Sourced<SignalAction>,
+    pub stray_work: Sourced<SignalAction>,
+    pub no_work: Sourced<NoWork>,
+}
+
+impl Default for SettlementPolicy {
+    fn default() -> Self {
+        Self::shipped()
+    }
+}
+
+impl SettlementPolicy {
+    /// Today's behaviour, declared at the default layer. Keeping these values
+    /// in one place makes the shipped policy the parity oracle for resolution.
+    pub fn shipped() -> Self {
+        let action = |value| Sourced {
+            value,
+            source: Source {
+                layer: Layer::Default,
+                origin: None,
+            },
+        };
+        Self {
+            handoff_missing: action(SignalAction::Review),
+            handoff_malformed: action(SignalAction::Review),
+            empty_result: action(SignalAction::Review),
+            uncommitted_work: action(SignalAction::Hold),
+            stray_work: action(SignalAction::Review),
+            no_work: Sourced {
+                value: NoWork::Detect,
+                source: Source {
+                    layer: Layer::Default,
+                    origin: None,
+                },
+            },
+        }
+    }
+}
+
+/// A non-default action that changed an outcome or a class, with the source
+/// that chose it. Built only inside the classifier.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedPolicy {
+    pub signal: PartialSignal,
+    pub action: SignalAction,
+    pub source: Source,
+}

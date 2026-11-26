@@ -34,10 +34,13 @@ fn evidence(pinned: Option<GitOid>, head: Option<GitOid>) -> SettlementEvidence 
             stopped_handoff: None,
         },
         handoff: DeclarationEvidence::Missing,
+        declarations: Default::default(),
         git: Some(GitEvidence {
             pinned,
             head,
             uncommitted: None,
+            uncommitted_paths: Vec::new(),
+            pushed_head: None,
             primary: PrimaryCheckout::NotChecked,
         }),
         custody: CustodyFacts {
@@ -54,6 +57,7 @@ fn evidence(pinned: Option<GitOid>, head: Option<GitOid>) -> SettlementEvidence 
                 eof_fragment_unsettles: false,
             },
         },
+        policy: provenant_records::settlement::policy::SettlementPolicy::shipped(),
     }
 }
 

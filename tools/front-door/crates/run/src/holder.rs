@@ -994,6 +994,24 @@ fn seal_import_refusal(
     )
 }
 
+/// The diagnostic path list kept beside the census note: bounded, sorted and
+/// never read by the classifier.
+fn bounded_uncommitted_paths(paths: &[String]) -> Vec<String> {
+    let mut paths: Vec<String> = paths
+        .iter()
+        .take(64)
+        .map(|path| {
+            let mut path = path.clone();
+            if path.len() > 256 {
+                path.truncate(path.floor_char_boundary(256));
+            }
+            path
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
 /// The stray-work check is advice: when it cannot run, the lane still settles.
 fn warn_stray_check(error: &dyn std::fmt::Display) {
     use provenant_records::warning::{STRAY_WORK_CHECK_FAILED, Warning, warn};
@@ -2332,7 +2350,7 @@ impl RunStore {
         scope: provenant_records::custody::Scope,
         cancel: CancelToken,
         recovery: Option<&custody::Recovery>,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<crate::writer::UncommittedWork>> {
         let launch = crate::prepare_writer_with_facts(
             writer,
             &self.writer_registry,
@@ -2524,7 +2542,7 @@ impl RunStore {
                     );
                     let withheld = match left {
                         Ok(None) => None,
-                        Ok(Some(reason)) => Some((reason, false)),
+                        Ok(Some(work)) => Some((work.render(), false)),
                         Err(error) => Some((
                             format!(
                                 "writer terminal check failed for {}: {error}",
@@ -2802,6 +2820,7 @@ impl RunStore {
         // Host-proven Git facts. The classifier decides what they mean; the
         // holder only records what the terminal checks observed.
         let mut uncommitted: Option<String> = None;
+        let mut uncommitted_paths: Vec<String> = Vec::new();
         let mut primary = provenant_records::settlement::PrimaryCheckout::NotChecked;
         let mut stopped_handoff: Option<provenant_records::handoff::Handoff> = None;
         // A late request alone cannot invalidate a verified clean exit. If the
@@ -3445,7 +3464,10 @@ impl RunStore {
                     );
                     match left {
                         Ok(None) => {}
-                        Ok(Some(reason)) => uncommitted = Some(reason),
+                        Ok(Some(work)) => {
+                            uncommitted_paths = bounded_uncommitted_paths(&work.paths);
+                            uncommitted = Some(work.render());
+                        }
                         Err(error) => {
                             // An unreadable terminal check stays a host failure.
                             decoded.outcome = Outcome::Failed;
@@ -3714,6 +3736,15 @@ impl RunStore {
             &record.project_id.to_string(),
             &task,
         );
+        // Closing is idempotent; a re-drive reads the same counts from the
+        // journal without changing the sealed snapshot.
+        let declaration_counts = self.close_declarations(attempt)?.1;
+        let pushed_head = task
+            .writer
+            .as_ref()
+            .map(|writer| crate::evidence::pushed_head(attempt, &writer.worktree))
+            .transpose()?
+            .flatten();
         let evidence = provenant_records::settlement::SettlementEvidence {
             schema_version: provenant_records::settlement::SETTLEMENT_EVIDENCE_SCHEMA,
             lane,
@@ -3731,10 +3762,13 @@ impl RunStore {
                 stopped_handoff: stopped_handoff.clone(),
             },
             handoff: declared,
+            declarations: declaration_counts,
             git: (task.writer.is_some()).then(|| provenant_records::settlement::GitEvidence {
                 pinned: crate::evidence::launch_pin(attempt)?,
                 head: crate::evidence::terminal_head(attempt)?,
                 uncommitted: uncommitted.clone(),
+                uncommitted_paths: uncommitted_paths.clone(),
+                pushed_head,
                 primary,
             }),
             custody: provenant_records::settlement::CustodyFacts {
@@ -3758,6 +3792,7 @@ impl RunStore {
                     .and_then(|marker| stall_stop_cause(exit.stop_reason, cancelled, marker)),
                 identity: provider_identity(exit, &decoded, &policy),
             },
+            policy: provenant_records::settlement::policy::SettlementPolicy::shipped(),
         };
         let (evidence, digest) = match crate::evidence::read_evidence(attempt)? {
             Some(sealed) => sealed,

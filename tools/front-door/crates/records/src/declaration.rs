@@ -39,6 +39,17 @@ pub struct DeclarationReceipt {
     pub digest: crate::FileDigest,
 }
 
+/// How many declaration lines an attempt collected, by disposition. Counts are
+/// replayed from the whole journal, so a rejected line followed by an accepted
+/// one reports both even though only the accepted line settles the lane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclarationCounts {
+    #[serde(default)]
+    pub accepted: u32,
+    #[serde(default)]
+    pub rejected: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeclarationEvidence {

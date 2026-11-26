@@ -295,6 +295,9 @@ pub const UPSTREAM_UNRESOLVED: WarningCode = WarningCode("UPSTREAM_UNRESOLVED");
 pub const BRANCH_CONFIG_UNREADABLE: WarningCode = WarningCode("BRANCH_CONFIG_UNREADABLE");
 /// A notes cursor acknowledgement failed; a page may replay.
 pub const NOTES_CURSOR_UNACKNOWLEDGED: WarningCode = WarningCode("NOTES_CURSOR_UNACKNOWLEDGED");
+/// A re-drive offered different evidence; the sealed copy was kept.
+pub const SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS: WarningCode =
+    WarningCode("SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS");
 /// A PR journal could not be read; reconciliation covers the gap.
 pub const PR_JOURNAL_UNAVAILABLE: WarningCode = WarningCode("PR_JOURNAL_UNAVAILABLE");
 /// A build context, Git binding or repository was unavailable; build ran locally.

@@ -7,13 +7,15 @@
 
 use provenant_core::GitOid;
 use provenant_records::CanonicalV1;
-use provenant_records::declaration::{DECLARATION_SCHEMA, DeclarationEvidence, SealedDeclaration};
+use provenant_records::declaration::{
+    DECLARATION_SCHEMA, DeclarationCounts, DeclarationEvidence, SealedDeclaration,
+};
 use provenant_records::handoff::{Handoff, HandoffError, HandoffStatus};
 use provenant_records::run::{Outcome, PartialSignal, SettlementReason, TerminalCause};
 use provenant_records::settlement::{
-    CustodyFacts, GitEvidence, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
-    PrimaryCheckout, Progress, SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
-    classify::budget_completed, classify::settle,
+    CustodyFacts, GitEvidence, HandoffSource, HostVerdict, IdentityEvidence, IdentityPolicyEffect,
+    LaneRole, PrimaryCheckout, Progress, SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
+    classify::budget_completed, classify::settle, policy::SettlementPolicy,
 };
 use provenant_records::stop::StopCause;
 
@@ -61,6 +63,7 @@ fn base(lane: LaneRole, outcome: Outcome, cause: Option<TerminalCause>) -> Settl
             stopped_handoff: None,
         },
         handoff: DeclarationEvidence::Missing,
+        declarations: DeclarationCounts::default(),
         git: None,
         custody: CustodyFacts {
             launched: true,
@@ -76,6 +79,7 @@ fn base(lane: LaneRole, outcome: Outcome, cause: Option<TerminalCause>) -> Settl
                 eof_fragment_unsettles: false,
             },
         },
+        policy: SettlementPolicy::shipped(),
     }
 }
 
@@ -84,6 +88,8 @@ fn git_at(pinned: Option<&str>, head: Option<&str>) -> Option<GitEvidence> {
         pinned: pinned.map(|text| GitOid::parse(text).unwrap()),
         head: head.map(|text| GitOid::parse(text).unwrap()),
         uncommitted: None,
+        uncommitted_paths: Vec::new(),
+        pushed_head: None,
         primary: PrimaryCheckout::Clean,
     })
 }
@@ -141,6 +147,8 @@ fn rows() -> Vec<Row> {
         pinned: Some(GitOid::parse(BASE).unwrap()),
         head: Some(GitOid::parse(HEAD).unwrap()),
         uncommitted: None,
+        uncommitted_paths: Vec::new(),
+        pushed_head: None,
         primary: PrimaryCheckout::Review {
             note: "work made in the primary checkout".into(),
         },
@@ -164,6 +172,8 @@ fn rows() -> Vec<Row> {
         pinned: Some(GitOid::parse(BASE).unwrap()),
         head: Some(GitOid::parse(HEAD).unwrap()),
         uncommitted: Some("M src/lib.rs".into()),
+        uncommitted_paths: vec!["src/lib.rs".into()],
+        pushed_head: None,
         primary: PrimaryCheckout::Clean,
     });
     uncommitted.handoff = accepted(handoff(HandoffStatus::Done, "Done"));
@@ -469,4 +479,52 @@ fn the_budget_gate_requires_a_done_accepted_declaration() {
         Outcome::Failed,
         &accepted(handoff(HandoffStatus::StoppedEarly, "More work remains."))
     ));
+}
+
+#[test]
+fn pushed_head_and_uncommitted_paths_are_not_settlement_evidence() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.git = git_at(Some(BASE), Some(HEAD));
+    evidence.handoff = accepted(handoff(HandoffStatus::Done, "Delivered"));
+    let fact = settle(&evidence);
+
+    let mut varied = evidence.clone();
+    let git = varied.git.as_mut().unwrap();
+    git.pushed_head = Some(GitOid::parse(HEAD).unwrap());
+    git.uncommitted_paths = vec!["src/lib.rs".into()];
+    assert_eq!(
+        settle(&varied),
+        fact,
+        "diagnostic Git evidence must not move a fact"
+    );
+}
+
+#[test]
+fn a_host_stop_records_a_host_handoff_source() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::ReviewRequired, None);
+    evidence.host.stopped_handoff = Some(handoff(
+        HandoffStatus::StoppedEarly,
+        "the host stopped this attempt",
+    ));
+    assert_eq!(settle(&evidence).handoff_source, Some(HandoffSource::Host));
+}
+
+#[test]
+fn rejected_then_accepted_reports_both_counts_and_a_declared_source() {
+    let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
+    evidence.handoff = accepted(handoff(HandoffStatus::Done, "Delivered"));
+    let counts = DeclarationCounts {
+        accepted: 1,
+        rejected: 1,
+    };
+    evidence.declarations = counts;
+    let fact = settle(&evidence);
+    assert_eq!(fact.handoff_source, Some(HandoffSource::Declared));
+    assert_eq!(fact.declarations, Some(counts));
+}
+
+#[test]
+fn an_adapter_writer_reports_no_declaration_counts() {
+    let evidence = base(LaneRole::AdapterWriter, Outcome::Succeeded, None);
+    assert_eq!(settle(&evidence).declarations, None);
 }

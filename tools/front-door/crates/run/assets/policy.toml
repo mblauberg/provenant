@@ -1440,3 +1440,12 @@ strength = "warn"
 refusable = true
 knob = "policy.PR_ATTEMPT_STATE"
 justification = "Opening a pull request is not an authority act: an attempt that did not end succeeded or review_required warns and opens from its recorded branch and head; refuse selects a configured stop."
+
+[[rule]]
+code = "SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS"
+site = "run/src/evidence.rs#seal_evidence"
+boundary = "none"
+strength = "warn"
+refusable = false
+knob = "policy.SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS"
+justification = "A crash re-drive that assembles different settlement evidence keeps the sealed copy and warns; the sealed copy always wins and a refusal would strand custody on an attempt whose decision was already sealed."

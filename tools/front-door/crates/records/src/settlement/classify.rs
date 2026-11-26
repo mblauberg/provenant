@@ -14,7 +14,8 @@ use crate::run::{
     TerminalEvidence,
 };
 use crate::settlement::{
-    IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout, Progress, SettlementEvidence,
+    HandoffSource, IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout, Progress,
+    SettlementEvidence,
 };
 use crate::stop::{Stop, StopCause};
 
@@ -433,6 +434,18 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     signals.sort();
     signals.dedup();
 
+    // Provenance is a fact about where the settled handoff came from. A host
+    // stop outranks a declaration; an accepted declaration is the lane's own.
+    let handoff_source = if stopped.is_some() {
+        Some(HandoffSource::Host)
+    } else if matches!(&evidence.handoff, DeclarationEvidence::Accepted(_)) {
+        Some(HandoffSource::Declared)
+    } else {
+        None
+    };
+    // Adapters owe no declaration, so their count is absent rather than zero.
+    let declarations = (evidence.lane != LaneRole::AdapterWriter).then_some(evidence.declarations);
+
     OutcomeFact {
         outcome,
         cause,
@@ -444,6 +457,9 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         signals,
         progress,
         handoff: declaration,
+        handoff_source,
+        declarations,
+        applied: Vec::new(),
         reason,
         terminal_note,
         complete,
