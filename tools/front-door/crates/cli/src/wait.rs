@@ -210,7 +210,7 @@ impl Origin {
         use provenant_records::{Layer, Source};
         match self.of(key) {
             provenant_config::Origin::Compiled { profile } => {
-                Source::at(Layer::Profile, format!("{}#{key}", profile.as_str()))
+                Source::at(Layer::Default, format!("{}#{key}", profile.as_str()))
             }
             provenant_config::Origin::User { path } => {
                 let path = path.as_path_text().unwrap_or("config.toml").to_owned();

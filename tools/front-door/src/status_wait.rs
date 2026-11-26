@@ -2812,7 +2812,7 @@ fn write_line(line: &str) -> std::io::Result<()> {
 #[cfg(test)]
 pub(crate) fn test_policy_source() -> provenant_records::Source {
     provenant_records::Source::at(
-        provenant_records::Layer::Profile,
+        provenant_records::Layer::Default,
         "test#domains.wait.pr_head_policy",
     )
 }
