@@ -16,6 +16,16 @@ inputs and allocates a new name for different ones ([graph naming](run-launch.md
 Each attempt has a unique work key, including its graph-assigned attempt number.
 - Why: lost replies and concurrent requests must not duplicate work or identity.
 
+## Unsupported launch fields
+
+`UNSUPPORTED` covers refusing launch fields only: a declared write, network, resume or
+skill-location gap, or a model gap with no eligible fallback. A degraded model, effort or
+image-input gap is reported in the route diagnostics and the result, not as `UNSUPPORTED`.
+Admission checks the adapter's row facts; an owner's capability overlay and gap policy apply
+at routing and preparation, before the provider starts.
+- Why: an error code must name a refused launch input, not a degraded control the launch can
+  proceed without.
+
 ## Host Cargo home
 
 Every lane uses the host-resolved `CARGO_HOME` (the host process's environment,

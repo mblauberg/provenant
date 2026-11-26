@@ -206,7 +206,10 @@ credential or filesystem grants.
 Unavailable adapter, model and effort capabilities may select an eligible
 fallback, and invalid invocation syntax remains an operation error. Neither
 establishes an authority boundary; account, route, continuation, explicit
-read-only and pinned-source bindings still do.
+read-only and pinned-source bindings still do. A missing effort control on an exact route is
+dropped with an `effort_warning` naming the adapter's declaration; pools prefer a fallback.
+Write, network, resume and skill-location gaps refuse. `on_gap` or
+`policy.LAUNCH_*_UNSUPPORTED` may set a model, effort or image gap to off or refuse.
 
 Authorised task text reaches provider stdin or argv unchanged, including
 secret-shaped prose and whitespace, and cloud handoff instructions append to the
