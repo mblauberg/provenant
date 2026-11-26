@@ -242,8 +242,13 @@ taken only when local attempt evidence needs it.
 
 `status --mine` reads active custody across projects (or one `--project`),
 including attempts nested under the current chair and unattended items open to
-adoption. Settled custody leaves the view, and the session-start digest reads
-this view instead of extracting PRs from prose.
+adoption. `status --adoptable` lists only the unattended items open to adoption.
+Settled custody leaves the view. The session-start digest reads this view
+instead of extracting PRs from prose: it names only custody this chair holds in
+the hook's project, and collapses unattended and other projects' rows into one
+`Unattended: N (M this project) — provenant status --adoptable` line. Set
+`session.digest.scope = all` under `[knobs]` to list the chair's custody across
+projects again; the effective scope and its layer appear in that line.
 
 Writer presence is `live`, `unattended`, `settling` or `unknown`. `running` shows
 only while the recorded guardian or provider identity is present. A changed boot

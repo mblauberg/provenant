@@ -655,7 +655,11 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
                 census.as_ref(),
             );
             let mine = record.holder.belongs_to(&chair);
-            if !mine && presence != HolderPresence::Unattended {
+            if args.adoptable {
+                if presence != HolderPresence::Unattended {
+                    continue;
+                }
+            } else if !mine && presence != HolderPresence::Unattended {
                 continue;
             }
             lines.push(if globals.full {
@@ -684,7 +688,11 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
             lines.push(format!("more: provenant status --mine --cursor {cursor}"));
         }
         if lines.is_empty() {
-            lines.push("no active custody".into());
+            lines.push(if args.adoptable {
+                "no adoptable custody".into()
+            } else {
+                "no active custody".into()
+            });
         }
         Ok((
             serde_json::to_value(CustodyStatus {
