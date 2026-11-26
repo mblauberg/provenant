@@ -7,6 +7,17 @@ fn review(name: &str, id: &str) -> GraphNode {
         .unwrap()
 }
 
+/// Plan a compiled node the way the graph kernel sees it: the review and
+/// repair-writer behaviours used by the contract checks are derived during
+/// planning, not present on the raw `GraphNode`.
+fn planned(node: GraphNode) -> PlannedNode {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1, "graph_id": "g", "nodes": [node]
+    }))
+    .unwrap();
+    validate_plan(&document).unwrap().0.nodes.remove(0)
+}
+
 fn finding() -> Value {
     json!({"id":"F1","severity":"high","file":"a.rs","line":1,
             "summary":"The failing path is reachable","status":"open",
@@ -1320,13 +1331,14 @@ fn oversized_blocking_findings_remain_retrievable_with_the_verdict() {
 #[test]
 // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn round_two_findings_without_a_named_invariant_are_warned_then_refused() {
-    let mut node = review("review.tests", "check");
+    let mut node = planned(review("review.tests", "check"));
     node.round = Some(LoopRound {
         extra: Default::default(),
         loop_id: "repair".into(),
         round: 2,
         node_id: "check".into(),
         until: false,
+        retry_on: false,
         previous_gate: None,
     });
     let unnamed: Vec<Finding> = serde_json::from_value(json!([finding()])).unwrap();
@@ -1334,7 +1346,7 @@ fn round_two_findings_without_a_named_invariant_are_warned_then_refused() {
         schema_version: 1,
         verdict: Some("VERDICT: FAIL".into()),
         findings_available: Some(true),
-        findings: unnamed.clone(),
+        findings: unnamed,
         ..Default::default()
     };
     let warnings = review::invariant_warnings(&node, &outputs);
@@ -1365,7 +1377,7 @@ fn round_two_findings_without_a_named_invariant_are_warned_then_refused() {
 #[test]
 // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn fix_round_without_sweep_sites_and_pin_is_flagged() {
-    let mut node = review("task", "fix");
+    let mut node = planned(review("task", "fix"));
     node.repair_writer = true;
     let bare: Vec<RepairItem> = serde_json::from_value(json!([{
         "id": "unchecked input x", "status": "fixed", "reason": "removed the case"

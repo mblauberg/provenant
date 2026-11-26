@@ -784,9 +784,7 @@ fn outputs(
         // adjudication node resolves it. Flag the split so a reduced verdict
         // is never silently treated as an agreed changes-request.
         // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
-        let split = verdicts
-            .iter()
-            .any(|verdict| *verdict == ReviewVerdict::RequestChanges)
+        let split = verdicts.contains(&ReviewVerdict::RequestChanges)
             && verdicts.iter().any(|verdict| {
                 matches!(
                     verdict,
