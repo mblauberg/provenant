@@ -1,4 +1,4 @@
-//! `reconcile` — settle open attempts and report uncertain custody.
+//! `reconcile` — settle open attempts, reclaim dead leases behind undecodable records and report uncertain custody.
 use crate::commands::{Call, Domain, Verb};
 use provenant_cli::Command;
 use provenant_core::consumer_env::Stability;

@@ -16,7 +16,10 @@ fn a_writer_lock_holder_with_a_live_settlement_owner_is_never_escalated() {
         (true, "guardian unobservable")
     );
     // Another attempt's settle worker can hold the lock after its
-    // guardian exits; an unreadable owner is not proof of absence.
+    // guardian exits; an unreadable owner is not proof of absence. This is the
+    // conservative admission question ("may someone still release it?"), not
+    // the reclaim gate: releasing an undecodable record's lease needs a
+    // positive liveness disproof, which `unreadable` recovery tests below.
     assert_eq!(
         reservation_may_release(false, Some(false), owner(Some(true))),
         (true, "guardian exited, settlement owner live")
@@ -34,6 +37,93 @@ fn a_writer_lock_holder_with_a_live_settlement_owner_is_never_escalated() {
         reservation_may_release(true, Some(false), unreachable),
         (false, "guardian exited")
     );
+}
+
+/// Spec: docs/specs/run-settlement.md#settlement — a dead attempt whose record
+/// no longer decodes holds no custody once liveness is disproved.
+#[test]
+fn an_unreadable_dead_attempt_releases_its_writer_lease() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = crate::tests::input();
+    run.request.task.writer = Some(WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
+        project: temp.path().join("checkout"),
+        worktree: temp.path().join("checkout/.worktrees/unreadable"),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let custody = context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join("unreadable");
+    std::fs::create_dir_all(&custody)?;
+    let attempt = store.attempt_dir(id, false)?;
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        provenant_os::fs::Directory::open_anchor(&custody)?,
+        RunStore::scope(&store.record(id, &call)?),
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+    // NeverSpawned with no recorded guardian: liveness is positively disproved.
+    let lease = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?;
+    drop(lease);
+    assert_eq!(store.writer_fences()?.len(), 1);
+
+    // Persisted-format drift: the row no longer decodes at schema version 2.
+    store.db.execute(
+        "UPDATE attempts SET record=?1 WHERE id=?2",
+        rusqlite::params![
+            br#"{"schema_version":2,"attempt_id":"stale"}"#.as_slice(),
+            id.to_string(),
+        ],
+    )?;
+    assert!(store.record(id, &call).is_err());
+
+    let found = store.reconcile_with_observer(
+        run.attempt_id,
+        &crate::dispatch_tests::Fake::default(),
+        &call,
+        &provenant_supervisor::census::SystemProcessObserver,
+    )?;
+    assert!(
+        matches!(
+            found.as_slice(),
+            [(found, Reconciled::UnreadableReleased { source, locks })]
+                if *found == id
+                    && source.attempt == id
+                    && source.schema_version == Some(2)
+                    && locks.contains(&custody.join("writer.lock"))
+        ),
+        "{found:?}"
+    );
+    assert!(store.writer_fences()?.is_empty());
+    let quarantine = attempt.open_verified_directory(std::ffi::OsStr::new("quarantine"))?;
+    assert!(
+        crate::artifacts::read_sealed(
+            &quarantine,
+            "unreadable-attempt-record.json",
+            TERMINAL_RECORD_LIMIT
+        )?
+        .is_some()
+    );
+    Ok(())
 }
 
 #[test]

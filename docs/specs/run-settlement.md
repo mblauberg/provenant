@@ -220,6 +220,18 @@ settlement checks still apply.
   lock must remain an exclusion boundary during concurrent release (#3844).
 - Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`
 
+A record that no longer decodes is classified as unreadable, not as proof that custody is held.
+Reconciliation acquires writer exclusion and releases the lease only on a strict liveness disproof:
+the reservation classifies as absent, any recorded holder is proved gone, and no exit is still
+settling. The raw bytes and their typed source (path, schema, error) are sealed under
+`quarantine/` before the reservation is cleared; the database row keeps its original bytes and is
+never deleted. Both reconciliation and `release attempt:ID` emit the same host-side typed warning
+carrying that source. An unknown holder keeps the fence, so a decode failure alone never releases
+custody (#3829).
+- Why: format drift must not turn a dead attempt into a permanent fence, but custody remains a real
+  boundary, so only positive absence evidence may clear it.
+- Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`, `crates/cli/src/run/reconcile.rs`
+
 The handoff is the closed `handoff` fence that ends the answer, which always wins. When an answer
 contains several blocks, the last one that ends the answer is authoritative: earlier blocks and the
 prose between them are ordinary answer text. Without one, a `json` fence that decodes as a handoff

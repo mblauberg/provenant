@@ -338,6 +338,13 @@ enum RecordRead {
     Durable,
     Observed,
 }
+
+/// The two outcomes of a recovery read of an attempt record.
+pub(crate) enum AttemptRecordRead {
+    Decoded(AttemptRecord),
+    Unreadable(UnreadableAttempt),
+}
+
 impl RunStore {
     /// Read only the stored prompt or result for a console search. Other
     /// artifact classes can contain credentials or provider state and are
@@ -693,6 +700,63 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         self.read_record(id, call, RecordRead::Observed)
+    }
+    /// Read an attempt record for recovery. A record whose bytes no longer
+    /// decode is classified as unreadable instead of being mistaken for an
+    /// undecidable custody error: its bytes are kept with the source so the
+    /// caller can preserve them and judge the owner's liveness separately.
+    pub(crate) fn recovery_record(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecordRead> {
+        let raw: Vec<u8> = self
+            .db
+            .query_row(
+                "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                params![id.to_string(), self.context.project_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(RunError::NotFound)?;
+        match crate::db::decode_attempt(&raw) {
+            Ok(_) => self.record(id, call).map(AttemptRecordRead::Decoded),
+            Err(error) => {
+                let (schema_version, message) = match error {
+                    RunError::Decode(error) => {
+                        let schema_version = match error.root_cause() {
+                            provenant_records::DecodeError::Typed { schema_version, .. } => {
+                                *schema_version
+                            }
+                            provenant_records::DecodeError::UnsupportedVersion {
+                                found, ..
+                            } => Some(*found),
+                            _ => None,
+                        };
+                        (schema_version, error.to_string())
+                    }
+                    RunError::Version(version) => (
+                        Some(version as u64),
+                        format!("unsupported schema version {version}"),
+                    ),
+                    other => return Err(other),
+                };
+                Ok(AttemptRecordRead::Unreadable(UnreadableAttempt {
+                    source: UnreadableSource {
+                        attempt: id,
+                        path: self
+                            .context
+                            .state_root
+                            .as_path()
+                            .join("attempts")
+                            .join(id.to_string()),
+                        schema_version,
+                        error: message,
+                    },
+                    raw,
+                }))
+            }
+        }
     }
     fn read_record(
         &self,
