@@ -2733,7 +2733,7 @@ fn writer_controls_preserve_new_branch_and_refuse_conflicting_access() -> Result
 }
 
 #[test]
-fn plain_read_only_task_pins_fetched_upstream_and_local_source_is_honoured() -> Result {
+fn plain_read_only_task_pins_fetched_upstream_and_live_source_is_honoured() -> Result {
     let rig = TestRig::new()?;
     let remote = rig.root.join("remote.git");
     let remote = remote.to_str().ok_or("remote path")?;
@@ -2794,16 +2794,16 @@ fn plain_read_only_task_pins_fetched_upstream_and_local_source_is_honoured() -> 
         "the launch must name the source ref it used: {warnings:?}"
     );
 
-    // An explicit local source keeps the stale checkout as the subject.
-    let local = submit(Some("live"))?;
-    let node = &local["document"]["nodes"][0];
+    // An explicit live source keeps the stale checkout as the subject.
+    let live = submit(Some("live"))?;
+    let node = &live["document"]["nodes"][0];
     assert!(node["source"].is_null(), "{node}");
-    let local_warnings = local["warnings"].as_array().ok_or("local warnings")?;
+    let live_warnings = live["warnings"].as_array().ok_or("live warnings")?;
     assert!(
-        !local_warnings
+        !live_warnings
             .iter()
             .any(|warning| warning.as_str().is_some_and(|text| text.contains(&default))),
-        "a local source must not report an upstream pin: {local_warnings:?}"
+        "a live source must not report an upstream pin: {live_warnings:?}"
     );
     Ok(())
 }
@@ -3064,7 +3064,8 @@ fn read_source_choices_pin_the_commit_and_name_their_layer() -> Result {
 
 /// `lanes.writer_base` replaces the compiled origin default: a sole remote
 /// named `upstream` supplies the base of a `--branch` writer, `checkout` keeps
-/// the caller checkout, and an explicit `--base` always wins over the knob.
+/// the caller checkout's HEAD, and an explicit `--base` always wins over the
+/// knob. The admitted base is what provisioning creates the branch from.
 /// Spec: docs/specs/run-launch.md#inputs-and-resources
 #[test]
 fn writer_base_knob_resolves_the_sole_remote_and_launch_base_wins() -> Result {
@@ -3086,6 +3087,34 @@ fn writer_base_knob_resolves_the_sole_remote_and_launch_base_wins() -> Result {
     git(&rig, &["remote", "add", "upstream", remote])?;
     git(&rig, &["push", "-q", "upstream", "main"])?;
     git(&rig, &["remote", "set-head", "upstream", "main"])?;
+    // The caller checkout moves past the remote default branch, so the
+    // checkout and default-branch bases name different commits.
+    std::fs::write(rig.project.join("file"), "two\n")?;
+    git(&rig, &["commit", "-q", "-am", "two"])?;
+    let checkout_head = git(&rig, &["rev-parse", "HEAD"])?;
+    assert_ne!(checkout_head, base);
+    // The admitted writer base is the commit provisioning creates the
+    // branch from, never a ref re-read at creation time.
+    fn provisioning_bases(value: &Value, bases: &mut Vec<Value>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(base) = map.get("new_worktree").and_then(|spec| spec.get("base")) {
+                    bases.push(base.clone());
+                }
+                map.values()
+                    .for_each(|value| provisioning_bases(value, bases));
+            }
+            Value::Array(items) => items
+                .iter()
+                .for_each(|value| provisioning_bases(value, bases)),
+            _ => {}
+        }
+    }
+    let provisioned = |response: &Value| {
+        let mut bases = Vec::new();
+        provisioning_bases(&response["document"], &mut bases);
+        bases
+    };
 
     let factory = factory(&rig)?;
     let cancel = CancelToken::new();
@@ -3115,8 +3144,19 @@ fn writer_base_knob_resolves_the_sole_remote_and_launch_base_wins() -> Result {
         "the report must name the effective value and layer: {pinned}"
     );
 
+    assert_eq!(provisioned(&pinned), vec![json!(base)], "{pinned}");
+
     let checkout = submit(Some("checkout"), None)?;
-    assert!(checkout["writer_base"]["commit"].is_null(), "{checkout}");
+    assert_eq!(
+        checkout["writer_base"]["commit"],
+        json!(checkout_head),
+        "{checkout}"
+    );
+    assert_eq!(
+        provisioned(&checkout),
+        vec![json!(checkout_head)],
+        "{checkout}"
+    );
 
     let explicit = submit(Some("checkout"), Some(&base))?;
     assert_eq!(explicit["writer_base"]["commit"], json!(base));
@@ -5056,6 +5096,10 @@ fn one_subject_per_origin_survives_a_push() -> Result {
     // but the admitted subject keeps naming the original head for every origin.
     git(&rig, &["commit", "--allow-empty", "-m", "later head"])?;
     assert_ne!(git(&rig, &["rev-parse", "HEAD"])?, head);
+    let journal_rig = TestRig::new()?;
+    let journal_factory = factory(&journal_rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(journal_factory.clock.mono_now(), 10)?;
 
     let origins = [
         SubjectOrigin::LocalRef {
@@ -5117,15 +5161,42 @@ fn one_subject_per_origin_survives_a_push() -> Result {
         assert_eq!(run.status, graph::GraphStatus::Complete, "{index}: {run:?}");
         assert_eq!(owner.captured, vec![Some(head.clone())], "{index}");
 
-        // The host hydrates the checkpoint subject from the admitted document
-        // on reload (journal.rs); status then projects that same subject.
-        let mut status = run;
-        status.checkpoint.subject = Some(expected.clone());
-        let wire = serde_json::to_value(&status)?;
-        assert_eq!(wire["checkpoint"]["subject"], json!(expected), "{index}");
+        // Persist through the real journal and reload as status does: the
+        // stored checkpoint subject is hydrated from the admitted document,
+        // never from the in-memory run.
+        let mut journal = FileJournal::open(
+            &journal_factory.context.roots.state,
+            journal_factory.context.identity.project,
+            &document.graph_id,
+            budget,
+            &cancel,
+            &journal_factory.clock,
+        )?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: None,
+            extra: Default::default(),
+            bases: None,
+            directory: journal_factory.cwd.clone(),
+            document: document.clone(),
+        })?;
+        let mut checkpoint = run.checkpoint.clone();
+        checkpoint.subject = None;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let reloaded = FileJournal::read_status_checkpoint(
+            &journal_factory.context.roots.state,
+            journal_factory.context.identity.project,
+            &document.graph_id,
+        )?
+        .ok_or("reloaded checkpoint")?;
+        assert_eq!(reloaded.subject, Some(expected.clone()), "{index}");
+        let wire = serde_json::to_value(&reloaded)?;
         assert!(
-            wire["checkpoint"]["subject"]["policy_source"].is_string(),
-            "every admitted subject names its policy source: {index}"
+            wire["subject"]["policy_source"].is_string(),
+            "every admitted subject names its policy source: {index}: {wire}"
         );
     }
     Ok(())

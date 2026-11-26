@@ -608,17 +608,20 @@ fn smoke_fixture_is_deterministic_per_nonce() -> Result<(), Box<dyn std::error::
 // Spec: docs/specs/state.md#managed-install — a smoke run forgets its fixture
 // binding and removes the directory on success, failure and refused launch.
 fn smoke_removes_its_fixture_and_binding() -> Result<(), Box<dyn std::error::Error>> {
-    for (name, script) in [
-        ("success", None),
-        ("failure", Some("#!/bin/sh\nexit 42\n".to_owned())),
+    // success: a passing run; failure: a completed run whose status lacks the
+    // nonce; refused: the launch command itself exits non-zero.
+    for (name, refused, summary) in [
+        ("success", false, "nonce: $nonce"),
+        ("failure", false, "nonce: absent"),
+        ("refused", true, ""),
     ] {
         let temp = tempfile::tempdir()?;
         let home = temp.path().join("home");
         std::fs::create_dir(&home)?;
         let state = temp.path().join("state");
         provenant_os::fixture::private_state_dir(&state)?;
-        let (program, calls) = match script {
-            Some(_) => {
+        let (program, calls) = if refused {
+            {
                 let program = temp.path().join("provenant");
                 let calls = temp.path().join("calls");
                 std::fs::write(
@@ -632,7 +635,8 @@ fn smoke_removes_its_fixture_and_binding() -> Result<(), Box<dyn std::error::Err
                 std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
                 (program, calls)
             }
-            None => smoke_program(temp.path(), "nonce: $nonce")?,
+        } else {
+            smoke_program(temp.path(), summary)?
         };
         let runner = smoke_runner(&home)?;
         let result = crate::smoke::run_lifecycle(
