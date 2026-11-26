@@ -1130,14 +1130,14 @@ fn enrich_status_rows_with_facts(
         };
         let host = host.parse().map_err(|_| FacadeError::StateCorrupt)?;
         let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
-        let (record, waits) = if host == context.identity.host {
+        let (record, waits, relayed_presence) = if host == context.identity.host {
             let Some(store) = &facts.store else {
                 continue;
             };
             match store.record(attempt, &facts.call) {
                 Ok(record) => {
                     let waits = store.lane_waits(std::slice::from_ref(&record), &facts.call);
-                    (record, waits)
+                    (record, waits, None)
                 }
                 // A collected run leaves the retained graph's own row readable.
                 Err(provenant_run::RunError::NotFound) => continue,
@@ -1190,8 +1190,9 @@ fn enrich_status_rows_with_facts(
                     RunResult::Status {
                         attempt: record,
                         lane_waits,
+                        presence,
                         ..
-                    } if record.attempt_id == attempt => (record, lane_waits),
+                    } if record.attempt_id == attempt => (record, lane_waits, presence),
                     _ => return Err(FacadeError::StateCorrupt),
                 },
                 _ => return Err(FacadeError::StateCorrupt),
@@ -1231,20 +1232,33 @@ fn enrich_status_rows_with_facts(
         if let Some(subtree) = &record.peer.peer_subtree {
             row["peer_subtree"] = json!(subtree);
         }
-        let census = if host == context.identity.host {
-            facts.census()
+        let mut projected = if let Some(presence) = relayed_presence {
+            // The peer observed its own writer with its own census. Use that
+            // result directly: a fresh output event alone is not a heartbeat
+            // and a reader here cannot observe the peer's process table.
+            provenant_cli::run::project_lane_with_relayed_presence(
+                &record,
+                &waits,
+                context.roots.state.as_path(),
+                clock.wall_now().ok(),
+                presence,
+            )
         } else {
-            Err(())
+            let census = if host == context.identity.host {
+                facts.census()
+            } else {
+                Err(())
+            };
+            provenant_cli::run::project_lane_with_admission(
+                &record,
+                &waits,
+                context.roots.state.as_path(),
+                clock.wall_now().ok(),
+                host == context.identity.host && row["latest_attempt"] == true,
+                census,
+                &facts.lane_holders,
+            )
         };
-        let mut projected = provenant_cli::run::project_lane_with_admission(
-            &record,
-            &waits,
-            context.roots.state.as_path(),
-            clock.wall_now().ok(),
-            host == context.identity.host && row["latest_attempt"] == true,
-            census,
-            &facts.lane_holders,
-        );
         if host == context.identity.host
             && let Some(store) = &facts.store
         {
@@ -3779,7 +3793,7 @@ fn host_graph_output(
         let fault = TargetFault {
             outcome: provenant_records::Outcome::Invalid,
             code: "NOT_FOUND",
-            message: format!("NOT_FOUND: {} has not launched", resolved.target()),
+            message: format!("{} has not launched", resolved.target()),
         };
         if command.target.attempt.is_none()
             && let Some(reply) = unlaunched_failure_output(command, factory, budget, cancel)?
@@ -3843,10 +3857,7 @@ fn composite_graph_output(
         return Ok(output_fail(
             provenant_records::Outcome::Invalid,
             "NOT_FOUND",
-            &format!(
-                "NOT_FOUND: {graph}/{} has no settled composite outputs",
-                progress.id
-            ),
+            &format!("{graph}/{} has no settled composite outputs", progress.id),
         ));
     };
     // A valid composite may export typed fields without declaring result text.
