@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-pub const PROTOCOL: u64 = 14;
+pub const PROTOCOL: u64 = 15;
 pub const MAX_FRAME: usize = 1_048_576;
 
 macro_rules! peer_feature_protocols {
@@ -2525,7 +2525,7 @@ mod tests {
             trace: Default::default(),
             change: provenant_records::run::AttemptState::Terminal {
                 extra: Default::default(),
-                terminal_cause: None,
+                cause: None,
                 terminal_note: None,
                 stop: Some(stop.clone()),
                 outcome: provenant_records::run::Outcome::Failed,

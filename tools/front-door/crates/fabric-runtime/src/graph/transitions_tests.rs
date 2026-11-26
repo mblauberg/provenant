@@ -400,31 +400,31 @@ fn complete_attempt_transition_needs_no_owner_or_journal() {
     // process owner or storage implementation to accidentally depend on.
     for (outcome, contract, expected_state, expected_outcome, again) in [
         (
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             None,
             NodeState::Succeeded,
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             false,
         ),
         (
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             Some("VERDICT: PASS"),
             NodeState::Failed,
-            AttemptOutcome::TaskFailed,
+            GraphAttemptOutcome::TaskFailed,
             false,
         ),
         (
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             None,
             NodeState::Failed,
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             false,
         ),
         (
-            AttemptOutcome::DeadlineExceeded,
+            GraphAttemptOutcome::DeadlineExceeded,
             None,
             NodeState::Failed,
-            AttemptOutcome::DeadlineExceeded,
+            GraphAttemptOutcome::DeadlineExceeded,
             false,
         ),
     ] {
@@ -454,7 +454,8 @@ fn complete_attempt_transition_needs_no_owner_or_journal() {
                 branch: None,
                 commit: None,
                 stop: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
+                cause: None,
             },
             ObservationFacts {
                 route_index: 0,
@@ -478,11 +479,8 @@ fn complete_attempt_transition_needs_no_owner_or_journal() {
         assert_eq!(progress.attempts[0].input_manifest, recorded.input_manifest);
         assert_eq!(checkpoint.extra["future_graph"], true);
         assert_eq!(progress.extra["future_node"], true);
-        if expected_outcome == AttemptOutcome::DeadlineExceeded {
-            assert_eq!(
-                progress.advance_error_code.as_deref(),
-                Some("deadline_exceeded")
-            );
+        if expected_outcome == GraphAttemptOutcome::DeadlineExceeded {
+            assert_eq!(progress.advance_code.as_deref(), Some("deadline_exceeded"));
         }
     }
 }
@@ -520,7 +518,7 @@ fn review_settlement_records_subject_head_separately_from_base() {
     let attempt_id = provenant_core::AttemptId::from_bytes([7; 16]);
     let observation = AttemptObservation::Terminal {
         attempt_ref: Some(format!("fixture/{attempt_id}")),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: Some(Box::new(capture.finish())),
         result_warning: None,
@@ -528,7 +526,8 @@ fn review_settlement_records_subject_head_separately_from_base() {
         branch: None,
         commit: Some(base.clone()),
         stop: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
+        cause: None,
     };
     apply_attempt_observation(
         &plan,
@@ -558,42 +557,86 @@ fn review_settlement_records_subject_head_separately_from_base() {
     assert_eq!(settlement.base.map(|oid| oid.to_string()), Some(base));
 }
 
+/// The projected outcome is the one fact behind a writer stop: the restart
+/// code follows it, and pushed refs with a done declaration no longer
+/// revise it. A blocked declaration keeps its note whatever the refs (#4010).
 #[test]
-fn writer_declared_stop_cause_uses_commit_evidence() {
+fn writer_stop_code_follows_the_projected_outcome() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "writer-stop-cause",
-            "nodes": [{"id":"one", "access":"worktree_write", "worktree":"/fixture/writer", "write_scope":["src"], "prompt":"do the work",
-                "routes":[{"adapter":"first", "model":"first/model"}]}]
-        }))
-        .unwrap();
+        "schema_version": 1, "graph_id": "writer-stop-code",
+        "nodes": [{"id":"one", "access":"worktree_write", "worktree":"/fixture/writer", "write_scope":["src"], "prompt":"do the work",
+            "routes":[{"adapter":"first", "model":"first/model"}]}]
+    }))
+    .unwrap();
     let limits = crate::config::GraphLimits::default();
     let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
     let base = "1111111111111111111111111111111111111111";
     let head = "2222222222222222222222222222222222222222";
-    for (outcome, commit, expected) in [
+    let done = provenant_records::handoff::Handoff::from_json(
+        br#"{"schema_version":2,"status":"done","note":"brief complete","remaining":[],"decisions":[],"verify":[]}"#,
+    )
+    .unwrap();
+    let blocked = provenant_records::handoff::Handoff::from_json(
+        br#"{"schema_version":2,"status":"blocked","note":"waiting on owner","remaining":["ask the owner"],"decisions":[],"verify":[]}"#,
+    )
+    .unwrap();
+    for (outcome, commit, handoff, expected_code, expected_note) in [
         (
-            AttemptOutcome::DeclaredStop,
+            GraphAttemptOutcome::DeclaredStop,
             Some(head),
-            Some("writer_declared_stop"),
+            None,
+            Some("declared_stop"),
+            None,
         ),
         (
-            AttemptOutcome::DeclaredStop,
+            GraphAttemptOutcome::DeclaredStop,
             Some(base),
-            Some("stopped_no_work"),
+            None,
+            Some("declared_stop"),
+            None,
         ),
-        (AttemptOutcome::DeclaredStop, None, Some("stopped_no_work")),
-        // A stop path cannot call new commits "no work": the observed head
-        // decides the cause even when the outcome came from the stop path.
         (
-            AttemptOutcome::StoppedNoWork,
+            GraphAttemptOutcome::StoppedNoWork,
             Some(head),
-            Some("writer_declared_stop"),
+            None,
+            Some("stopped_no_work"),
+            None,
+        ),
+        (
+            GraphAttemptOutcome::StoppedNoWork,
+            None,
+            None,
+            Some("stopped_no_work"),
+            None,
+        ),
+        // Pushed refs and a done declaration no longer close the node.
+        (
+            GraphAttemptOutcome::DeclaredStop,
+            Some(head),
+            Some(done.clone()),
+            Some("declared_stop"),
+            None,
+        ),
+        // A blocked declaration travels with its note whatever the refs.
+        (
+            GraphAttemptOutcome::DeclaredStop,
+            Some(head),
+            Some(blocked.clone()),
+            Some("declared_stop"),
+            Some("waiting on owner"),
         ),
     ] {
         let mut checkpoint =
             initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
         let _ = start(&plan, &positions, &mut checkpoint, &limits);
         checkpoint.nodes[0].source_commit = Some(base.into());
+        let result = handoff.map(|handoff| {
+            let mut capture = crate::result_capture::ResultCapture::new(None);
+            capture.push(b"work left for the chair");
+            let mut result = capture.finish();
+            result.handoff = Ok(Some(handoff));
+            result
+        });
         apply_attempt_observation(
             &plan,
             &mut checkpoint,
@@ -604,13 +647,14 @@ fn writer_declared_stop_cause_uses_commit_evidence() {
                 attempt_ref: Some("host/attempt".into()),
                 outcome,
                 launched: true,
-                result: None,
+                result: result.map(Box::new),
                 result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: commit.map(str::to_owned),
                 stop: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
+                cause: None,
             },
             ObservationFacts {
                 route_index: 0,
@@ -625,96 +669,30 @@ fn writer_declared_stop_cause_uses_commit_evidence() {
         )
         .unwrap();
         assert_eq!(
-            checkpoint.nodes[0].advance_error_code.as_deref(),
-            expected,
+            checkpoint.nodes[0].advance_code.as_deref(),
+            expected_code,
             "outcome={outcome:?} commit={commit:?}"
         );
-    }
-}
-
-/// Small: commits ahead of the input head and a done handoff finish the
-/// brief, whatever stop path reported the lane. A stop cause cannot call
-/// that work "no work" (#3988).
-#[test]
-fn pushed_refs_and_done_handoff_outrank_the_stop_path() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "writer-refs-outcome",
-            "nodes": [{"id":"one", "access":"worktree_write", "worktree":"/fixture/writer", "write_scope":["src"], "prompt":"do the work",
-                "routes":[{"adapter":"first", "model":"first/model"}]}]
-        }))
-        .unwrap();
-    let limits = crate::config::GraphLimits::default();
-    let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
-    let base = "1111111111111111111111111111111111111111";
-    let head = "2222222222222222222222222222222222222222";
-    let text = format!(
-        "```handoff\n{}\n```",
-        serde_json::json!({
-            "schema_version": 2, "status": "done", "note": "brief complete",
-            "remaining": [], "decisions": [], "verify": []
-        })
-    );
-    let mut capture = crate::result_capture::ResultCapture::new(None);
-    capture.push(text.as_bytes());
-    let mut result = capture.finish();
-    result.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
-    for (outcome, settlement_reason) in [
-        (
-            AttemptOutcome::DeclaredStop,
-            provenant_records::run::SettlementReason::DeclaredStop,
-        ),
-        (
-            AttemptOutcome::StoppedNoWork,
-            provenant_records::run::SettlementReason::DeclaredStop,
-        ),
-    ] {
-        let mut checkpoint =
-            initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
-        let _ = start(&plan, &positions, &mut checkpoint, &limits);
-        checkpoint.nodes[0].source_commit = Some(base.into());
-        apply_attempt_observation(
-            &plan,
-            &mut checkpoint,
-            &positions,
-            0,
-            &limits,
-            AttemptObservation::Terminal {
-                attempt_ref: Some("host/attempt".into()),
-                outcome,
-                launched: true,
-                result: Some(Box::new(result.clone())),
-                result_warning: None,
-                result_path: None,
-                branch: None,
-                commit: Some(head.into()),
-                stop: None,
-                settlement_reason: Some(settlement_reason),
-            },
-            ObservationFacts {
-                route_index: 0,
-                usage: None,
-                fallback_evidence: None,
-                evidence_unreadable: false,
-                fallback_evidence_retry: None,
-                fallback_cause: None,
-                skipped_accounts: Vec::new(),
-                review_range: ReviewRange::Unknown,
-            },
-        )
-        .unwrap();
         assert_eq!(
             checkpoint.nodes[0].attempts[0].outcome,
-            Some(AttemptOutcome::Succeeded),
-            "outcome={outcome:?}"
+            Some(outcome),
+            "outcome={outcome:?} commit={commit:?}"
         );
-        assert_eq!(checkpoint.nodes[0].advance_error_code, None);
+        if let Some(note) = expected_note {
+            assert_eq!(
+                checkpoint.nodes[0].advance_note.as_deref(),
+                Some(note),
+                "outcome={outcome:?} commit={commit:?}"
+            );
+        }
     }
 }
 
-/// #4065: an inline implement writer with a successful attempt, a done handoff
-/// and a pushed delivery head settles succeeded whatever provisional settlement
-/// reason was recorded, and its dependant is unblocked. No findings block is
-/// present: findings are not a writer success criterion.
+/// #4065: an inline implement writer whose sealed settlement completed, with a
+/// done handoff and a pushed delivery head, settles succeeded and unblocks its
+/// dependant. No findings block is present: findings are not a writer success
+/// criterion. The sealed class decides: refs and a done handoff never promote
+/// a sealed failure, and an attempt with no sealed class releases nothing.
 #[test]
 fn inline_implement_pushed_head_and_done_handoff_unblock_dependants() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
@@ -733,18 +711,24 @@ fn inline_implement_pushed_head_and_done_handoff_unblock_dependants() {
     let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
     let base = "1111111111111111111111111111111111111111";
     let pushed = "2222222222222222222222222222222222222222";
-    let text = format!(
-        "```handoff\n{}\n```",
-        serde_json::json!({
-            "schema_version": 2, "status": "done", "note": "brief complete",
-            "remaining": [], "decisions": [], "verify": []
-        })
-    );
+    // The handoff arrives by declaration, never from the result text.
+    let declared = serde_json::json!({
+        "schema_version": 2, "status": "done", "note": "brief complete",
+        "remaining": [], "decisions": [], "verify": []
+    });
     let mut capture = crate::result_capture::ResultCapture::new(None);
-    capture.push(text.as_bytes());
+    capture.push(b"brief complete");
     let mut result = capture.finish();
-    result.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
-    for settlement_reason in [Some(provenant_records::run::SettlementReason::Failed), None] {
+    result.handoff =
+        provenant_records::handoff::Handoff::from_json(declared.to_string().as_bytes()).map(Some);
+    for (settlement_class, releases) in [
+        (
+            Some(provenant_records::run::SettlementClass::Completed),
+            true,
+        ),
+        (Some(provenant_records::run::SettlementClass::Failed), false),
+        (None, false),
+    ] {
         let mut checkpoint =
             initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
         let _ = start(&plan, &positions, &mut checkpoint, &limits);
@@ -757,7 +741,7 @@ fn inline_implement_pushed_head_and_done_handoff_unblock_dependants() {
             &limits,
             AttemptObservation::Terminal {
                 attempt_ref: Some("host/attempt".into()),
-                outcome: AttemptOutcome::Succeeded,
+                outcome: GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(result.clone())),
                 result_warning: None,
@@ -766,7 +750,8 @@ fn inline_implement_pushed_head_and_done_handoff_unblock_dependants() {
                 // owner.rs supplies the pushed delivery head here (#4065).
                 commit: Some(pushed.into()),
                 stop: None,
-                settlement_reason,
+                settlement_class,
+                cause: None,
             },
             ObservationFacts {
                 route_index: 0,
@@ -780,21 +765,21 @@ fn inline_implement_pushed_head_and_done_handoff_unblock_dependants() {
             },
         )
         .unwrap();
-        assert_eq!(
-            checkpoint.nodes[0].attempts[0].outcome,
-            Some(AttemptOutcome::Succeeded),
-            "settlement_reason={settlement_reason:?}"
+        let dependant = dependency_state(
+            &plan.nodes[positions["after"]],
+            &plan,
+            &checkpoint,
+            &positions,
         );
-        assert_eq!(checkpoint.nodes[0].state, NodeState::Succeeded);
         assert_eq!(
-            dependency_state(
-                &plan.nodes[positions["after"]],
-                &plan,
-                &checkpoint,
-                &positions
-            ),
-            None,
-            "dependant must be unblocked; settlement_reason={settlement_reason:?}"
+            checkpoint.nodes[0].state == NodeState::Succeeded,
+            releases,
+            "settlement_class={settlement_class:?}"
+        );
+        assert_eq!(
+            dependant.is_none(),
+            releases,
+            "dependant release follows the sealed class; settlement_class={settlement_class:?}"
         );
     }
 }
@@ -811,7 +796,7 @@ fn handoff_missing_classification_keeps_dependants_closed() {
         &limits,
         AttemptObservation::Terminal {
             attempt_ref: Some("host/handoff-missing".into()),
-            outcome: AttemptOutcome::ReviewRequired,
+            outcome: GraphAttemptOutcome::ReviewRequired,
             launched: true,
             result: None,
             result_warning: None,
@@ -819,7 +804,8 @@ fn handoff_missing_classification_keeps_dependants_closed() {
             branch: None,
             commit: None,
             stop: Some(provenant_records::StopCause::HandoffMissing),
-            settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+            settlement_class: Some(provenant_records::run::SettlementClass::HandoffMissing),
+            cause: None,
         },
         ObservationFacts {
             route_index: 0,
@@ -838,7 +824,7 @@ fn handoff_missing_classification_keeps_dependants_closed() {
     assert_eq!(progress.state, NodeState::Failed);
     assert_eq!(
         progress.attempts[0].outcome,
-        Some(AttemptOutcome::OtherFailure)
+        Some(GraphAttemptOutcome::OtherFailure)
     );
 }
 
@@ -885,7 +871,7 @@ fn next_attempt_transition_requests_only_the_facts_its_disposition_needs() {
     let attempt = &mut progress.attempts[0];
     attempt.state = AttemptState::Terminal;
     attempt.launched = false;
-    attempt.outcome = Some(AttemptOutcome::AuthRequired);
+    attempt.outcome = Some(GraphAttemptOutcome::AuthRequired);
     attempt.attempt_ref = Some("host/attempt".into());
     assert_eq!(
         next_attempt_transition(node, progress, &limits, None, None, &observed),
@@ -924,7 +910,7 @@ fn preparation_transitions_enforce_pinned_sources_and_input_capacity_without_io(
     ));
     assert_eq!(checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(
-        checkpoint.nodes[0].advance_error_code.as_deref(),
+        checkpoint.nodes[0].advance_code.as_deref(),
         Some("integration_head_moved")
     );
     plan.nodes[0].inputs.push(GraphInput {
@@ -942,7 +928,67 @@ fn preparation_transitions_enforce_pinned_sources_and_input_capacity_without_io(
         limits.node_prompt_bytes
     ));
     assert_eq!(
-        checkpoint.nodes[0].advance_error_code.as_deref(),
+        checkpoint.nodes[0].advance_code.as_deref(),
         Some("upstream_outputs_too_large")
+    );
+}
+
+#[test]
+fn sealed_cause_lands_on_the_attempt_and_the_code_comes_from_the_outcome() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "sealed-cause",
+        "nodes": [{"id":"one", "access":"worktree_write", "worktree":".worktrees/one",
+            "prompt":"do the work", "routes":[{"adapter":"first", "model":"first/model"}]}]
+    }))
+    .unwrap();
+    let limits = crate::config::GraphLimits::default();
+    let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
+    let mut checkpoint = initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
+    start(&plan, &positions, &mut checkpoint, &limits);
+    apply_attempt_observation(
+        &plan,
+        &mut checkpoint,
+        &positions,
+        0,
+        &limits,
+        AttemptObservation::Terminal {
+            attempt_ref: Some("host/no-work".into()),
+            outcome: GraphAttemptOutcome::StoppedNoWork,
+            launched: true,
+            result: None,
+            result_warning: None,
+            result_path: None,
+            branch: None,
+            commit: None,
+            stop: Some(provenant_records::StopCause::StoppedNoWork),
+            settlement_class: Some(provenant_records::run::SettlementClass::DeclaredStop),
+            cause: Some(Box::new(provenant_records::run::CauseKind::StoppedNoWork)),
+        },
+        ObservationFacts {
+            route_index: 0,
+            usage: None,
+            fallback_evidence: None,
+            evidence_unreadable: false,
+            fallback_evidence_retry: None,
+            fallback_cause: None,
+            skipped_accounts: Vec::new(),
+            review_range: ReviewRange::Unknown,
+        },
+    )
+    .unwrap();
+    let attempt = &checkpoint.nodes[0].attempts[0];
+    assert_eq!(
+        attempt.cause,
+        Some(provenant_records::run::CauseKind::StoppedNoWork)
+    );
+    assert_eq!(attempt.outcome, Some(GraphAttemptOutcome::StoppedNoWork));
+    assert_eq!(
+        checkpoint.nodes[0].advance_code.as_deref(),
+        Some("stopped_no_work")
+    );
+    let status = serde_json::to_value(&checkpoint).unwrap();
+    assert_eq!(
+        status["nodes"][0]["attempts"][0]["cause"],
+        "stopped_no_work"
     );
 }

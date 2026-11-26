@@ -1598,6 +1598,7 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
@@ -1614,8 +1615,8 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     )?;
     drop(lock);
     let mut publication = tests::publication();
-    publication.outcome = Outcome::ReviewRequired;
-    publication.reason = Some("protected changes require review".into());
+    publication.fact.outcome = Outcome::ReviewRequired;
+    publication.fact.reason = Some("protected changes require review".into());
     store.publish_terminal(id, 1, &publication, &exit, &call)?;
     // The first `log` marks the commit body as built; after it, `rev-parse
     // --verify HEAD` (the push stage's head check) overruns its bound.

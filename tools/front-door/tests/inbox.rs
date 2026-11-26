@@ -466,7 +466,7 @@ impl provenant_run::Providers for Indexed {
             repository: Some(self.0.clone()),
             observed_head: Some(provenant_core::GitOid::parse(&"a".repeat(40)).map_err(|e| {
                 provenant_run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::HandoffRefused,
+                    provenant_records::run::CauseKind::LaunchHandoffRefused,
                     e.to_string(),
                 )
             })?),

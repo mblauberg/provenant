@@ -147,7 +147,7 @@ impl RunStore {
         let notice = notice_line(&Line {
             attempt: &attempt,
             outcome: outcome.as_str().unwrap_or("unknown"),
-            partial: !next.partial_signals.is_empty(),
+            partial: !next.signals.is_empty(),
             model: route.and_then(|route| route.model.as_deref()),
             head: head.as_deref().map(|head| clip(head, 12)),
             pull_request: pull_request.as_deref(),

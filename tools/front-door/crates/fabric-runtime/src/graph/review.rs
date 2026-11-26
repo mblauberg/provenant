@@ -2,9 +2,9 @@
 use super::*;
 
 /// The one result order every review prompt states: one verdict line after the
-/// findings and prose, then the closed handoff as the very last thing. Settlement
-/// tolerates only a lone verdict after the handoff, so prompts never invite it.
-pub(super) const VERDICT_THEN_HANDOFF: &str = "After all findings and prose, write exactly one verdict line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. Then put the shared closed handoff block last, with nothing after it.";
+/// findings and prose, as the very last thing. A reader owes no declaration, so
+/// nothing follows the verdict.
+pub(super) const VERDICT_LAST: &str = "After all findings and prose, end with exactly one verdict line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE, with nothing after it.";
 
 /// A delivery review is acceptable only with complete structured evidence.
 /// Keep the original verdict in the record; this policy affects the gate only.
@@ -133,10 +133,9 @@ pub(super) fn retained_findings(node: &PlannedNode, progress: &NodeProgress) -> 
     progress.state == NodeState::Failed
         && ((node.composite.is_some() && progress.outputs.as_ref().is_some_and(partial))
             || (template::review_behaviour(node).is_some()
-                && progress
-                    .attempts
-                    .last()
-                    .is_some_and(|attempt| attempt.outcome == Some(AttemptOutcome::TaskFailed))))
+                && progress.attempts.last().is_some_and(|attempt| {
+                    attempt.outcome == Some(GraphAttemptOutcome::TaskFailed)
+                })))
         && progress
             .outputs
             .as_ref()
@@ -326,8 +325,7 @@ pub(super) fn correct_verdict(
             && checkpoint.nodes[*index]
                 .review_verdict_correction_refused
                 .is_none()
-            && checkpoint.nodes[*index].advance_error_code.as_deref()
-                == Some("review_verdict_invalid")
+            && checkpoint.nodes[*index].advance_code.as_deref() == Some("review_verdict_invalid")
             && !checkpoint
                 .expansions
                 .iter()
@@ -341,7 +339,7 @@ pub(super) fn correct_verdict(
     };
     let mut next = checkpoint.clone();
     let brief = format!(
-        "{}\n\nThe previous reply had an invalid verdict. Return the findings. {VERDICT_THEN_HANDOFF} This is the only automatic verdict correction.",
+        "{}\n\nThe previous reply had an invalid verdict. Return the findings. {VERDICT_LAST} This is the only automatic verdict correction.",
         node.prompt
     );
     if let Err(error) = patch::correct_review_verdict(
@@ -380,7 +378,7 @@ pub(super) fn correct_verdict(
             plans::clear_expansion_pause(&mut next, index, true);
         }
         next.nodes[index].review_verdict_correction_refused =
-            Some(bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES));
+            Some(bounded(&error.to_string(), MAX_ADVANCE_NOTE_BYTES));
         return Ok(Some(next));
     }
     transitions::retain_automatic_retry_accounting(

@@ -115,8 +115,11 @@ uncertain or reset a worktree with edits.
   a process group or an open path.
 - `reconcile` reports storage errors in `writer_reservation_errors` and exits
   non-zero.
-- A valid handoff declaring `stopped_early` or `blocked` makes an otherwise
-  successful lane settle as `review_required`.
+- A valid declaration of `stopped_early` or `blocked` makes an otherwise
+  successful lane settle as `review_required`. The `lanes.settlement.*`
+  settings (`config schema` lists each key, its values and default) decide
+  which other signals hold a lane for review; `run --explain` shows each
+  key's effective value and source.
 
 ## Waiting
 

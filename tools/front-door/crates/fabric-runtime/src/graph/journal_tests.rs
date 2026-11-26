@@ -62,7 +62,7 @@ fn stored_fixture() -> StoredCheckpoint {
     checkpoint.nodes[0].state = NodeState::Succeeded;
     let attempt = &mut checkpoint.nodes[0].attempts[0];
     attempt.state = AttemptState::Terminal;
-    attempt.outcome = Some(AttemptOutcome::Succeeded);
+    attempt.outcome = Some(GraphAttemptOutcome::Succeeded);
     attempt.launched = true;
     attempt.attempt_ref = Some(format!(
         "{}/{}",
@@ -584,7 +584,7 @@ fn terminal_checkpoint_with_superseded_header_is_retired() {
         .join(project.to_string())
         .join("graph-g-test.json");
     let mut stored = stored_fixture();
-    stored.schema_version = super::journal::CHECKPOINT_SCHEMA_VERSION - 1;
+    stored.schema_version = 1;
     std::fs::write(&path, CanonicalV1::bytes(&stored).unwrap().as_bytes()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(
@@ -644,7 +644,7 @@ fn interrupted_terminal_collection_resumes_derived_cleanup() {
             .count()
     };
     assert!(prompt_blobs() > 0);
-    FileJournal::set_advance_error(&root, project, "g-test", Some("interrupted cleanup")).unwrap();
+    FileJournal::set_advance_note(&root, project, "g-test", Some("interrupted cleanup")).unwrap();
     let pending = directory.join("pending");
     std::fs::create_dir_all(&pending).unwrap();
     std::fs::write(pending.join("g-test.pending"), b"1").unwrap();
@@ -1474,7 +1474,7 @@ fn launched_route_fallback_history_is_readable() {
     let mut stored: StoredCheckpoint = stored_fixture();
     let node = &mut stored.checkpoint.nodes[0];
     node.attempts[0].launched = true;
-    node.attempts[0].outcome = Some(AttemptOutcome::UsageLimited);
+    node.attempts[0].outcome = Some(GraphAttemptOutcome::UsageLimited);
     let mut next = node.attempts[0].clone();
     next.key.route_index = 1;
     next.key.attempt = 2;
@@ -1487,12 +1487,15 @@ fn launched_route_fallback_history_is_readable() {
 }
 #[test]
 fn delivery_retry_reopens_only_the_matching_failed_attempt() {
-    for outcome in [AttemptOutcome::OtherFailure, AttemptOutcome::ReviewRequired] {
+    for outcome in [
+        GraphAttemptOutcome::OtherFailure,
+        GraphAttemptOutcome::ReviewRequired,
+    ] {
         assert_delivery_retry_reopens_matching_attempt(outcome);
     }
 }
 
-fn assert_delivery_retry_reopens_matching_attempt(outcome: AttemptOutcome) {
+fn assert_delivery_retry_reopens_matching_attempt(outcome: GraphAttemptOutcome) {
     let temp = crate::test_support::tempdir().expect("state fixture");
     let base = std::fs::canonicalize(temp.path()).expect("absolute state");
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).expect("private state");
@@ -1599,8 +1602,8 @@ fn tick_reports_corrupt_checkpoints_once_until_bytes_change_or_retired() {
         std::fs::read_to_string(&marker).unwrap().lines().nth(1),
         Some("decode")
     );
-    FileJournal::set_advance_error(&root, project, "g-test", Some("another error")).unwrap();
-    FileJournal::set_advance_error(&root, project, "g-test", None).unwrap();
+    FileJournal::set_advance_note(&root, project, "g-test", Some("another error")).unwrap();
+    FileJournal::set_advance_note(&root, project, "g-test", None).unwrap();
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
             .unwrap()
@@ -1693,7 +1696,7 @@ fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     );
 }
 #[test]
-fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
+fn advance_note_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     let root = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(root.path()).unwrap();
@@ -1714,7 +1717,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
         }]
     }))
     .unwrap();
-    let read = || FileJournal::read_advance_error(&root, project, "errors").unwrap();
+    let read = || FileJournal::read_advance_note(&root, project, "errors").unwrap();
     assert_eq!(read(), None);
     let mut journal = FileJournal::open(&root, project, "errors", budget, &cancel, &clock).unwrap();
     for directory in [inputs.checkout.clone(), inputs.home.clone()] {
@@ -1736,14 +1739,14 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
         .unwrap();
     assert_eq!(execution.directory, inputs.checkout);
     // Recording takes no graph lock, so it works while the journal is held.
-    let set = |error| FileJournal::set_advance_error(&root, project, "errors", error).unwrap();
+    let set = |error| FileJournal::set_advance_note(&root, project, "errors", error).unwrap();
     set(Some("first"));
     assert_eq!(read().as_deref(), Some("first"));
     set(Some("second"));
     assert_eq!(read().as_deref(), Some("second"));
-    let long = "é".repeat(MAX_ADVANCE_ERROR_BYTES);
+    let long = "é".repeat(MAX_ADVANCE_NOTE_BYTES);
     set(Some(&long));
-    assert_eq!(read().unwrap().len(), MAX_ADVANCE_ERROR_BYTES);
+    assert_eq!(read().unwrap().len(), MAX_ADVANCE_NOTE_BYTES);
     set(None);
     assert_eq!(read(), None);
     set(None);
@@ -2482,9 +2485,9 @@ mod launch_recovery {
                 Ok(AttemptObservation::Terminal {
                     attempt_ref: Some(reference),
                     outcome: if self.failed_node == Some(key.node_id.as_str()) {
-                        AttemptOutcome::OtherFailure
+                        GraphAttemptOutcome::OtherFailure
                     } else {
-                        AttemptOutcome::Succeeded
+                        GraphAttemptOutcome::Succeeded
                     },
                     launched: true,
                     result: None,
@@ -2492,8 +2495,9 @@ mod launch_recovery {
                     result_path: None,
                     branch: None,
                     commit: None,
-                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                     stop: None,
+                    cause: None,
                 })
             } else {
                 Ok(AttemptObservation::Pending {
@@ -2879,4 +2883,55 @@ fn bind_refuses_a_subject_that_disagrees_with_the_bound_review_base() {
         .bind(make_execution("g-disagree", &"b".repeat(40)))
         .expect_err("a subject base must agree with the bound review base");
     assert!(matches!(error.root_cause(), JournalError::BadEnvelope));
+}
+
+#[test]
+fn v2_checkpoint_migrates_and_is_published_under_the_journal_lock() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    drop(FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap());
+    let path = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+    let mut value = serde_json::to_value(stored_fixture()).unwrap();
+    value["schema_version"] = 2.into();
+    value["checkpoint"]["nodes"][0]["advance_error_code"] = "writer_declared_stop".into();
+    value["checkpoint"]["nodes"][0]["advance_error"] = "waiting".into();
+    let digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&value["checkpoint"], &value["execution"]),
+    )
+    .unwrap();
+    value["digest"] = digest.to_string().into();
+    std::fs::write(&path, CanonicalV1::bytes(&value).unwrap().as_bytes()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    let stored = load_checkpoint(&journal.directory, "g-test")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.checkpoint.nodes[0].advance_code.as_deref(),
+        Some("declared_stop")
+    );
+    assert_eq!(
+        stored.checkpoint.nodes[0].advance_note.as_deref(),
+        Some("waiting")
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["schema_version"], 3);
+    assert!(
+        saved["checkpoint"]["nodes"][0]
+            .get("advance_error_code")
+            .is_none()
+    );
 }

@@ -77,6 +77,26 @@ pub(super) fn latest() -> provenant_core::WallTime {
 /// `.retry-` and the digits of a u64 generation.
 const RETRY_SUFFIX_BYTES: usize = 27;
 
+/// The largest configurable `on_stop` defaults a checkpoint can seal: one entry
+/// for every cause, each with the longest wire step. Config declares keys from
+/// this closed set only, so the bound stays an upper bound without a config
+/// special case.
+pub(super) fn worst_case_on_stop_defaults() -> provenant_records::OnStop {
+    provenant_records::OnStop::new(
+        provenant_records::StopCause::ALL
+            .into_iter()
+            .map(|cause| {
+                (
+                    cause,
+                    provenant_records::NextStep::SameRoute {
+                        continuation: provenant_records::Continuation::Fresh,
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
 fn ask_bound(ask: &AskRequest) -> usize {
     let link = AskLink {
         extra: Default::default(),
@@ -130,6 +150,7 @@ pub(super) fn checkpoint_bound(
         pull_request: Some(String::new()),
         integration_pin: Some(String::new()),
         cancelled: true,
+        on_stop_defaults: worst_case_on_stop_defaults(),
         delivery_ci_superseded: Vec::new(),
         cancel_reason: Some(String::new()),
         pause: provenant_records::pause::Pause::new(
@@ -354,7 +375,7 @@ fn node_bound(
                 head: "4".repeat(64),
                 pull_request: format!("https://{}", "x".repeat(OUTPUT_FIELD_BYTES - 8)),
             }),
-            error: Some("x".repeat(MAX_ADVANCE_ERROR_BYTES)),
+            error: Some("x".repeat(MAX_ADVANCE_NOTE_BYTES)),
         }
     });
     let delivery_park = (plan.queue.is_some()
@@ -511,8 +532,8 @@ fn node_bound(
         wait_reason: None,
         cancelled_from: Some(NodeState::Running),
         skip_reason: Some("graph cancelled".into()),
-        advance_error: Some(String::new()),
-        advance_error_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
+        advance_note: Some(String::new()),
+        advance_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         advance_owner_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         outputs: Some(if boundary {
             gate_outputs(false)
@@ -625,8 +646,8 @@ fn node_bound(
     }
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
-        + MAX_ADVANCE_ERROR_BYTES // advance error
-        + if correction { MAX_ADVANCE_ERROR_BYTES } else { 0 };
+        + MAX_ADVANCE_NOTE_BYTES // advance error
+        + if correction { MAX_ADVANCE_NOTE_BYTES } else { 0 };
     if template::review_node(node) {
         bytes += canonical_len(&serde_json::json!({"review_settlement": {
             "attempt_id": "1".repeat(32),
@@ -643,10 +664,10 @@ fn node_bound(
     }
     // The node's own bounded launch retry wait, kept while it is running.
     if !boundary && node.composite.is_none() && node.decide.is_none() && node.land.is_none() {
-        bytes += MAX_ADVANCE_ERROR_BYTES + 320; // retry reason, timing and bounded policy
+        bytes += MAX_ADVANCE_NOTE_BYTES + 320; // retry reason, timing and bounded policy
     }
     if expands {
-        bytes += MAX_ADVANCE_ERROR_BYTES; // expansion pause
+        bytes += MAX_ADVANCE_NOTE_BYTES; // expansion pause
     }
     if plans::agent(node) && !admitted {
         // Final blocks are always externalised by prompt_store. Reserve the
@@ -676,7 +697,7 @@ fn node_bound(
             + 256;
     }
     if let Some(spec) = &node.loop_body {
-        bytes += MAX_ADVANCE_ERROR_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
+        bytes += MAX_ADVANCE_NOTE_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
         if let Some(session) = &spec.decision_session {
             let ask = asks::loop_ask(&plan.graph_id, &node.id, usize::MAX, session);
             bytes += loop_rounds * (ask_bound(&ask) + RETRY_SUFFIX_BYTES);
@@ -704,7 +725,7 @@ fn node_bound(
     if let Some(spec) = &node.land {
         // branch, head, ask ID, actor and note; and one ask link.
         bytes +=
-            2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_ERROR_BYTES;
+            2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_NOTE_BYTES;
         let session = land::session(spec, plan).unwrap_or("");
         let ask = land::land_ask(
             &plan.graph_id,
@@ -828,7 +849,7 @@ fn node_bound(
             // The longest stop cause name.
             stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
             attempt_ref: Some(String::new()),
-            outcome: Some(AttemptOutcome::AdapterUnavailable),
+            outcome: Some(GraphAttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),
             input_cap: Some(usize::MAX),
             input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
@@ -844,6 +865,7 @@ fn node_bound(
                 cost_partial: true,
                 cost_unknown_reason: Some(String::new()),
             }),
+            cause: None,
         };
         // A manifest records at most MANIFEST_INPUT_LIMIT selected values. Each
         // entry carries two bounded identifiers, a digest and an optional OID.

@@ -184,6 +184,17 @@ starts the next attempt on the same recorded worktree.
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
+Graph status reports the exact settled cause on each attempt as `attempts[].cause`, copied from the
+run fact when the attempt is recorded and absent when no cause was settled; `next_step` still keys on
+the sealed stop cause. Default next steps may be set at the host and project layers under
+`domains.fabric.graph.on_stop.<stop_cause>` and `projects.{project}.on_stop.<stop_cause>`, resolved
+once at graph admission because graphs are pinned. A template's or node's own `on_stop` stays above
+those defaults, and setting a pinned cause warns `ON_STOP_PINNED_IGNORED` with its source.
+`declared_stop` and `stopped_no_work` are display codes keyed by the projected outcome: no-work
+needs a known, unchanged head, and without an override its default follows `stopped_early`.
+- Why: status and follow-up need one typed cause without re-reading the run store, and a pinned
+  graph must not change meaning when host policy changes later.
+
 ### One model spelling per route
 
 A route carries one spelling of its model: the full catalogue id
@@ -627,8 +638,9 @@ checkpoint missing launch evidence or its actor is refused.
 ### Checkpoint envelope
 
 Admission bounds the worst-case checkpoint before saving the plan. The fixed
-checkpoint envelope is 32 MiB, including the full handoff projections and
-pending-steer reserve for graphs at the default node limit. Graph text,
+checkpoint envelope is 32 MiB, including the full handoff projections,
+pending-steer reserve and worst-case configured `on_stop` defaults for graphs at
+the default node limit. Graph text,
 identity fields and object keys keep their exact bytes in local state and
 execution context, through captured fragments, retries, template substitutions
 and expansions; heuristic content inspection warns with the field and rule

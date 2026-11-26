@@ -48,7 +48,7 @@ pub(super) fn settle_removed_worktree(
     // Saving a settled checkpoint also retires the pending marker, so later
     // ticks stop revisiting a worktree that no longer exists.
     journal.save(checkpoint)?;
-    provenant_fabric_runtime::graph::FileJournal::set_advance_error(state, project, id, None)?;
+    provenant_fabric_runtime::graph::FileJournal::set_advance_note(state, project, id, None)?;
     Ok(true)
 }
 

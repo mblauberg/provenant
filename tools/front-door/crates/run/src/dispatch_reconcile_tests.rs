@@ -141,7 +141,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
-                terminal_cause: provenant_records::run::TerminalCause::HandoffRefused,
+                cause: provenant_records::run::CauseKind::LaunchHandoffRefused,
                 terminal_note: None,
                 message: self.message.into(),
                 host_message: Some(self.message.into()),
@@ -225,8 +225,8 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         assert_eq!(record.provider_launched, Some(false));
         assert_eq!(record.skipped_routes[1].cause, cause);
         assert_eq!(
-            record.terminal_evidence,
-            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+            record.terminal_basis,
+            Some(provenant_records::run::TerminalBasis::PreLaunchRefusal)
         );
     }
     Ok(())
@@ -246,7 +246,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
-                terminal_cause: provenant_records::run::TerminalCause::HandoffRefused,
+                cause: provenant_records::run::CauseKind::LaunchHandoffRefused,
                 terminal_note: None,
                 message: "all candidates require sign-in; run provenant accounts".into(),
                 host_message: None,
@@ -303,8 +303,8 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         );
         let record = store.record(id, &call)?;
         assert_eq!(
-            record.terminal_evidence,
-            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+            record.terminal_basis,
+            Some(provenant_records::run::TerminalBasis::PreLaunchRefusal)
         );
         assert_eq!(record.provider_launched, Some(false));
         assert_eq!(

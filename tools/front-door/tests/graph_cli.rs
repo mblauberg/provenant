@@ -3313,7 +3313,7 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
     checkpoint.nodes[0].state = NodeState::Succeeded;
     checkpoint.nodes[0].attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Terminal;
     checkpoint.nodes[0].attempts[0].outcome =
-        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+        Some(provenant_fabric_runtime::graph::GraphAttemptOutcome::Succeeded);
     let mut journal = FileJournal::open(
         &state,
         project,
@@ -3396,7 +3396,7 @@ fn steer_at_a_settled_node_refuses_even_while_a_sibling_is_running() -> Result {
     checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
     checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
     checkpoint.nodes[0].attempts[0].outcome =
-        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+        Some(provenant_fabric_runtime::graph::GraphAttemptOutcome::Succeeded);
     // A sibling still running keeps the graph unfinished, but cannot read the
     // settled node's steering note.
     checkpoint.nodes[1].state = NodeState::Running;
@@ -3447,7 +3447,7 @@ fn steer_on_a_complete_graph_refuses_even_when_warn_is_configured() -> Result {
         .ok_or("checkpoint")?;
     use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
     use provenant_fabric_runtime::graph::{
-        AttemptOutcome, AttemptState, FileJournal, GraphJournal, NodeState,
+        AttemptState, FileJournal, GraphAttemptOutcome, GraphJournal, NodeState,
     };
     let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
     inputs.state_dir = Some(rig.state());
@@ -3468,7 +3468,7 @@ fn steer_on_a_complete_graph_refuses_even_when_warn_is_configured() -> Result {
     checkpoint.nodes[0].state = NodeState::Succeeded;
     checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
     checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
-    checkpoint.nodes[0].attempts[0].outcome = Some(AttemptOutcome::Succeeded);
+    checkpoint.nodes[0].attempts[0].outcome = Some(GraphAttemptOutcome::Succeeded);
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = CancelToken::new();
     let mut journal = FileJournal::open(
@@ -3638,7 +3638,7 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
             &provenant_fabric_runtime::config::GraphBudget::default(),
         )?;
         assert_eq!(
-            run.checkpoint.nodes[0].advance_error_code.as_deref(),
+            run.checkpoint.nodes[0].advance_code.as_deref(),
             Some("launch_refused")
         );
         assert_eq!(
@@ -3647,7 +3647,7 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
         );
         assert!(
             run.checkpoint.nodes[0]
-                .advance_error
+                .advance_note
                 .as_deref()
                 .is_some_and(|error| !error.is_empty())
         );

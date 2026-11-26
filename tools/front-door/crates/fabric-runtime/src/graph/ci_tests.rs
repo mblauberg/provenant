@@ -168,15 +168,16 @@ impl AttemptOwner for Owner {
         }
         Ok(AttemptObservation::Terminal {
             attempt_ref: Some(format!("fixture/{}/{}", key.node_id, self.attempts)),
-            outcome: AttemptOutcome::Succeeded,
+            outcome: GraphAttemptOutcome::Succeeded,
             launched: true,
             result: None,
             result_warning: None,
             result_path: None,
             branch: self.branch.clone(),
             commit: self.commit.clone(),
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             stop: None,
+            cause: None,
         })
     }
     fn park_delivery(

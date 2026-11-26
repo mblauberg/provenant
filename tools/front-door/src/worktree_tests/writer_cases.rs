@@ -23,6 +23,7 @@ pub(super) fn writer_dispatch_edits_a_linked_worktree() -> Result {
     let first_record = store.create(&first, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        context: context.clone(),
         home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "instruction-edit",
@@ -153,6 +154,7 @@ pub(super) fn shared_holders_both_launch_and_removal_refused_while_holder_is_liv
     let _ = fs::remove_file(&ready);
     let first_provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        context: context.clone(),
         home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "hold",
@@ -181,6 +183,7 @@ pub(super) fn shared_holders_both_launch_and_removal_refused_while_holder_is_liv
     let second_record = store.create(&second, &call)?;
     let second_provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        context: context.clone(),
         home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "edit",
@@ -261,6 +264,7 @@ pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
     let _release_on_drop = ReleaseOnDrop(release.clone());
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        context: context.clone(),
         home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "hold",
@@ -370,6 +374,7 @@ pub(super) fn writer_terminal_retains_sequencer_state() -> Result {
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        context: context.clone(),
         home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "control",
@@ -446,6 +451,7 @@ pub(super) fn writer_terminal_retains_sequencer_state() -> Result {
     let _release_on_drop = ReleaseOnDrop(release.clone());
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        context: context.clone(),
         home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "hold",
@@ -514,6 +520,7 @@ pub(super) fn writer_production_plan_denies_outside_writes() -> Result {
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        context: context.clone(),
         home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "negative",
@@ -573,6 +580,7 @@ pub(super) fn writer_reconcile_keeps_unfinished_cherry_pick_and_releases() -> Re
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
+        context: context.clone(),
         home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
         mode: "edit",

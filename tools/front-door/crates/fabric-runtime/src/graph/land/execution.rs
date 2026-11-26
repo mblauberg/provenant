@@ -46,8 +46,8 @@ fn fail<R: AttemptOwner, J: GraphJournal>(
     let progress = &mut checkpoint.nodes[index];
     progress.state = NodeState::Failed;
     progress.outputs = None;
-    progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-    progress.advance_error_code = Some(code.into());
+    progress.advance_note = Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
+    progress.advance_code = Some(code.into());
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
@@ -303,7 +303,7 @@ pub(in crate::graph) fn advance<R: AttemptOwner, J: GraphJournal>(
                 record.authorised_by = Some(LandAuthority::Chair { ask_id });
             }
             record.pull_request = pull_request;
-            record.note = note.map(|note| bounded(&note, MAX_ADVANCE_ERROR_BYTES));
+            record.note = note.map(|note| bounded(&note, MAX_ADVANCE_NOTE_BYTES));
             let progress = &mut checkpoint.nodes[index];
             progress.outputs = Some(outputs(&record));
             progress.land = Some(record);
@@ -330,7 +330,7 @@ pub(in crate::graph) fn advance<R: AttemptOwner, J: GraphJournal>(
                         "node {id}: land retry deadline passes the last representable wall time; lower ci_poll_backoff"
                     ))
                 })?;
-            record.note = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+            record.note = Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
             record.wake_at = Some(wake_at);
             record.pending_observations = record.pending_observations.saturating_add(1);
             checkpoint.nodes[index].land = Some(record);
@@ -431,8 +431,8 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
     };
     let progress = &mut checkpoint.nodes[index];
     progress.state = NodeState::Failed;
-    progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-    progress.advance_error_code = Some(code.into());
+    progress.advance_note = Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
+    progress.advance_code = Some(code.into());
     // A failed land keeps no retry deadline from an earlier pending observation.
     if let Some(land) = progress.land.as_mut() {
         land.wake_at = None;
@@ -477,7 +477,7 @@ pub(in crate::graph) fn validate_progress(
         && progress.attempts.is_empty()
         && progress.gate.is_none()
         && progress.ci.is_none()
-        && (progress.advance_error.is_none() || progress.state == NodeState::Failed)
+        && (progress.advance_note.is_none() || progress.state == NodeState::Failed)
         && match progress.state {
             NodeState::Pending | NodeState::Blocked | NodeState::Skipped => {
                 progress.land.is_none() && progress.outputs.is_none()

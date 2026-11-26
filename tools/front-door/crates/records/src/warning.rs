@@ -54,6 +54,9 @@ impl WarningCode {
 pub const CONFIG_KEY_IGNORED: WarningCode = WarningCode("CONFIG_KEY_IGNORED");
 /// A configured value was malformed, so the default applied.
 pub const CONFIG_MALFORMED: WarningCode = WarningCode("CONFIG_MALFORMED");
+/// An `on_stop` default was set for a pinned cause, whose table row cannot be
+/// overridden. The declared default was kept and named with its source.
+pub const ON_STOP_PINNED_IGNORED: WarningCode = WarningCode("ON_STOP_PINNED_IGNORED");
 /// A candidate value came from a layer its family does not list.
 pub const SETTING_LAYER_IGNORED: WarningCode = WarningCode("SETTING_LAYER_IGNORED");
 /// A name differed only by case and was folded to its canonical spelling.
@@ -305,6 +308,11 @@ pub const UPSTREAM_UNRESOLVED: WarningCode = WarningCode("UPSTREAM_UNRESOLVED");
 pub const BRANCH_CONFIG_UNREADABLE: WarningCode = WarningCode("BRANCH_CONFIG_UNREADABLE");
 /// A notes cursor acknowledgement failed; a page may replay.
 pub const NOTES_CURSOR_UNACKNOWLEDGED: WarningCode = WarningCode("NOTES_CURSOR_UNACKNOWLEDGED");
+/// A re-drive offered different evidence; the sealed copy was kept.
+pub const SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS: WarningCode =
+    WarningCode("SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS");
+/// A settlement knob had an unrecognised value, so the shipped default applied.
+pub const SETTLEMENT_POLICY_INVALID: WarningCode = WarningCode("SETTLEMENT_POLICY_INVALID");
 /// A PR journal could not be read; reconciliation covers the gap.
 pub const PR_JOURNAL_UNAVAILABLE: WarningCode = WarningCode("PR_JOURNAL_UNAVAILABLE");
 /// A build context, Git binding or repository was unavailable; build ran locally.
@@ -409,6 +417,9 @@ pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIAL
 /// A route model is a full `ADAPTER/ID` that the effective catalogue does not
 /// know. The declared spelling is preserved; the warning names it.
 pub const ROUTE_MODEL_NOT_CATALOGUED: WarningCode = WarningCode("ROUTE_MODEL_NOT_CATALOGUED");
+/// A declaration succeeded but its journal is nearly full. The claim still
+/// succeeds; the named setting is the one to raise.
+pub const DECLARATION_JOURNAL_NEAR_FULL: WarningCode = WarningCode("DECLARATION_JOURNAL_NEAR_FULL");
 
 impl Warning {
     /// A warning with no subject, source or repair.

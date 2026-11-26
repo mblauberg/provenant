@@ -809,11 +809,11 @@ mod provisioning_tests {
         }
         assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
         assert_eq!(
-            checkpoint.nodes[0].advance_error_code.as_deref(),
+            checkpoint.nodes[0].advance_code.as_deref(),
             Some("launch_refused")
         );
         let blocked = checkpoint.nodes[0]
-            .advance_error
+            .advance_note
             .as_deref()
             .ok_or("blocked node reason")?;
         assert!(blocked.contains(cause.unwrap_or(error.code())), "{blocked}");

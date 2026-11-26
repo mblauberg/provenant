@@ -12,16 +12,17 @@ mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
     BRIEF_PREAMBLE_KNOB, BriefLayer, BriefPreamble, BriefRole, BriefStaticCheck, BuildCap,
-    LaneLocation, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with,
-    route_label,
+    LaneLocation, PreambleExtras, lane_preamble, lane_preamble_with, route_label,
 };
 mod controls;
 pub use controls::release_progress;
 mod correlation;
 pub use correlation::{WorkCoverage, WorkSelector, validate_work};
 mod db;
+mod declaration;
 mod delivery;
 mod disk;
+mod evidence;
 mod git_context;
 mod holder;
 mod identity;
@@ -42,6 +43,7 @@ mod service;
 #[cfg(test)]
 mod service_tests;
 pub mod settlement;
+pub mod settlement_policy;
 mod short_temporary;
 mod store;
 mod telemetry_context;
@@ -83,7 +85,7 @@ pub use git_context::{
 };
 pub use holder::{
     HolderContext, HostLaunchContext, RetainedGit, RootSeed, RunHolder, SealedTask, retained_git,
-    writer_base,
+    settlement_git, writer_base,
 };
 pub use identity::ProviderIdentityEvidence;
 #[cfg(test)]

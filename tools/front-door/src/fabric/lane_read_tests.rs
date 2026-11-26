@@ -285,39 +285,41 @@ fn settled_attempt(
         model: Some("gpt-6-luna".into()),
         ..Default::default()
     };
+    let outcome = if success {
+        provenant_records::run::Outcome::Succeeded
+    } else {
+        provenant_records::run::Outcome::Failed
+    };
+    let mut fact = provenant_records::settlement::classify::settle(
+        &provenant_records::settlement::SettlementEvidence::fixture(
+            provenant_records::settlement::LaneRole::Reader,
+            outcome,
+            None,
+        ),
+    );
+    if !success {
+        fact.reason = Some("fixture child provider failed".into());
+    }
     store.publish_terminal(
         id,
         record.revision,
         &provenant_run::TerminalPublication {
-            handoff: Ok(None),
-            terminal_cause: None,
-            terminal_note: None,
-            outcome: if success {
-                provenant_records::run::Outcome::Succeeded
-            } else {
-                provenant_records::run::Outcome::Failed
-            },
+            fact,
+            evidence: None,
             started_at: Some(record.queued_at),
             finished_at: clock.wall_now()?,
             provider_ms: Some(1),
-            reason: if success {
-                None
-            } else {
-                Some("fixture child provider failed".into())
-            },
             result: if success {
                 "child result reached parent"
             } else {
                 "child provider failure details"
             },
-            complete: true,
             redacted: false,
             resolved_route: Some(route.clone()),
             applied_route: Some(route.clone()),
             observed_route: Some(route),
             usage: Default::default(),
             session: None,
-            partial_signals: Vec::new(),
         },
         &exit,
         &call,
@@ -404,7 +406,7 @@ fn bind_sibling_graph(
         "schema_version":2,"graph_id":graph,"plan_digest":"fixture",
         "nodes":[
             {"id":"parent--success","state":"succeeded","attempts":[{"key":{"graph_id":graph,"node_id":"parent--success","route_index":0,"attempt":1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(success),"launch_actor":"fixture","outcome":"succeeded"}]},
-            {"id":"parent--failure","state":"failed","advance_error_code":"launch_refused","advance_owner_code":"command_unavailable","advance_error":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0,"attempt":1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
+            {"id":"parent--failure","state":"failed","advance_code":"launch_refused","advance_owner_code":"command_unavailable","advance_note":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0,"attempt":1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
         ]
     }))?;
     journal.bind(GraphExecution {
@@ -441,7 +443,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         "nodes":[
             {"id":"parent","state":"running","attempts":[{"key":{"graph_id":graph,"node_id":"parent","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"senior"},"state":"running","attempt_ref":reference(caller),"launch_actor":"fixture"}]},
             {"id":"parent--success","state":"succeeded","attempts":[{"key":{"graph_id":graph,"node_id":"parent--success","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(success),"launch_actor":"fixture","outcome":"succeeded"}]},
-            {"id":"parent--failure","state":"failed","advance_error_code":"launch_refused","advance_owner_code":"command_unavailable","advance_error":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
+            {"id":"parent--failure","state":"failed","advance_code":"launch_refused","advance_owner_code":"command_unavailable","advance_note":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
         ]
     }))?;
     let document: GraphDocument = serde_json::from_value(

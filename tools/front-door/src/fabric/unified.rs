@@ -408,7 +408,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                 .cancel_reason
                 .as_deref()
                 .or(run.checkpoint.pause_reason())
-                .or(run.advance_error.as_deref()),
+                .or(run.advance_note.as_deref()),
         ));
     }
     for node in &run.checkpoint.nodes {
@@ -427,9 +427,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             } else {
                 (
                     json!(node.state),
-                    node.advance_error
-                        .as_deref()
-                        .or(node.skip_reason.as_deref()),
+                    node.advance_note.as_deref().or(node.skip_reason.as_deref()),
                     Value::Null,
                 )
             };
@@ -619,7 +617,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         row["cause_code"] = json!(node.and_then(|node| {
             node.advance_owner_code
                 .as_deref()
-                .or(node.advance_error_code.as_deref())
+                .or(node.advance_code.as_deref())
         }));
         if row["cause_code"].is_null()
             && let Some(stop) = attempt.and_then(|attempt| attempt.stop.as_ref())
@@ -641,7 +639,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             }));
         }
         if row["kind"] == "graph"
-            && run.advance_error.as_deref().is_some_and(|reason| {
+            && run.advance_note.as_deref().is_some_and(|reason| {
                 reason.starts_with(&provenant_fabric_runtime::graph::unreadable_graph_guidance(
                     &target.graph,
                 ))
@@ -665,7 +663,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             // presented as permission to start a fresh attempt.
             "blocked" | "failed"
                 if matches!(
-                    node.and_then(|node| node.advance_error_code.as_deref()),
+                    node.and_then(|node| node.advance_code.as_deref()),
                     Some(
                         "launch_refused" | "launch_retry_exhausted" | "writer_binding_unavailable"
                     )
@@ -1294,7 +1292,7 @@ fn enrich_status_rows_with_facts(
         // A peer owns a separate graph rooted at the submitted attempt. Its
         // authenticated status retains the origin binding beside that pointer.
         row["preparation_failure"] = json!(record.preparation_failure);
-        row["settlement_reason"] = json!(record.settlement_reason);
+        row["settlement_class"] = json!(record.settlement_class);
         let target: provenant_cli::Target = row["id"]
             .as_str()
             .ok_or(FacadeError::StateCorrupt)?
@@ -1462,8 +1460,8 @@ fn enrich_status_rows_with_peer(
 /// Keep graph cause codes scalar even when a closed terminal cause has data.
 /// Decode the declaration before selecting its tag: arbitrary object keys are
 /// not safe diagnostics.
-fn terminal_cause_code(value: &Value) -> Option<String> {
-    let _: provenant_records::run::TerminalCause = serde_json::from_value(value.clone()).ok()?;
+fn cause_code(value: &Value) -> Option<String> {
+    let _: provenant_records::run::CauseKind = serde_json::from_value(value.clone()).ok()?;
     match value {
         Value::String(code) => Some(code.clone()),
         Value::Object(tagged) => tagged.keys().next().cloned(),
@@ -1472,9 +1470,9 @@ fn terminal_cause_code(value: &Value) -> Option<String> {
 }
 
 fn project_attempt_failure(row: &mut Value) {
-    if let Some(code) = terminal_cause_code(&row["terminal_cause"]) {
+    if let Some(code) = cause_code(&row["cause"]) {
         row["cause_code"] = json!(code);
-        if code == "handoff_refused" {
+        if code == "launch_handoff_refused" {
             if let Some(id) = row["id"].as_str() {
                 row["next"] = json!(format!("provenant retry {id}"));
             }
@@ -1514,7 +1512,7 @@ fn project_node_failures(rows: &mut [Value]) {
                 ),
                 (
                     row["graph_state"].clone(),
-                    terminal_cause_code(&row["terminal_cause"]).map_or(Value::Null, Value::String),
+                    cause_code(&row["cause"]).map_or(Value::Null, Value::String),
                     row["reason"].clone(),
                     row["next"].clone(),
                 ),
@@ -2958,7 +2956,7 @@ pub(crate) fn graph_listing(
                                 .cancel_reason
                                 .as_deref()
                                 .or(run.checkpoint.pause_reason())
-                                .or(run.advance_error.as_deref())
+                                .or(run.advance_note.as_deref())
                                 .map(str::to_owned)
                         })
                         .flatten();
@@ -4426,7 +4424,7 @@ fn localise_worktree_actions(factory: &Factory, graph: &str, rows: &mut [Value])
     let binding_failed = |row: &Value| {
         checkpoint.nodes.iter().any(|node| {
             Some(node.id.as_str()) == row["node_id"].as_str()
-                && node.advance_error_code.as_deref() == Some("writer_binding_unavailable")
+                && node.advance_code.as_deref() == Some("writer_binding_unavailable")
                 && node.advance_owner_code.as_deref() != Some("writer_lock_busy")
         })
     };

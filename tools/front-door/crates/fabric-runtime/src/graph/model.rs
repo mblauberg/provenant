@@ -1964,6 +1964,10 @@ pub struct GraphCheckpoint {
     /// Durable admission fence. Resume observes the same attempt keys.
     #[serde(default)]
     pub cancelled: bool,
+    /// Host/project `on_stop` defaults resolved once at admission. A node's
+    /// own `on_stop` entry wins over these; old checkpoints decode to empty.
+    #[serde(default, skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    pub on_stop_defaults: provenant_records::OnStop,
     /// Exact-head evidence that permits replay-safe release after conflict recovery.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivery_ci_superseded: Vec<DeliveryCiSupersession>,
@@ -2235,10 +2239,10 @@ pub struct NodeProgress {
     pub skip_reason: Option<String>,
     /// An actionable admission or settlement failure, retained for status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub advance_error: Option<String>,
+    pub advance_note: Option<String>,
     /// Stable cause of an admission or settlement failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub advance_error_code: Option<String>,
+    pub advance_code: Option<String>,
     /// Code from the owner whose launch refusal produced the disposition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advance_owner_code: Option<String>,
@@ -2300,7 +2304,12 @@ pub struct GraphAttempt {
     pub route: GraphRoute,
     pub state: AttemptState,
     pub attempt_ref: Option<String>,
-    pub outcome: Option<AttemptOutcome>,
+    pub outcome: Option<GraphAttemptOutcome>,
+    /// The exact typed cause the run sealed for this attempt, copied from the
+    /// terminal record at settlement. Status and `next_step` can name it
+    /// without re-reading the run store; the next step still keys on `stop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<provenant_records::run::CauseKind>,
     /// Actor that first submitted this attempt. Run-store operation replay is
     /// actor-scoped, so a resume submits under it.
     pub launch_actor: String,
@@ -2674,14 +2683,14 @@ pub struct GraphRun {
     pub outcome: Option<GraphOutcome>,
     pub checkpoint: GraphCheckpoint,
     /// Why the last automatic advance failed, as recorded for `status`.
-    pub advance_error: Option<String>,
+    pub advance_note: Option<String>,
 }
 
 impl Serialize for GraphRun {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let fields =
-            3 + usize::from(self.outcome.is_some()) + usize::from(self.advance_error.is_some());
+            3 + usize::from(self.outcome.is_some()) + usize::from(self.advance_note.is_some());
         let mut state = serializer.serialize_struct("GraphRun", fields)?;
         state.serialize_field("status", &self.status)?;
         if let Some(outcome) = &self.outcome {
@@ -2692,8 +2701,8 @@ impl Serialize for GraphRun {
         let mut checkpoint = self.checkpoint.clone();
         checkpoint.pending_steers = Default::default();
         state.serialize_field("checkpoint", &GraphCheckpointProjection::from(&checkpoint))?;
-        if let Some(error) = &self.advance_error {
-            state.serialize_field("advance_error", error)?;
+        if let Some(error) = &self.advance_note {
+            state.serialize_field("advance_note", error)?;
         }
         state.serialize_field("waits", &super::graph_waits(&self.checkpoint))?;
         state.end()

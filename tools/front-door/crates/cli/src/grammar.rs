@@ -69,6 +69,8 @@ pub enum Command {
     /// Share append-only observations with project lanes
     #[command(subcommand)]
     Notes(crate::notes::Notes),
+    /// Declare this lane's result to the host-bound journal
+    Declare(crate::declaration::DeclareArgs),
     /// Answer a request using the revision you saw
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts

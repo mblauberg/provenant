@@ -1362,32 +1362,36 @@
 
             let route = make_route();
             let finished_at = clock.wall_now()?;
+            let outcome = if succeeded {
+                run::Outcome::Succeeded
+            } else {
+                run::Outcome::Failed
+            };
+            let mut fact = provenant_records::settlement::classify::settle(
+                &provenant_records::settlement::SettlementEvidence::fixture(
+                    provenant_records::settlement::LaneRole::Reader,
+                    outcome,
+                    None,
+                ),
+            );
+            fact.complete = succeeded;
             let publication = run::TerminalPublication {
-                handoff: Ok(None),
-                terminal_cause: None,
-                terminal_note: None,
-                outcome: if succeeded {
-                    run::Outcome::Succeeded
-                } else {
-                    run::Outcome::Failed
-                },
+                fact,
+                evidence: None,
                 finished_at,
                 started_at: Some(finished_at),
                 provider_ms: Some(100),
-                reason: None,
                 result: if succeeded {
                     "answer\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"finished\"}\n```"
                 } else {
                     "failed"
                 },
-                complete: succeeded,
                 redacted: false,
                 resolved_route: Some(route.clone()),
                 applied_route: Some(route.clone()),
                 observed_route: Some(route),
                 usage: run::UsageRecord::default(),
                 session: None,
-                partial_signals: Vec::new(),
             };
             store.publish_terminal(attempt_id, 1, &publication, &exit_obs, &run_call)?;
             Ok(())
