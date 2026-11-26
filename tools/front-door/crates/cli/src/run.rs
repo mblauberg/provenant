@@ -401,6 +401,12 @@ pub fn resolve_read_source(
     provider::confinement::resolve_read_source(state, source, choice)
 }
 
+/// The one configured forge remote for a checkout (port table, then upstream,
+/// then the sole remote), or none. Callers never assume `origin`.
+pub fn resolved_forge_remote(state: &Path, project: &Path) -> Option<provenant_config::RemoteName> {
+    provider::confinement::resolved_forge_remote(state, project)
+}
+
 /// Resolve the writer's default-branch base through the same remote discovery
 /// as a read source, so a remote named anything other than `origin` is found.
 pub fn resolve_default_branch(state: &Path, source: &Path) -> Option<ReadSourcePin> {

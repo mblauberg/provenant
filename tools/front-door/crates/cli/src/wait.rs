@@ -18,6 +18,13 @@ pub const PR_HEAD_SOURCE_KEY: &str = "domains.wait.pr_head_source";
 /// The key that selects what a wait does when its forge head is unavailable.
 pub const PR_HEAD_UNPINNED_KEY: &str = "domains.wait.pr_head_unpinned";
 
+/// The choices `domains.wait.pr_head_policy` accepts.
+pub const PR_HEAD_POLICY_CHOICES: &[&str] = &["pinned", "follow_latest"];
+/// The choices `domains.wait.pr_head_source` accepts.
+pub const PR_HEAD_SOURCE_CHOICES: &[&str] = &["auto", "forge", "local"];
+/// The choices `domains.wait.pr_head_unpinned` accepts.
+pub const PR_HEAD_UNPINNED_CHOICES: &[&str] = &["first_sample", "refuse"];
+
 /// Where a `wait --pr` takes the head it pins at admission.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -323,7 +330,7 @@ impl Settings {
     /// The effective PR head settings for one project, with the key that
     /// supplied each value. A project row wins only for the fields it sets;
     /// the reported key is the one whose origin a report must cite.
-    pub fn pr_head(&self, project: Option<&str>) -> EffectivePrHead {
+    pub fn effective_pr_head(&self, project: Option<&str>) -> EffectivePrHead {
         let override_row = project.and_then(|id| self.projects.get(id));
         let key = |field: &str| match override_row {
             Some(row) if row_has(row, field) => {
@@ -462,12 +469,12 @@ pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     FieldMetadata::int("max_targets", 1, 1024),
     FieldMetadata::int("pr_read_timeout_seconds", 1, 600),
     FieldMetadata::int("actions_grace_seconds", 0, 600),
-    FieldMetadata::new("pr_head_policy", "string"),
-    FieldMetadata::new("pr_head_source", "string"),
-    FieldMetadata::new("pr_head_unpinned", "string"),
-    FieldMetadata::new("projects.{project}.pr_head_policy", "string"),
-    FieldMetadata::new("projects.{project}.pr_head_source", "string"),
-    FieldMetadata::new("projects.{project}.pr_head_unpinned", "string"),
+    FieldMetadata::enumeration("pr_head_policy", PR_HEAD_POLICY_CHOICES),
+    FieldMetadata::enumeration("pr_head_source", PR_HEAD_SOURCE_CHOICES),
+    FieldMetadata::enumeration("pr_head_unpinned", PR_HEAD_UNPINNED_CHOICES),
+    FieldMetadata::enumeration("projects.{project}.pr_head_policy", PR_HEAD_POLICY_CHOICES),
+    FieldMetadata::enumeration("projects.{project}.pr_head_source", PR_HEAD_SOURCE_CHOICES),
+    FieldMetadata::enumeration("projects.{project}.pr_head_unpinned", PR_HEAD_UNPINNED_CHOICES),
     FieldMetadata::int("preflight_busy_timeout_ms", 0, 60000),
 ]);
 
@@ -633,7 +640,7 @@ mod tests {
                 ..ProjectWaitConfig::default()
             },
         );
-        let effective = settings.pr_head(Some("demo"));
+        let effective = settings.effective_pr_head(Some("demo"));
         assert_eq!(effective.policy, SubjectPolicy::FollowLatest);
         assert_eq!(effective.source, PrHeadSource::Forge);
         assert_eq!(effective.unpinned, PrHeadUnpinned::FirstSample);
@@ -647,7 +654,7 @@ mod tests {
         );
         // An unset field keeps the host key, so its origin stays truthful.
         assert_eq!(effective.unpinned_key, PR_HEAD_UNPINNED_KEY);
-        let host = settings.pr_head(Some("other"));
+        let host = settings.effective_pr_head(Some("other"));
         assert_eq!(host.policy, SubjectPolicy::Pinned);
         assert_eq!(host.policy_key, PR_HEAD_POLICY_KEY);
         assert_eq!(host.source_key, PR_HEAD_SOURCE_KEY);

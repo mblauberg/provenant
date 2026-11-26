@@ -39,6 +39,9 @@ enum Source {
         /// Whether the pull request has reported the pinned head at least once.
         /// Only after that does a different head count as a move.
         pinned_head_seen: bool,
+        /// The effective `domains.wait.pr_head_policy` (or its command
+        /// override) this wait applies to every sample, one-off reads included.
+        policy: SubjectPolicy,
         /// `KEY from SOURCE` for the policy that fixed this head, carried on
         /// every sample so a first pin reports the same source as admission.
         policy_source: String,
@@ -536,15 +539,21 @@ fn warn_local_head_unavailable(number: u64, source: &str) {
 }
 
 /// The tip of a branch known locally, checked in the local repository only.
-/// Both the checked-out branch and a remote-tracking branch count; a missing
-/// repository or an unsafe branch name simply means no local tip is known.
-fn local_branch_tip(cwd: &Path, branch: &str) -> Option<String> {
+/// Both the checked-out branch and its tracking ref under the configured forge
+/// remote count; a missing repository, remote or unsafe branch name simply
+/// means no local tip is known.
+fn local_branch_tip(state: &Path, cwd: &Path, branch: &str) -> Option<String> {
     let binary = provenant_os::git::git_executable()?;
-    let refs = [
-        provenant_confinement::repo::GitRefName::branch(branch).ok()?,
-        provenant_confinement::repo::GitRefName::remote_tracking(format!("origin/{branch}"))
+    let mut refs = vec![provenant_confinement::repo::GitRefName::branch(branch).ok()?];
+    if let Some(remote) = provenant_cli::run::resolved_forge_remote(state, cwd) {
+        refs.push(
+            provenant_confinement::repo::GitRefName::remote_tracking(format!(
+                "{}/{branch}",
+                remote.as_str()
+            ))
             .ok()?,
-    ];
+        );
+    }
     let environment: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(key, _)| {
             !key.to_str()
@@ -706,7 +715,6 @@ fn pr_reading(
 /// across samples: a verdict is only ever about the pinned head.
 fn read_pr(
     source: &mut Source,
-    policy: SubjectPolicy,
     edge: &provenant_cli::run::Edge<'_>,
     _session: &mut Option<provenant_cli::fabric::Context>,
     deadline: Instant,
@@ -714,17 +722,19 @@ fn read_pr(
     cancel: &CancelToken,
 ) -> Reading {
     let label = source.label();
-    let (number, repository, complete, policy_source) = match &*source {
+    let (number, repository, complete, policy, policy_source) = match &*source {
         Source::Pr {
             number,
             repository,
             complete,
+            policy,
             policy_source,
             ..
         } => (
             *number,
             repository.clone(),
             *complete,
+            *policy,
             policy_source.clone(),
         ),
         _ => return Reading::unavailable(&label, "not a pull request source"),
@@ -805,15 +815,7 @@ fn read(
             // A one-off read has no state to carry forward; the polling worker
             // owns the persistent subject for the wait loop.
             let mut owned = source.clone();
-            read_pr(
-                &mut owned,
-                SubjectPolicy::Pinned,
-                edge,
-                session,
-                deadline,
-                pr_read_timeout,
-                cancel,
-            )
+            read_pr(&mut owned, edge, session, deadline, pr_read_timeout, cancel)
         }
         Source::UnreadableGraph(_, error) => classify_rows(
             &label,
@@ -2010,7 +2012,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     // repository from beats the host section, and every sourced report cites
     // the key that supplied the effective value.
     let project_key = project_id.map(|id| id.to_string());
-    let head = settings.pr_head(project_key.as_deref());
+    let head = settings.effective_pr_head(project_key.as_deref());
     let pr_head_policy = command.pr_head_policy.unwrap_or(head.policy);
     let pr_policy_source = if command.head.is_some() {
         "--head".to_owned()
@@ -2054,7 +2056,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             };
             let local_tip = forge
                 .as_ref()
-                .and_then(|(_, branch)| local_branch_tip(edge.cwd, branch));
+                .and_then(|(_, branch)| local_branch_tip(edge.roots.state.as_path(), edge.cwd, branch));
             if let (Some((sha, branch)), Some(local)) = (&forge, &local_tip)
                 && local != sha
             {
@@ -2108,6 +2110,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 repository: repository.clone(),
                 subject: subject.map(Box::new),
                 pinned_head_seen: false,
+                policy: pr_head_policy,
                 policy_source: pr_policy_source.clone(),
                 complete,
             }
@@ -2497,7 +2500,6 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 let initial = grace.apply(
                     read_pr(
                         &mut source,
-                        pr_head_policy,
                         edge,
                         &mut session,
                         deadline,
@@ -2560,7 +2562,6 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                         // Reconcile through the observer before settling.
                                         read_pr(
                                             &mut source,
-                                            pr_head_policy,
                                             edge,
                                             &mut session,
                                             deadline,
@@ -2575,7 +2576,6 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                     // fetch the authoritative PR status now.
                                     read_pr(
                                         &mut source,
-                                        pr_head_policy,
                                         edge,
                                         &mut session,
                                         deadline,
@@ -2601,7 +2601,6 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 }
                                 read_pr(
                                     &mut source,
-                                    pr_head_policy,
                                     edge,
                                     &mut session,
                                     deadline,
@@ -2631,7 +2630,6 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             last_reconcile = Instant::now();
                             read_pr(
                                 &mut source,
-                                pr_head_policy,
                                 edge,
                                 &mut session,
                                 deadline,
@@ -3144,6 +3142,7 @@ mod tests {
             repository: Ok("owner/repo".into()),
             subject: None,
             pinned_head_seen: false,
+            policy: SubjectPolicy::Pinned,
             policy_source: "domains.wait.pr_head_policy from the compiled test profile".into(),
             complete: false,
         };
@@ -4141,6 +4140,7 @@ mod tests {
             repository: Ok("owner/repo".into()),
             subject: None,
             pinned_head_seen: false,
+            policy: SubjectPolicy::Pinned,
             policy_source: "domains.wait.pr_head_policy from the compiled test profile".into(),
             complete: false,
         }];
@@ -4199,6 +4199,7 @@ mod tests {
                 repository: Ok("owner/repo".into()),
                 subject: None,
                 pinned_head_seen: false,
+                policy: SubjectPolicy::Pinned,
                 policy_source: "domains.wait.pr_head_policy from the compiled test profile".into(),
                 complete,
             }]

@@ -2238,7 +2238,10 @@ fn configured_upstream(
 /// could fetch; callers without a remote keep their local source behaviour.
 ///
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-fn resolved_forge_remote(state: &Path, project: &Path) -> Option<provenant_config::RemoteName> {
+pub(in crate::run) fn resolved_forge_remote(
+    state: &Path,
+    project: &Path,
+) -> Option<provenant_config::RemoteName> {
     let ports = provenant_config::PortTable::read_for(Some(project), state).ok()?;
     let policy = provenant_config::operation_policy(state, project, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
