@@ -2094,10 +2094,7 @@ fn writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff()
         finished.signals,
         vec![provenant_records::run::SettlementSignal::DeclaredStop]
     );
-    let result =
-        String::from_utf8(read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?)?;
-    let handoff =
-        provenant_records::handoff::Handoff::from_result(&result)?.ok_or("result handoff")?;
+    let handoff = store.handoff(&finished)??.ok_or("sealed handoff")?;
     assert_eq!(handoff.note, "Parser done; renderer next");
     assert_eq!(handoff.remaining, vec!["Finish renderer".to_owned()]);
     assert!(handoff.unfinished());
@@ -2111,7 +2108,7 @@ fn writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff()
         return Err("typed full scope report".into());
     };
     assert_eq!(code, "WRITE_SCOPE");
-    assert_eq!(*strength, provenant_records::policy::Strength::Warn);
+    assert_eq!(strength, provenant_records::policy::Strength::Warn);
     assert!(
         paths
             .iter()
@@ -2261,14 +2258,6 @@ fn writer_that_lost_its_lane_token_settles_on_its_handoff()
         assert_eq!(stop.cause(), expected_stop);
         let handoff = stop.handoff().ok_or("sealed stop handoff")?;
         assert_eq!(handoff.note, "Parser done; renderer next");
-        if host_outcome == Outcome::AuthRequired {
-            let result = String::from_utf8(
-                read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?,
-            )?;
-            let rendered = provenant_records::handoff::Handoff::from_result(&result)?
-                .ok_or("result handoff")?;
-            assert_eq!(rendered.note, handoff.note);
-        }
         assert_eq!(
             std::fs::read_to_string(fixture.writer.worktree.join("token-work.txt"))?,
             "uncommitted work before the token was lost\n"

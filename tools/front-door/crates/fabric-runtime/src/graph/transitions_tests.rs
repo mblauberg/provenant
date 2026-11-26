@@ -455,6 +455,7 @@ fn complete_attempt_transition_needs_no_owner_or_journal() {
                 commit: None,
                 stop: None,
                 settlement_class: Some(provenant_records::run::SettlementClass::Completed),
+                cause: None,
             },
             ObservationFacts {
                 route_index: 0,
@@ -526,6 +527,7 @@ fn review_settlement_records_subject_head_separately_from_base() {
         commit: Some(base.clone()),
         stop: None,
         settlement_class: Some(provenant_records::run::SettlementClass::Completed),
+        cause: None,
     };
     apply_attempt_observation(
         &plan,
@@ -707,6 +709,7 @@ fn handoff_missing_classification_keeps_dependants_closed() {
             commit: None,
             stop: Some(provenant_records::StopCause::HandoffMissing),
             settlement_class: Some(provenant_records::run::SettlementClass::HandoffMissing),
+            cause: None,
         },
         ObservationFacts {
             route_index: 0,

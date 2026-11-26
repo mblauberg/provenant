@@ -161,7 +161,12 @@ fn terminal(
             let mut capture = crate::result_capture::ResultCapture::new(None);
             capture.push(text.as_bytes());
             let mut result = capture.finish();
-            result.handoff = provenant_records::handoff::Handoff::from_turns(text, &[]);
+            result.handoff = text
+                .split_once("```handoff\n")
+                .and_then(|(_, remainder)| remainder.split_once("\n```").map(|(json, _)| json))
+                .map_or(Ok(None), |json| {
+                    provenant_records::handoff::Handoff::from_json(json.as_bytes()).map(Some)
+                });
             Box::new(result)
         }),
         result_warning: None,

@@ -1023,9 +1023,14 @@ fn parent_and_child(
 fn capture(text: &str) -> crate::result_capture::CapturedResult {
     let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
     capture.push(text.as_bytes());
-    // The sealed handoff a settled attempt carries, as the fixture text declares it.
+    // This fixture supplies the sealed handoff separately from captured text.
     let mut result = capture.finish();
-    result.handoff = provenant_records::handoff::Handoff::from_turns(text, &[]);
+    result.handoff = text
+        .split_once("```handoff\n")
+        .and_then(|(_, remainder)| remainder.split_once("\n```").map(|(json, _)| json))
+        .map_or(Ok(None), |json| {
+            provenant_records::handoff::Handoff::from_json(json.as_bytes()).map(Some)
+        });
     result
 }
 

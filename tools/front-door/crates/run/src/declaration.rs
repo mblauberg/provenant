@@ -271,7 +271,7 @@ mod tests {
     use super::*;
     use crate::tests::{call, clock, context};
     use provenant_core::{CancelToken, Clock as _, OperationId};
-    use provenant_records::{CanonicalRequest, handoff::HandoffStatus};
+    use provenant_records::{handoff::HandoffStatus, run::CanonicalRequest};
     use serde_json::json;
     use std::result::Result as StdResult;
 

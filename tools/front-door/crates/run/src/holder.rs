@@ -5209,14 +5209,16 @@ mod settlement_5a_tests {
             "decisions": [],
             "verify": [],
         });
-        store.declare(
-            id,
-            &provenant_records::declaration::DeclarationInput {
-                request_id: format!("5a-{status}"),
-                payload,
-            },
-            &provenant_records::declaration::DeclarationLimit::shipped(),
-        )?;
+        store
+            .declare(
+                id,
+                &provenant_records::declaration::DeclarationInput {
+                    request_id: format!("5a-{status}"),
+                    payload,
+                },
+                &provenant_records::declaration::DeclarationLimit::shipped(),
+            )
+            .expect("settlement fixture declaration");
         Ok(())
     }
 
@@ -5255,7 +5257,7 @@ mod settlement_5a_tests {
             execution.state_root.as_path(),
             &attempt,
             scope,
-            &Policy::default(),
+            &provenant_records::policy::Policy::default(),
         )?;
         let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::DirBuilder::new()

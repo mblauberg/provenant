@@ -190,10 +190,8 @@ fn restart_cannot_change_the_sealed_pin() -> TestResult {
     let (kept, kept_digest) = seal_evidence(&dir, &evidence(Some(oid(0xcc)), Some(oid(0xdd))))?;
     assert_eq!(kept, sealed);
     assert_eq!(kept_digest, digest);
-    assert_eq!(kept.git.expect("writer evidence").input_head, Some(base));
-    assert_eq!(
-        kept.git.expect("writer evidence").head_progress(),
-        HeadProgress::Moved
-    );
+    let git = kept.git.as_ref().expect("writer evidence");
+    assert_eq!(git.input_head, Some(base));
+    assert_eq!(git.head_progress(), HeadProgress::Moved);
     Ok(())
 }

@@ -1221,8 +1221,8 @@ mod tests {
         Ok(())
     }
 
-    fn declared_payload(status: &str) -> TestResult {
-        Ok(serde_json::from_slice(&snapshot(status))?)
+    fn declared_payload(status: &str) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::from_slice(&snapshot(status))
     }
 
     #[test]
@@ -1684,7 +1684,7 @@ mod tests {
         let attempt = store.attempt_dir(id, false)?;
         declare(&store, id, "one", declared_payload("done")?)?;
         let sealed = store.handoff(&record)??;
-        assert_eq!(sealed, Ok(None), "the journal is not read until capture");
+        assert_eq!(sealed, None, "the journal is not read until capture");
 
         // A different, fenced handoff with prose and a later tool call is only
         // answer text: capture closes the journal and seals the declaration.

@@ -664,6 +664,7 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
         state: AttemptState::Terminal,
         attempt_ref: Some("attempt-1".into()),
         outcome: Some(GraphAttemptOutcome::Succeeded),
+        cause: None,
         launch_actor: "chair".into(),
         input_cap: None,
         input_cap_source: None,

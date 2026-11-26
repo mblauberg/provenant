@@ -115,7 +115,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         assert_eq!(record.provider_launched, Some(false));
         let (state, reason) = LaneRow::state_and_reason(&record.state);
         assert_eq!(state, "rejected");
-        let cause = if disk {
+        let expected_cause = if disk {
             CauseKind::DiskFloor
         } else {
             CauseKind::RouteResolutionRefused
@@ -123,15 +123,15 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         let AttemptState::Terminal { cause, .. } = &record.state else {
             return Err("not terminal".into());
         };
-        assert_eq!(*cause, Some(cause));
+        assert_eq!(*cause, Some(expected_cause));
         let (_, label) = LaneRow::state_and_label(&record.state);
         let label = label.ok_or("missing human label")?;
-        assert_eq!(label, cause.reason());
+        assert_eq!(label, expected_cause.reason());
         assert!(!label.contains("PROVIDER_SECRET_SENTINEL"), "{label}");
         assert!(!label.contains("unsupported_effort"), "{label}");
         assert!(!label.contains("99 bytes available"), "{label}");
         let reason = reason.ok_or("missing structured reason")?;
-        assert!(reason.starts_with(cause.detail()), "{reason}");
+        assert!(reason.starts_with(expected_cause.detail()), "{reason}");
         if disk {
             assert!(reason.contains("gc.critical_free"), "{reason}");
             assert!(reason.contains("99 bytes available"), "{reason}");
@@ -148,7 +148,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             assert!(reason.contains("unsupported_effort"), "{reason}");
         } else {
             // Without a host-authored explanation or fixed note, only the safe cause remains.
-            assert!(reason.starts_with(cause.detail()), "{reason}");
+            assert!(reason.starts_with(expected_cause.detail()), "{reason}");
             assert!(!reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
             assert!(!reason.contains(PROVIDER_TOKEN), "{reason}");
         }
