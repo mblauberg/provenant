@@ -356,4 +356,25 @@ mod tests {
         }
         assert!(!temp.path().join(".provenant").exists());
     }
+
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    #[test]
+    fn an_ignored_capability_carries_the_warning_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[[adapter_capabilities]]\nadapter = \"no-such-adapter\"\ndisable = [\"model\"]\n",
+        )
+        .unwrap();
+        let ((), warnings) =
+            provenant_records::warning::capture(|| super::capability_overlay(&roots));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            warnings[0].source.origin.as_deref(),
+            Some("warning:CONFIG_KEY_IGNORED"),
+            "{warnings:?}"
+        );
+    }
 }
