@@ -228,7 +228,10 @@ an empty range. For a manual bundled smoke launch without a `diff_base`, the che
 parent supplies the range; if unavailable, review is skipped with a reason and the other eligible
 nodes continue. A node may name a small project-relative fixture;
 the host stages its bytes with the task, so a peer places the same file in its own candidate
-scratch and the brief names its path instead of leaking a caller path.
+scratch and the brief names its path instead of leaking a caller path. A remotely placed reader
+binds the receiving peer's checkout `HEAD` as its source and `HEAD^` as its review base, so
+sender-only commits do not prevent the reader from seeing the peer's tree. If Git cannot resolve
+that evidence, the peer warns and falls back to the sender's pins; this does not refuse the launch.
 - Why: a verification graph must run on a real install and exercise a writer, and a skipped node
   must not refuse the run it does not take part in. A fixture must reach every host that runs a
   reader, not just the host that owns the checkout.

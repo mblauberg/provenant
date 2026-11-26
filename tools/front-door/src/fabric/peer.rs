@@ -1524,29 +1524,68 @@ pub(crate) fn peer_submit_graph(
     // Carry the sender-staged fixture bytes, not a sender path, so the peer
     // places exactly the same fixture in its own candidate scratch.
     document.nodes[0].fixture_bytes = task.fixture.clone();
-    // A reader compares against the sender's pinned base. A peer-owned writer
-    // starts from its own freshly provisioned worktree and has no review base.
-    document.review_base = if peer_writer { None } else { task.base.clone() };
+    // A remote reader must read the peer's own checkout. The sender's pinned
+    // head names a commit in the sender's scratch project, which the peer
+    // clone may never have seen: the source view materialiser refuses an
+    // absent commit rather than substituting the peer's HEAD, so a reader
+    // bound to it cannot see the tree, staged fixture included. Resolve the
+    // peer's current checkout once; its first parent gives the review range a
+    // real base in the same repository. Missing Git evidence stays advisory:
+    // warn and fall back to the sender's pins rather than refusing the launch.
+    let (peer_head, peer_base) = if peer_writer {
+        (None, None)
+    } else {
+        let git = provenant_os::git::git_executable();
+        let head = git
+            .as_ref()
+            .and_then(|git| provenant_run::resolve_git_base(git, &factory.cwd, "HEAD").ok());
+        if head.is_none() {
+            super::interface::warn_operator(
+                "peer reader could not resolve its own checkout HEAD; falling back to the sender's source head",
+            );
+        }
+        let base = head.as_ref().and_then(|_| {
+            git.as_ref()
+                .and_then(|git| provenant_run::resolve_git_base(git, &factory.cwd, "HEAD^").ok())
+                .and_then(|base| base.parse::<provenant_core::GitOid>().ok())
+        });
+        (head, base)
+    };
+    document.review_base = if peer_writer {
+        None
+    } else {
+        peer_base
+            .map(|base| base.to_string())
+            .or_else(|| task.base.clone())
+    };
     document.peer_origin_work_key = Some(origin_work_key.clone());
-    // A reader is pinned to the sender's source commit. A peer-owned writer
-    // provisions its own worktree from the branch and base instead, so a
-    // source binding would conflict with that provisioning intent.
+    // A reader reads the peer's own checkout. A peer-owned writer provisions
+    // its worktree from the branch and base instead, so a source binding would
+    // conflict with that provisioning intent.
     document.nodes[0].source = if peer_writer {
         None
     } else {
-        task.head.as_ref().map(
-            |head| provenant_fabric_runtime::graph::SourceBinding::Commit {
-                commit: head.clone(),
-            },
-        )
+        peer_head
+            .clone()
+            .or_else(|| task.head.clone())
+            .map(|head| provenant_fabric_runtime::graph::SourceBinding::Commit { commit: head })
     };
     let review_base = if peer_writer {
         None
     } else {
-        task.base
-            .as_deref()
-            .map(|base| factory.resolve_base(&factory.cwd, base, &facts, cancel))
-            .transpose()?
+        peer_base.or_else(|| {
+            let resolved = task.base.as_deref().and_then(|base| {
+                factory
+                    .resolve_base(&factory.cwd, base, &facts, cancel)
+                    .ok()
+            });
+            if resolved.is_none() && task.base.is_some() {
+                super::interface::warn_operator(
+                    "peer reader could not resolve a review base in its own checkout; review ranges fall back to the source commit",
+                );
+            }
+            resolved
+        })
     };
     document.network = network.map(|network| match network {
         provenant_cli::Switch::On => provenant_fabric_runtime::graph::GraphNetwork::On,
