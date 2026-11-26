@@ -164,6 +164,9 @@ pub fn capability_overlay(roots: &Roots) -> provenant_records::CapabilityOverlay
         provenant_records::warning::warn(provenant_records::warning::Warning::new(
             provenant_records::warning::CONFIG_KEY_IGNORED,
             warning.to_string(),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::CONFIG_KEY_IGNORED,
+            ),
         ));
     }
     overlay

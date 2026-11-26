@@ -7,7 +7,7 @@
 //! the report to a single `once_per_change` warning across both tasks.
 
 use provenant_config::ProjectBinding;
-use provenant_records::warning::{Warning, warn};
+use provenant_records::warning::{Warning, detected_source, warn};
 
 /// Whether this binding has no root left to settle or poll.
 pub(crate) fn absent(binding: &ProjectBinding) -> bool {
@@ -24,6 +24,7 @@ pub(crate) fn warn_vanished(binding: &ProjectBinding) {
             format!(
                 "project {project} is no longer present at its registered root; settlement and forge polling skip it"
             ),
+            detected_source(provenant_records::warning::PROJECT_ROOT_VANISHED),
         )
         .subject(project.to_string())
         .repair("run `provenant gc --apply` to unregister the vanished project")
