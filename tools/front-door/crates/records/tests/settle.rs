@@ -10,9 +10,12 @@ use provenant_records::CanonicalV1;
 use provenant_records::declaration::{
     DECLARATION_SCHEMA, DeclarationCounts, DeclarationEvidence, SealedDeclaration,
 };
+use provenant_records::graph::GraphAttemptOutcome;
 use provenant_records::handoff::{Handoff, HandoffError, HandoffStatus};
 use provenant_records::provenance::{Layer, Source, Sourced};
+use provenant_records::run::{AttemptRecord, AttemptState};
 use provenant_records::run::{CauseKind, Outcome, SettlementClass, SettlementSignal};
+use provenant_records::settlement::project::graph_outcome;
 use provenant_records::settlement::{
     CustodyFacts, GitEvidence, HandoffSource, HeadProgress, HostFacts, IdentityEvidence,
     IdentityPolicyEffect, LaneRole, PrimaryCheckout, SETTLEMENT_EVIDENCE_SCHEMA,
@@ -25,6 +28,7 @@ use provenant_records::settlement::{
     },
 };
 use provenant_records::stop::StopCause;
+use provenant_records::wire::lane::LaneRow;
 
 const BASE: &str = "1111111111111111111111111111111111111111";
 const HEAD: &str = "2222222222222222222222222222222222222222";
@@ -715,5 +719,119 @@ fn a_route_mismatch_outranks_a_stall_policy_and_is_never_delivered() {
             provenant_records::run::DependantRelease::Hold,
             "{head}"
         );
+    }
+}
+
+/// A terminal record carrying exactly the settled fact, as the store commits it.
+fn terminal_record(
+    fact: &provenant_records::settlement::OutcomeFact,
+    launched: bool,
+) -> AttemptRecord {
+    use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+    let mut record: AttemptRecord = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": AttemptId::from_bytes([1; 16]),
+        "run_id": "02020202020202020202020202020202",
+        "task_id": "04040404040404040404040404040404",
+        "project_id": ProjectId::from_bytes([3; 16]),
+        "key": provenant_records::WorkKey::new(ProjectId::from_bytes([3; 16]), "graph", "node", 1).unwrap(),
+        "operation_id": "projection",
+        "attempt_number": 1,
+        "revision": 1,
+        "generation": 0,
+        "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+        "authority_digest": Digest::from_bytes([5; 32]),
+        "queued_at": WallTime::from_micros(1).unwrap(),
+        "state": {"state":"running"},
+        "usage": {},
+        "read_only_writable": [],
+        "protected_paths": [], "trace": {},
+        "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
+    }))
+    .unwrap();
+    record.state = AttemptState::Terminal {
+        extra: Default::default(),
+        cause: fact.cause,
+        terminal_note: fact.terminal_note.clone(),
+        stop: fact.stop.clone(),
+        outcome: fact.outcome,
+        exit_code: None,
+        finished_at: WallTime::from_micros(2).unwrap(),
+        reason: fact.reason.clone(),
+    };
+    record.settlement_class = Some(fact.settlement_class);
+    record.signals = fact.signals.clone();
+    record.provider_launched = Some(launched);
+    record
+}
+
+// Spec: docs/specs/run-settlement.md, test 6 (projections agree).
+#[test]
+fn every_projection_of_a_settled_row_agrees() {
+    for row in rows() {
+        let fact = settle(&row.evidence);
+        let record = terminal_record(&fact, row.evidence.custody.launched);
+        let graph = graph_outcome(&record).expect("a terminal record projects");
+        let stop = fact.stop.as_ref().map(provenant_records::Stop::cause);
+        let (state, reason) = LaneRow::state_and_reason(&record.state);
+
+        // The CLI row names the settled outcome, never a recomputed one.
+        assert_eq!(
+            Some(state.as_str()),
+            serde_json::to_value(fact.outcome).unwrap().as_str(),
+            "{}: lane row state",
+            row.name
+        );
+        if let Some(cause) = fact.cause
+            && fact
+                .stop
+                .as_ref()
+                .is_none_or(|stop| stop.handoff_result().is_ok())
+        {
+            assert!(
+                reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with(&cause.diagnostic(true))),
+                "{}: lane row reason {reason:?} does not name {cause:?}",
+                row.name
+            );
+        }
+        // The release is the class's release for the sealed stop.
+        assert_eq!(
+            fact.release,
+            fact.settlement_class.release(stop),
+            "{}: release",
+            row.name
+        );
+        // No-work is one fact: the graph projects it exactly when settle
+        // recorded the cause.
+        assert_eq!(
+            graph == GraphAttemptOutcome::StoppedNoWork,
+            fact.cause == Some(CauseKind::StoppedNoWork),
+            "{}: graph no-work {graph:?} against cause {:?}",
+            row.name,
+            fact.cause
+        );
+        let blocked = fact
+            .handoff
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .is_some_and(|handoff| handoff.status == HandoffStatus::Blocked);
+        if blocked {
+            assert_ne!(
+                graph,
+                GraphAttemptOutcome::StoppedNoWork,
+                "{}: graph",
+                row.name
+            );
+            assert_ne!(
+                fact.cause,
+                Some(CauseKind::StoppedNoWork),
+                "{}: cause",
+                row.name
+            );
+            assert_ne!(stop, Some(StopCause::StoppedNoWork), "{}: stop", row.name);
+        }
     }
 }

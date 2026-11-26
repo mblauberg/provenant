@@ -1318,43 +1318,12 @@ impl RunStore {
             .unwrap_or_default();
         let refusal_result = provenant_core::bounded_line(&raw_refusal, 256);
         use provenant_records::settlement::{
-            CustodyFacts, HostFacts, IdentityEvidence, IdentityPolicyEffect, LaneRole,
-            SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence, classify::settle,
+            CustodyFacts, HostFacts, SettlementEvidence, classify::settle,
         };
-        let evidence = SettlementEvidence {
-            schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
-            lane: LaneRole::Reader,
-            host: HostFacts {
-                outcome,
-                cause: cause,
-                complete: true,
-                result_empty: false,
-                reason,
-                terminal_note,
-                signals: Vec::new(),
-                denial: None,
-                host_handoff: None,
-            },
-            handoff: provenant_records::declaration::DeclarationEvidence::Missing,
-            declarations: Default::default(),
-            git: None,
-            custody: CustodyFacts {
-                launched: false,
-                cancelled: outcome == Outcome::Cancelled,
-                steered: false,
-                cancellation_delivered: None,
-                import_cancelled: false,
-                process_exit: false,
-                stall: None,
-                identity: IdentityEvidence {
-                    conflict: false,
-                    incomplete: IdentityPolicyEffect::Complete,
-                    eof_fragment_unsettles: false,
-                    route: provenant_records::settlement::RouteIdentityFact::Observed,
-                },
-            },
-            policy: provenant_records::settlement::policy::SettlementPolicy::shipped(),
-        };
+        let evidence = SettlementEvidence::host_decided(
+            HostFacts::decided(outcome, cause, reason, terminal_note),
+            CustodyFacts::host_decided(false, outcome == Outcome::Cancelled),
+        );
         let fact = settle(&evidence);
         let publication = TerminalPublication {
             fact,
@@ -1938,44 +1907,21 @@ impl RunStore {
         };
         let revision = old.revision;
         use provenant_records::settlement::{
-            CustodyFacts, HostFacts, IdentityEvidence, IdentityPolicyEffect, LaneRole,
-            SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence, classify::settle,
+            CustodyFacts, HostFacts, SettlementEvidence, classify::settle,
         };
-        let bounded_reason = provenant_core::bounded_line(reason, 4096);
-        let evidence = SettlementEvidence {
-            schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
-            lane: LaneRole::Reader,
-            host: HostFacts {
-                outcome: Outcome::Cancelled,
-                cause: None,
-                complete: true,
-                result_empty: false,
-                reason: Some(bounded_reason),
-                terminal_note: None,
-                signals: Vec::new(),
-                denial: None,
-                host_handoff: None,
-            },
-            handoff: provenant_records::declaration::DeclarationEvidence::Missing,
-            declarations: Default::default(),
-            git: None,
-            custody: CustodyFacts {
-                launched: !exit.never_spawned,
-                cancelled: true,
-                steered: false,
+        let evidence = SettlementEvidence::host_decided(
+            HostFacts::decided(
+                Outcome::Cancelled,
+                None,
+                Some(provenant_core::bounded_line(reason, 4096)),
+                None,
+            ),
+            CustodyFacts {
                 cancellation_delivered: exit.cancel_delivered_before_exit,
-                import_cancelled: false,
                 process_exit: true,
-                stall: None,
-                identity: IdentityEvidence {
-                    conflict: false,
-                    incomplete: IdentityPolicyEffect::Complete,
-                    eof_fragment_unsettles: false,
-                    route: provenant_records::settlement::RouteIdentityFact::Observed,
-                },
+                ..CustodyFacts::host_decided(!exit.never_spawned, true)
             },
-            policy: provenant_records::settlement::policy::SettlementPolicy::shipped(),
-        };
+        );
         let fact = settle(&evidence);
         let publication = TerminalPublication {
             fact,
@@ -2039,7 +1985,25 @@ impl RunStore {
         next.terminal_basis = Some(TerminalBasis::Lost {
             reason: reason.into(),
         });
-        next.settlement_class = Some(SettlementClass::Lost);
+        // The lost class is settle's decision too, so every terminal path
+        // derives its class the same way.
+        next.settlement_class = Some(
+            provenant_records::settlement::classify::settle(
+                &provenant_records::settlement::SettlementEvidence::host_decided(
+                    provenant_records::settlement::HostFacts::decided(
+                        Outcome::Lost,
+                        None,
+                        Some(reason.into()),
+                        None,
+                    ),
+                    provenant_records::settlement::CustodyFacts::host_decided(
+                        old.provider_launched != Some(false),
+                        false,
+                    ),
+                ),
+            )
+            .settlement_class,
+        );
         next.state = AttemptState::Terminal {
             extra: Default::default(),
             cause: None,

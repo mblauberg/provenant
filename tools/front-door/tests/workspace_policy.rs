@@ -1977,6 +1977,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
 #[test]
 fn settlement_outcome_has_one_writer() -> Result<(), Box<dyn Error>> {
     const SETTLE_OWNER: &str = "crates/records/src/settlement/classify.rs";
+    const EVIDENCE_OWNER: &str = "crates/records/src/settlement/mod.rs";
     const HOLDER: &str = "crates/run/src/holder.rs";
     const TRANSITIONS: &str = "crates/fabric-runtime/src/graph/transitions.rs";
     const HOLDER_CEILING: usize = 5750;
@@ -2052,6 +2053,22 @@ fn settlement_outcome_has_one_writer() -> Result<(), Box<dyn Error>> {
                 && relative != SETTLE_OWNER
             {
                 violations.push(format!("{where_}: applied policy built outside settle"));
+            }
+            // The holder builds a launched lane's evidence; every host-decided
+            // terminal goes through `SettlementEvidence::host_decided`.
+            if line.contains("SettlementEvidence {")
+                && !line.contains("struct SettlementEvidence")
+                && !line.contains("enum SettlementEvidence")
+                && !line.contains("impl SettlementEvidence")
+                && relative != EVIDENCE_OWNER
+                && relative != HOLDER
+            {
+                violations.push(format!(
+                    "{where_}: settlement evidence built outside host_decided and the holder"
+                ));
+            }
+            if line.contains("settlement_class = Some(SettlementClass::") {
+                violations.push(format!("{where_}: settlement class written without settle"));
             }
             if relative == SETTLE_OWNER
                 && (line.contains(".pushed_head") || line.contains(".uncommitted_paths"))

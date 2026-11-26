@@ -361,4 +361,79 @@ mod tests {
         ));
         Ok(())
     }
+
+    /// Every file under `root`, relative to it.
+    fn files(
+        root: &std::path::Path,
+    ) -> StdResult<std::collections::BTreeSet<String>, std::io::Error> {
+        let mut found = std::collections::BTreeSet::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir)? {
+                let path = entry?.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if let Ok(relative) = path.strip_prefix(root) {
+                    found.insert(relative.to_string_lossy().into_owned());
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    // Spec: docs/specs/run-settlement.md, test 7 (a lane cannot write
+    // settlement records).
+    #[test]
+    fn a_declaration_writes_only_the_bound_attempts_journal() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let bound = AttemptId::from_bytes([7; 16]);
+        let other = AttemptId::from_bytes([8; 16]);
+        for (attempt, operation) in [(bound, "declaration-bound"), (other, "declaration-other")] {
+            store.create(
+                &PreparedRun {
+                    attempt_id: attempt,
+                    operation_id: OperationId::parse(operation)?,
+                    created_at: clock.wall_now()?,
+                    request: proposal(),
+                    prompt: "private".into(),
+                },
+                &call,
+            )?;
+        }
+        let before = files(temp.path())?;
+        // The payload names the other attempt and a settlement record; neither
+        // selects anything, since the attempt comes from the holder binding.
+        let mut hostile = payload();
+        hostile["attempt_id"] = json!(other.to_string());
+        hostile["settlement_evidence"] = json!({"outcome": "succeeded"});
+        // Accepted or rejected, the line lands in the bound journal only.
+        let _ = store.declare(
+            bound,
+            &DeclarationInput {
+                request_id: "hostile".into(),
+                payload: hostile,
+            },
+            &DeclarationLimit::shipped(),
+        );
+        let after = files(temp.path())?;
+        let added: Vec<_> = after.difference(&before).cloned().collect();
+        let bound_dir = format!("attempts/{bound}/");
+        assert!(
+            added.iter().all(|path| path.contains(&bound_dir)
+                && (path.ends_with(JOURNAL) || path.ends_with(LOCK))),
+            "a declaration wrote outside the bound journal: {added:?}"
+        );
+        assert!(added.iter().any(|path| path.ends_with(JOURNAL)));
+        assert!(before.difference(&after).next().is_none());
+        let other_dir = store.attempt_dir(other, false)?;
+        let (evidence, counts) = store.close_declarations(&other_dir)?;
+        assert_eq!(evidence, DeclarationEvidence::Missing);
+        assert_eq!(counts.accepted, 0);
+        Ok(())
+    }
 }

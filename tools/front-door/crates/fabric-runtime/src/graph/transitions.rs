@@ -499,22 +499,6 @@ pub(super) fn apply_attempt_observation(
                             .push("review_partial: selected review coverage is incomplete".into());
                     }
                 }
-                let malformed = result
-                    .as_ref()
-                    .is_some_and(|capture| capture.handoff.is_err());
-                let settlement_class = if malformed
-                    && matches!(
-                        outcome,
-                        GraphAttemptOutcome::Succeeded
-                            | GraphAttemptOutcome::ReviewRequired
-                            | GraphAttemptOutcome::DeclaredStop
-                            | GraphAttemptOutcome::StoppedNoWork
-                    ) {
-                    attempt.stop = Some(provenant_records::StopCause::HandoffMalformed);
-                    Some(provenant_records::run::SettlementClass::HandoffMalformed)
-                } else {
-                    settlement_class
-                };
                 let review_result = node.access == AccessMode::ReadOnly
                     && template::review_node(node)
                     && outputs.verdict.is_some()

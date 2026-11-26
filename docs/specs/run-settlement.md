@@ -367,7 +367,10 @@ With `warn` or `off` the signal drops out of the class ladder, so the class is `
 dependants release.
 
 Fixed, with reason: progress is pin-relative and `Unknown` is never no-work — calling committed work
-"no work" is the defect this batch closes. The sealed evidence wins on a re-drive. A lane appends only
+"no work" is the defect this batch closes. The sealed evidence wins on a re-drive. A terminal the
+host decides without a lane result (a pre-launch refusal, a queued withdrawal, an owner stop after
+exit, a lost attempt) builds its evidence with `SettlementEvidence::host_decided` and still goes
+through `settle`; no other path writes a settlement class. A lane appends only
 to its own socket's attempt. Sequences and `request_id` idempotency are invariants. Prose is never
 read: the command guidance is the protocol text and lane rules sit in `lanes.brief_preamble`.
 `declared_stop` is the lane's own statement and its follow-up is `on_stop`.

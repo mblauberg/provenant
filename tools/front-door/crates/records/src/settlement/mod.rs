@@ -185,44 +185,85 @@ pub struct OutcomeFact {
     pub delivery_eligible: bool,
 }
 
+impl SettlementEvidence {
+    /// Evidence for a terminal the host decided without a lane result: a
+    /// pre-launch refusal, a withdrawal, an owner stop after exit or a lost
+    /// attempt. The lane owes no handoff and has no Git evidence, and
+    /// `settle` still makes the decision.
+    pub fn host_decided(host: HostFacts, custody: CustodyFacts) -> Self {
+        Self {
+            schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
+            lane: LaneRole::Reader,
+            host,
+            handoff: DeclarationEvidence::Missing,
+            declarations: DeclarationCounts::default(),
+            git: None,
+            custody,
+            policy: SettlementPolicy::shipped(),
+        }
+    }
+}
+
+impl HostFacts {
+    /// A complete host decision with no result, signals or host handoff.
+    pub fn decided(
+        outcome: Outcome,
+        cause: Option<CauseKind>,
+        reason: Option<String>,
+        terminal_note: Option<String>,
+    ) -> Self {
+        Self {
+            outcome,
+            cause,
+            complete: true,
+            result_empty: false,
+            reason,
+            terminal_note,
+            signals: Vec::new(),
+            denial: None,
+            host_handoff: None,
+        }
+    }
+}
+
+impl CustodyFacts {
+    /// Custody of an attempt the host decided: no stall, steer, import or
+    /// process exit, and a complete identity with no route to compare.
+    pub fn host_decided(launched: bool, cancelled: bool) -> Self {
+        Self {
+            launched,
+            cancelled,
+            steered: false,
+            cancellation_delivered: None,
+            import_cancelled: false,
+            process_exit: false,
+            stall: None,
+            identity: IdentityEvidence {
+                conflict: false,
+                incomplete: IdentityPolicyEffect::Complete,
+                eof_fragment_unsettles: false,
+                route: RouteIdentityFact::Observed,
+            },
+        }
+    }
+}
+
 #[cfg(any(test, feature = "fixture"))]
 impl SettlementEvidence {
     /// A launched, complete fixture with no declaration or Git evidence.
     pub fn fixture(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> Self {
+        let reason =
+            matches!(outcome, Outcome::Unsettled | Outcome::Lost).then(|| "fixture".into());
         Self {
-            schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
             lane,
-            host: HostFacts {
-                outcome,
-                cause,
-                complete: true,
-                result_empty: false,
-                reason: matches!(outcome, Outcome::Unsettled | Outcome::Lost)
-                    .then(|| "fixture".into()),
-                terminal_note: None,
-                signals: vec![],
-                denial: None,
-                host_handoff: None,
-            },
-            handoff: DeclarationEvidence::Missing,
-            declarations: DeclarationCounts::default(),
-            git: None,
-            custody: CustodyFacts {
-                launched: true,
-                cancelled: outcome == Outcome::Cancelled,
-                steered: false,
-                cancellation_delivered: Some(true),
-                import_cancelled: false,
-                process_exit: true,
-                stall: None,
-                identity: IdentityEvidence {
-                    conflict: false,
-                    incomplete: IdentityPolicyEffect::Complete,
-                    eof_fragment_unsettles: false,
-                    route: RouteIdentityFact::Observed,
+            ..Self::host_decided(
+                HostFacts::decided(outcome, cause, reason, None),
+                CustodyFacts {
+                    cancellation_delivered: Some(true),
+                    process_exit: true,
+                    ..CustodyFacts::host_decided(true, outcome == Outcome::Cancelled)
                 },
-            },
-            policy: SettlementPolicy::shipped(),
+            )
         }
     }
 }
