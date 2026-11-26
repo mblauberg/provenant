@@ -2296,6 +2296,62 @@ pub fn checkpoint_before_reboot(
 pub fn holder_gone(directory: &Directory, scope: Scope, observer: &dyn ProcessObserver) -> bool {
     observe_holder(directory, scope, observer) == HolderPresence::Gone
 }
+/// Whether supervisor evidence proves this attempt can no longer hold custody.
+/// Callers must keep writer exclusion while acting on this proof. A completed
+/// exit is sufficient on the same boot only when cleanup finished without
+/// unresolved processes or retained custody; an exit still settling is not.
+pub fn attempt_quiescent(
+    directory: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+) -> bool {
+    match read_record::<StoredExit>(directory, "process-exit.json", EXIT_LIMIT) {
+        Ok(exit) => {
+            exit.schema_version == 1
+                && exit.scope == scope
+                && !exit.unresolved_cleanup
+                && exit.unresolved_pids.is_empty()
+                && exit.unresolved_identities.is_empty()
+                && exit.retention.is_none()
+                && match exit.settlement_evidence {
+                    SettlementEvidence::NeverSpawned => exit.never_spawned,
+                    SettlementEvidence::DarwinCensusAndCustodyLease
+                    | SettlementEvidence::OrphansEnded => !exit.never_spawned,
+                    SettlementEvidence::Unresolved | SettlementEvidence::LeftoverNotProven => false,
+                }
+                && match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
+                    Ok(record)
+                        if record.schema_version == 1
+                            && record.scope == scope
+                            && !record.publication_pending =>
+                    {
+                        record
+                            .guardian
+                            .iter()
+                            .chain(record.provider.iter())
+                            .chain(record.descendants.iter())
+                            .all(|identity| match observer.observe(identity.pid) {
+                                ProcessObservation::Present(fact) => {
+                                    fact.identity != *identity || fact.zombie
+                                }
+                                ProcessObservation::Absent => true,
+                                ProcessObservation::Unknown(_) => false,
+                            })
+                    }
+                    Err(CustodyError::Filesystem(error)) if error.is_not_found() => true,
+                    _ => false,
+                }
+        }
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
+            match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
+                Err(CustodyError::Filesystem(error)) if error.is_not_found() => true,
+                Ok(_) => holder_gone(directory, scope, observer),
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    }
+}
 /// Whether any of these PIDs may still be alive (a signal-0 probe, no effect).
 pub fn any_pid_alive(pids: &[i64]) -> bool {
     crate::process_os::provider::any_pid_alive(pids)
