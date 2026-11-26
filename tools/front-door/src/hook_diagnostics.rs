@@ -1,7 +1,7 @@
 //! Durable diagnostics for hooks that fail inside Provenant. A failing hook
 //! abstains so it cannot refuse a tool or a prompt, but the cause and duration
 //! must survive after the harness has moved on.
-use provenant_core::{Clock, WallTime};
+use provenant_core::Clock;
 use provenant_os::clock::SystemClock;
 use provenant_records::diagnostic::safe_text;
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,7 @@ pub(crate) fn recent_overruns(state: &Path, window: std::time::Duration) -> Vec<
         let seen = value
             .get("at")
             .and_then(serde_json::Value::as_str)
-            .and_then(|text| jiff::Timestamp::parse(text).ok())
+            .and_then(|text| text.parse::<jiff::Timestamp>().ok())
             .is_some_and(|seen| seen.as_second() >= cutoff);
         if !seen {
             continue;
