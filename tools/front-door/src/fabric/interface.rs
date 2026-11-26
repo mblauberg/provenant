@@ -1,7 +1,7 @@
 //! Document-based graph service shared by the CLI and the lane relay.
 use super::subject::{
-    DEFAULT_WRITER_BASE, ReadPlan, SubjectAdmission, bind_default_read_only_source,
-    bind_writer_base_source,
+    ReadPlan, SubjectAdmission, WRITER_BASE_KNOB, WriterBaseChoice, WriterBaseSetting,
+    bind_default_read_only_source, bind_writer_base_source,
 };
 use super::*;
 use provenant_fabric_runtime::graph::{
@@ -829,6 +829,91 @@ fn read_source_report(
     })
 }
 
+/// Read the `lanes.writer_base` knob from one TOML layer, accepting both the
+/// flat dotted key and a `[knobs.lanes]` table, as the read-source reader does.
+fn writer_base_value(text: &str) -> Option<String> {
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let knobs = doc.get("knobs")?.as_table_like()?;
+    let item = knobs
+        .get(WRITER_BASE_KNOB)
+        .or_else(|| knobs.get("lanes")?.as_table_like()?.get("writer_base"))?;
+    item.as_str().map(str::to_owned)
+}
+
+/// Resolve `lanes.writer_base` through the host, host-project, repository and
+/// launch layers. `--base` is the launch layer and always wins; a bad value
+/// warns and falls back to the compiled `default_branch`.
+pub(super) fn writer_base_choice(
+    input: &Value,
+    config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
+    state: &Path,
+    project: &Path,
+) -> WriterBaseChoice {
+    let mut choice = WriterBaseChoice::default();
+    if let Some(knob) = config.knobs.get(WRITER_BASE_KNOB) {
+        let value = knob.value.as_str().unwrap_or_default();
+        match WriterBaseSetting::parse(value) {
+            Ok(setting) => {
+                choice.value = setting;
+                choice.layer = knob.source.layer;
+                choice.origin = Some(format!("config.toml#{WRITER_BASE_KNOB}"));
+            }
+            Err(_) => warn_operator(format!(
+                "{WRITER_BASE_KNOB}={value:?} is not a valid writer base; using default_branch"
+            )),
+        }
+    }
+    let mut layers = Vec::new();
+    if let Some(project_dir) = provenant_config::host_project_dir(state, project) {
+        layers.push((Layer::Host, project_dir.join("config.toml")));
+    }
+    layers.push((Layer::Project, project.join(".provenant/config.toml")));
+    for (layer, path) in layers {
+        let Some(value) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| writer_base_value(&text))
+        else {
+            continue;
+        };
+        match WriterBaseSetting::parse(&value) {
+            Ok(setting) => {
+                choice.value = setting;
+                choice.layer = layer;
+                choice.origin = Some(path.display().to_string());
+            }
+            Err(_) => {
+                choice.value = WriterBaseSetting::DefaultBranch;
+                choice.layer = layer;
+                choice.origin = Some(path.display().to_string());
+                warn_operator(format!(
+                    "{WRITER_BASE_KNOB}={value:?} (source: {}) is not a valid writer base; using default_branch",
+                    path.display()
+                ));
+            }
+        }
+    }
+    if let Some(base) = input
+        .get("base")
+        .and_then(Value::as_str)
+        .filter(|base| !base.is_empty())
+    {
+        choice.value = WriterBaseSetting::Ref(base.to_owned());
+        choice.layer = Layer::Launch;
+        choice.origin = Some("--base".into());
+    }
+    choice
+}
+
+/// The writer base reported in `run --explain` and the launch result. `source`
+/// names both the effective value and the layer that chose it; `commit` is null
+/// when the writer keeps the caller checkout.
+fn writer_base_report(base: Option<&provenant_core::GitOid>, choice: &WriterBaseChoice) -> Value {
+    json!({
+        "commit": base.map(|base| base.to_string()),
+        "source": format!("{} ({})", choice.value, choice.description()),
+    })
+}
+
 /// The resolved node a template or `use` launch runs, taken before the graph
 /// id is chosen. Its lowered roles decide whether the launch is a writer.
 struct TemplateLaunch {
@@ -976,7 +1061,9 @@ fn bind_launch_controls(
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| invalid("base"))?,
-            None => DEFAULT_WRITER_BASE,
+            // The real default is resolved at admission from `lanes.writer_base`;
+            // `default_base` tells provisioning to resolve it again on the peer.
+            None => "HEAD",
         };
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
         let worktree = ports
@@ -2251,6 +2338,17 @@ impl Factory {
                 )
             })
             .unwrap_or_default();
+        let writer_base_setting = read_config
+            .as_ref()
+            .map(|config| {
+                writer_base_choice(
+                    input,
+                    config,
+                    self.context.roots.state.as_path(),
+                    &self.context.project_root,
+                )
+            })
+            .unwrap_or_default();
         if read_config.is_none() {
             warn_operator(
                 "could not read the run configuration; lanes.read_source keeps its compiled default",
@@ -2672,6 +2770,7 @@ impl Factory {
                 "source_admission": source_admission, "warnings": warnings,
                 "subject": subject,
                 "read_source": read_source_report(default_source.as_ref(), &read_source),
+                "writer_base": writer_base_report(writer_base.as_ref(), &writer_base_setting),
                 // The silence threshold is a host default with a named source,
                 // just like the other settings an explanation reports.
                 "stall": {
@@ -2720,6 +2819,7 @@ impl Factory {
         result["subject"] = json!(subject);
         result["warnings"] = json!(warnings);
         result["read_source"] = read_source_report(default_source.as_ref(), &read_source);
+        result["writer_base"] = writer_base_report(writer_base.as_ref(), &writer_base_setting);
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });

@@ -270,6 +270,7 @@ fn writer_without_a_base_names_the_caller_checkout_fallback() {
         std::path::Path::new("/project"),
         std::path::Path::new("/project"),
         std::path::Path::new("/state"),
+        &Default::default(),
         &provenant_cli::run::ReadSourceChoice::automatic(),
         None,
     );

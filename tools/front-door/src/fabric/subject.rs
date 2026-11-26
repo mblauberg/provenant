@@ -2,10 +2,10 @@
 //!
 //! A review, a read-only graph and a writer each resolve their subject here;
 //! nothing downstream re-reads a ref or re-resolves a source for this graph.
-use super::interface::read_source_choice;
+use super::interface::{read_source_choice, writer_base_choice};
 use super::*;
 use crate::pr::observer::Observer;
-use provenant_cli::run::{ReadSourceChoice, resolve_read_source};
+use provenant_cli::run::{ReadSourceChoice, resolve_default_branch, resolve_read_source};
 use provenant_fabric_runtime::graph::{
     AccessMode, GraphDocument, GraphNode, NodeKind, SourceBinding,
 };
@@ -478,6 +478,17 @@ impl Factory {
                 )
             })
             .unwrap_or_default();
+        let writer_base_setting = read_config
+            .as_ref()
+            .map(|config| {
+                writer_base_choice(
+                    input,
+                    config,
+                    self.context.roots.state.as_path(),
+                    &self.context.project_root,
+                )
+            })
+            .unwrap_or_default();
         let git = provenant_os::git::git_executable();
         let mut warnings = Vec::new();
         if read_config.is_none() {
@@ -508,9 +519,13 @@ impl Factory {
             &self.context.project_root,
             &self.cwd,
             self.context.roots.state.as_path(),
+            &writer_base_setting,
             &read_source,
             git.as_deref(),
         );
+        if let Some(warning) = writer_base.warning.clone() {
+            warnings.push(warning);
+        }
         if let Some(warning) = writer_base.fallback_warning(&self.cwd) {
             warnings.push(warning);
         }
@@ -688,6 +703,34 @@ mod tests {
     // One entry point keeps every helper and import inside a `#[test]` body:
     // the harness-less worktree driver omits libtest functions, so module-level
     // items would be reported as unused there.
+    #[test]
+    fn writer_base_setting_parses_the_config_vocabulary() {
+        use super::*;
+
+        assert_eq!(
+            WriterBaseSetting::parse("default_branch"),
+            Ok(WriterBaseSetting::DefaultBranch)
+        );
+        assert_eq!(
+            WriterBaseSetting::parse(""),
+            Ok(WriterBaseSetting::DefaultBranch)
+        );
+        assert_eq!(
+            WriterBaseSetting::parse("checkout"),
+            Ok(WriterBaseSetting::Checkout)
+        );
+        assert_eq!(
+            WriterBaseSetting::parse("refs/heads/topic"),
+            Ok(WriterBaseSetting::Ref("refs/heads/topic".into()))
+        );
+        for invalid in ["not a ref", "-bad"] {
+            assert!(
+                WriterBaseSetting::parse(invalid).is_err(),
+                "{invalid} must not be a writer base"
+            );
+        }
+    }
+
     #[test]
     fn review_subject_stale_head_invariants() -> crate::worktree_tests::support::Result {
         use super::*;
@@ -1105,14 +1148,82 @@ mod tests {
     }
 }
 
-/// The base a `--branch` writer starts from when it names no `--base`.
-pub(super) const DEFAULT_WRITER_BASE: &str = "refs/remotes/origin/HEAD";
+/// The key whose value selects a writer's base when it names no `--base`.
+pub(super) const WRITER_BASE_KNOB: &str = "lanes.writer_base";
+
+/// A resolved `lanes.writer_base` value, before Git is consulted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum WriterBaseSetting {
+    /// The resolved forge remote's default branch (remote HEAD, then the forge).
+    DefaultBranch,
+    /// The caller's checkout, with no pinned base expression.
+    Checkout,
+    /// A caller-supplied ref, resolved by the one read-source resolver.
+    Ref(String),
+}
+
+impl WriterBaseSetting {
+    /// Parse one knob spelling. An empty value keeps the compiled
+    /// `default_branch`; `checkout` keeps the caller checkout; every other
+    /// bounded printable value names a Git ref.
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "" | "default_branch" => Ok(Self::DefaultBranch),
+            "checkout" => Ok(Self::Checkout),
+            value if provenant_confinement::repo::GitRevision::new(value).is_ok() => {
+                Ok(Self::Ref(value.to_owned()))
+            }
+            _ => Err(format!(
+                "expected default_branch, checkout, or a Git ref (got {value:?})"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for WriterBaseSetting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DefaultBranch => f.write_str("default_branch"),
+            Self::Checkout => f.write_str("checkout"),
+            Self::Ref(value) => f.write_str(value),
+        }
+    }
+}
+
+/// The sourced writer-base policy and the configuration layer that chose it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WriterBaseChoice {
+    pub(super) value: WriterBaseSetting,
+    pub(super) layer: Layer,
+    pub(super) origin: Option<String>,
+}
+
+impl Default for WriterBaseChoice {
+    fn default() -> Self {
+        Self {
+            value: WriterBaseSetting::DefaultBranch,
+            layer: Layer::Default,
+            origin: None,
+        }
+    }
+}
+
+impl WriterBaseChoice {
+    /// Where this choice was set, for warnings and receipts.
+    pub(super) fn description(&self) -> String {
+        match &self.origin {
+            Some(origin) => format!("{} ({origin})", self.layer.as_str()),
+            None => self.layer.as_str().to_owned(),
+        }
+    }
+}
 
 /// The launch expression that supplied a writer's base.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WriterBaseSource {
     ExplicitBase,
     BranchDefault,
+    ConfiguredRef,
     WorktreeHead,
     CallerCheckout,
 }
@@ -1122,6 +1233,7 @@ impl WriterBaseSource {
         match self {
             Self::ExplicitBase => "explicit --base",
             Self::BranchDefault => "the --branch default",
+            Self::ConfiguredRef => "lanes.writer_base",
             Self::WorktreeHead => "the named worktree HEAD",
             Self::CallerCheckout => "no base expression",
         }
@@ -1133,6 +1245,8 @@ impl WriterBaseSource {
 pub(super) struct WriterBase {
     pub(super) commit: Option<String>,
     pub(super) source: WriterBaseSource,
+    /// Set when a configured value could not be resolved; advisory only.
+    pub(super) warning: Option<String>,
 }
 
 impl WriterBase {
@@ -1149,13 +1263,15 @@ impl WriterBase {
     }
 }
 
-/// Resolve one writer base by role: explicit `--base`, else the `--branch`
-/// default, else the named worktree's HEAD, else none.
+/// Resolve one writer base by role: explicit `--base`, else the configured
+/// `lanes.writer_base` for a `--branch` launch, else the named worktree's HEAD,
+/// else none. The explicit flag always wins; no Git evidence is fatal.
 pub(super) fn resolve_writer_base(
     input: &Value,
     project_root: &Path,
     cwd: &Path,
     state: &Path,
+    choice: &WriterBaseChoice,
     read_source: &ReadSourceChoice,
     git: Option<&Path>,
 ) -> WriterBase {
@@ -1167,12 +1283,49 @@ pub(super) fn resolve_writer_base(
         return WriterBase {
             commit: resolve_ref(state, cwd, base, read_source, "--base"),
             source: WriterBaseSource::ExplicitBase,
+            warning: None,
         };
     }
     if input.get("branch").is_some_and(|branch| !branch.is_null()) {
-        return WriterBase {
-            commit: resolve_ref(state, cwd, DEFAULT_WRITER_BASE, read_source, "--branch"),
-            source: WriterBaseSource::BranchDefault,
+        let unresolved = || {
+            format!(
+                "{WRITER_BASE_KNOB}={} (source: {}) could not be resolved; writer base falls back to the caller checkout",
+                choice.value,
+                choice.description()
+            )
+        };
+        return match &choice.value {
+            WriterBaseSetting::Checkout => WriterBase {
+                commit: None,
+                source: WriterBaseSource::CallerCheckout,
+                warning: None,
+            },
+            WriterBaseSetting::DefaultBranch => match resolve_default_branch(state, cwd) {
+                Some(pin) => WriterBase {
+                    commit: Some(pin.commit.to_string()),
+                    source: WriterBaseSource::BranchDefault,
+                    warning: None,
+                },
+                None => WriterBase {
+                    commit: None,
+                    source: WriterBaseSource::CallerCheckout,
+                    warning: Some(unresolved()),
+                },
+            },
+            WriterBaseSetting::Ref(reference) => {
+                match resolve_ref(state, cwd, reference, read_source, WRITER_BASE_KNOB) {
+                    Some(commit) => WriterBase {
+                        commit: Some(commit),
+                        source: WriterBaseSource::ConfiguredRef,
+                        warning: None,
+                    },
+                    None => WriterBase {
+                        commit: None,
+                        source: WriterBaseSource::CallerCheckout,
+                        warning: Some(unresolved()),
+                    },
+                }
+            }
         };
     }
     if let Some(worktree) = named_worktree(input) {
@@ -1180,11 +1333,13 @@ pub(super) fn resolve_writer_base(
         return WriterBase {
             commit: git.and_then(|git| provenant_run::resolve_git_base(git, &path, "HEAD").ok()),
             source: WriterBaseSource::WorktreeHead,
+            warning: None,
         };
     }
     WriterBase {
         commit: None,
         source: WriterBaseSource::CallerCheckout,
+        warning: None,
     }
 }
 

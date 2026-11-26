@@ -2051,6 +2051,24 @@ pub(in crate::run) fn resolve_read_source(
     })
 }
 
+/// Resolve the remote's default branch for a writer base through the one
+/// read-source resolver. The remote comes from the declared/inferred forge
+/// context, never a compiled `origin`, so a repository whose only remote is
+/// named `upstream` resolves to `upstream/HEAD`.
+pub(crate) fn resolve_default_branch(
+    state: &Path,
+    source: &Path,
+) -> Option<crate::run::ReadSourcePin> {
+    resolve_read_source(
+        state,
+        source,
+        &crate::run::ReadSourceChoice {
+            source: crate::run::ReadSource::DefaultBranch,
+            ..crate::run::ReadSourceChoice::automatic()
+        },
+    )
+}
+
 /// Resolve a fetched ref to its commit and keep the exact ref that named it.
 fn resolve_upstream_ref(
     executor: &dyn provenant_os::exec::Executor,
