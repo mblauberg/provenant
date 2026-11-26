@@ -22,6 +22,13 @@ mod graph_document;
 pub(crate) mod owner;
 mod peer;
 mod peer_source_binding;
+mod queue_adoption;
+mod queue_controls;
+mod queue_delivery;
+mod queue_dispatch;
+mod queue_registry;
+mod queue_scheduler;
+mod queue_snapshot;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
 mod steer;
@@ -46,9 +53,9 @@ use graph_status::{graph_snapshot, graph_status_elapsed};
 pub use peer::{hosts, peer};
 pub(crate) use settlement::advance_live_graph;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 include!("fabric/facade_tests.rs");
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 include!("fabric/graph_tests.rs");
 
 use provenant_cli::fabric::Context;
@@ -333,6 +340,18 @@ impl BoundFacade<'_> {
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError> {
         use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
+
+        if let Some(result) = queue_controls::handle_inbox_control(
+            self.factory,
+            input.clone(),
+            host.clone(),
+            budget,
+            cancel,
+        )
+        .map_err(ServiceError::from)?
+        {
+            return Ok(result);
+        }
 
         let ctx = &self.factory.context;
         let Some(host) =

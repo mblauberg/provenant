@@ -16,8 +16,9 @@ fn request(
     Ok(serde_json::to_string(&(request, delivery))?)
 }
 
-// Tests take the request instead of starting a detached process.
-#[cfg(test)]
+// The worktree harness takes the request instead of starting a detached
+// process, both as libtest and when linked from the fixture-gated library.
+#[cfg(any(test, feature = "fixture"))]
 thread_local! {
     pub(crate) static SPAWNED: std::cell::RefCell<Result<Vec<String>, String>> =
         const { std::cell::RefCell::new(Ok(Vec::new())) };
@@ -29,7 +30,7 @@ pub(crate) fn spawn(
     delivery: Option<&provenant_run::WriterDeliveryReceipt>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = request(settled, delivery)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixture"))]
     return SPAWNED.with_borrow_mut(|spawned| match spawned {
         Ok(spawned) => {
             spawned.push(request);
@@ -37,7 +38,7 @@ pub(crate) fn spawn(
         }
         Err(error) => Err(error.clone().into()),
     });
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "fixture")))]
     {
         let argv = [
             std::env::current_exe()?.into_os_string(),

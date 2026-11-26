@@ -4,6 +4,38 @@ use provenant_fabric_runtime::graph::{
     GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
 };
 
+// Spec: docs/specs/delivery-queue.md#queue-and-controls
+#[test]
+fn status_projects_recorded_delivery_progress_into_the_digest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut value = serde_json::to_value(checkpoint("g"))?;
+    let node = &mut value["nodes"][0];
+    let key = json!({"graph_id":"g","node_id":"parent","attempt":1,"route_index":0});
+    node["delivery_loop"] = json!({"name":"repair","round":2,"last_attempt":key});
+    node["escalation"] = json!({"rung":1,"cause":"ci_red","transition_attempt":key});
+    node["delivery_park"] = json!({"transition_id":"p1","operation_id":"p1",
+        "item":"issue-42","attempt_key":key,"attempt_ref":null,"reason":"ci_unavailable",
+        "handoff":"inspect checks","head":"abc123","evidence":[],"request_id":null});
+    let checkpoint: GraphCheckpoint = serde_json::from_value(value)?;
+    let target = GraphTarget {
+        graph: "g".into(),
+        node: None,
+        attempt: None,
+    };
+    let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
+    super::status_keys(&mut rows, provenant_core::ProjectId::from_bytes([3; 16]))?;
+    let digests = super::super::graph_status::node_digests(&rows);
+    let digest = digests
+        .iter()
+        .find(|digest| digest.item.as_deref() == Some("issue-42"))
+        .expect("parked item is projected");
+    assert_eq!(digest.delivery_loop["round"], 2);
+    assert_eq!(digest.escalation["rung"], 1);
+    assert_eq!(digest.delivery_park["handoff"], "inspect checks");
+    assert!(digest.line.contains("head=abc123/recorded"));
+    Ok(())
+}
+
 // Spec: docs/specs/cli.md#status-selection
 #[test]
 fn full_status_liveness_detail_names_event_source_directory_command_and_wait() {
@@ -532,6 +564,7 @@ fn graph_peer_status_preserves_typed_wait_facts() -> Result<(), Box<dyn std::err
     }];
     let response = RunResult::Status {
         extra: Default::default(),
+        presence: Some(provenant_records::wire::LanePresence::Live),
         lane_waits: waits.clone(),
         attempt: attempt.clone(),
     };
@@ -539,12 +572,14 @@ fn graph_peer_status_preserves_typed_wait_facts() -> Result<(), Box<dyn std::err
     let RunResult::Status {
         attempt: peer_attempt,
         lane_waits: peer_waits,
+        presence,
         ..
     } = decoded
     else {
         return Err("status response changed kind".into());
     };
     assert_eq!(peer_waits, waits);
+    assert_eq!(presence, Some(provenant_records::wire::LanePresence::Live));
     let local =
         provenant_cli::run::project_lane(&attempt, &waits, Path::new("/unused"), None, false);
     let peer = provenant_cli::run::project_lane(
@@ -737,35 +772,30 @@ fn the_listing_never_hides_active_work_and_counts_what_it_omits() {
 }
 
 fn digest(presence: Option<&str>) -> super::super::graph_status::NodeDigest {
-    super::super::graph_status::NodeDigest {
-        key: provenant_records::WorkKey::new(
-            provenant_core::ProjectId::from_bytes([7; 16]),
-            "g",
-            "n",
-            1,
-        )
-        .expect("valid work key"),
-        outcome: "running".into(),
-        cause: None,
-        branch: None,
-        pr: json!({"state":"unknown","reference":null}),
-        ci: json!({"state":"unavailable"}),
-        result_path: None,
-        provider_error: None,
-        review_verdict: None,
-        findings_count: None,
-        findings_available: None,
-        review_partial: None,
-        attempt_state: Some("running".into()),
-        attempt_presence: presence.map(str::to_owned),
-        stalled: false,
-        last_event_at: None,
-        line: "  n: running".into(),
-        state: "running".into(),
-        settled: false,
-        handoff_status: None,
-        open_asks: Vec::new(),
-        evidence_error: None,
+    let key = provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([7; 16]),
+        "g",
+        "n",
+        1,
+    )
+    .expect("valid work key");
+    let rows = vec![
+        json!({"kind":"node", "work_key":key, "state":"running"}),
+        json!({"kind":"attempt", "work_key":key, "state":"running", "presence":presence}),
+    ];
+    super::super::graph_status::node_digests(&rows)
+        .into_iter()
+        .next()
+        .expect("fixture projects a node digest")
+}
+
+#[test]
+fn listing_digest_fixture_projects_attempt_presence() {
+    for presence in ["live", "unattended"] {
+        let digest = digest(Some(presence));
+        assert_eq!(digest.attempt_presence.as_deref(), Some(presence));
+        assert!(digest.delivery_loop.is_null());
+        assert!(digest.delivery_park.is_null());
     }
 }
 
@@ -2818,4 +2848,91 @@ fn settled_lane_output_ignores_unfinished_sibling() {
         !super::output_needs_graph_failures(false, &checkpoint.nodes[0]),
         "a settled lane's retained output must not acquire stale failure rows while a sibling runs"
     );
+}
+
+/// A peer-hosted attempt: its key is the peer's own graph, and the record
+/// retains the host that owns it. Both facts are relayed with the status.
+fn peer_attempt_fixture(
+    graph: &str,
+    host: &str,
+) -> Result<provenant_records::run::AttemptRecord, Box<dyn std::error::Error>> {
+    let id = "11111111111111111111111111111111";
+    let digest = format!("sha256:{}", "ab".repeat(32));
+    Ok(serde_json::from_value(json!({
+        "schema_version":1,"attempt_id":id,"project_id":id,
+        "key":{"project":id,"graph":graph,"node":"task","attempt":1},
+        "attempt_number":1,"revision":1,"generation":1,
+        "requested_route":{"kind":"named","name":"senior"},
+        "authority_digest":digest,"queued_at":"2026-10-29T00:00:00.000000Z",
+        "state":{"state":"running"},"usage":{},"read_only_writable":[],
+        "protected_paths":[],"trace":{},
+        "prompt":{"path":{"encoding":"utf8","path":"prompt.md"},
+            "digest":digest,"bytes":0,"complete":true,"redacted":false},
+        "peer_graph":{"host":host,"graph_id":graph},
+        "peer_origin_work_key":{"project":id,"graph":"X","node":"task","attempt":1}
+    }))?)
+}
+
+// Spec: docs/specs/fabric.md#peer-hosts. A peer's own liveness observation is
+// relayed; output age alone never turns an unobserved writer into a live one.
+#[test]
+fn relayed_peer_presence_reports_a_live_writer_as_running() -> Result<(), Box<dyn std::error::Error>>
+{
+    let graph = "peer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let attempt = peer_attempt_fixture(graph, "22222222222222222222222222222222")?;
+    // The launching host observes no peer census, so without a relay the row
+    // stays unknown even though the peer's writer is live.
+    let unobserved = provenant_cli::run::project_lane_with_admission(
+        &attempt,
+        &[],
+        Path::new("/unused"),
+        None,
+        false,
+        Err(()),
+        &[],
+    );
+    assert_eq!(unobserved.state, "unknown");
+
+    let relayed = provenant_cli::run::project_lane_with_relayed_presence(
+        &attempt,
+        &[],
+        Path::new("/unused"),
+        None,
+        provenant_records::wire::LanePresence::Live,
+    );
+    assert_eq!(relayed.state, "running");
+    assert_eq!(
+        relayed.presence,
+        Some(provenant_records::wire::LanePresence::Live)
+    );
+    Ok(())
+}
+
+// The reclaim hint must name a target `reconcile` resolves on the host that
+// owns the peer graph, not a graph name meaningless on the launching host.
+#[test]
+fn peer_unknown_reason_names_a_reconcile_target_on_the_owning_host()
+-> Result<(), Box<dyn std::error::Error>> {
+    let host = "22222222222222222222222222222222";
+    let graph = "peer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let attempt = peer_attempt_fixture(graph, host)?;
+    let row = provenant_records::wire::LaneRow::project(
+        &attempt,
+        provenant_records::wire::LaneProjectionFacts {
+            presence: Some(provenant_records::wire::LanePresence::Unknown),
+            ..Default::default()
+        },
+    );
+    let reason = row.reason.ok_or("missing reason")?;
+    assert!(
+        reason.contains(&format!("provenant reconcile {graph}/task#1")),
+        "{reason}"
+    );
+    assert!(reason.contains(&format!("on host {host}")), "{reason}");
+    assert!(!reason.contains("reconcile X/task"), "{reason}");
+
+    let target = provenant_cli::Target::parse(&format!("{graph}/task#1"))?;
+    assert_eq!(target.name, graph);
+    assert_eq!(target.node.as_deref(), Some("task"));
+    Ok(())
 }

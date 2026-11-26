@@ -5,7 +5,7 @@ use crate::terminal_run;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use support::{
     Result, TestRig, code, install_fake_claude_auth, register_account, set_claude_config_dir,
     write_fake_claude_identity,
@@ -102,6 +102,32 @@ fn stored(rig: &TestRig) -> std::result::Result<String, Box<dyn std::error::Erro
     Ok(text)
 }
 
+/// Chair hooks queue a detached incremental worker and return, so stored rows
+/// appear when that child finishes. Wait for the invariant with a bounded
+/// deadline instead of reading the store at the moment the hook returns.
+fn wait_for_rows(
+    rig: &TestRig,
+    count: usize,
+    settled: impl Fn(&[Value]) -> bool,
+) -> Result<Vec<Value>> {
+    let text = provenant_test_support::wait_for(
+        "detached chair ingest rows",
+        Duration::from_secs(30),
+        || stored(rig).unwrap_or_default(),
+        |text| {
+            let rows: Vec<Value> = text
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            rows.len() >= count && settled(&rows)
+        },
+    )?;
+    Ok(text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect())
+}
+
 #[test]
 fn chair_session_start_ingests_the_session_as_chair() -> Result {
     let mut rig = TestRig::new()?;
@@ -113,11 +139,7 @@ fn chair_session_start_ingests_the_session_as_chair() -> Result {
     write_session(&config, "chair-session", "m1", 45)?;
     let output = start_chair_session(&rig, "chair-session")?;
     assert_eq!(code(&output), 0);
-    let store = stored(&rig)?;
-    let rows: Vec<Value> = store
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<std::result::Result<_, _>>()?;
+    let rows = wait_for_rows(&rig, 1, |_| true)?;
     let row = rows
         .first()
         .ok_or("the chair SessionStart did not ingest its session")?;
@@ -154,10 +176,12 @@ fn provider_identity_rotation_is_preserved_per_chair_session_in_ingest() -> Resu
     write_session(&config, "session-b", "message-b", 9)?;
     assert_eq!(code(&start_chair_session(&rig, "session-b")?), 0);
 
-    let rows: Vec<Value> = stored(&rig)?
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<std::result::Result<_, _>>()?;
+    // The second worker also re-attributes rows the first worker saw before
+    // the rotated session was recorded, so wait for every row to settle.
+    let rows = wait_for_rows(&rig, 2, |rows| {
+        rows.iter()
+            .all(|row| row["identity"]["identity"]["state"] == "known")
+    })?;
     assert_eq!(rows.len(), 2);
     let row_for = |session: &str| rows.iter().find(|row| row["session"] == session).unwrap();
     for (session, key) in [("session-a", &first), ("session-b", &second)] {
@@ -205,10 +229,13 @@ fn chair_stop_ingests_new_usage() -> Result {
     fs::create_dir_all(&subagents)?;
     fs::write(subagents.join("agent-a.jsonl"), message("m3", 20))?;
     assert_eq!(code(&invoke()?), 0);
-    let rows: Vec<Value> = stored(&rig)?
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<std::result::Result<_, _>>()?;
+    let rows = wait_for_rows(&rig, 3, |rows| {
+        rows.iter()
+            .any(|row| row["message"] == "m2" && row["output"] == 60)
+            && rows
+                .iter()
+                .any(|row| row["message"] == "m3" && row["source"] == "subagent")
+    })?;
     assert_eq!(rows.len(), 3);
     assert!(
         rows.iter()

@@ -1002,6 +1002,7 @@ pub(crate) fn graph_land(
     project: &Path,
     state: &Path,
     request: &provenant_fabric_runtime::graph::LandRequest<'_>,
+    delivery_queue: bool,
     workers: &dyn WorkerObserver,
 ) -> provenant_fabric_runtime::graph::LandObservation {
     use provenant_fabric_runtime::graph::LandObservation;
@@ -1042,6 +1043,7 @@ pub(crate) fn graph_land(
         }
     };
     let land = provenant_records::landing::LandRequest {
+        delivery_queue,
         members: vec![provenant_records::landing::LandMember {
             pr: number,
             head: Some(head.to_string()),
@@ -1346,7 +1348,7 @@ mod land_log_tests {
 /// Test seam: the cleanup check for `feat` merged at `merged` into `main`, then
 /// the Git command `between` (another process acting, none when empty), then
 /// the branch deletion. The status and detail of the `branch` step.
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 pub(crate) fn delete_after_check(
     project: &Path,
     host_state: &Path,

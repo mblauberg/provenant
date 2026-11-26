@@ -26,7 +26,14 @@ pub fn resolve_fail<E: std::fmt::Display>(error: ResolveError<E>) -> Fail {
     } else {
         Status::Invalid
     };
-    Fail::new(status, kind, error.to_string())
+    // `ResolveError` renders its code for readers that have no typed envelope.
+    // Here the code travels in `Fail.kind` and the human renderer prints it;
+    // carrying it in the message too would print `NOT_FOUND: NOT_FOUND:`.
+    Fail::new(
+        status,
+        kind,
+        crate::target::fault_message(kind.code(), &error.to_string()),
+    )
 }
 
 /// The local attempt id a resolved attempt names, or `NOT_FOUND` when it ran
@@ -40,7 +47,7 @@ pub(super) fn local_attempt(
         Fail::new(
             Status::Invalid,
             ErrorKind::NotFound,
-            format!("NOT_FOUND: {} has no local attempt", resolved.target()),
+            format!("{} has no local attempt", resolved.target()),
         )
     };
     let key = resolved
@@ -117,4 +124,30 @@ pub(super) fn context_matches(
                 .number
                 .is_none_or(|number| context.attempt == Some(number.get()))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches. The
+    /// envelope carries the code once; the message must not repeat it.
+    #[test]
+    fn resolve_fail_leaves_the_typed_code_to_the_envelope() {
+        let missing: ResolveError<std::convert::Infallible> = ResolveError::NotFound {
+            target: "peer-abc/task#1".into(),
+            candidates: Vec::new(),
+        };
+        let fail = resolve_fail(missing);
+        assert_eq!(fail.kind, ErrorKind::NotFound);
+        assert_eq!(fail.message, "peer-abc/task#1");
+
+        let ambiguous: ResolveError<std::convert::Infallible> = ResolveError::Ambiguous {
+            target: "g".into(),
+            candidates: vec!["one".into(), "two".into()],
+        };
+        let fail = resolve_fail(ambiguous);
+        assert_eq!(fail.kind, ErrorKind::AmbiguousTarget);
+        assert_eq!(fail.message, "g has several nodes; use one of one, two");
+    }
 }

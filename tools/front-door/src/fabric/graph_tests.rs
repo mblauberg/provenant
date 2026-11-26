@@ -358,23 +358,23 @@ mod graph_writer_admission_tests {
     #[test]
     fn native_timeout_rereads_local_state_only_for_launch_retry() {
         use crate::status_wait::ObservationWake;
-        assert!(super::interface::graph_wait_needs_refresh(
+        assert!(super::interface::observation::graph_wait_needs_refresh(
             ObservationWake::NativeTimeout,
             true,
         ));
-        assert!(!super::interface::graph_wait_needs_refresh(
+        assert!(!super::interface::observation::graph_wait_needs_refresh(
             ObservationWake::NativeTimeout,
             false,
         ));
-        assert!(super::interface::graph_wait_needs_refresh(
+        assert!(super::interface::observation::graph_wait_needs_refresh(
             ObservationWake::Changed,
             false,
         ));
-        assert!(super::interface::graph_wait_needs_refresh(
+        assert!(super::interface::observation::graph_wait_needs_refresh(
             ObservationWake::PacedFallback,
             false,
         ));
-        assert!(!super::interface::graph_wait_needs_refresh(
+        assert!(!super::interface::observation::graph_wait_needs_refresh(
             ObservationWake::Cancelled,
             true,
         ));
@@ -383,15 +383,15 @@ mod graph_writer_admission_tests {
     #[test]
     fn remote_fallback_deadline_survives_local_graph_events() {
         assert_eq!(
-            super::interface::next_remote_deadline(Some(500), true, false, 450, 100),
+            super::interface::observation::next_remote_deadline(Some(500), true, false, 450, 100),
             Some(500),
         );
         assert_eq!(
-            super::interface::next_remote_deadline(Some(500), true, true, 550, 100),
+            super::interface::observation::next_remote_deadline(Some(500), true, true, 550, 100),
             Some(650),
         );
         assert_eq!(
-            super::interface::next_remote_deadline(Some(500), false, false, 550, 100),
+            super::interface::observation::next_remote_deadline(Some(500), false, false, 550, 100),
             None,
         );
     }
@@ -1491,6 +1491,7 @@ mod graph_ask_inbox_tests {
             service.execute(
                 InboxInput::Answer {
                     extra: Default::default(),
+                    queue_control: None,
                     id: request,
                     action: if option.is_some() {
                         AnswerAction::Choose
@@ -1809,6 +1810,7 @@ mod graph_ask_inbox_tests {
         service.execute(
             InboxInput::Answer {
                 extra: Default::default(),
+                    queue_control: None,
                 id: open.id,
                 action: AnswerAction::Choose,
                 option_id: Some("hold".into()),
@@ -1913,6 +1915,7 @@ mod graph_ask_inbox_tests {
         service.execute(
             InboxInput::Answer {
                 extra: Default::default(),
+                    queue_control: None,
                 id: open[0].id,
                 action: AnswerAction::Choose,
                 option_id: Some("ship".into()),

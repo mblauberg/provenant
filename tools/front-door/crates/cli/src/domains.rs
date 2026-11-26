@@ -24,6 +24,8 @@ pub struct Domains {
     pub pr: PrSettings,
     #[serde(default)]
     pub lanes: LanesSettings,
+    #[serde(default)]
+    pub hooks: provenant_config::HookSettings,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -798,7 +800,7 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
 ]);
 
-static ENTRIES: [DomainSection; 10] = [
+static ENTRIES: [DomainSection; 11] = [
     provenant_config::policy::SECTION,
     crate::wait::SECTION,
     provenant_providers::accounts::SECTION,
@@ -809,6 +811,7 @@ static ENTRIES: [DomainSection; 10] = [
     PR_SECTION,
     LANES_SECTION,
     crate::steward::SECTION,
+    provenant_config::HOOKS_SECTION,
 ];
 pub static SECTIONS: DomainSections<Domains> = DomainSections::new(&ENTRIES);
 
@@ -879,6 +882,7 @@ mod tests {
             ("pr", typed_paths::<PrSettings>()),
             ("lanes", typed_paths::<LanesSettings>()),
             ("steward", typed_paths::<crate::steward::Settings>()),
+            ("hooks", typed_paths::<provenant_config::HookSettings>()),
         ]
         .into_iter()
         .flat_map(|(name, paths)| {

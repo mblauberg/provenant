@@ -1082,7 +1082,9 @@ mod response_tests {
     fn batch_target_derives_from_the_consensus_member_base()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::pr::landing::fakes::FakeForge;
-        use crate::pr::landing::ports::{Forge as _, PullRequestInfo, PullRequestState};
+        use crate::pr::landing::ports::{
+            Forge as _, Mergeability, PullRequestInfo, PullRequestState,
+        };
         use provenant_records::Layer;
         let mut forge = FakeForge::default();
         for (number, base) in [(1, "release"), (2, "release"), (3, "main")] {
@@ -1094,6 +1096,7 @@ mod response_tests {
                     base_branch: base.into(),
                     author: "author".into(),
                     state: PullRequestState::Open,
+                    mergeability: Mergeability::Unknown,
                     merged_commit: None,
                     stack: None,
                     draft: false,

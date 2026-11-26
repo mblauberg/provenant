@@ -27,6 +27,9 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
             std::slice::from_ref(&cmd.target),
             crate::fabric::GraphCommand::Stop {
                 reason: cmd.reason.as_deref(),
+                queue_control: cmd.queue_control,
+                queue_revision: cmd.queue_revision,
+                operation_id: cmd.operation_id.as_ref(),
             },
             globals,
             process.workers(),

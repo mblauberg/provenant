@@ -40,6 +40,11 @@ plan = false
 [batch]
 max_parallel = 4 # cap on concurrent slices running at once, 1-64
 
+[queue]
+max_parallel = 4 # active delivery item graphs; must be positive, 1-64
+ci_slots = 1 # shared CI observation admission slots; 0 disables the cap, 0-64
+prep_retries = 2 # launch preparation retries before parking, 0-64
+
 [plan]
 mode = "auto" # auto, on or off; --plan overrides it
 route = "principal" # route alias the planner node runs on
