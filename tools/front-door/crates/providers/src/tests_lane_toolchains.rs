@@ -683,7 +683,7 @@ fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
         let mut route = route(id, "fixture-model");
         route.account_key = None;
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
-            let plan = fixture_access_plan(access, declared.authentication, false);
+            let plan = fixture_access_plan(access, declared.login.authentication, false);
             let launch = entry.adapter.prepare(fixture_input(
                 &route,
                 &plan,
@@ -885,7 +885,7 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
         .iter()
         .filter(|spec| spec.install.is_some() && spec.capabilities.launch.model.value)
     {
-        let id = declared.name;
+        let id = declared.identity.name;
         let adapter = REGISTRY
             .iter()
             .find(|entry| entry.adapter.id() == id)
@@ -939,7 +939,7 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
             for session in [Session::Fresh, Session::Resume] {
                 let plan = fixture_access_plan(
                     access,
-                    declared.authentication,
+                    declared.login.authentication,
                     session == Session::Resume,
                 );
                 let mut input = fixture_input(

@@ -78,10 +78,10 @@ pub fn defaults() -> BTreeMap<String, ProviderSettings> {
         .iter()
         .map(|provider| {
             let mut settings = ProviderSettings::default();
-            if let Some(models) = provider.default_models {
+            if let Some(models) = provider.identity.default_models {
                 settings.models = Some(models.iter().map(|model| (*model).to_owned()).collect());
             }
-            (provider.name.to_owned(), settings)
+            (provider.identity.name.to_owned(), settings)
         })
         .collect()
 }
@@ -235,5 +235,25 @@ mod tests {
             provenant_records::warning::capture(|| settings.version_probe_timeout("codex"));
         assert_eq!(timeout, Duration::from_secs(9));
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn compiled_defaults_seed_models_from_the_declared_adapter_identity() {
+        let defaults = super::defaults();
+        assert_eq!(defaults.len(), provenant_records::ADAPTER_SPECS.len());
+        // Cursor declares its model patterns on AdapterSpec.identity; the
+        // compiled defaults must seed them under the identity's name.
+        let cursor = defaults.get("cursor").expect("cursor default settings");
+        assert_eq!(
+            cursor.models,
+            Some(vec![
+                "auto".to_owned(),
+                "composer-*".to_owned(),
+                "grok-*".to_owned()
+            ])
+        );
+        // An adapter with no declared defaults keeps the unrestricted setting.
+        let claude = defaults.get("claude").expect("claude default settings");
+        assert!(claude.models.is_none());
     }
 }

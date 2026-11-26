@@ -1321,7 +1321,7 @@ pub fn resolve_review_family(
                         }
                         if accounts.is_empty() {
                             return provenant_records::AdapterSpec::get(&selected.adapter)
-                                .map(|adapter| adapter.family.to_owned())
+                                .map(|adapter| adapter.identity.family.to_owned())
                                 .ok_or_else(|| {
                                     RoutingError::unknown_adapter(&selected.adapter).into()
                                 });

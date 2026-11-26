@@ -22,7 +22,7 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
         };
         for &access in accesses {
             for &network in declaration.capabilities.launch.network {
-                let base = fixture_network_plan(access, declaration.authentication, network);
+                let base = fixture_network_plan(access, declaration.login.authentication, network);
                 let mut permissions = base.permissions().clone();
                 for name in provenant_core::CARGO_CREDENTIAL_FILES {
                     permissions.credential_roots.add(
@@ -47,7 +47,7 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
                     agy_state: None,
                 })?;
                 let mut route = route(
-                    declaration.name,
+                    declaration.identity.name,
                     if declaration.capabilities.launch.model.value {
                         "fixture-model"
                     } else {
@@ -75,7 +75,7 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
                 let hook_binary = input.provenant.executable;
                 let hook_state = input.provenant.state;
                 let launch = entry.adapter.prepare(input)?;
-                let context = format!("{} {access:?} {network:?}", declaration.name);
+                let context = format!("{} {access:?} {network:?}", declaration.identity.name);
                 if let Some(install) = declaration.install {
                     if let Some(instruction) = install.instruction_file {
                         assert!(install.native.instructions.value, "{context}");

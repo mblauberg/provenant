@@ -6783,11 +6783,11 @@ mod user_skills_tests {
         let prompt = Prompt::new("fixture".into());
         for adapter in provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|entry| entry.skills.is_some())
+            .filter(|entry| entry.launch.skill_location.is_some())
         {
-            let root = base.join(adapter.name);
+            let root = base.join(adapter.identity.name);
             let home = root.join("home");
-            let skills = match adapter.name {
+            let skills = match adapter.identity.name {
                 "claude" => home.join(".claude/skills"),
                 "codex" => home.join(".agents/skills"),
                 "cursor" => home.join(".cursor/skills"),
@@ -6803,7 +6803,7 @@ mod user_skills_tests {
                 path,
                 scope: PathScope::Subtree,
             };
-            let auth = match adapter.name {
+            let auth = match adapter.identity.name {
                 "codex" | "cursor" | "opencode" => Some("login".into()),
                 "agy" => Some("keychain".into()),
                 _ => None,
@@ -6836,7 +6836,7 @@ mod user_skills_tests {
                 user_skills: true,
                 access: provenant_records::LaneAccess::Isolated,
                 extra: Default::default(),
-                adapter: adapter.name.into(),
+                adapter: adapter.identity.name.into(),
                 model: "fixture".into(),
                 effort: None,
                 catalogue_revision: "fixture".into(),
@@ -6859,7 +6859,7 @@ mod user_skills_tests {
             };
             let provider = provenant_providers::REGISTRY
                 .iter()
-                .find(|entry| entry.adapter.id() == adapter.name)
+                .find(|entry| entry.adapter.id() == adapter.identity.name)
                 .ok_or("adapter")?
                 .adapter;
             for writer in [false, true] {
@@ -6933,7 +6933,7 @@ mod user_skills_tests {
                         receipt["exposed"],
                         state == "discover",
                         "{} {state}",
-                        adapter.name
+                        adapter.identity.name
                     );
                     if let Some(stage) = &spec.user_skills.root {
                         assert!(
@@ -6951,7 +6951,7 @@ mod user_skills_tests {
                                     && (read.scope != PathScope::Subtree
                                         || !skills.starts_with(&read.path))),
                             "{}: {:?}",
-                            adapter.name,
+                            adapter.identity.name,
                             spec.profile.spec.runtime_reads
                         );
                         assert!(spec.setup.iter().any(

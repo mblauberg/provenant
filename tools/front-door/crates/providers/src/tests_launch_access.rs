@@ -302,7 +302,7 @@ fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<()
         }) {
             let id = entry.adapter.id();
             let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
-            let authentication = declaration.authentication;
+            let authentication = declaration.login.authentication;
             let plan = fixture_access_plan(access, authentication, false);
             let mut route = route(id, "fixture-model");
             route.account_key = None;
@@ -459,7 +459,7 @@ fn model_adapters_follow_declared_prompt_transport_without_exposing_tokens()
         let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
         let mut route = route(id, "fixture-model");
         route.account_key = None;
-        let plan = read_only_plan("/fixture", declaration.authentication);
+        let plan = read_only_plan("/fixture", declaration.login.authentication);
         let prepared = entry.adapter.prepare(fixture_input(
             &route,
             &plan,
@@ -533,7 +533,7 @@ fn read_only_launch_requires_cwd_inside_a_declared_read_root() -> Result<(), Pro
     }) {
         let id = entry.adapter.id();
         let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
-        let plan = read_only_plan("/fixture", declaration.authentication);
+        let plan = read_only_plan("/fixture", declaration.login.authentication);
         let mut route = route(id, "fixture-model");
         route.account_key = None;
         assert!(matches!(

@@ -1413,7 +1413,7 @@ fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, P
             "LANE_LANERUNTIME_HOOK_PROJECTION",
             format!(
                 "{} {detail}; continuing without its lane hooks",
-                adapter.name
+                adapter.identity.name
             ),
         )
     };

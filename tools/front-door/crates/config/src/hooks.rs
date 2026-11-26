@@ -765,7 +765,7 @@ mod tests {
                 native.len(),
                 declared_native.len(),
                 "{} native",
-                adapter.name
+                adapter.identity.name
             );
             for (action, event, matcher, timeout) in declared_native {
                 assert_eq!(
@@ -780,14 +780,19 @@ mod tests {
                         .count(),
                     1,
                     "{} {:?}",
-                    adapter.name,
+                    adapter.identity.name,
                     action
                 );
             }
 
             let lane = registrations_for(&[adapter.id], true);
             let declared_lane = declared(adapter.id, true);
-            assert_eq!(lane.len(), declared_lane.len(), "{} lane", adapter.name);
+            assert_eq!(
+                lane.len(),
+                declared_lane.len(),
+                "{} lane",
+                adapter.identity.name
+            );
             for (action, event, matcher, timeout) in declared_lane {
                 assert_eq!(
                     lane.iter()
@@ -800,7 +805,7 @@ mod tests {
                         .count(),
                     1,
                     "{} lane {:?}",
-                    adapter.name,
+                    adapter.identity.name,
                     action
                 );
             }
@@ -818,7 +823,7 @@ mod tests {
                     assert!(
                         source.contains(&encoded),
                         "{} {:?}",
-                        adapter.name,
+                        adapter.identity.name,
                         row.action
                     );
                 }
@@ -830,7 +835,7 @@ mod tests {
                     assert!(
                         !source.contains(&format!("\"action\":\"{}\"", action.command())),
                         "{} {:?}",
-                        adapter.name,
+                        adapter.identity.name,
                         action
                     );
                 }

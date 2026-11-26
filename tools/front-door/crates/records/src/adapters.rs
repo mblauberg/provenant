@@ -2519,7 +2519,7 @@ mod tests {
             assert_eq!(
                 ADAPTER_SPECS
                     .iter()
-                    .filter(|row| row.name == spec.identity.name)
+                    .filter(|row| row.identity.name == spec.identity.name)
                     .count(),
                 1
             );

@@ -1760,7 +1760,7 @@ mod tests {
             .ok_or("adapter")?;
         let base = crate::tests::fixture_access_plan(
             crate::Access::WorktreeWrite,
-            provenant_records::AdapterSpec::get(adapter).and_then(|s| s.authentication),
+            provenant_records::AdapterSpec::get(adapter).and_then(|s| s.login.authentication),
             false,
         );
         let mut permissions = base.permissions().clone();
