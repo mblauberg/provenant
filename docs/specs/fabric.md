@@ -133,7 +133,8 @@ be present with budget left before any effect, so a timed-out call cannot commit
 The CLI and the relay render one typed category per error. A lane-side graph
 call is sent only after the kernel-supplied relay peer is proved to be the
 caller's live guardian ancestor. The proof follows the kernel-reported parent
-chain with exact current identities and strictly older start stamps; a scoped
+chain with exact current identities and rechecks each child identity and parent
+PID while walking; process start timestamps do not determine ancestry. A scoped
 or host-wide census is neither required nor consulted, so an inconclusive or
 unavailable census cannot present a healthy relay as replaced. Settlement reactions (graph advance, chair notice,
 chair log) run once in effect, and notices never instruct.

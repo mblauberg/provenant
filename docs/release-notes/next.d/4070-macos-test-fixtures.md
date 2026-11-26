@@ -2,7 +2,7 @@
 
 ### Pipelines and graphs
 
-- Lane-side graph calls no longer report `relay_peer_refused` when a macOS process census is unavailable or inconclusive. The relay proves ancestry from the kernel-reported parent chain with exact live identities and strictly older start stamps, so a healthy host guardian is not mistaken for a replaced socket owner. (#4070)
+- Lane-side graph calls no longer report `relay_peer_refused` when a macOS process census is unavailable or inconclusive. The relay proves ancestry from the kernel-reported parent chain with exact live identities and stable parent links, without relying on process start timestamp ordering. (#4070)
 
 ### Tests
 

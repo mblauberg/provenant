@@ -48,8 +48,9 @@ fn caller_is_guardian_descendant_with(
     // host-wide census is not needed for this proof and can omit a process
     // that churned or was unreadable while the chain to this guardian stays
     // intact, which used to surface as `relay_peer_refused` on macOS. Every
-    // accepted edge still carries the current identity and a strictly older
-    // start stamp, so a replaced ancestor remains a refusal.
+    // accepted edge is rechecked against the child's current identity and
+    // parent PID. Start timestamps are not an ancestry proof and may have
+    // insufficient precision to order processes created close together.
     let mut current = peer_now;
     for _ in 0..MAX_CENSUS_ENTRIES {
         if current.identity.pid == guardian.pid {
@@ -62,9 +63,14 @@ fn caller_is_guardian_descendant_with(
         let ProcessObservation::Present(parent) = observer.observe(parent_pid) else {
             return false;
         };
+        let ProcessObservation::Present(current_now) = observer.observe(current.identity.pid)
+        else {
+            return false;
+        };
         if parent.identity.pid != parent_pid
             || parent.identity.boot != guardian.boot
-            || parent.identity.native_start >= current.identity.native_start
+            || current_now.identity != current.identity
+            || current_now.parent_pid != parent_pid
         {
             return false;
         }
@@ -259,6 +265,25 @@ mod tests {
         assert!(!caller_is_guardian_descendant_with(
             &outsider,
             Some(sibling.pid),
+            Some(&guardian),
+        ));
+    }
+
+    /// Darwin process start timestamps may not distinguish rapidly created
+    /// processes. Stable kernel parent links and exact identities carry the
+    /// ancestry proof without imposing a timestamp ordering.
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
+    #[test]
+    fn live_parent_chain_does_not_depend_on_start_timestamp_order() {
+        let guardian = identity(10, 20);
+        let child = identity(11, 10);
+        let observer = ChainObserver {
+            facts: vec![fact(guardian.clone(), 1), fact(child.clone(), guardian.pid)],
+        };
+
+        assert!(caller_is_guardian_descendant_with(
+            &observer,
+            Some(child.pid),
             Some(&guardian),
         ));
     }
