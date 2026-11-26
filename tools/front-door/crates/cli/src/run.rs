@@ -1043,7 +1043,7 @@ impl Registry<'_> {
         };
         let model_observation = provenant_records::AdapterSpec::get(adapter.id())
             .map(|spec| spec.capabilities.answering_model.value)
-            .unwrap_or(provenant_records::AnsweringModelSource::Stream);
+            .unwrap_or(provenant_records::AnsweringModelSource::Unreported);
         let model = stream_model(route);
         // A caller without a sealed task policy receives the compiled table;
         // there is no host or project layer to overlay in that case.

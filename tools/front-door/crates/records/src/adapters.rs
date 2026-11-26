@@ -153,6 +153,8 @@ pub enum AnsweringModelSource {
     Stream,
     Rollout,
     SessionDatabase,
+    /// The adapter reports no answering model at all.
+    Unreported,
 }
 
 /// Location of a provider's user skill tree relative to the host home or an
@@ -220,6 +222,8 @@ impl AdapterFact<bool> {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalEventStrength {
+    /// The provider's terminal event states success or failure, and it
+    /// outranks a clean exit.
     Strong,
     Weak,
     Absent,
@@ -228,6 +232,23 @@ pub enum TerminalEventStrength {
 pub enum UsageAttribution {
     Attempt,
     Session,
+}
+/// How the provider session id is learned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionReference {
+    /// The decoder emits a provider session event.
+    Reported,
+    /// The session id is inferred from other evidence.
+    Inferred,
+    /// No provider session id is available.
+    Absent,
+}
+/// A known adapter limitation, shown in diagnostics and the capability matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caveat {
+    pub code: &'static str,
+    pub note: &'static str,
+    pub source: &'static str,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetainedArtifact {
@@ -850,6 +871,8 @@ pub struct Capabilities {
     pub answering_model: AdapterFact<AnsweringModelSource>,
     pub usage_attribution: AdapterFact<UsageAttribution>,
     pub live_input: AdapterFact<bool>,
+    pub session_reference: AdapterFact<SessionReference>,
+    pub caveats: &'static [Caveat],
 }
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LaunchRequest<'a> {
@@ -1202,6 +1225,8 @@ adapter_specs! { $;
             answering_model: AdapterFact::row(AnsweringModelSource::Stream),
             usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
             live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::row(SessionReference::Reported),
+            caveats: &[],
         },
         retention: Retention { transcript_layout: AdapterFact::supported(), artifacts: &[] , relocated_session_state: true, sessions_only: false, transcript_account_root: true },
     },
@@ -1347,6 +1372,8 @@ adapter_specs! { $;
             answering_model: AdapterFact::row(AnsweringModelSource::Rollout),
             usage_attribution: AdapterFact::because(UsageAttribution::Session, "codex usage totals are session-wide unless marked per attempt", "crates/run/src/holder.rs"),
             live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::row(SessionReference::Reported),
+            caveats: &[],
         },
         retention: Retention { transcript_layout: AdapterFact::supported(), artifacts: &[] , relocated_session_state: false, sessions_only: true, transcript_account_root: false },
     },
@@ -1484,6 +1511,8 @@ adapter_specs! { $;
             answering_model: AdapterFact::row(AnsweringModelSource::Stream),
             usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
             live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::row(SessionReference::Reported),
+            caveats: &[],
         },
         retention: Retention { transcript_layout: AdapterFact::supported(), artifacts: &[RetainedArtifact { parent: ".cursor", name: "chats", scrub: &[] }] , relocated_session_state: true, sessions_only: false, transcript_account_root: false },
     },
@@ -1625,6 +1654,8 @@ adapter_specs! { $;
             answering_model: AdapterFact::row(AnsweringModelSource::Stream),
             usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
             live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::row(SessionReference::Reported),
+            caveats: &[],
         },
         retention: Retention { transcript_layout: AdapterFact::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] , relocated_session_state: false, sessions_only: false, transcript_account_root: false },
     },
@@ -1767,6 +1798,8 @@ adapter_specs! { $;
             answering_model: AdapterFact::row(AnsweringModelSource::SessionDatabase),
             usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
             live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::row(SessionReference::Reported),
+            caveats: &[],
         },
         retention: Retention { transcript_layout: AdapterFact::supported(), artifacts: &[RetainedArtifact { parent: "data", name: "opencode", scrub: &["auth.json"] }] , relocated_session_state: true, sessions_only: false, transcript_account_root: false },
     },
@@ -1876,9 +1909,11 @@ adapter_specs! { $;
                 chair: ControlSupport::Unsupported,
             },
             terminal_event: AdapterFact::because(TerminalEventStrength::Absent, "process exit is the contract for raw output", ADAPTER_ROW_SOURCE),
-            answering_model: AdapterFact::because(AnsweringModelSource::Stream, "configured commands report no model; stream is the neutral default", ADAPTER_ROW_SOURCE),
+            answering_model: AdapterFact::because(AnsweringModelSource::Unreported, "configured commands report no model", ADAPTER_ROW_SOURCE),
             usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
             live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::because(SessionReference::Absent, "raw output carries no session id", ADAPTER_ROW_SOURCE),
+            caveats: &[],
         },
         retention: Retention { transcript_layout: AdapterFact::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] , relocated_session_state: false, sessions_only: false, transcript_account_root: false },
     },
@@ -1993,6 +2028,8 @@ adapter_specs! { $;
             answering_model: AdapterFact::row(AnsweringModelSource::Stream),
             usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
             live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::because(SessionReference::Absent, "the delegated adapter reports no provider session id", ADAPTER_ROW_SOURCE),
+            caveats: &[],
         },
         retention: Retention { transcript_layout: AdapterFact::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] , relocated_session_state: false, sessions_only: false, transcript_account_root: false },
     },
@@ -2106,6 +2143,8 @@ adapter_specs! { $;
             answering_model: AdapterFact::row(AnsweringModelSource::Stream),
             usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
             live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::because(SessionReference::Absent, "the delegated adapter reports no provider session id", ADAPTER_ROW_SOURCE),
+            caveats: &[],
         },
         retention: Retention { transcript_layout: AdapterFact::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] , relocated_session_state: false, sessions_only: false, transcript_account_root: false },
     },

@@ -45,6 +45,7 @@ fn answering_declaration(value: AdapterFact<AnsweringModelSource>) -> Value {
         AnsweringModelSource::Stream => "stream",
         AnsweringModelSource::Rollout => "rollout",
         AnsweringModelSource::SessionDatabase => "session_database",
+        AnsweringModelSource::Unreported => "unreported",
     };
     declaration(json!(name), value.reason, value.source)
 }
@@ -80,6 +81,7 @@ fn status_name(value: CompatibilityStatus) -> &'static str {
         CompatibilityStatus::Unsupported => "unsupported",
         CompatibilityStatus::Broken => "broken",
         CompatibilityStatus::VersionUnread => "version_unread",
+        CompatibilityStatus::Unlisted => "unlisted",
     }
 }
 
@@ -344,6 +346,7 @@ pub fn markdown() -> String {
                 AnsweringModelSource::Stream => "stream",
                 AnsweringModelSource::Rollout => "rollout",
                 AnsweringModelSource::SessionDatabase => "session_database",
+                AnsweringModelSource::Unreported => "unreported",
             },
             match spec.capabilities.usage_attribution.value {
                 UsageAttribution::Attempt => "attempt",

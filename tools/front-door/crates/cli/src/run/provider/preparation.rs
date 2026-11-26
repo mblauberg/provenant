@@ -5104,6 +5104,7 @@ pub(super) fn prepare_candidates_inner(
                 Status::Unsupported => "unsupported",
                 Status::Broken => "broken",
                 Status::VersionUnread => "version_unread",
+                Status::Unlisted => "unlisted",
             };
             let mut detail = format!(
                 "{} {} is {}",

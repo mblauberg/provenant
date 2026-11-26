@@ -581,6 +581,7 @@ fn status_text(status: CompatibilityStatus) -> &'static str {
         CompatibilityStatus::Unsupported => "unsupported",
         CompatibilityStatus::Broken => "broken",
         CompatibilityStatus::VersionUnread => "version_unread",
+        CompatibilityStatus::Unlisted => "unlisted",
     }
 }
 
