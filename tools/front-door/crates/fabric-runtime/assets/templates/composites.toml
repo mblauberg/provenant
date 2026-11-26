@@ -102,7 +102,7 @@ nodes = [
   # TODO(#3972-s3): publish binds the PR, issue, branch, worktree and head.
   { id = "publish", role = "delivery-publish", when = { delivery_execution_wired = true }, access = "read_only", after = ["hygiene", "implement"], source = { type = "node", node = "implement" }, prompt = "Publish the writer's branch as a pull request and record its repository, branch and current head." },
   # TODO(#3972-s3): observe PR mergeability; unknown is pending, not clean.
-  { id = "conflict", role = "delivery-conflict", when = { delivery_execution_wired = true }, access = "read_only", after = ["publish", "implement"], source = { type = "node", node = "implement" }, prompt = "Observe the pull request mergeability before waiting for CI. CONFLICTING routes to a rebase writer on the same retained worktree; unknown mergeability stays pending." },
+  { id = "conflict", role = "delivery-conflict", when = { delivery_execution_wired = true }, access = "read_only", after = ["publish", "implement"], source = { type = "node", node = "implement" }, prompt = "Observe the pull request mergeability before waiting for CI. CONFLICTING routes to a writer on the same retained worktree to merge the base into the branch; never rebase pushed history. Unknown mergeability stays pending." },
   # One composite represents the CI outcome. Its successful export is either
   # the initial green gate or the bounded repair loop's green recheck; the
   # skipped alternative is expected, while failure of both paths fails the

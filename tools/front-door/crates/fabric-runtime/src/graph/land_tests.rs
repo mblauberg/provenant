@@ -664,7 +664,7 @@ fn queue_publish_document(tier: &str) -> GraphDocument {
     // which may fail to activate the loop.
     let recovery_body = json!([
        {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
-        "prompt":"rebase the published branch", "route":{"alias":"senior"},
+        "prompt":"merge the base into the published branch", "route":{"alias":"senior"},
         "source":{"type":"node","node":"previous.verified_clean"},
         "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}]},
        {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
@@ -951,7 +951,7 @@ fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
               "previous_bindings":{"refresh":"publish","verified_clean":"hygiene"},
               "body":[
                 {"id":"fix", "access":"worktree_write", "worktree":worktree,
-                 "prompt":"rebase the retained published branch", "write_scope":["src"],
+                 "prompt":"merge the base into the retained published branch", "write_scope":["src"],
                  "route":{"alias":"senior"},
                  "source":{"type":"node","node":"previous.verified_clean"},
                  "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}]},
@@ -1009,12 +1009,12 @@ fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
             {"id":"writer_bundle", "kind":"composite", "access":"read_only",
              "composite":{"nodes":[
                 {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
-                 "prompt":"rebase the retained published branch", "write_scope":["src"],
+                 "prompt":"merge the base into the retained published branch", "write_scope":["src"],
                  "route":{"alias":"senior"},
                  "source":{"type":"node","node":"previous.verified_clean"},
                  "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}]},
                 {"id":"followup", "access":"worktree_write", "worktree":"/wt/feature",
-                 "prompt":"finish the rebase", "write_scope":["src"],
+                 "prompt":"finish the merge", "write_scope":["src"],
                  "route":{"alias":"senior"}, "depends_on":["fix"],
                  "source":{"type":"node","node":"fix"}}
              ], "exports":[{"node":"followup","outputs":["branch","commit","result"]}]}},
@@ -1046,7 +1046,7 @@ fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
         "id":"rebase", "kind":"composite", "access":"read_only",
         "depends_on":["conflict"], "composite":{"nodes":[
             {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
-             "prompt":"rebase the retained published branch", "write_scope":["src"],
+             "prompt":"merge the base into the retained published branch", "write_scope":["src"],
              "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"}},
             {"id":"unbound", "access":"worktree_write", "worktree":"/wt/feature",
              "prompt":"write without the published head", "write_scope":["src"],

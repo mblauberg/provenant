@@ -223,7 +223,9 @@ fn ci_outcomes_are_recorded_and_fail_closed() {
         (
             CiState::Conflict,
             NodeState::Failed,
-            Some("conflict; next: rebase the branch onto its base and push"),
+            Some(
+                "conflict; next: merge the base into the branch; never rebase pushed history; then push",
+            ),
         ),
         (
             CiState::NotScheduled,
@@ -302,7 +304,7 @@ fn conflict_document() -> GraphDocument {
             "id":"rebase",
             "access":"worktree_write",
             "worktree":"retained",
-            "prompt":"Rebase the retained branch",
+            "prompt":"Merge the base into the retained branch",
             "depends_on":["conflict"],
             "route":{"adapter":"fixture","model":"fixture/model"}
         }]
@@ -382,7 +384,9 @@ fn conflict_gate_only_routes_definite_conflicts_and_replays_pending_heads() {
     );
     assert_eq!(
         conflict.gate.as_ref().unwrap().reason.as_deref(),
-        Some("conflicting; next: rebase the branch onto its base and push")
+        Some(
+            "conflicting; next: merge the base into the branch; never rebase pushed history; then push"
+        )
     );
     assert_eq!(
         conflict.conflict.as_ref().unwrap().state,
@@ -390,7 +394,7 @@ fn conflict_gate_only_routes_definite_conflicts_and_replays_pending_heads() {
     );
     assert_eq!(final_run.checkpoint.nodes[1].state, NodeState::Succeeded);
     assert_eq!(owner.attempts, 1);
-    assert_eq!(owner.prompts, ["Rebase the retained branch"]);
+    assert_eq!(owner.prompts, ["Merge the base into the retained branch"]);
 }
 
 #[test]
@@ -1102,7 +1106,7 @@ fn queue_published_document() -> GraphDocument {
              "depends_on":["hygiene"],"source":{"type":"node","node":"hygiene"}},
             {"id":"conflict","kind":"gate","access":"read_only","depends_on":["publish"],
              "on_fail":"rebase","condition":{"type":"conflict","target":{"node":"publish"}}},
-            {"id":"rebase","access":"worktree_write","worktree":"lane","prompt":"rebase",
+            {"id":"rebase","access":"worktree_write","worktree":"lane","prompt":"merge the base",
              "source":{"type":"head","node":"publish"},"depends_on":["conflict"],
              "route":{"adapter":"fixture","model":"fixture/model"}},
             {"id":"ci","kind":"gate","access":"read_only","depends_on":["conflict","publish"],
@@ -1128,7 +1132,7 @@ fn queue_published_document() -> GraphDocument {
               "previous_bindings":{"refresh":"publish_after_rebase"},"body":[
                 {"id":"refresh_conflict_initial","kind":"gate","access":"read_only","on_fail":"fix",
                  "condition":{"type":"conflict","target":{"node":"previous.refresh"}}},
-                {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"rebase the fresh publication",
+                {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"merge the base into the fresh publication",
                  "source":{"type":"head","node":"previous.refresh"},"depends_on":["refresh_conflict_initial"],
                  "route":{"adapter":"fixture","model":"fixture/model"}},
                 {"id":"hygiene","kind":"hygiene","access":"worktree_write","worktree":"lane",
@@ -1226,7 +1230,7 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
                  "on_fail":"rebase","condition":{"type":"conflict","target":{"node":"publish"}}},
                 {"id":"rebase","kind":"composite","access":"read_only","depends_on":["conflict"],
                  "composite":{"nodes":[
-                    {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"rebase",
+                    {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"merge the base",
                      "source":{"type":"head","node":"publish"},
                      "route":{"adapter":"fixture","model":"fixture/model"}}
                  ],"exports":[{"node":"fix","outputs":["result","branch","commit"]}]}},
@@ -1380,7 +1384,7 @@ fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
               "previous_bindings":{"republish":"publish"},"body":[
                 {"id":"conflict","kind":"gate","access":"read_only","on_fail":"fix",
                  "condition":{"type":"conflict","target":{"node":"previous.republish"}}},
-                {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"rebase",
+                {"id":"fix","access":"worktree_write","worktree":"lane","prompt":"merge the base",
                  "source":{"type":"head","node":"previous.republish"},"depends_on":["conflict"],
                  "route":{"adapter":"fixture","model":"fixture/model"}},
                 {"id":"hygiene","kind":"hygiene","access":"worktree_write","worktree":"lane",
@@ -1737,7 +1741,7 @@ fn conflict_node_target_does_not_rebase_a_different_head() {
     doc.nodes.push(
         serde_json::from_value(serde_json::json!({
             "id":"rebase","access":"worktree_write","worktree":"lane",
-            "prompt":"Rebase the retained branch","depends_on":["ci"],
+            "prompt":"Merge the base into the retained branch","depends_on":["ci"],
             "route":{"adapter":"fixture","model":"fixture/model"}
         }))
         .unwrap(),

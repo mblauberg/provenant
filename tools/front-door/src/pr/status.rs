@@ -475,7 +475,7 @@ fn display_check_url(url: &str) -> Option<String> {
 }
 
 /// Report conflicts even if a check result exists: the conflict gate runs
-/// before CI and routes the retained writer to rebase.
+/// before CI and routes the retained writer to merge the base.
 fn mark_conflict(
     observation: &mut provenant_fabric_runtime::graph::CiObservation,
     read_mergeable: impl FnOnce() -> Option<String>,
@@ -484,9 +484,10 @@ fn mark_conflict(
     if read_mergeable().as_deref() == Some("CONFLICTING") {
         observation.state = CiState::Conflict;
         observation.failed_checks.clear();
-        observation.summary =
-            "pull request conflicts with its base; next: rebase the branch onto its base and push"
-                .into();
+        observation.summary = format!(
+            "pull request conflicts with its base; next: {}",
+            provenant_fabric_runtime::graph::CONFLICT_GUIDANCE
+        );
     }
 }
 

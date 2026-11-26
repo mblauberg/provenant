@@ -128,6 +128,10 @@ use budget::*;
 pub use journal::*;
 pub use model::*;
 
+/// Shared recovery guidance for a pull request that conflicts with its base.
+pub const CONFLICT_GUIDANCE: &str =
+    "merge the base into the branch; never rebase pushed history; then push";
+
 /// Review identity follows the launched node, including runtime expansions.
 /// `plan.review` frames the subject rather than reviewing it.
 pub fn is_review_node(node: &GraphNode) -> bool {

@@ -231,7 +231,7 @@ pub(super) fn queue_conflict_recheck(
         .as_ref()
         .and_then(|target| positions.get(target))
         .copied()
-        .ok_or("queue conflict gate has no rebase writer")?;
+        .ok_or("queue conflict gate has no merge-base writer")?;
     let recovery_container =
         plan.nodes[rebase].composite.is_some() || plan.nodes[rebase].loop_body.is_some();
     if (!plans::writer(&plan.nodes[rebase]) && !recovery_container)

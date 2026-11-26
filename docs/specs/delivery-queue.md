@@ -102,8 +102,9 @@ For each item, the default `deliver` shape is optional scope → writer → hygi
 gate observes the PR before waiting for CI. `CONFLICTING` routes to a conflict
 writer on the same retained worktree that merges the base branch into the
 delivery branch, then hygiene, publication and fresh
-conflict/CI gates. Never rebase a conflicting delivery branch. Checkpoint
-validation uses the planned recovery path to keep
+conflict/CI gates. Never rebase a conflicting delivery branch. Conflict diagnostics
+direct operators to merge the base into the branch and never rebase pushed history.
+Checkpoint validation uses the planned recovery path to keep
 an initial conflict nonterminal while that path is pending. Unknown mergeability
 is pending, not clean. If the head moves
 while mergeability is read, the observation is pending on the new head and

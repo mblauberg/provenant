@@ -74,7 +74,7 @@ fn wait_for_rate_limit(result: &mut CiObservation, reset: jiff::Timestamp) {
     result.failed_checks.clear();
 }
 
-/// Read mergeability before CI so a conflict is routed to rebase immediately.
+/// Read mergeability before CI so a conflict is routed to merge the base immediately.
 pub(super) fn observe_conflict(state: &Path, project: &Path, target: &str) -> ConflictObservation {
     let read = |args: &[&str]| {
         super::super::successful(
@@ -760,7 +760,7 @@ mod tests {
             assert_eq!(observation.state, expected, "{check_pages} {mergeable}");
             assert_eq!(observation.head_sha.as_deref(), Some(OLD));
             match expected {
-                CiState::Conflict => assert!(observation.summary.contains("next: rebase")),
+                CiState::Conflict => assert!(observation.summary.contains("next: merge the base into the branch; never rebase pushed history")),
                 CiState::Pending => assert!(observation.summary.ends_with(
                     "awaiting check registration next: check the workflow triggers or push an empty commit to start CI"
                 )),

@@ -2162,7 +2162,7 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
                 {"id":"conflict","kind":"gate","access":"read_only","on_fail":"rebase",
                  "condition":{"type":"conflict","target":{"node":"previous.rebase_publish"}}},
                 {"id":"rebase","access":"worktree_write","worktree":"/fixture/writer",
-                 "prompt":"rebase the retained worktree","write_scope":["src"],
+                 "prompt":"merge the base into the retained worktree","write_scope":["src"],
                  "route":{"alias":"senior"},"depends_on":["conflict"],
                  "source":{"type":"head","node":"previous.rebase_publish"}},
                 {"id":"rebase_hygiene","kind":"hygiene","access":"worktree_write",
@@ -2247,7 +2247,7 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
     assert_eq!(
         dependency_state(&plan.nodes[rebase_index], &plan, &checkpoint, &positions),
         None,
-        "the failed conflict gate activates the same-round rebase writer"
+        "the failed conflict gate activates the same-round merge writer"
     );
     let replay: GraphCheckpoint =
         serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
@@ -2264,7 +2264,7 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
     assert_eq!(
         dependency_state(&plan.nodes[rebase_index], &plan, &checkpoint, &positions),
         Some(NodeState::Skipped),
-        "the rebase writer is inactive when the conflict gate is clear"
+        "the merge writer is inactive when the conflict gate is clear"
     );
 
     let next_round_conflict = positions["delivery--r2--conflict"];
@@ -2317,7 +2317,7 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
             &failed_writer,
             &positions,
         ),
-        "a failed rebase operation is terminal, not a conflict retry"
+        "a failed merge operation is terminal, not a conflict retry"
     );
     assert_eq!(
         dependency_state(

@@ -518,7 +518,11 @@ fn failed_policy_lookup_uses_all_reported_checks() {
         || Some("CONFLICTING".into()),
     );
     assert_eq!(conflict.state, CiState::Conflict);
-    assert!(conflict.summary.contains("next: rebase"));
+    assert!(
+        conflict
+            .summary
+            .contains("next: merge the base into the branch; never rebase pushed history")
+    );
     // A conflict gate runs before CI even if stale check evidence is present.
     let failed = observe_ci_with(
         &[],
@@ -533,7 +537,11 @@ fn failed_policy_lookup_uses_all_reported_checks() {
         || Some("CONFLICTING".into()),
     );
     assert_eq!(failed.state, CiState::Conflict);
-    assert!(failed.summary.contains("next: rebase"));
+    assert!(
+        failed
+            .summary
+            .contains("next: merge the base into the branch; never rebase pushed history")
+    );
 
     let unreadable_queue_policy = observe_ci_with(
         &[],

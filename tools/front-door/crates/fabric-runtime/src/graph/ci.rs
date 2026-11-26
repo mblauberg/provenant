@@ -461,9 +461,10 @@ pub(super) fn evaluate<O: AttemptOwner>(
         CiState::Passed => Evaluation::Settled(None),
         CiState::Failed => Evaluation::Settled(Some("failed".into())),
         CiState::Unavailable => Evaluation::Settled(Some("unavailable".into())),
-        CiState::Conflict => Evaluation::Settled(Some(
-            "conflict; next: rebase the branch onto its base and push".into(),
-        )),
+        CiState::Conflict => Evaluation::Settled(Some(format!(
+            "conflict; next: {}",
+            super::CONFLICT_GUIDANCE
+        ))),
         CiState::NotScheduled => Evaluation::Settled(Some(NOT_SCHEDULED.into())),
     })
 }
@@ -583,9 +584,10 @@ pub(super) fn evaluate_conflict<O: AttemptOwner>(
             Evaluation::Pending
         }
         ConflictState::Clear => Evaluation::Settled(None),
-        ConflictState::Conflicting => Evaluation::Settled(Some(
-            "conflicting; next: rebase the branch onto its base and push".into(),
-        )),
+        ConflictState::Conflicting => Evaluation::Settled(Some(format!(
+            "conflicting; next: {}",
+            super::CONFLICT_GUIDANCE
+        ))),
     })
 }
 

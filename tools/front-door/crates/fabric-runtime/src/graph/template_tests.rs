@@ -2260,7 +2260,7 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
                             "previous_bindings":{"refresh":"publish", "verified_clean":"hygiene"},
                             "body":[
                                 {"id":"fix", "access":"worktree_write", "worktree":"/fixture/writer",
-                                    "prompt":"rebase the retained branch", "route":{"alias":"senior"},
+                                    "prompt":"merge the base into the retained branch", "route":{"alias":"senior"},
                                     "source":{"type":"node", "node":"previous.verified_clean"},
                                     "inputs":[{"node":"previous.refresh", "outputs":["branch", "commit"]}]},
                                 {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",

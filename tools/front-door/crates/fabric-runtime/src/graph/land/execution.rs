@@ -505,7 +505,7 @@ mod recovery_members_tests {
             "schema_version":2,"graph_id":"recovery-members",
             "nodes":[
                 {"id":"recovery","access":"worktree_write","worktree":"/wt/retained",
-                 "prompt":"rebase","write_scope":["src"],"route":{"alias":"senior"}},
+                 "prompt":"merge the base","write_scope":["src"],"route":{"alias":"senior"}},
                 {"id":"prerequisite","access":"worktree_write","worktree":"/wt/other",
                  "prompt":"unrelated prerequisite","write_scope":["docs"],
                  "route":{"alias":"senior"}}

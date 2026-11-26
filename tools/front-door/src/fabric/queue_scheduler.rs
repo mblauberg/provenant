@@ -1121,6 +1121,257 @@ mod tests {
         assert!(!matches_item_execution("queue-1", &item, &execution).unwrap());
     }
 
+    // Spec: docs/specs/delivery-queue.md#durable-delivery-queue
+    #[test]
+    fn restart_preserves_one_graph_and_writer_through_launch_and_park()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::queue_registry::{
+            QueueAdmission, QueueIdentity, QueueItemSpec, QueueSnapshot, QueueSnapshotItem,
+            QueueSubmission, bounded_wait_deadlines,
+        };
+        use super::*;
+        use provenant_fabric_runtime::graph::{
+            self, AccessMode, AttemptKey, AttemptObservation, AttemptOwner, GraphRoute, NodeInput,
+            Replay, WriterWorktreeBinding,
+        };
+        use provenant_records::{Layer, Source, Sourced};
+        use serde_json::json;
+        use std::{collections::BTreeMap, convert::Infallible, path::PathBuf};
+
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
+                    .collect()
+            }
+        }
+        #[derive(Default)]
+        struct Writer {
+            starts: usize,
+        }
+        impl AttemptOwner for Writer {
+            type Error = Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
+            fn actor(&self) -> String {
+                "fixture".into()
+            }
+            fn bind_writer_worktree(
+                &mut self,
+                path: &str,
+            ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+                Ok(Some(WriterWorktreeBinding {
+                    extra: Default::default(),
+                    source_directory_identity: None,
+                    shared_worktree: None,
+                    worktree: path.into(),
+                    head: "a".repeat(40),
+                }))
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &AttemptKey,
+                _: NodeInput<'_>,
+                _: &GraphRoute,
+                _: AccessMode,
+                _: Option<&str>,
+                _: Replay<'_>,
+            ) -> Result<AttemptObservation, Self::Error> {
+                self.starts += 1;
+                Ok(AttemptObservation::Pending { attempt_ref: None })
+            }
+        }
+
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock::new(),
+            backoff: provenant_core::ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &Free,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let now = factory.clock.wall_now()?;
+        let project = factory.context.identity.project;
+        let identity = QueueIdentity::new(&project.to_string(), "github", "issue-3972")?;
+        let request =
+            json!({"op":"run", "template":"deliver", "name":"item-3972", "brief":"fix issue"});
+        let cap_wait = Sourced {
+            value: 10,
+            source: Source {
+                layer: Layer::Default,
+                origin: None,
+            },
+        };
+        let (warning_at, overflow_at) = bounded_wait_deadlines(now, &cap_wait)?;
+        let registry = QueueRegistry::open(roots.state.as_path())?;
+        let admission = registry.admit(
+            QueueSubmission {
+                queue_id: "queue-3972".into(),
+                submission_digest: format!("sha256:{}", "b".repeat(64)),
+                project: identity.project.clone(),
+                tracker: identity.tracker.clone(),
+                snapshot: QueueSnapshot {
+                    selector: "issue-3972".into(),
+                    source: "fixture".into(),
+                    resolved_at: now,
+                    items: vec![QueueSnapshotItem {
+                        identity: identity.clone(),
+                        data: json!({"id":"issue-3972"}),
+                    }],
+                },
+                knobs: Default::default(),
+                cap_wait,
+                admitted_at: now,
+                warning_at,
+                overflow_at,
+                items: vec![QueueItemSpec {
+                    identity: identity.clone(),
+                    graph_id: "item-3972".into(),
+                    launch_request: request,
+                    execution_directory: rig.project.to_string_lossy().into_owned(),
+                    adoption: None,
+                }],
+            },
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        assert!(matches!(
+            admission,
+            QueueAdmission::Admitted {
+                replayed: false,
+                ..
+            }
+        ));
+        let schedule = registry.claim_queue("queue-3972", now, budget, &cancel, &factory.clock)?;
+        let item = &schedule.launch[0].1;
+        let prepared = super::super::interface::launch_input(&item_request("queue-3972", item)?)?;
+        let digest = super::super::interface::submission_digest(&prepared, None, None)?;
+        let mut document: graph::GraphDocument = serde_json::from_value(json!({
+            "schema_version":2, "graph_id":"item-3972", "context":{"work_item":"issue-3972"},
+            "nodes":[{"id":"writer", "access":"worktree_write", "worktree":rig.project,
+                "prompt":"fix issue", "route":{"adapter":"fixture", "model":"fixture/model"}}]
+        }))?;
+        document.queue = Some(Default::default());
+        document.set_replay_digest(&digest);
+        let mut journal = FileJournal::open(
+            &roots.state,
+            project,
+            &item.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: None,
+            extra: Default::default(),
+            bases: None,
+            directory: rig.project.clone(),
+            document: document.clone(),
+        })?;
+        let mut writer = Writer::default();
+        let first = graph::advance_with_budget(
+            &document,
+            &mut writer,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        assert_eq!(writer.starts, 1);
+        assert_eq!(first.checkpoint.nodes[0].attempts.len(), 1);
+        drop(journal);
+        drop(registry);
+
+        // The graph was saved but the registry still says Launching: replay must observe it.
+        let registry = QueueRegistry::open(roots.state.as_path())?;
+        let item = registry
+            .queues(budget, &cancel, &factory.clock)?
+            .remove(0)
+            .items
+            .remove(0);
+        assert!(matches!(
+            launch_item(&factory, &registry, "queue-3972", &item, budget, &cancel)?,
+            QueueLaunchDisposition::Observed
+        ));
+        let mut journal = FileJournal::open(
+            &roots.state,
+            project,
+            &item.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        let mut checkpoint = journal.load(&item.graph_id)?.unwrap();
+        checkpoint.set_pause(
+            provenant_records::pause::PauseCause::StructuralLimit,
+            "waiting for chair",
+        );
+        journal.save(&checkpoint)?;
+        drop(journal);
+        // Crash after the pause checkpoint, before the registry releases its slot.
+        drop(registry);
+        let registry = QueueRegistry::open(roots.state.as_path())?;
+        let resolved = crate::roots::Resolved {
+            assets: rig.project.clone(),
+            home: rig.home.clone(),
+            project: rig.project.clone(),
+            roots: roots.clone(),
+            claude_config: None,
+            codex_home: None,
+        };
+        let report = tick_queues(&resolved, now, &Free);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let queue = registry.queues(budget, &cancel, &factory.clock)?.remove(0);
+        assert_eq!(queue.items[0].state, QueueItemState::Parked);
+        let schedule = registry.claim_queue_with_parked(
+            "queue-3972",
+            &BTreeSet::from([identity]),
+            now,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        assert_eq!(schedule.launch.len(), 1);
+        assert!(matches!(
+            launch_item(
+                &factory,
+                &registry,
+                "queue-3972",
+                &schedule.launch[0].1,
+                budget,
+                &cancel
+            )?,
+            QueueLaunchDisposition::Observed
+        ));
+        let journal_checkpoint =
+            FileJournal::read_checkpoint(&roots.state, project, "item-3972")?.unwrap();
+        assert_eq!(
+            FileJournal::graph_ids(&roots.state, project)?,
+            vec!["item-3972"]
+        );
+        assert_eq!(journal_checkpoint.nodes[0].attempts.len(), 1);
+        assert_eq!(writer.starts, 1);
+        Ok(())
+    }
+
     #[test]
     fn exact_supersession_overrides_active_lease_classification() {
         use super::{BTreeSet, lease_owner, mark_superseded_lease};
