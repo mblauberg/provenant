@@ -974,11 +974,13 @@ fn the_grace_period_is_bounded_and_restarts_for_a_new_head() {
 fn test_sample(policy: SubjectPolicy) -> PrSample<'static> {
     static FIXTURE_REPOSITORY: std::sync::LazyLock<Result<String, String>> =
         std::sync::LazyLock::new(|| Ok("owner/repo".into()));
+    static FIXTURE_POLICY_SOURCE: std::sync::LazyLock<provenant_records::Source> =
+        std::sync::LazyLock::new(super::test_policy_source);
     PrSample {
         number: 7,
         repository: &FIXTURE_REPOSITORY,
         policy,
-        policy_source: &super::test_policy_source(),
+        policy_source: &FIXTURE_POLICY_SOURCE,
         now: WallTime::UNIX_EPOCH,
     }
 }
@@ -1164,12 +1166,13 @@ fn a_wait_pins_the_forge_head_at_admission() {
     assert!(subject.policy_source.is_some());
 
     let explicit = "d".repeat(40);
+    let launch_source = provenant_records::Source::at(provenant_records::Layer::Launch, "--head");
     let forced = pr_subject(
         7,
         &Ok("owner/repo".into()),
         SubjectPolicy::FollowLatest,
         PrHeadSource::Auto,
-        "--head",
+        &launch_source,
         now,
         Some(&explicit),
         Some((forge.clone(), "feature".into())),
@@ -1179,13 +1182,7 @@ fn a_wait_pins_the_forge_head_at_admission() {
     assert_eq!(forced.head, oid(&explicit));
     assert_eq!(forced.origin, SubjectOrigin::Explicit);
     assert_eq!(forced.policy, SubjectPolicy::Pinned, "--head always pins");
-    assert_eq!(
-        forced.policy_source,
-        Some(provenant_records::Source::at(
-            provenant_records::Layer::Launch,
-            "--head"
-        ))
-    );
+    assert_eq!(forced.policy_source, Some(launch_source));
 
     let local = "e".repeat(40);
     let local_subject = pr_subject(

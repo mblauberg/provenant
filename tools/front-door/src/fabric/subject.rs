@@ -479,7 +479,7 @@ pub(crate) fn is_empty_review_range(subject: &PinnedSubject) -> bool {
 impl Factory {
     /// Resolve the operation's one subject. Admission calls this once; nothing
     /// inside the admitted graph re-reads a ref or re-resolves a source.
-    pub(crate) fn admit_subject(
+    pub(super) fn admit_subject(
         &self,
         input: &Value,
         writer_base_input: Option<&Value>,
