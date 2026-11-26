@@ -114,7 +114,6 @@
             "actor_id": "02020202020202020202020202020202",
             "kind": "dispatch",
             "operation_id": "tree-implement-console-overview",
-            "parent_attempt": null,
             "project_id": "01010101010101010101010101010101",
             "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
             "schema_version": 1,

@@ -2242,6 +2242,36 @@ mod tests {
     }
 
     #[test]
+    fn committed_operation_metadata_omits_absent_parents_and_keeps_present_ones() {
+        let mut present = 0;
+        let mut absent = 0;
+        for (name, rows) in [
+            ("console-board", "lanes"),
+            ("console-tree", "nodes"),
+            ("console-tree-conflicts", "nodes"),
+            ("console-tree-subtree", "nodes"),
+            ("console-tree-limited", "nodes"),
+        ] {
+            let bytes = std::fs::read(default_fixtures().join(format!("{name}.json")))
+                .expect("committed fixture");
+            let fixture: serde_json::Value = serde_json::from_slice(&bytes).expect("fixture JSON");
+            for row in fixture["data"][rows].as_array().expect("fixture rows") {
+                let operation = row["metadata"]["operation"]
+                    .as_object()
+                    .expect("operation metadata");
+                match operation.get("parent_attempt") {
+                    None => absent += 1,
+                    Some(value) => {
+                        assert!(value.is_string(), "present parent must be an attempt ID");
+                        present += 1;
+                    }
+                }
+            }
+        }
+        assert!(absent > 0 && present > 0, "cover both parent cases");
+    }
+
+    #[test]
     fn synthetic_overview_lanes_share_valid_attempt_ids_with_tree() {
         let generated = fixtures::console().expect("synthetic console fixtures");
         let overview = &generated
