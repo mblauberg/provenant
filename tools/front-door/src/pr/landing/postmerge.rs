@@ -540,6 +540,7 @@ mod tests {
                 checks: vec![CheckEvidence {
                     name: "post".into(),
                     issuer: None,
+                    app_id: None,
                     result,
                 }],
                 ..super::super::receipt::tests::evidence(commit)
@@ -572,11 +573,13 @@ mod tests {
             CheckEvidence {
                 name: "post".into(),
                 issuer: None,
+                app_id: None,
                 result: GateResult::Failed,
             },
             CheckEvidence {
                 name: "post".into(),
                 issuer: None,
+                app_id: None,
                 result: GateResult::Pending,
             },
         ];
@@ -740,6 +743,7 @@ mod tests {
                     checks: vec![CheckEvidence {
                         name: "post".into(),
                         issuer: None,
+                        app_id: None,
                         result: GateResult::Pending,
                     }],
                     ..super::super::receipt::tests::evidence("l1")
@@ -748,6 +752,7 @@ mod tests {
                     checks: vec![CheckEvidence {
                         name: "post".into(),
                         issuer: None,
+                        app_id: None,
                         result: GateResult::Passed,
                     }],
                     ..super::super::receipt::tests::evidence("l1")
@@ -827,11 +832,13 @@ mod tests {
                     CheckEvidence {
                         name: "failed".into(),
                         issuer: None,
+                        app_id: None,
                         result: GateResult::Failed,
                     },
                     CheckEvidence {
                         name: "pending".into(),
                         issuer: None,
+                        app_id: None,
                         result: GateResult::Pending,
                     },
                 ],

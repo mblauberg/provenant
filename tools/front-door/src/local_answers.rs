@@ -199,6 +199,7 @@ mod tests {
         let answered = service.execute(
             InboxInput::Answer {
                 extra: Default::default(),
+                queue_control: None,
                 id: receipt.request_id,
                 action: AnswerAction::Reply,
                 option_id: None,

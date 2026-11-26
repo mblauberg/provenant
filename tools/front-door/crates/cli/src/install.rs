@@ -97,13 +97,18 @@ pub fn configured_targets(
         "",
         &Default::default(),
     ));
-    let mut targets = Targets::new(roots, home, harnesses, policy);
+    let mut targets = Targets::new(roots.clone(), home, harnesses, policy);
     // Read installation dependencies only; unrelated domain settings remain
     // advisory and cannot block installation.
     config::apply_install_config_with_domains(
         &mut targets,
         &crate::config_reads::sections_for("knobs")?,
     )?;
+    // The installed chair timeout is a domain setting, not an install target
+    // path, so it is applied after the install-specific config snapshot.
+    if let Ok(config) = crate::config_reads::show_for(&roots, "install") {
+        targets.hook_timeout_secs = config.domains.hooks.timeout_secs;
+    }
     targets.apply_environment(claude_config_dir, codex_home)?;
     Ok(targets)
 }

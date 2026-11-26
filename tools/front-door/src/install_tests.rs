@@ -724,7 +724,7 @@ fn remote_smoke_verify_carries_the_writer_branch_and_staged_fixture()
     std::fs::write(
         &launcher,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nargs=\"$*\"\nproject=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --project) project=\"$2\"; shift 2;;\n    *) shift;;\n  esac\ndone\ncase \" $args \" in\n  *' run smoke '*)\n    [ -n \"$project\" ] || exit 90\n    [ -f \"$project/fixture.txt\" ] || exit 91\n    grep -qx 'smoke fixture' \"$project/fixture.txt\" || exit 92\n    printf '%s\\n' '{{\"node\":\"smoke/read\"}}' '{{\"node\":\"smoke/review\"}}' '{{\"node\":\"smoke/write\"}}'; printf '%s\\n' '{{\"status\":\"pending\"}}';;\n  *' wait '*|*' status '*) printf '%s\\n' '{{\"status\":\"complete\"}}';;\n  *) exit 77;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nargs=\"$*\"\nproject=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --project) project=\"$2\"; shift 2;;\n    *) shift;;\n  esac\ndone\ncase \" $args \" in\n  *' run smoke '*)\n    [ -n \"$project\" ] || exit 90\n    [ -f \"$project/fixture.txt\" ] || exit 91\n    grep -Eq '^smoke fact [0-9a-f]{{16}}$' \"$project/fixture.txt\" || exit 92\n    printf '%s\\n' '{{\"node\":\"smoke/read\"}}' '{{\"node\":\"smoke/review\"}}' '{{\"node\":\"smoke/write\"}}'; printf '%s\\n' '{{\"status\":\"pending\"}}';;\n  *' wait '*|*' status '*) printf '%s\\n' '{{\"status\":\"complete\"}}';;\n  *) exit 77;;\nesac\n",
             calls.display()
         ),
     )?;

@@ -64,10 +64,28 @@ source unavailable, never empty. Autosave never writes the chair's
 Hook state carries custody-ledger, lane and worktree rows. Inside a lane,
 hook context is one line directing progress to the lane handoff, and chair
 checkpoint text, standing grants and save commands are withheld; outside a lane
-it carries the chair checkpoint guidance.
-- Why: restoring the wrong or a lost checkpoint misdirects an agent, and absent
-  evidence must not read as an empty queue.
+it carries the chair checkpoint guidance. When the digest is shown, the
+autosave's duplicate custody section is withheld so the custody list is printed
+once. If output must be bounded, derived sections shrink first: the chair's
+`## Intent` (up to 3 KiB) and `## Now` (up to 1 KiB) stay intact while the
+derived digest and then the checkpoint excerpt give way. A fresh checkpoint
+with nothing actionable drops the "no save needed by freshness policy"
+boilerplate.
+- Why: restoring the wrong or a lost checkpoint misdirects an agent, absent
+  evidence must not read as an empty queue, and a repeated custody list or a
+  cut Intent/Now wastes the bounded hook output.
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/state.rs`
+
+### Bounded restore after compaction
+
+The [session skill](../../skills/session/SKILL.md) restores after compaction in
+three bounded steps: read the hook context, run one cursor-bounded state read
+(`provenant status --session-stream --cursor <cursor>`), then act against the
+owners. It reads state output, never its own driver or tool source, and does not
+re-derive a wait by polling; `orchestrate` owns the wait rule.
+- Why: open-ended re-orientation after compaction spends turns re-reading source
+  instead of state, and a wait already reports its own event.
+- Owner: `skills/session/SKILL.md`
 
 ### Structured summary revisions and inbox coverage
 

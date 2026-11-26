@@ -188,6 +188,10 @@ pub(super) fn prune(document: &GraphDocument) -> Result<Option<GraphDocument>, A
                 Some(GateCondition::Ci {
                     target: CiTarget::Node { node, .. },
                     ..
+                })
+                | Some(GateCondition::Conflict {
+                    target: CiTarget::Node { node, .. },
+                    ..
                 }) => Some(node.as_str()),
                 _ => None,
             });

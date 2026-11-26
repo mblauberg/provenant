@@ -102,6 +102,32 @@ fn a_checkpoint_round_trips_its_handoff_pause_and_decision_typed() {
 }
 
 #[test]
+fn queue_ci_wait_is_a_typed_graph_field_and_unknown_fields_still_round_trip() {
+    let wait = provenant_records::Sourced {
+        value: 30,
+        source: provenant_records::Source {
+            layer: provenant_records::Layer::Default,
+            origin: None,
+        },
+    };
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 2,
+        "graph_id": "queue-ci-wait",
+        "nodes": [],
+        "queue_ci_wait": {"value": 30, "layer": "default"},
+        "future_extension": true
+    }))
+    .unwrap();
+
+    assert_eq!(document.queue_ci_wait, Some(wait));
+    assert!(!document.extra.contains_key("queue_ci_wait"));
+    assert_eq!(document.extra.get("future_extension"), Some(&json!(true)));
+    let encoded = serde_json::to_value(document).unwrap();
+    assert_eq!(encoded["queue_ci_wait"]["value"], 30);
+    assert_eq!(encoded["future_extension"], true);
+}
+
+#[test]
 fn a_review_decision_without_a_reviewed_base_fails_closed_at_the_landing_check() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version": 1,
@@ -172,6 +198,9 @@ fn a_review_decision_without_a_reviewed_base_fails_closed_at_the_landing_check()
         compact_disposition_findings: None,
         full_disposition_findings: None,
         verdict_error: None,
+        hygiene: None,
+        publication: None,
+        handoff: None,
         schema_version: 2,
         decide_outcome: None,
         result: None,
@@ -215,6 +244,9 @@ fn a_review_decision_without_a_reviewed_base_fails_closed_at_the_landing_check()
         compact_disposition_findings: None,
         full_disposition_findings: None,
         verdict_error: None,
+        hygiene: None,
+        publication: None,
+        handoff: None,
         schema_version: 2,
         decide_outcome: None,
         result: None,

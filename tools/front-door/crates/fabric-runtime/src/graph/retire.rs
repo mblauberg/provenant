@@ -58,6 +58,8 @@ pub(super) fn dynamic_subtree(
             };
             *expansion = Expansion {
                 extra: Default::default(),
+                delivery_review_disposition: None,
+                delivery_review_node: None,
                 retired: Some(Box::new(record)),
                 retry_generation: None,
                 final_result: false,

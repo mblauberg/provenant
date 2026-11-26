@@ -205,6 +205,8 @@ pub struct Targets {
     /// The systemd service unit the Linux timer activates; `None` on macOS.
     pub tick_service: Option<Vec<u8>>,
     pub hook_specs: Vec<HookRegistration>,
+    /// Installed timeout for chair hooks, from `hooks.timeout_secs`.
+    pub hook_timeout_secs: u64,
     /// Registered account directories, which `check install` expects to be
     /// recorded targets. Supplied only by the process edge.
     pub accounts: Vec<AccountHome>,
@@ -286,6 +288,7 @@ impl Targets {
             tick_agent: None,
             tick_service: None,
             hook_specs,
+            hook_timeout_secs: crate::DEFAULT_HOOK_TIMEOUT_SECS,
             accounts: Vec::new(),
             shared_settings: None,
             force_settings: false,
@@ -492,6 +495,7 @@ impl Targets {
             tick_agent: None,
             tick_service: None,
             hook_specs: crate::hooks::registrations(&receipt.harnesses),
+            hook_timeout_secs: crate::DEFAULT_HOOK_TIMEOUT_SECS,
             accounts: Vec::new(),
             shared_settings: None,
             force_settings: false,
