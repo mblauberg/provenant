@@ -66,7 +66,7 @@ pub(super) fn prepare_command(
             "{provider} has no named model-less entries{hint}"
         )));
     }
-    AdapterSpec::get(provider)
+    let check = AdapterSpec::get(provider)
         .ok_or_else(|| {
             format!(
                 "unknown adapter `{provider}`{}",
@@ -81,8 +81,10 @@ pub(super) fn prepare_command(
             network: task.access.network,
             skill_location: task.profile.require_skill_location,
             ..Default::default()
-        })
-        .first_as_error()?;
+        });
+    if let Some(decision) = check.refusal() {
+        return Err(PrepareError::Unsupported(decision.clone()));
+    }
     let adapter = REGISTRY
         .iter()
         .find(|entry| entry.adapter.id() == provider)
@@ -332,10 +334,18 @@ pub(super) fn prepare_command(
     if let Some(alias) = &paths.temporary_alias {
         alias_temporary_env(&mut spec.env, &scratch, &alias.join(&scratch_name));
     }
-    let mut launch_warnings =
-        super::preparation::image_input_warning(provider, &task.access.attachments)
-            .into_iter()
-            .collect::<Vec<_>>();
+    let mut launch_warnings = Vec::new();
+    let image_input = !task.access.attachments.is_empty();
+    if let Some(spec) = AdapterSpec::get(provider)
+        && let Some(decision) = spec
+            .check_launch(&provenant_records::LaunchRequest {
+                image_input,
+                ..Default::default()
+            })
+            .degraded(provenant_records::LaunchField::ImageInput)
+    {
+        launch_warnings.push(format!("warning: {decision}; attachments remain readable"));
+    }
     launch_warnings.extend(protection_warnings);
     launch_warnings.extend(super::preparation::ignore_file_warnings(
         provider,

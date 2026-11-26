@@ -136,8 +136,8 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
             query
                 .intent
                 .check_launch(&narrow, "gpt-5.3-codex-low", None)
-                .first_as_error()
-                .is_ok(),
+                .refusal()
+                .is_none(),
             expected == "cursor"
         );
         let selected = resolve(&query, &ctx)?;
@@ -166,6 +166,122 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
             expected == "codex"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_declared_model_gap_makes_the_candidate_ineligible_and_the_pool_falls_back()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::{AdapterSpec, Declaration, ROW_SOURCE};
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config.pools.insert(
+        "model-gap".into(),
+        vec![
+            RoutePoolMember {
+                model: ModelId::parse("codex/gpt-6-luna")?,
+                weight: 1,
+                effort: None,
+                efforts: vec![],
+                free: false,
+            },
+            RoutePoolMember {
+                model: ModelId::parse("cursor/composer-2.5")?,
+                weight: 0,
+                effort: None,
+                efforts: vec![],
+                free: false,
+            },
+        ],
+    );
+    // A command-style row that declares no model control.
+    let mut no_model = *AdapterSpec::get("codex").unwrap();
+    no_model.capabilities.launch.model = Declaration::unsupported("no model control", ROW_SOURCE);
+    let lookup = |adapter: &str| {
+        if adapter == "codex" {
+            Some(no_model)
+        } else {
+            AdapterSpec::get(adapter).copied()
+        }
+    };
+    let codex = availability();
+    let cursor = AvailabilityRecord {
+        adapter: "cursor".into(),
+        ..availability()
+    };
+    let records = [codex, cursor];
+    let access = [
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+        AccessContext {
+            adapter: "cursor",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+    ];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.launch_specs = Some(&lookup);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("cursor/composer-2.5")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("model-gap")?);
+    let selected = resolve(&query, &ctx)?;
+    assert_eq!(selected.adapter, "cursor");
+    let receipt = selected.pool_selection.ok_or("pool selection")?;
+    assert!(
+        receipt
+            .candidates
+            .iter()
+            .any(|candidate| candidate.model.starts_with("codex/")
+                && candidate.exclusion.is_some())
+    );
+    // The same gap on an exact pin has nowhere to move, so it reports.
+    query.choice = RouteChoice::Model(ModelId::parse("codex/gpt-6-luna")?);
+    assert!(matches!(
+        resolve(&query, &ctx),
+        Err(RoutingError::UnsupportedLaunch(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn an_exact_pin_drops_an_undeclared_effort_with_a_sourced_warning()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::{AdapterSpec, Declaration, ROW_SOURCE};
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let mut no_effort = *AdapterSpec::get("codex").unwrap();
+    no_effort.capabilities.launch.effort =
+        Declaration::unsupported("no effort control", ROW_SOURCE);
+    let lookup = |adapter: &str| {
+        if adapter == "codex" {
+            Some(no_effort)
+        } else {
+            AdapterSpec::get(adapter).copied()
+        }
+    };
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.launch_specs = Some(&lookup);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.effort = Some("high".into());
+    let route = resolve(&query, &ctx)?;
+    assert!(route.effort.is_none());
+    let warning = route.diagnostics.effort_warning.ok_or("effort warning")?;
+    assert_eq!(warning.requested, "high");
+    assert!(warning.applied.is_none());
+    assert_eq!(warning.source, ROW_SOURCE);
+    assert_eq!(warning.reason, "no effort control");
     Ok(())
 }
 

@@ -547,7 +547,7 @@ fn full_model_routes_replay_without_rederiving_the_id() -> TestResult {
 }
 
 #[test]
-fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
+fn undeclared_effort_degrades_but_only_refusals_block_dispatch() -> TestResult {
     let model = |provider: &str, effort: Option<&str>| RequestedRoute::Model {
         required_family: None,
         extra: Default::default(),
@@ -555,16 +555,18 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
         model: format!("{provider}/m"),
         effort: effort.map(str::to_owned),
     };
-    // (provider, effort, accepted): the effort column of the adapter table.
+    // Effort is a degradation on every row: preflight admits it and routing
+    // either drops it on an exact pin or prefers a fallback in a pool.
     let cases = [
-        ("claude", Some("high"), true),
-        ("codex", Some("high"), true),
-        ("agy", Some("high"), true),
-        ("opencode", Some("high"), true),
-        ("cursor", Some("high"), true),
-        ("cursor", None, true),
+        ("claude", Some("high")),
+        ("codex", Some("high")),
+        ("agy", Some("high")),
+        ("opencode", Some("high")),
+        ("cursor", Some("high")),
+        ("cursor", None),
+        ("command", Some("high")),
     ];
-    for (provider, effort, accepted) in cases {
+    for (provider, effort) in cases {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -574,16 +576,22 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
         input.task.route = model(provider, effort);
         let result = Service::new(&store).dispatch(input, temp.path(), &call);
         let recorded = store.operation(&operation, &call)?.is_some();
-        assert_eq!(result.is_ok(), accepted, "{provider} {effort:?}");
+        assert!(result.is_ok(), "{provider} {effort:?}: {result:?}");
         assert!(recorded, "{provider} {effort:?} left no operation");
-        if let Err(error) = result {
-            assert!(
-                error
-                    .to_string()
-                    .starts_with(&format!("{provider} does not support effort: "))
-            );
-        }
     }
+    // A preflight refusal still names the adapter, field, reason and source.
+    let mut task = submission("capabilities").task;
+    task.route = model("command", Some("high"));
+    let route = Service::route(task.route.clone())?;
+    assert!(check_launch_capabilities(&task, &route).is_ok());
+    task.profile.require_skill_location = true;
+    let refused = check_launch_capabilities(&task, &route).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .starts_with("command does not support skill location: ")
+    );
+    assert!(refused.to_string().contains("source="));
     Ok(())
 }
 
@@ -830,12 +838,14 @@ fn the_task_is_checked_before_a_writer_is_prepared() -> TestResult {
     // The writer path cannot resolve, so reaching its preparation would fail
     // with a different error than the route check.
     input.task.worktree = Some(temp.path().join("no-such-writer"));
-    input.task.route = RequestedRoute::Model {
+    // A model or effort gap is a degrade, so use a field command refuses. The
+    // fallback question belongs to routing; preflight only blocks refusals.
+    input.task.profile.require_skill_location = true;
+    input.task.route = RequestedRoute::Adapter {
         required_family: None,
         extra: Default::default(),
         provider: "command".into(),
-        model: "command/m".into(),
-        effort: Some("high".into()),
+        name: "fixture".into(),
     };
     let error = Service::new(&store)
         .dispatch(input, temp.path(), &call)
@@ -843,7 +853,7 @@ fn the_task_is_checked_before_a_writer_is_prepared() -> TestResult {
     assert!(
         error
             .to_string()
-            .starts_with("command does not support model: ")
+            .starts_with("command does not support skill location: ")
     );
     assert_eq!(
         store
