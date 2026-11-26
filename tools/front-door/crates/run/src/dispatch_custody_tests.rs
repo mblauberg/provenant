@@ -408,24 +408,21 @@ fn release_preserves_private_temporary_directories_for_follow_up() -> TestResult
     observed.scope.attempt = terminal;
     observed.termination = Some(Termination::Exit(1));
     seal_exit(&store, &observed)?;
+    let mut fact = super::tests::publication_fact(Outcome::Failed, None);
+    fact.reason = Some("fixture failure".into());
     let publication = TerminalPublication {
-        handoff: Ok(None),
-        terminal_cause: None,
-        terminal_note: None,
-        outcome: Outcome::Failed,
+        fact,
+        evidence: None,
         finished_at: WallTime::from_micros(160)?,
         started_at: Some(WallTime::from_micros(120)?),
         provider_ms: Some(1),
-        reason: Some("fixture failure".into()),
         result: "",
-        complete: true,
         redacted: false,
         resolved_route: Some(route()),
         applied_route: Some(route()),
         observed_route: Some(route()),
         usage: UsageRecord::default(),
         session: None,
-        partial_signals: Vec::new(),
     };
     store.publish_terminal(terminal, 1, &publication, &observed, &call)?;
     assert!(terminal_tmp.exists());

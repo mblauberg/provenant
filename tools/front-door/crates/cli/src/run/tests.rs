@@ -1012,23 +1012,28 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     id,
                     session.store.record(id, &call)?.revision,
                     &run::TerminalPublication {
-                        handoff: Ok(None),
-                        terminal_cause: None,
-                        terminal_note: None,
-                        outcome: run::Outcome::Unsettled,
+                        fact: {
+                            let mut fact = provenant_records::settlement::classify::settle(
+                                &provenant_records::settlement::SettlementEvidence::fixture(
+                                    provenant_records::settlement::LaneRole::Reader,
+                                    run::Outcome::Unsettled,
+                                    None,
+                                ),
+                            );
+                            fact.reason = Some("publish refused".into());
+                            fact
+                        },
+                        evidence: None,
                         finished_at: clock.wall_now()?,
                         started_at: None,
                         provider_ms: None,
-                        reason: Some("publish refused".into()),
                         result: "retained provider evidence",
-                        complete: true,
                         redacted: false,
                         resolved_route: None,
                         applied_route: None,
                         observed_route: None,
                         usage: Default::default(),
                         session: None,
-                        partial_signals: vec![],
                     },
                     &exit,
                     &call,

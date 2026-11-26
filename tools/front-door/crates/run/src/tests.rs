@@ -783,25 +783,33 @@ pub(super) fn route() -> RouteRecord {
         ..Default::default()
     }
 }
+pub(super) fn publication_fact(
+    outcome: Outcome,
+    cause: Option<TerminalCause>,
+) -> provenant_records::settlement::OutcomeFact {
+    provenant_records::settlement::classify::settle(
+        &provenant_records::settlement::SettlementEvidence::fixture(
+            provenant_records::settlement::LaneRole::Reader,
+            outcome,
+            cause,
+        ),
+    )
+}
+
 pub(super) fn publication() -> TerminalPublication<'static> {
     TerminalPublication {
-        handoff: Ok(None),
-        terminal_cause: None,
-        terminal_note: None,
-        outcome: Outcome::Succeeded,
+        fact: publication_fact(Outcome::Succeeded, None),
+        evidence: None,
         finished_at: WallTime::from_micros(200).unwrap(),
         started_at: Some(WallTime::from_micros(110).unwrap()),
         provider_ms: Some(1),
-        reason: None,
         result: "sealed result ☀",
-        complete: true,
         redacted: false,
         resolved_route: Some(route()),
         applied_route: Some(route()),
         observed_route: Some(route()),
         usage: UsageRecord::default(),
         session: None,
-        partial_signals: Vec::new(),
     }
 }
 pub(super) fn exit() -> ExitObservation {
@@ -977,10 +985,10 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
         RECORD_LIMIT,
     )?;
     let mut publication = publication();
-    publication.outcome = Outcome::ReviewRequired;
-    publication.reason = Some("protected changes require review".into());
+    publication.fact.outcome = Outcome::ReviewRequired;
+    publication.fact.reason = Some("protected changes require review".into());
     let mut incomplete = publication.clone();
-    incomplete.complete = false;
+    incomplete.fact.complete = false;
     assert!(matches!(
         store.publish_terminal(id, 1, &incomplete, &exit(), &call),
         Err(RunError::Validation(_))
@@ -1052,7 +1060,7 @@ fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> T
         RECORD_LIMIT,
     )?;
     let mut publication = publication();
-    publication.outcome = Outcome::Succeeded;
+    publication.fact.outcome = Outcome::Succeeded;
     let record = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
     assert_eq!(record.head, Some(base));
     assert!(matches!(
@@ -1162,7 +1170,7 @@ fn project_delivery_receipt(
         RECORD_LIMIT,
     )?;
     let mut publication = publication();
-    publication.outcome = Outcome::Succeeded;
+    publication.fact.outcome = Outcome::Succeeded;
     store.publish_terminal(id, 1, &publication, &exit(), &call)?;
     artifacts::seal(
         &attempt,
@@ -1310,13 +1318,13 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
         RECORD_LIMIT,
     )?;
     let mut publication = publication();
-    publication.outcome = Outcome::ReviewRequired;
-    publication.terminal_cause = Some(TerminalCause::IdentityMismatch);
+    publication.fact.outcome = Outcome::ReviewRequired;
+    publication.fact.cause = Some(TerminalCause::IdentityMismatch);
     publication.observed_route = Some(RouteRecord {
         model: Some("other/model".into()),
         ..route()
     });
-    publication.reason = Some(
+    publication.fact.reason = Some(
         "warning: observed provider identity (model other/model) differs from the requested route (model fixture/model); kept commit for review"
             .into(),
     );
@@ -2854,7 +2862,7 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
         .pragma_query_value(None, "page_count", |row| row.get(0))?;
     store.db.pragma_update(None, "max_page_count", pages)?;
     let mut publication = publication();
-    publication.reason = Some("x".repeat(128 * 1024));
+    publication.fact.reason = Some("x".repeat(128 * 1024));
     assert!(matches!(
         store.publish_terminal(id, 1, &publication, &exit(), &call),
         Err(RunError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
@@ -2905,7 +2913,10 @@ fn receipt_cancellation_requires_ordered_delivery() -> TestResult {
         observation.cancel_delivered_before_exit = delivered;
         seal_observation(&store, &input, &observation)?;
         let mut publication = publication();
-        publication.outcome = Outcome::Cancelled;
+        publication.fact.outcome = Outcome::Cancelled;
+        if delivered == Some(true) {
+            publication.fact.terminal_evidence = TerminalEvidence::EffectiveCancellation;
+        }
         let result = store.publish_terminal(id, 1, &publication, &observation, &call);
         if delivered == Some(true) {
             let record = result?;
@@ -3181,7 +3192,7 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
             RECORD_LIMIT,
         )?;
         let mut publication = publication();
-        publication.outcome = if prelaunch {
+        publication.fact.outcome = if prelaunch {
             Outcome::Cancelled
         } else {
             Outcome::TimedOut
@@ -3258,7 +3269,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
     observation.termination = None;
     seal_observation(&store, &input, &observation)?;
     let mut publication = publication();
-    publication.outcome = Outcome::QuotaLimited;
+    publication.fact.outcome = Outcome::QuotaLimited;
     publication.started_at = None;
     publication.provider_ms = None;
     let record = store.publish_terminal(id, 1, &publication, &observation, &call)?;
@@ -3514,7 +3525,7 @@ fn settle_one(
     observation.termination = None;
     seal_observation(store, &input, &observation)?;
     let mut publication = publication();
-    publication.outcome = Outcome::QuotaLimited;
+    publication.fact.outcome = Outcome::QuotaLimited;
     publication.started_at = None;
     publication.provider_ms = None;
     store.publish_terminal(id, 1, &publication, &observation, call)?;
@@ -3871,8 +3882,6 @@ fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult
         );
         blocker.execute_batch("ROLLBACK")?;
         let conflicting = TerminalPublication {
-            terminal_cause: None,
-            terminal_note: None,
             result: "conflicting result",
             ..publication()
         };
@@ -3932,8 +3941,6 @@ fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
         let original = std::fs::read(path.join("terminal-pending.json"))?;
         blocker.execute_batch("ROLLBACK")?;
         let conflicting = TerminalPublication {
-            terminal_cause: None,
-            terminal_note: None,
             result: "conflicting result",
             ..publication()
         };
