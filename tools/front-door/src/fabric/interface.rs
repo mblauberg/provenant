@@ -2470,12 +2470,12 @@ impl Factory {
                 .as_ref()
                 .is_none_or(|base| base.commit.is_none())
             {
-                writer_base = Some(base.clone());
+                writer_base = base.clone();
             }
-            match &base.commit {
+            match base.as_ref().and_then(|base| base.commit.as_deref()) {
                 Some(commit) => {
                     if document.review_base.is_none() {
-                        document.review_base = Some(commit.clone());
+                        document.review_base = Some(commit.to_owned());
                         document.schema_version = document.schema_version.max(2);
                     }
                     for node in &mut document.nodes {

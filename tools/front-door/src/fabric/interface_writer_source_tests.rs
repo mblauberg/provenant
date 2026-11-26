@@ -381,11 +381,11 @@ fn authored_writer_base_is_accepted_and_named_in_explain() -> Result {
 #[test]
 fn node_sourced_panel_without_a_base_refuses_before_launch() -> Result {
     let rig = crate::worktree_tests::repository()?;
-    git(rig, &["config", "user.name", "Test"])?;
-    git(rig, &["config", "user.email", "test@example.invalid"])?;
+    git(&rig, &["config", "user.name", "Test"])?;
+    git(&rig, &["config", "user.email", "test@example.invalid"])?;
     let writer = rig.root.join("no-base-writer");
     git(
-        rig,
+        &rig,
         &[
             "worktree",
             "add",
