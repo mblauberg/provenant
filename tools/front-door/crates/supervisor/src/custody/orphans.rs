@@ -45,66 +45,6 @@ pub(crate) trait OrphanProbe {
 }
 
 pub(super) struct SystemProbe;
-#[cfg(target_os = "macos")]
-fn darwin_process_environment(pid: i64) -> Option<Vec<u8>> {
-    if pid <= 0 {
-        return None;
-    }
-    let mut mib = [
-        libc::CTL_KERN,
-        libc::KERN_PROCARGS2,
-        i32::try_from(pid).ok()?,
-    ];
-    let mut size = 0;
-    // SAFETY: sysctl borrows the three initialized MIB entries and writes only
-    // the returned length; a null output requests the current record size.
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as libc::c_uint,
-            std::ptr::null_mut(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-        || size < std::mem::size_of::<libc::c_int>()
-        || size > 1_048_576
-    {
-        return None;
-    }
-    let mut bytes = vec![0; size];
-    // SAFETY: bytes has exactly the requested capacity and sysctl updates size
-    // to the number of initialized bytes. The MIB contains only scalar values.
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as libc::c_uint,
-            bytes.as_mut_ptr().cast(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-        || size > bytes.len()
-    {
-        return None;
-    }
-    bytes.truncate(size);
-    let argc = i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?);
-    if argc < 0 {
-        return None;
-    }
-    let mut cursor = 4;
-    cursor = bytes.get(cursor..)?.iter().position(|byte| *byte == 0)? + cursor + 1;
-    while bytes.get(cursor) == Some(&0) {
-        cursor += 1;
-    }
-    for _ in 0..argc {
-        cursor = bytes.get(cursor..)?.iter().position(|byte| *byte == 0)? + cursor + 1;
-    }
-    Some(bytes.get(cursor..)?.to_vec())
-}
 
 impl OrphanProbe for SystemProbe {
     #[cfg(target_os = "macos")]
@@ -127,7 +67,7 @@ impl OrphanProbe for SystemProbe {
         #[cfg(target_os = "linux")]
         let bytes = std::fs::read(format!("/proc/{pid}/environ")).ok();
         #[cfg(target_os = "macos")]
-        let bytes = darwin_process_environment(pid);
+        let bytes = crate::process_os::census::darwin_process_environment(pid);
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let bytes: Option<Vec<u8>> = {
             let _ = pid;
