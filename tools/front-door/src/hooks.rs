@@ -21,7 +21,6 @@ use std::{
     time::{Duration, Instant},
 };
 const INPUT_CAP: usize = 1024 * 1024;
-const LOCAL_BUDGET: Duration = Duration::from_secs(1);
 const ANSWER_BUDGET: Duration = Duration::from_millis(50);
 // Debug builds let integration tests on loaded runners widen delivery; release keeps 50 ms.
 fn answer_budget() -> Duration {
@@ -33,9 +32,7 @@ fn answer_budget() -> Duration {
     }
     ANSWER_BUDGET
 }
-/// Cap for hooks that read lane and PR state through this binary's own commands.
-const SESSION_BUDGET: Duration = Duration::from_secs(4);
-// Leave time for child termination, assembling the digest and writing the hook
+/// Leave time for child termination, assembling the digest and writing the hook
 // response after an inventory reaches its own deadline.
 const SESSION_FINISH_RESERVE: Duration = Duration::from_secs(1);
 
@@ -43,6 +40,51 @@ pub(crate) fn session_collection_deadline(deadline: Instant) -> Instant {
     deadline
         .checked_sub(SESSION_FINISH_RESERVE)
         .unwrap_or(deadline)
+}
+
+/// One local budget for the whole hook, below the timeout written into the
+/// installed registration. The setting and its layer are read once and carried
+/// into the overrun warning and its durable diagnostic.
+struct HookBudget {
+    deadline: Instant,
+    duration: Duration,
+    timeout_secs: u64,
+    source: String,
+}
+
+#[allow(clippy::disallowed_methods)]
+fn local_budget(globals: &Globals, started: Instant) -> HookBudget {
+    let resolved = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Directory,
+        crate::roots::Product::Optional,
+    );
+    let config = resolved
+        .map_err(|error| error.to_string())
+        .and_then(|resolved| {
+            provenant_cli::config_reads::show_for(&resolved.roots, "hook")
+                .map_err(|error| error.to_string())
+        });
+    let (timeout_secs, source) = match config {
+        Ok(read) => (
+            read.domains.hooks.timeout_secs,
+            provenant_cli::config_reads::setting_source(
+                &read.origins,
+                "domains.hooks.timeout_secs",
+            ),
+        ),
+        Err(error) => (
+            provenant_config::DEFAULT_HOOK_TIMEOUT_SECS,
+            format!("compiled defaults (domains.hooks.timeout_secs); config unavailable: {error}"),
+        ),
+    };
+    let duration = provenant_config::hook_budget(timeout_secs);
+    HookBudget {
+        deadline: started + duration,
+        duration,
+        timeout_secs,
+        source,
+    }
 }
 type Error = Box<dyn std::error::Error>;
 
@@ -90,26 +132,20 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
     if provenant_cli::fabric::in_lane() && is_chair_session_handler(spec.handler) {
         return 0;
     }
-    // Test delivery budgets must also fit inside the enclosing delivery budget.
-    // Release builds retain the normal local deadline.
-    let deadline = started
-        + if matches!(spec.handler, Handler::AnswerDelivery) {
-            LOCAL_BUDGET.max(answer_budget())
-        } else {
-            LOCAL_BUDGET
-        };
+    let budget = local_budget(globals, started);
+    let deadline = budget.deadline;
+    let action = spec.action.map_or("unknown", HookAction::command);
     let client = spec.client;
-    match spec.handler {
-        Handler::ChairPrompt => crate::chair::hook(false, globals),
+    let status = match spec.handler {
+        Handler::ChairPrompt => crate::chair::hook(false, globals, deadline),
         Handler::ChairStart => {
-            let status = crate::chair::hook(true, globals);
-            // The chair's spend is most of the total, so its SessionStart also
-            // tops up the native ingest store. The call stops at its wall budget
-            // and is silent.
+            let status = crate::chair::hook(true, globals, deadline);
             crate::usage::ingest_after_chair_hook(globals);
             status
         }
         Handler::ChairStop => {
+            // Queue only. The detached worker owns every transcript read, so a
+            // 200 MB set cannot hold this hook past its budget.
             crate::usage::ingest_after_chair_hook(globals);
             0
         }
@@ -124,7 +160,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
         Handler::PreCompact => advisory(
             Moment::PreCompact,
             globals,
-            started,
+            deadline,
             &failure,
             client,
             spec.event,
@@ -133,7 +169,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
         Handler::Compact => advisory(
             Moment::Compact,
             globals,
-            started,
+            deadline,
             &failure,
             client,
             spec.event,
@@ -142,7 +178,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
         Handler::SessionStart => advisory(
             Moment::Restart,
             globals,
-            started,
+            deadline,
             &failure,
             client,
             spec.event,
@@ -151,7 +187,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
         Handler::Stop => advisory(
             Moment::Stop,
             globals,
-            started,
+            deadline,
             &failure,
             client,
             spec.event,
@@ -172,7 +208,32 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
                 }
             }
         }
+    };
+    let elapsed = started.elapsed();
+    if elapsed > budget.duration {
+        let overrun = elapsed - budget.duration;
+        let message = format!(
+            "{action} hook exceeded its local budget by {} ms; the budget is {}% of the {} s installed timeout from {}",
+            overrun.as_millis(),
+            provenant_config::HOOK_BUDGET_PERCENT,
+            budget.timeout_secs,
+            budget.source
+        );
+        warn(
+            Warning::new(
+                provenant_records::warning::HOOK_BUDGET_OVERRUN,
+                message.clone(),
+            )
+            .subject(action),
+        );
+        failure.record_overrun(
+            &format!("hook deadline exceeded by {} ms", overrun.as_millis()),
+            budget.duration,
+            overrun,
+            &budget.source,
+        );
     }
+    status
 }
 fn is_chair_session_handler(handler: Handler) -> bool {
     matches!(
@@ -671,15 +732,13 @@ fn prepare_answers(
 fn advisory(
     moment: Moment,
     globals: &Globals,
-    started: Instant,
+    deadline: Instant,
     failure: &Failure<'_>,
     client: Option<provenant_records::Harness>,
     event_name: &str,
     protocol: Option<HookProtocol>,
 ) -> u8 {
-    // Reading lane and PR state can take longer than a checkpoint read, so
-    // these hooks hold a wider budget; the registered host timeouts are 5s.
-    let deadline = started + SESSION_BUDGET;
+    // The single local budget is already shorter than the installed timeout.
     let input = match hook_io::read_stdin(INPUT_CAP, deadline) {
         Ok(bytes) => bytes,
         Err(_) => {

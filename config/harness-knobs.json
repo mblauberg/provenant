@@ -478,6 +478,18 @@
       "projects.{project}.user_skills": {"type": "enum", "default": "host user_skills", "effect": "Override host user skill discovery for this project."}
     }
   },
+  "native_hook_settings": {
+    "path": "domains.hooks",
+    "settings": {
+      "timeout_secs": {
+        "type": "int",
+        "min": 1,
+        "max": 300,
+        "default": 10,
+        "effect": "Timeout in seconds written into every installed chair hook (chair-start, chair-stop, chair-prompt) and the chair switch settings, with its source shown in `provenant doctor`. The hook runtime uses one local budget of 60% of this value, warns and records an overrun before the host kills the hook, and returns before the budget expires. Inspect value, default and origin with config show or config schema."
+      }
+    }
+  },
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {

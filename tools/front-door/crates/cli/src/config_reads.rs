@@ -29,9 +29,11 @@ reads! {
     "accounts set" => ["accounts", "quota"],
     "accounts sync" => ["accounts", "fabric"],
     "hosts" => ["fabric"],
-    "hosts doctor" => ["fabric", "accounts", "quota", "routing"], "fabric" => ["fabric", "routing", "accounts", "lanes", "run", "quota", "policy", "wait"],
+    "doctor" => ["fabric", "accounts", "quota", "routing", "hooks"],
+    "hosts doctor" => ["fabric", "accounts", "quota", "routing", "hooks"], "fabric" => ["fabric", "routing", "accounts", "lanes", "run", "quota", "policy", "wait"],
     "fabric context" => ["fabric", "wait"],
-    "install" => ["accounts", "fabric"], "upgrade" => ["accounts", "fabric"],
+    "install" => ["accounts", "fabric", "hooks"], "upgrade" => ["accounts", "fabric"],
+    "hooks" => ["hooks"],
     "uninstall" => ["accounts", "fabric"],
     // `init` resolves its port table and forge context directly; it reads no
     // config.toml domain, so unrelated invalid domains cannot refuse it.
@@ -50,13 +52,13 @@ reads! {
     "reconcile" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy"],
     "telemetry" => ["accounts", "routing"], "native" => ["accounts"],
     "quota" => ["accounts", "quota"], "console" => ["fabric"],
-    "chair" => ["fabric", "accounts", "routing", "quota"], "worktree" => [],
+    "chair" => ["fabric", "accounts", "routing", "quota", "hooks"], "worktree" => [],
     "pr" => ["fabric", "routing", "accounts", "pr"],
     "pr contributions" => ["fabric"],
     "gc" => ["fabric"], "tick" => ["fabric", "quota", "accounts", "routing", "steward"],
     "disk" => [], "cloud" => ["accounts"], "workflow" => ["routing"],
-    "tracker" => [], "verify" => [], "build" => [], "check" => [], "check install" => ["accounts"],
-    "check providers" => ["accounts", "quota", "wait", "fabric", "run", "routing", "lanes", "policy"], "hook" => ["fabric", "run", "pr"],
+    "tracker" => [], "verify" => [], "build" => [], "check" => [], "check install" => ["accounts", "hooks"],
+    "check providers" => ["accounts", "quota", "wait", "fabric", "run", "routing", "lanes", "policy"], "hook" => ["fabric", "run", "pr", "hooks"],
     "internal" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "steward", "wait"],
     "knobs" => [], "admit" => []
 }

@@ -146,25 +146,39 @@ fn fixed_target(context: &Context, target: &RegisteredAccount) -> Result<(), Err
 // Hook deadlines must be checked against the real monotonic clock.
 #[allow(clippy::disallowed_methods)]
 fn check_time(deadline: Option<Instant>) -> Result<(), Error> {
+    // The enclosing hook budget already reserves 40% below the installed
+    // timeout, so only a short local reserve is needed before starting work.
     if deadline
-        .is_some_and(|d| d.saturating_duration_since(Instant::now()) < Duration::from_secs(3))
+        .is_some_and(|d| d.saturating_duration_since(Instant::now()) < Duration::from_secs(1))
     {
         return Err("hook deadline near; continuing without a switch".into());
     }
     Ok(())
+}
+fn hook_timeout_secs(context: &Context) -> u64 {
+    provenant_cli::config_reads::show_for(&context.roots, "chair")
+        .map(|config| config.domains.hooks.timeout_secs)
+        .unwrap_or(provenant_config::DEFAULT_HOOK_TIMEOUT_SECS)
 }
 fn command(
     context: &Context,
     target: &RegisteredAccount,
     checkpoint: &Path,
 ) -> Result<String, Error> {
-    command_with_executable(context, target, checkpoint, &std::env::current_exe()?)
+    command_with_executable(
+        context,
+        target,
+        checkpoint,
+        &std::env::current_exe()?,
+        hook_timeout_secs(context),
+    )
 }
 fn command_with_executable(
     context: &Context,
     target: &RegisteredAccount,
     checkpoint: &Path,
     executable: &Path,
+    timeout_secs: u64,
 ) -> Result<String, Error> {
     // Supply these hooks to the new session even when the target has only its
     // own credentials/settings. No config directory contents are copied.
@@ -177,9 +191,9 @@ fn command_with_executable(
         ))
     };
     let settings = json!({"hooks":{
-        "SessionStart":[{"hooks":[{"type":"command","command":hook("chair-start")?,"timeout":5}]}],
-        "Stop":[{"hooks":[{"type":"command","command":hook("chair-stop")?,"timeout":5}]}],
-        "UserPromptSubmit":[{"hooks":[{"type":"command","command":hook("chair-prompt")?,"timeout":10}]}]
+        "SessionStart":[{"hooks":[{"type":"command","command":hook("chair-start")?,"timeout":timeout_secs}]}],
+        "Stop":[{"hooks":[{"type":"command","command":hook("chair-stop")?,"timeout":timeout_secs}]}],
+        "UserPromptSubmit":[{"hooks":[{"type":"command","command":hook("chair-prompt")?,"timeout":timeout_secs}]}]
     }});
     let prompt = format!(
         "Continue the chair handoff from checkpoint {}. Read it and its state/handoff file first. Inspect the listed Fabric lane IDs in the run store before acting; collect existing results and never re-run completed lanes. Preserve the originating authority limits.",
@@ -1057,11 +1071,10 @@ fn record_start(context: &Context, input: &Input) {
 // The hook protocol imposes real wall-time input and execution caps.
 // The hook's switch outcome is reported on stderr for the caller that keys on its exit code.
 #[allow(clippy::disallowed_methods)]
-pub fn hook(start: bool, globals: &Globals) -> u8 {
-    // Stay inside the registered 5s SessionStart and 10s prompt timeouts.
-    let deadline = Instant::now() + Duration::from_secs(if start { 4 } else { 8 });
+pub fn hook(start: bool, globals: &Globals, deadline: Instant) -> u8 {
     let result = (|| -> Result<Option<Value>, Error> {
-        let input = hook_io::read_stdin(1024 * 1024, Instant::now() + Duration::from_secs(1))?;
+        let input_deadline = deadline.min(Instant::now() + Duration::from_secs(1));
+        let input = hook_io::read_stdin(1024 * 1024, input_deadline)?;
         let input: Input = serde_json::from_slice(&input)?;
         if input.hook_event_name
             != if start {
@@ -1199,7 +1212,13 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$CLAUDE_CONFIG_DIR\" \"$PROVENANT_STATE_DIR\" \"$@\"\n",
         )?;
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700))?;
-        let command = command_with_executable(&context, &target, &checkpoint, &executable)?;
+        let command = command_with_executable(
+            &context,
+            &target,
+            &checkpoint,
+            &executable,
+            provenant_config::DEFAULT_HOOK_TIMEOUT_SECS,
+        )?;
         let env = vec![(
             OsString::from("PATH"),
             OsString::from(format!("{}:/usr/bin:/bin", bin.display())),
@@ -1276,8 +1295,14 @@ mod tests {
             );
         }
         assert!(
-            command_with_executable(&context, &target, &checkpoint, Path::new("/a\nb/provenant"))
-                .is_err()
+            command_with_executable(
+                &context,
+                &target,
+                &checkpoint,
+                Path::new("/a\nb/provenant"),
+                provenant_config::DEFAULT_HOOK_TIMEOUT_SECS,
+            )
+            .is_err()
         );
         Ok(())
     }
@@ -1416,12 +1441,44 @@ mod tests {
     }
 
     #[test]
+    fn chair_hook_timeout_comes_from_the_hooks_domain() -> Result<(), super::Error> {
+        use super::*;
+        use provenant_core::{PathResolver, RootInputs};
+        let tmp = tempfile::tempdir()?;
+        let home = tmp.path().canonicalize()?;
+        let mut inputs = RootInputs::new(home.clone(), home.clone());
+        inputs.state_dir = Some(home.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(roots.state.as_path())?;
+        }
+        let context = Context {
+            roots,
+            cwd: home.clone(),
+            assets: home.clone(),
+            home,
+            claude_config: None,
+            clock: provenant_os::clock::SystemClock::new(),
+        };
+        assert_eq!(hook_timeout_secs(&context), 10);
+        std::fs::write(
+            context.roots.state.join("config.toml"),
+            "schema_version = 1\n[domains.hooks]\ntimeout_secs = 7\n",
+        )?;
+        assert_eq!(hook_timeout_secs(&context), 7);
+        Ok(())
+    }
+
+    #[test]
     fn chair_hook_reserves_time_before_snapshot_and_launch() {
         use super::*;
         let instant = Instant::now();
         assert!(check_time(None).is_ok());
         assert!(check_time(Some(instant + Duration::from_secs(8))).is_ok());
-        assert!(check_time(Some(instant + Duration::from_secs(2))).is_err());
+        assert!(check_time(Some(instant + Duration::from_millis(900))).is_err());
         assert!(check_time(Some(instant)).is_err());
     }
 }

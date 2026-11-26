@@ -104,9 +104,25 @@ fn hook_command(
     .collect::<Vec<_>>()
     .join(" "))
 }
-fn hook_value(spec: &HookRegistration, binary: &Path, state: &Path) -> Result<Value, InstallError> {
+fn hook_value(
+    spec: &HookRegistration,
+    binary: &Path,
+    state: &Path,
+    timeout_secs: u64,
+) -> Result<Value, InstallError> {
     let mut value = json!({"type":"command", "command":hook_command(spec, binary, state)?});
-    let timeout = spec.timeout_seconds.map(|seconds| match spec.protocol {
+    // Chair hooks are the ones whose work the host owns; one setting controls
+    // their installed timeout so the runtime can keep its budget below it.
+    // Other actions keep their declared per-protocol timeout.
+    let configured = if matches!(
+        spec.action,
+        HookAction::ChairPrompt | HookAction::ChairStart | HookAction::ChairStop
+    ) {
+        Some(timeout_secs)
+    } else {
+        spec.timeout_seconds
+    };
+    let timeout = configured.map(|seconds| match spec.protocol {
         HookProtocol::CursorCommands {
             timeout_unit: HookTimeoutUnit::Milliseconds,
         } => seconds.saturating_mul(1000),
@@ -137,6 +153,7 @@ pub(crate) fn value(spec: &HookRegistration, targets: &Targets) -> Result<Value,
         spec,
         &targets.bin_dir.join("provenant"),
         targets.roots.state.as_path(),
+        targets.hook_timeout_secs,
     )
 }
 
@@ -499,7 +516,9 @@ fn render_settings(harness: Harness, binary: &Path, state: &Path) -> Result<Valu
         if matches!(spec.protocol, HookProtocol::OpenCodePlugin) {
             continue;
         }
-        let value = hook_value(&spec, binary, state)?;
+        // Lane settings carry no chair actions, so the configured chair timeout
+        // cannot change them; the declared per-action timeout still applies.
+        let value = hook_value(&spec, binary, state, crate::DEFAULT_HOOK_TIMEOUT_SECS)?;
         settings = append_registration(&settings, &spec, value)?;
     }
     decode_jsonc(Cursor::new(settings), Limits::CONFIG).map_err(InstallError::from)
@@ -838,13 +857,39 @@ mod tests {
                 let settings = lane_hook_settings(adapter.id, binary, state).unwrap();
                 let bytes = serde_json::to_vec(&settings).unwrap();
                 for row in &lane {
-                    let value = hook_value(row, binary, state).unwrap();
+                    let value =
+                        hook_value(row, binary, state, crate::DEFAULT_HOOK_TIMEOUT_SECS).unwrap();
                     let command = value.get("command").and_then(Value::as_str).unwrap();
                     let selector = selector(row, command).unwrap();
                     assert_eq!(get(&bytes, &selector).unwrap(), Some(value));
                 }
             }
         }
+    }
+
+    #[test]
+    fn configured_timeout_replaces_only_the_installed_chair_timeout() {
+        let binary = Path::new("/private/bin/provenant");
+        let state = Path::new("/private/state");
+        let chair = registrations(&[Harness::Claude])
+            .into_iter()
+            .find(|spec| spec.action == HookAction::ChairStop)
+            .unwrap();
+        let worktree = registrations(&[Harness::Claude])
+            .into_iter()
+            .find(|spec| spec.action == HookAction::WorktreeCreate)
+            .unwrap();
+        let chair_value = hook_value(&chair, binary, state, 17).unwrap();
+        let worktree_value = hook_value(&worktree, binary, state, 17).unwrap();
+        assert_eq!(chair_value["timeout"], json!(17));
+        assert_eq!(
+            worktree_value["timeout"],
+            json!(worktree.timeout_seconds.unwrap())
+        );
+        assert_eq!(
+            crate::hook_budget(17),
+            std::time::Duration::from_millis(10200)
+        );
     }
 
     #[test]
