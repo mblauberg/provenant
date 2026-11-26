@@ -5715,7 +5715,7 @@ fn pushed_delivery_head_proves_writer_commit_when_sealed_head_is_absent() {
     let receipt = provenant_records::run::WriterDeliveryReceipt {
         extra: Default::default(),
         schema_version: 1,
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "fix/4065".into(),
         head: Some(provenant_core::GitOid::parse(&pushed).unwrap()),
         review_acceptance: None,

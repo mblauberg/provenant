@@ -1228,10 +1228,16 @@ fn enrich_status_rows_with_facts(
     context: &Context,
     clock: &SystemClock,
     facts: &StatusFacts<'_>,
-    peer_budget: WaitBudget,
-) -> Result<(), FacadeError> {
+    peer_read: &mut impl FnMut(
+        provenant_core::HostId,
+        provenant_core::AttemptId,
+    ) -> Result<
+        Result<PeerResult, provenant_cli::fabric::PeerFailure>,
+        FacadeError,
+    >,
+) -> Result<Option<FacadeError>, FacadeError> {
     status_keys(rows, context.identity.project)?;
-    let mut peer_executor = None;
+    let mut last_peer_error = None;
     for row in rows.iter_mut() {
         if row["kind"] != "attempt" {
             continue;
@@ -1260,33 +1266,7 @@ fn enrich_status_rows_with_facts(
                 Err(error) => return Err(run_error(error)),
             }
         } else {
-            let executor = match &peer_executor {
-                Some(executor) => executor,
-                None => peer_executor.insert(
-                    SystemExecutor::new(1)
-                        .map_err(|_| FacadeError::io("create peer status executor"))?,
-                ),
-            };
-            let response = context.peer_with(
-                executor,
-                clock,
-                host,
-                PeerAction::Run {
-                    extra: Default::default(),
-                    input: RunInput::Status {
-                        extra: Default::default(),
-                        target: AttemptTarget {
-                            extra: Default::default(),
-                            host: Some(host),
-                            attempt,
-                        },
-                    },
-                    peer_subtree_after: None,
-                },
-                peer_budget,
-                facts.call.cancel,
-            );
-            let response = match response {
+            let response = match peer_read(host, attempt)? {
                 Ok(response) => response,
                 Err(failure) => {
                     row["evidence_error"] = json!(provenant_fabric_runtime::hosts::plain_text(
@@ -1294,6 +1274,7 @@ fn enrich_status_rows_with_facts(
                         200
                     ));
                     project_remote_attempt_unknown(row);
+                    last_peer_error = Some(*failure.error);
                     continue;
                 }
             };
@@ -1301,8 +1282,8 @@ fn enrich_status_rows_with_facts(
                 PeerResult::Run { data, .. } => match *data {
                     RunResult::Status {
                         attempt: record,
-                        lane_waits,
                         presence,
+                        lane_waits,
                         ..
                     } if record.attempt_id == attempt => (record, lane_waits, presence),
                     _ => return Err(FacadeError::StateCorrupt),
@@ -1411,7 +1392,7 @@ fn enrich_status_rows_with_facts(
             object.remove("latest_attempt");
         }
     }
-    Ok(())
+    Ok(last_peer_error)
 }
 
 /// Enrich one graph's rows with freshly gathered facts. A listing with many
@@ -1425,7 +1406,57 @@ pub(crate) fn enrich_status_rows_within(
     peer_budget: WaitBudget,
 ) -> Result<(), FacadeError> {
     let facts = StatusFacts::gather(context, clock, cancel)?;
-    enrich_status_rows_with_facts(rows, context, clock, &facts, peer_budget)
+    enrich_status_rows_with_peer(rows, context, clock, &facts, peer_budget).map(|_| ())
+}
+
+/// Preserve peer failures for wait history while status still projects unknown rows.
+pub(crate) fn observe_status_rows_within(
+    rows: &mut [Value],
+    context: &Context,
+    clock: &SystemClock,
+    cancel: &CancelToken,
+    peer_budget: WaitBudget,
+) -> Result<Option<FacadeError>, FacadeError> {
+    let facts = StatusFacts::gather(context, clock, cancel)?;
+    enrich_status_rows_with_peer(rows, context, clock, &facts, peer_budget)
+}
+
+fn enrich_status_rows_with_peer(
+    rows: &mut [Value],
+    context: &Context,
+    clock: &SystemClock,
+    facts: &StatusFacts<'_>,
+    peer_budget: WaitBudget,
+) -> Result<Option<FacadeError>, FacadeError> {
+    let mut executor = None;
+    enrich_status_rows_with_facts(rows, context, clock, facts, &mut |host, attempt| {
+        let executor = match &executor {
+            Some(executor) => executor,
+            None => executor.insert(
+                SystemExecutor::new(1)
+                    .map_err(|_| FacadeError::io("create peer status executor"))?,
+            ),
+        };
+        Ok(context.peer_with(
+            executor,
+            clock,
+            host,
+            PeerAction::Run {
+                extra: Default::default(),
+                input: RunInput::Status {
+                    extra: Default::default(),
+                    target: AttemptTarget {
+                        extra: Default::default(),
+                        host: Some(host),
+                        attempt,
+                    },
+                },
+                peer_subtree_after: None,
+            },
+            peer_budget,
+            facts.call.cancel,
+        ))
+    })
 }
 
 /// Keep graph cause codes scalar even when a closed terminal cause has data.
@@ -2999,7 +3030,8 @@ pub(crate) fn graph_listing(
             ),
             || StatusFacts::gather(&factory.context, &factory.clock, &cancel),
             |rows, facts| {
-                enrich_status_rows_with_facts(rows, &factory.context, &factory.clock, facts, budget)
+                enrich_status_rows_with_peer(rows, &factory.context, &factory.clock, facts, budget)
+                    .map(|_| ())
             },
         );
         finished.stranded_work = stranded_work;

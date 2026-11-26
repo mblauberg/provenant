@@ -106,10 +106,14 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
                 })
                 .collect()
         };
-        let aliases = |links: BTreeMap<String, String>, inherited: &BTreeMap<String, String>| {
+        let aliases = |links: BTreeMap<String, String>,
+                       inherited: &BTreeMap<String, String>,
+                       writer: bool| {
             let mut aliases = inherited.clone();
             for node in nodes.iter() {
-                aliases.remove(&node.id);
+                if !writer || node.continues.is_none() {
+                    aliases.remove(&node.id);
+                }
             }
             for id in links.keys() {
                 let mut target = id;
@@ -124,8 +128,40 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
             }
             aliases
         };
-        let writer_aliases = aliases(links(false), inherited);
-        let result_aliases = aliases(links(true), inherited_results);
+        // An authored writer id is the local name inside its enclosing
+        // composite or loop scope. Resolve it to the same expanded leaf as
+        // the composite id that exports that writer: a `with.writer` naming
+        // `fix` and a writer expanded as `task--fix` are the same authority.
+        // A local name shared by two writers stays unresolved so the whole
+        // plan can report the candidate ids instead of guessing one.
+        let mut local_writers: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+        for node in nodes
+            .iter()
+            .filter(|node| node.continues.is_none() && writers.contains(&node.id))
+        {
+            let id = &node.id;
+            if let Some((_, local)) = id.rsplit_once("--") {
+                match local_writers.entry(local) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(Some(id.as_str()));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if entry.get().is_some_and(|target| target != id.as_str()) {
+                            entry.insert(None);
+                        }
+                    }
+                }
+            }
+        }
+        let mut writer_aliases = aliases(links(false), inherited, true);
+        for (local, target) in local_writers {
+            if let Some(target) = target
+                && !writer_aliases.contains_key(local)
+            {
+                writer_aliases.insert(local.to_owned(), target.to_owned());
+            }
+        }
+        let result_aliases = aliases(links(true), inherited_results, false);
         let bind = |id: &mut String, aliases: &BTreeMap<String, String>| {
             if let Some(target) = aliases.get(id) {
                 *id = target.clone();
@@ -362,15 +398,22 @@ fn children(
                 .or_else(|| visible_names.get(&target).cloned())
                 .unwrap_or_else(|| scoped(prefix, &target));
         }
-        // A continued or landed writer may sit inside or outside the composite.
-        for writer in node
-            .continues
-            .iter_mut()
-            .chain(node.land.as_mut().map(|spec| &mut spec.node))
-        {
-            // Outer writers resolve through every enclosing scope, so a loop
-            // body or nested composite can continue or land a writer that is
-            // not one of its direct dependencies.
+        // A continuation cannot refer to itself. Preserve the authored name
+        // when no outer binding is visible so writer alias resolution can bind it.
+        if let Some(writer) = &mut node.continues {
+            *writer = if *writer == original.id {
+                inherited_names
+                    .get(writer.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| writer.clone())
+            } else {
+                reference(prefix, writer, &locals, incoming)
+                    .or_else(|| visible_names.get(writer.as_str()).cloned())
+                    .unwrap_or_else(|| scoped(prefix, writer))
+            };
+        }
+        if let Some(land) = &mut node.land {
+            let writer = &mut land.node;
             *writer = reference(prefix, writer, &locals, incoming)
                 .or_else(|| visible_names.get(writer.as_str()).cloned())
                 .unwrap_or_else(|| scoped(prefix, writer));

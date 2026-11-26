@@ -141,6 +141,88 @@ impl std::fmt::Display for GitOid {
 }
 text_wire!(GitOid, GitOidError);
 
+/// A Git remote name known to be usable as a `refs/remotes/<name>/x` namespace.
+///
+/// This is the single grammar for a remote name across config, records and
+/// delivery. The forge boundary builds it once; every consumer below receives
+/// the typed value, so an absent remote cannot be flattened into `Some("")` and
+/// reach Git as a push destination or a `refs/remotes/` namespace. The grammar
+/// follows `git check-ref-format` for a remote namespace component and also
+/// refuses a leading '-', which Git accepts in a ref but which would read as an
+/// option when passed as a remote argument.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RemoteName(String);
+
+/// The supplied remote name cannot name a `refs/remotes/` namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("a Git remote name must be a valid, non-blank ref namespace component")]
+pub struct RemoteNameError;
+
+impl RemoteName {
+    /// Build a remote name, refusing blank, padded, option-like or otherwise
+    /// invalid values that Git could not use as a `refs/remotes/<name>/x` ref.
+    pub fn new(name: impl AsRef<str>) -> Result<Self, RemoteNameError> {
+        let name = name.as_ref();
+        let valid = !name.is_empty()
+            && name.trim() == name
+            && !name.starts_with('-')
+            && !name.ends_with('/')
+            && !name.ends_with('.')
+            && !name.contains("..")
+            && !name.contains("@{")
+            && !name.chars().any(|character| {
+                character.is_ascii_control()
+                    || character.is_whitespace()
+                    || "~^:?*[\\".contains(character)
+            })
+            && name
+                .split('/')
+                .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"));
+        if !valid {
+            return Err(RemoteNameError);
+        }
+        Ok(Self(name.to_owned()))
+    }
+
+    /// Parse a remote name from text; alias for [`Self::new`] used by the text
+    /// wire macro below.
+    pub fn parse(text: &str) -> Result<Self, RemoteNameError> {
+        Self::new(text)
+    }
+
+    /// The remote name as a string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume the name into its string.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for RemoteName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for RemoteName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for RemoteName {
+    type Error = RemoteNameError;
+    fn try_from(name: &str) -> Result<Self, Self::Error> {
+        Self::new(name)
+    }
+}
+
+text_wire!(RemoteName, RemoteNameError);
+
 /// Provenant record digest, distinct from raw-file and Git identities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

@@ -299,7 +299,14 @@ fn has_alternative_account(
     route: &ResolvedRoute,
     availability: &[provenant_providers::AvailabilityRecord],
     refused: &std::collections::BTreeSet<(String, String)>,
+    policy: &provenant_routing::OfferEvidencePolicy<'_>,
+    catalogue: &provenant_routing::Catalogue,
 ) -> bool {
+    let Ok(model) =
+        provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+    else {
+        return false;
+    };
     availability.iter().any(|record| {
         record.adapter == route.adapter
             && record.account_key.as_deref() != route.account_key.as_deref()
@@ -307,7 +314,15 @@ fn has_alternative_account(
                 .account_key
                 .as_deref()
                 .is_some_and(|key| !refused.contains(&(record.adapter.clone(), key.to_owned())))
-            && provenant_providers::model_matches_offered(&route.model, &record.observed_models)
+            && record.account_key.as_deref().is_some_and(|key| {
+                provenant_routing::recorded_offer_models(
+                    policy.inputs(Some(record), &route.adapter, key),
+                    &model,
+                    catalogue,
+                    provenant_routing::OfferSupersedence::Allow,
+                )
+                .is_some_and(|evidence| evidence.serves)
+            })
     })
 }
 
@@ -2292,28 +2307,30 @@ fn stale_observation_index(
 
 /// The models a route's account reports when the requested model is not among
 /// them, with the age of that recorded offer list. Accounts that report no
-/// models place no restriction.
+/// models place no restriction. Launch preparation reads the same owner as
+/// resolve instead of its own probe-only offer rule.
 fn unoffered_model(
     availability: &[provenant_providers::AvailabilityRecord],
     route: &ResolvedRoute,
-    now: i64,
+    policy: &provenant_routing::OfferEvidencePolicy<'_>,
+    catalogue: &provenant_routing::Catalogue,
 ) -> Option<(Vec<String>, u64)> {
     let key = route.account_key.as_deref()?;
     if !AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.offered_models) {
         return None;
     }
-    let record = availability.iter().find(|record| {
-        record.adapter == route.adapter
-            && record.account_key.as_deref() == Some(key)
-            && record.expires_unix_seconds > now
-            && !record.observed_models.is_empty()
-    })?;
-    (!provenant_providers::model_matches_offered(&route.model, &record.observed_models)).then(
-        || {
-            let age_seconds = now.saturating_sub(record.observed_unix_seconds) as u64;
-            (record.observed_models.clone(), age_seconds)
-        },
-    )
+    let model =
+        provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model)).ok()?;
+    let probe = availability.iter().find(|record| {
+        record.adapter == route.adapter && record.account_key.as_deref() == Some(key)
+    });
+    let evidence = provenant_routing::recorded_offer_models(
+        policy.inputs(probe, &route.adapter, key),
+        &model,
+        catalogue,
+        provenant_routing::OfferSupersedence::Allow,
+    )?;
+    (!evidence.serves).then_some((evidence.offered_models, evidence.age_seconds))
 }
 
 /// The typed lane refusal for an account whose recorded offers exclude the
@@ -2393,6 +2410,17 @@ fn same_selected_ready(route: &ResolvedRoute, next: ResolvedRoute) -> Option<Res
 }
 
 #[cfg(test)]
+fn offer_policy(now: i64) -> provenant_routing::OfferEvidencePolicy<'static> {
+    provenant_routing::OfferEvidencePolicy {
+        accounts: &[],
+        freshness: &provenant_quota::DEFAULT_FRESHNESS,
+        quota_policies: &[],
+        catalogue_revision: "revision",
+        now_seconds: now,
+    }
+}
+
+#[cfg(test)]
 mod stale_readiness_tests {
     use super::*;
     use std::cell::Cell;
@@ -2423,14 +2451,25 @@ mod stale_readiness_tests {
             observed_unix_seconds: 10,
             expires_unix_seconds: 400,
         };
+        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
         assert_eq!(
-            unoffered_model(std::slice::from_ref(&record), &route, 20),
+            unoffered_model(
+                std::slice::from_ref(&record),
+                &route,
+                &offer_policy(20),
+                &catalogue
+            ),
             Some((record.observed_models.clone(), 10))
         );
         let mut flash = route.clone();
         flash.model = "gemini-9-flash".into();
         assert_eq!(
-            unoffered_model(std::slice::from_ref(&record), &flash, 20),
+            unoffered_model(
+                std::slice::from_ref(&record),
+                &flash,
+                &offer_policy(20),
+                &catalogue
+            ),
             None
         );
         let unknown = provenant_providers::AvailabilityRecord {
@@ -2438,7 +2477,10 @@ mod stale_readiness_tests {
             observed_models: vec![],
             ..record
         };
-        assert_eq!(unoffered_model(&[unknown], &route, 20), None);
+        assert_eq!(
+            unoffered_model(&[unknown], &route, &offer_policy(20), &catalogue),
+            None
+        );
     }
 
     #[test]
@@ -3399,6 +3441,8 @@ pub(super) fn prepare_candidates_inner(
     // pacing decision this launch makes.
     let freshness = crate::quota::quota_freshness(&config.origins, &config.domains.quota);
     config.domains.routing.freshness = freshness;
+    let quota_policies =
+        provenant_providers::scheduling_policies(&config.domains.quota, provider_registry);
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
     let (mut request, retained_identity) = match resume {
@@ -4091,8 +4135,18 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(offer_mismatch_skip(&route, mismatch));
             continue;
         }
+        let offer_catalogue_revision = route.catalogue_revision.clone();
+        let offer_policy = provenant_routing::OfferEvidencePolicy {
+            accounts: &diagnostic_records,
+            freshness: &freshness,
+            quota_policies: &quota_policies,
+            // Judge the availability the route was resolved against, not a
+            // later catalogue revision discovered after the decision.
+            catalogue_revision: &offer_catalogue_revision,
+            now_seconds: clock.unix_seconds(),
+        };
         if let Some((offered, age_seconds)) =
-            unoffered_model(&availability, &route, clock.unix_seconds())
+            unoffered_model(&availability, &route, &offer_policy, &catalogue)
         {
             reason_boundaries.insert(
                 reasons.len(),
@@ -4451,8 +4505,13 @@ pub(super) fn prepare_candidates_inner(
             // model-only pin with another account redraws, and automatic
             // alternatives keep their own readiness; both still prefer an
             // available route.
-            let alternative_account =
-                has_alternative_account(&route, &availability, &refused_accounts);
+            let alternative_account = has_alternative_account(
+                &route,
+                &availability,
+                &refused_accounts,
+                &offer_policy,
+                &catalogue,
+            );
             let pinned_advisory_route = pinned_advisory_candidate(
                 &task_request.choice,
                 &route,
@@ -5961,8 +6020,6 @@ pub(super) fn prepare_candidates_inner(
             (false, _) => None,
         };
         apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut provider);
-        let allowance_policies =
-            provenant_providers::scheduling_policies(&config.domains.quota, provider_registry);
         let mut pacing_config = config.domains.routing.clone();
         crate::route::resolve_pacing_accounts(&mut pacing_config, &config.domains.accounts)
             .map_err(|error| error.to_string())?;
@@ -5972,7 +6029,7 @@ pub(super) fn prepare_candidates_inner(
             &paths.attempt_id.to_string(),
             &pacing_config,
             &catalogue,
-            &allowance_policies,
+            &quota_policies,
             provenant_os::clock::SystemClock::new()
                 .wall_now()
                 .map_err(|e| e.to_string())?,
@@ -7488,15 +7545,19 @@ mod candidate_walk_regressions {
 
     #[test]
     fn alternative_account_must_serve_the_pinned_model() {
-        let pinned = route("legacy", "spent");
+        let mut pinned = route("gemini-4-hydrogen", "spent");
+        pinned.adapter = "agy".into();
+        pinned.catalogue_revision = "revision".into();
+        let policy = offer_policy(0);
+        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
         let record = |key: &str, models: &[&str]| provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: pinned.adapter.clone(),
-            executable: "/fixture/cursor".into(),
+            executable: "/fixture/agy".into(),
             version: "fixture".into(),
             last_update: None,
             fixture_ref: "fixture".into(),
-            catalogue_revision: "fixture".into(),
+            catalogue_revision: pinned.catalogue_revision.clone(),
             account_key: Some(key.into()),
             plan: None,
             observed_models: models.iter().map(|model| (*model).to_owned()).collect(),
@@ -7504,28 +7565,103 @@ mod candidate_walk_regressions {
             expires_unix_seconds: 1,
         };
         let refused = std::collections::BTreeSet::new();
-        assert!(!has_alternative_account(&pinned, &[], &refused));
         assert!(!has_alternative_account(
             &pinned,
-            &[record("spent", &["legacy"])],
-            &refused
+            &[],
+            &refused,
+            &policy,
+            &catalogue
+        ));
+        assert!(!has_alternative_account(
+            &pinned,
+            &[record("spent", &["gemini-4-hydrogen"])],
+            &refused,
+            &policy,
+            &catalogue,
         ));
         assert!(has_alternative_account(
             &pinned,
-            &[record("other", &["legacy"])],
-            &refused
+            &[record("other", &["gemini-4-hydrogen"])],
+            &refused,
+            &policy,
+            &catalogue,
         ));
         assert!(!has_alternative_account(
             &pinned,
-            &[record("other", &["unrelated"])],
-            &refused
+            &[record("other", &["gemini-4-argon"])],
+            &refused,
+            &policy,
+            &catalogue,
         ));
         let mut refused = std::collections::BTreeSet::new();
-        refused.insert(("cursor".to_owned(), "other".to_owned()));
+        refused.insert(("agy".to_owned(), "other".to_owned()));
         assert!(!has_alternative_account(
             &pinned,
-            &[record("other", &["legacy"])],
-            &refused
+            &[record("other", &["gemini-4-hydrogen"])],
+            &refused,
+            &policy,
+            &catalogue,
+        ));
+    }
+
+    #[test]
+    fn alternative_account_uses_fresh_snapshot_offer_evidence() {
+        let mut pinned = route("gemini-4-hydrogen", "spent");
+        pinned.adapter = "agy".into();
+        pinned.catalogue_revision = "revision".into();
+        let availability = [provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: pinned.adapter.clone(),
+            executable: "/fixture/agy".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: "revision".into(),
+            account_key: Some("other".into()),
+            plan: None,
+            observed_models: Vec::new(),
+            observed_unix_seconds: 90,
+            expires_unix_seconds: 200,
+        }];
+        let scope = provenant_quota::AccountScope {
+            extra: Default::default(),
+            adapter: pinned.adapter.clone(),
+            account_key: "other".into(),
+            label: "other".into(),
+        };
+        let mut account = provenant_quota::AccountRecord::empty(scope.clone());
+        account.revision = 1;
+        account.snapshot = Some(provenant_quota::QuotaSnapshot {
+            extra: Default::default(),
+            schema_version: 1,
+            account: scope,
+            revision: 1,
+            status: provenant_quota::QuotaStatus::Available,
+            observed_unix_seconds: 80,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: Some(provenant_quota::QuotaDetails {
+                extra: Default::default(),
+                models: vec!["gemini-4-hydrogen".into()],
+                ..Default::default()
+            }),
+            windows: Vec::new(),
+        });
+        let accounts = [account];
+        let policy = provenant_routing::OfferEvidencePolicy {
+            accounts: &accounts,
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
+            quota_policies: &[],
+            catalogue_revision: &pinned.catalogue_revision,
+            now_seconds: 100,
+        };
+        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
+        assert!(has_alternative_account(
+            &pinned,
+            &availability,
+            &std::collections::BTreeSet::new(),
+            &policy,
+            &catalogue,
         ));
     }
 

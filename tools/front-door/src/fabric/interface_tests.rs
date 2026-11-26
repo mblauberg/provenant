@@ -5219,3 +5219,19 @@ fn one_subject_per_origin_survives_a_push() -> Result {
     }
     Ok(())
 }
+
+#[test]
+fn explain_uses_the_declared_adapter_for_an_uncanonicalised_model() -> Result {
+    use provenant_fabric_runtime::graph::GraphNode;
+    let rig = TestRig::new()?;
+    let factory = factory(&rig)?;
+    let node: GraphNode = serde_json::from_value(json!({
+        "id":"exact", "access":"read_only", "prompt":"inspect",
+        "route":{"adapter":"codex","model":"unprefixed-model"}
+    }))?;
+    let rows = factory.explain_node_routes(&[node]);
+    assert_eq!(rows[0]["adapter"], "codex");
+    assert_eq!(rows[0]["model"], "unprefixed-model");
+    assert_eq!(rows[0]["sources"]["adapter"], "node field");
+    Ok(())
+}

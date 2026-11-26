@@ -102,6 +102,7 @@ impl ProviderGroup {
         _lease: &provenant_os::fs::LockGuard,
         _boot: &str,
         _priority: u8,
+        _before_exec: impl FnOnce(&ProcessIdentity) -> io::Result<()> + Send + 'static,
     ) -> io::Result<Self> {
         Err(unsupported())
     }
@@ -204,6 +205,7 @@ mod tests {
             &lease,
             "boot",
             0,
+            |_| Ok(()),
         )
         .err()
         .ok_or_else(|| io::Error::other("provider spawned"))?;

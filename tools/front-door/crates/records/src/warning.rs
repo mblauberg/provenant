@@ -181,6 +181,9 @@ pub const WRITER_FENCE_LIST_FAILED: WarningCode = WarningCode("WRITER_FENCE_LIST
 /// A settled writer attempt named a retained fence that is missing; abandon proceeds.
 pub const ABANDON_RETAINED_FENCE_MISSING: WarningCode =
     WarningCode("ABANDON_RETAINED_FENCE_MISSING");
+/// A dead lane's attributed process was found but cannot be proven enough to
+/// reap; it is named in status for the chair.
+pub const ORPHAN_PROCESS_ATTRIBUTED: WarningCode = WarningCode("ORPHAN_PROCESS_ATTRIBUTED");
 /// An abandoned lane left a stale Git worktree registration; the lane settled.
 pub const ABANDON_STALE_WORKTREE_REGISTRATION: WarningCode =
     WarningCode("ABANDON_STALE_WORKTREE_REGISTRATION");
@@ -225,6 +228,10 @@ pub const PRIMARY_POSITION_UNRECORDED: WarningCode = WarningCode("PRIMARY_POSITI
 pub const ADMISSION_RECORD_MALFORMED: WarningCode = WarningCode("ADMISSION_RECORD_MALFORMED");
 /// A steer targeted a settled lane and was handled by the sourced setting.
 pub const STEER_TARGET_SETTLED: WarningCode = WarningCode("STEER_TARGET_SETTLED");
+/// A dead attempt's undecodable record was preserved and its writer lease released.
+pub const UNREADABLE_RECORD_RELEASED: WarningCode = WarningCode("UNREADABLE_RECORD_RELEASED");
+/// A dead attempt's undecodable record still fences custody; liveness is unproved.
+pub const UNREADABLE_RECORD_HELD: WarningCode = WarningCode("UNREADABLE_RECORD_HELD");
 
 // Event-specific codes added when the warning slices named each site.
 // A violated policy rule warns under its own rule code (see policy.rs), so the

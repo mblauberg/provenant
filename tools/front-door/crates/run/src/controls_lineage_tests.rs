@@ -663,7 +663,7 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
     original.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: DeliveryMode::Pr,
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "old-lane".into(),
         open_pr: true,
         fast_forward_only: false,

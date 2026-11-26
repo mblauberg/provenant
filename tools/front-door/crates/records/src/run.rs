@@ -481,6 +481,92 @@ pub struct WriterRequest {
     pub worktree: std::path::PathBuf,
 }
 
+/// Where a delivery publishes: a named remote, or the local repository.
+///
+/// This is the one typed destination for a delivery request and its sealed
+/// binding. It is parsed once on decode with the single `RemoteName` grammar,
+/// so a name the resolver accepts is also a name delivery can use. The wire
+/// form is `null` for `Local` and a name string for `Remote`; an empty string
+/// is malformed and fails decoding rather than spelling a third, nameless
+/// destination.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Option<String>", into = "Option<String>")]
+pub enum Destination {
+    #[default]
+    Local,
+    Remote(provenant_core::RemoteName),
+}
+
+impl Destination {
+    /// A local repository destination, with no remote.
+    pub fn local() -> Self {
+        Self::Local
+    }
+
+    /// A destination named by a validated remote.
+    pub fn remote(name: provenant_core::RemoteName) -> Self {
+        Self::Remote(name)
+    }
+
+    /// Parse a destination from a remote name, refusing a malformed one.
+    pub fn from_name(name: &str) -> Result<Self, provenant_core::RemoteNameError> {
+        Ok(Self::Remote(provenant_core::RemoteName::new(name)?))
+    }
+
+    /// The bound remote, or `None` when the destination is local.
+    pub fn remote_name(&self) -> Option<&provenant_core::RemoteName> {
+        match self {
+            Self::Local => None,
+            Self::Remote(name) => Some(name),
+        }
+    }
+
+    /// The bound remote name as text, or `None` when the destination is local.
+    pub fn as_str(&self) -> Option<&str> {
+        self.remote_name().map(|name| name.as_str())
+    }
+
+    /// Whether this destination names no remote.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+}
+
+impl TryFrom<Option<String>> for Destination {
+    type Error = provenant_core::RemoteNameError;
+
+    fn try_from(value: Option<String>) -> Result<Self, Self::Error> {
+        match value {
+            None => Ok(Self::Local),
+            Some(name) => Ok(Self::Remote(provenant_core::RemoteName::new(name)?)),
+        }
+    }
+}
+
+impl From<Destination> for Option<String> {
+    fn from(destination: Destination) -> Self {
+        match destination {
+            Destination::Local => None,
+            Destination::Remote(name) => Some(name.into_string()),
+        }
+    }
+}
+
+impl From<provenant_core::RemoteName> for Destination {
+    fn from(name: provenant_core::RemoteName) -> Self {
+        Self::Remote(name)
+    }
+}
+
+impl std::fmt::Display for Destination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => f.write_str("local"),
+            Self::Remote(name) => f.write_str(name.as_str()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriterDeliveryRequest {
     #[serde(flatten)]
@@ -488,8 +574,9 @@ pub struct WriterDeliveryRequest {
     /// Push is the default delivery mode; integration never checks out either head.
     #[serde(default, skip_serializing_if = "DeliveryMode::is_push")]
     pub mode: DeliveryMode,
-    /// A configured remote name, never a URL supplied by a provider.
-    pub remote: String,
+    /// The typed destination: a configured remote name, never a URL supplied
+    /// by a provider, or a local repository.
+    pub remote: Destination,
     /// Short destination branch name; the host pushes an explicit full refspec.
     pub branch: String,
     #[serde(default)]
@@ -612,12 +699,14 @@ pub struct WriterReviewAcceptance {
     pub protected_paths: Vec<PathWire>,
 }
 
+/// The receipt's destination is typed; the run-store migration rewrites
+/// legacy empty local destinations before decoding stored attempt records.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriterDeliveryReceipt {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub schema_version: u64,
-    pub remote: String,
+    pub remote: Destination,
     pub branch: String,
     pub head: Option<GitOid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -637,8 +726,8 @@ pub struct WriterDeliveryReceipt {
 pub struct WriterIntegration {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    /// The bound remote name, or empty for a ref in the local repository.
-    pub remote: String,
+    /// The bound destination: a remote name, or local for a repository ref.
+    pub remote: Destination,
     /// Credential-free identity of the bound push URL; absent for a local ref.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_url: Option<String>,

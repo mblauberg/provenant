@@ -199,6 +199,18 @@ Nothing downstream splits, prefixes or re-derives the stored id: preparation,
 successor deduplication and prior-model exclusions parse it directly. This is
 what lets a batch route match `run implement --model` and a declared route
 equal to a ladder hand-off appear once among successors.
+`run --explain` reports a `node_routes` row for each launchable node with the
+effective adapter, model and effort and the source of each (`node field`,
+`policy`, `pool` or `default`). An exact node field or a configured named route
+resolves to one spelling; a pool is shown as candidate entries without
+drawing a pick, because the weighted selection, account and credential decision
+remain launch-only. The row's `selection` names that boundary, so pool routing
+can be checked before launch. Each pool candidate includes its model, adapter,
+effective effort and the source of each value; a node-level effort applies to
+every candidate. Structural and host-managed nodes (gates, loops, composites, decisions, land,
+hygiene and publish) have no route row. A model route reports its declared
+adapter even when its model cannot be canonicalised. Model-less adapter routes report their provider in `adapter`
+and preserve the configured entry separately as `route_name`.
 - Why: a model id may itself contain `/`, so re-parsing a stored id silently
   changes which model runs.
 - Owner: `crates/routing/src/catalog.rs`,
@@ -518,7 +530,10 @@ invalid.
 ### Writer continuation
 
 A writer that `continues` an upstream `pr` or `push` writer reuses its worktree
-and branch, so repairs update the same pull request. The host pushes without
+and branch, so repairs update the same pull request. An authored writer id binds
+to its unique expanded root writer, including inside repair loops whose local
+continuation has the same name; continuing writers do not become new roots.
+The host pushes without
 force and refuses a mismatched branch.
 - Why: a repair must land on the reviewed PR and never rewrite a moved branch.
 
@@ -662,7 +677,8 @@ liveness. When such a row needs recovery, its `next:` hint names the peer's own
 graph target and the host that owns it, where `reconcile` can resolve it. An
 uncertain remote mutation is resolved by the owner's receipt, never resent. Remote attempts bind the origin identity, transferred Git objects are
 verified before use, and a protocol mismatch is refused before decoding;
-cross-host text follows the configured disclosure policy. A peer locator
+reachable peer status relays the owner's authenticated presence and recovery
+hints name the owning host. Cross-host text follows the configured disclosure policy. A peer locator
 identifies a registered Git common directory, Git's verified worktree inventory
 selects the checkout that owns project configuration, and a bare common directory
 stays its own host-only layout root.

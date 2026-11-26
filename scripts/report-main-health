@@ -1,13 +1,91 @@
 #!/usr/bin/env python3
-"""Report the result of a main CI run to the red-main issue."""
+"""Report main CI health and quarantine flakes confirmed by a re-run."""
+import datetime as dt
+import importlib.machinery
+import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
 
 
 def gh(*args):
     return subprocess.run(['gh', *args], check=True, text=True, capture_output=True).stdout
+
+
+def load(name):
+    """Load a sibling script as a module so both sides share one parser."""
+    path = ROOT / name
+    spec = importlib.util.spec_from_loader(
+        name, importlib.machinery.SourceFileLoader(name, str(path))
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def junit_rows(directory):
+    if not directory or not Path(directory).is_dir():
+        return []
+    junit = load('junit-failures')
+    return junit.cases(junit.read_dir(directory))
+
+
+def junit_rows_by_job(directory):
+    """Return JUnit rows keyed by the test job represented by each artifact."""
+    if not directory or not Path(directory).is_dir():
+        return {}
+    junit = load('junit-failures')
+    root = Path(directory)
+    rows = {}
+    for path in junit.read_dir(root):
+        parts = path.relative_to(root).parts
+        if not parts:
+            continue
+        artifact = parts[0]
+        linux = re.fullmatch(r'rust-nextest-junit-(\d+)', artifact)
+        native = re.fullmatch(r'native-test-evidence-([a-z0-9-]+)', artifact)
+        if linux:
+            job = f'Rust front door ({linux.group(1)}/3)'
+        elif native:
+            job = f'Rust macOS tests ({native.group(1)})'
+        else:
+            continue
+        rows.setdefault(job, []).extend(junit.cases([path]))
+    return rows
+
+
+def failures_accounted_for(failed_jobs, rows_by_job, known_or_registered):
+    """Require evidence for every failed test job, with no other failures."""
+    # ci-status aggregates dependency results; the underlying failed jobs are
+    # the evidence we must account for.
+    jobs = [name for name in failed_jobs if name != 'ci-status']
+    if not jobs:
+        return False
+    for job in jobs:
+        failed = {
+            (row['package'], row['name'])
+            for row in rows_by_job.get(job, [])
+            if row['failed']
+        }
+        if not failed or not failed.issubset(known_or_registered):
+            return False
+    return True
+
+
+def known_flaky(repo):
+    """TOML entries plus open issue-backed entries (spec: docs/specs/ci.md)."""
+    flaky = load('flaky-quarantine')
+    config_path = ROOT.parent / 'tools/front-door/.config/quarantine.toml'
+    config = flaky.parse_config(config_path.read_text(encoding='utf-8'))
+    raw = gh('api', '--paginate', '--slurp',
+             f'repos/{repo}/issues?state=open&labels=ci%3Aflaky&per_page=100')
+    config['test'].extend(flaky.parse_issues(raw)['test'])
+    return flaky, config['test']
 
 
 def main():
@@ -24,15 +102,53 @@ def main():
         for issue in issues:
             gh('issue', 'close', str(issue['number']), '--repo', repo, '--comment', f'Main is green at {sha}: {run_url}')
         return
+
+    flaky, entries = known_flaky(repo)
+    known = {(entry['package'], entry['name']) for entry in entries}
+    failed = {
+        (row['package'], row['name'])
+        for row in junit_rows(os.environ.get('JUNIT_DIR'))
+        if row['failed']
+    }
+    # A candidate is a flake only when a dedicated re-run of the same tests
+    # passed. Without that evidence a failure stays actionable.
+    rerun_passed = {
+        (row['package'], row['name'])
+        for row in junit_rows(os.environ.get('RERUN_JUNIT_DIR'))
+        if not row['failed']
+    }
+    confirmed = sorted((failed & rerun_passed) - known)
+    budget = max(0, flaky.MAX_ENTRIES - len(known))
+    registered = set(confirmed[:budget])
+    for package, name in sorted(registered):
+        expiry = dt.date.today() + dt.timedelta(days=30)
+        body = (
+            f"{flaky.ISSUE_MARKER}\n"
+            f"- package: {package}\n"
+            f"- name: {name}\n"
+            "- owner: chair\n"
+            f"- expires: {expiry.isoformat()}\n\n"
+            f"Confirmed flaky on main: failed once, then passed on re-run at {run_url}.\n"
+            "The quarantine job keeps running this test; fix and remove this issue to end it."
+        )
+        gh('issue', 'create', '--repo', repo, '--title', f'ci:flaky {package}::{name}',
+           '--label', 'ci:flaky', '--body', body)
+
+    actionable = failed - known - registered
     jobs = json.loads(gh('api', '--paginate', '--slurp', f"repos/{repo}/actions/runs/{os.environ['RUN_ID']}/jobs?per_page=100"))
-    failed = [job['name'] for page in jobs for job in page['jobs'] if job.get('conclusion') == 'failure']
+    failed_jobs = [job['name'] for page in jobs for job in page['jobs'] if job.get('conclusion') == 'failure']
+    if (failed and not actionable and
+            failures_accounted_for(failed_jobs, junit_rows_by_job(os.environ.get('JUNIT_DIR')), known | registered)):
+        print(f'All {len(failed)} main failures are known or confirmed flakes; no red-main issue.')
+        return
+
     try:
         green = json.loads(os.environ.get('SELECTION_JSON') or '{}').get('evidence', {}).get('main')
     except (ValueError, AttributeError):
         green = None
     comparison = f'Last green main: {green}\nCompare: https://github.com/{repo}/compare/{green}...{sha}' if green else 'No green main found.'
     body = (f'CI failed on main: {run_url}\n\nSHA: {sha}\n\nFailed jobs: '
-            + (', '.join(failed) if failed else 'none reported') + f'\n\n{comparison}\n\n'
+            + (', '.join(failed_jobs) if failed_jobs else 'none reported') + f'\n\n{comparison}\n\n'
             + 'Fix forward: a PR that only repairs CI merges on green ci-status.')
     if issues:
         gh('issue', 'comment', str(issues[0]['number']), '--repo', repo, '--body', body)
@@ -43,6 +159,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (subprocess.CalledProcessError, ValueError, KeyError) as exc:
+    except (subprocess.CalledProcessError, ValueError, KeyError, OSError) as exc:
         print(f'main-health: {exc}', file=sys.stderr)
         sys.exit(1)
