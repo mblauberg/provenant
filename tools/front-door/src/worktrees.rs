@@ -713,6 +713,17 @@ struct GcData {
     /// Resolved `gc.attempt_scratch_max` and where it came from.
     attempt_scratch_max_bytes: u64,
     attempt_scratch_max_source: String,
+    /// Resolved `gc.scratch_grace` and where it came from.
+    scratch_grace_seconds: u64,
+    scratch_grace_source: String,
+    /// Resolved preview budget and whether a preview stopped at it.
+    preview_budget_seconds: u64,
+    preview_budget_source: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    preview_budget_stopped: bool,
+    /// Resolved share of free space that warns about attempt scratch.
+    scratch_warning_share: f64,
+    scratch_warning_share_source: String,
     sweep_cursor: Option<crate::gc_sweep::Cursor>,
     sweep_warning: Option<String>,
     sweep_stopped: bool,
@@ -1077,11 +1088,37 @@ const GC_REPAIR: &str =
 
 fn gc_failure<'a>(data: &'a GcData, message: &str, detailed: bool) -> CommandResult<GcOutput<'a>> {
     let mut result = CommandResult::new("gc", Outcome::Error, gc_result_data(data, detailed));
+    // Exit 3 must name the budget that stopped the pass and the way to raise
+    // it: a preview and an applied sweep have distinct, separately configured
+    // bounds and a single "retention incomplete" line cannot guide the operator.
+    let budget = if data.preview_budget_stopped {
+        format!(
+            "stopped at gc.preview_budget={}s (source: {}); raise gc.preview_budget in config.toml or rerun with `provenant gc --apply`",
+            data.preview_budget_seconds, data.preview_budget_source
+        )
+    } else if data.sweep_stopped {
+        format!(
+            "stopped at gc.sweep_budget={}s (source: {}); raise gc.sweep_budget in config.toml and rerun `provenant gc --apply`",
+            data.sweep_budget_seconds, data.sweep_budget_source
+        )
+    } else {
+        String::new()
+    };
+    let repair = if budget.is_empty() {
+        GC_REPAIR.to_owned()
+    } else {
+        format!("{GC_REPAIR} {budget}")
+    };
+    let message = if budget.is_empty() {
+        message.to_owned()
+    } else {
+        format!("{message}: {budget}")
+    };
     result.error = Some(provenant_records::CommandError::new(
         "GC",
         format!("{message}\n{}{GC_REPAIR}", gc_data_summary(data)),
         None,
-        GC_REPAIR,
+        repair.as_str(),
     ));
     result
 }
@@ -1265,7 +1302,7 @@ fn gc_compact_summary(data: &GcData, full: bool) -> String {
         .map(|entry| entry.worktrees.removed.len())
         .sum();
     let mut summary = format!(
-        "{}: {trees} worktrees, {} attempt scratch directories, {} known bytes; {} retention errors\nGC sweep budget: {}s (source: {}); free-space floor: {} bytes (source: {}); attempt scratch cap: {} bytes (source: {})\n",
+        "{}: {trees} worktrees, {} attempt scratch directories, {} known bytes; {} retention errors\nGC sweep budget: {}s (source: {}); preview budget: {}s (source: {}); free-space floor: {} bytes (source: {}); attempt scratch cap: {} bytes (source: {}); scratch grace: {}s (source: {}); scratch warning share: {}\n",
         if data.report.dry_run {
             "would collect"
         } else {
@@ -1276,12 +1313,23 @@ fn gc_compact_summary(data: &GcData, full: bool) -> String {
         data.retention_errors.len() + data.provider_state.errors.len(),
         data.sweep_budget_seconds,
         data.sweep_budget_source,
+        data.preview_budget_seconds,
+        data.preview_budget_source,
         data.free_floor_bytes,
         data.free_floor_source,
         data.attempt_scratch_max_bytes,
-        data.attempt_scratch_max_source
+        data.attempt_scratch_max_source,
+        data.scratch_grace_seconds,
+        data.scratch_grace_source,
+        data.scratch_warning_share
     );
     summary.push_str(&candidate_progress_line(data));
+    if data.preview_budget_stopped {
+        summary.push_str(&format!(
+            "preview stopped at gc.preview_budget={}s (source: {}); raise it or rerun with --apply\n",
+            data.preview_budget_seconds, data.preview_budget_source
+        ));
+    }
     for line in gc_uncollected_aggregate_lines(data) {
         summary.push_str(&line);
         summary.push('\n');
@@ -1350,6 +1398,24 @@ fn gc_data_summary(data: &GcData) -> String {
             "reclaimed"
         }
     ));
+    let mut by_class = gc_retention_bytes(data)
+        .into_iter()
+        .filter_map(|row| {
+            let (suffix, bytes) = match row.observation {
+                provenant_config::ByteObservation::Measured { bytes } => ("", bytes),
+                provenant_config::ByteObservation::Partial { bytes } => (" (partial)", bytes),
+                provenant_config::ByteObservation::Unknown => return None,
+            };
+            (bytes > 0).then(|| format!("{:?}={bytes}{suffix}", row.class))
+        })
+        .collect::<Vec<_>>();
+    by_class.sort();
+    if !by_class.is_empty() {
+        human.push_str(&format!(
+            "reclaimed bytes by class: {}\n",
+            by_class.join(", ")
+        ));
+    }
     let trees: usize = data
         .worktree_cleanup
         .iter()
@@ -1777,6 +1843,13 @@ enum GcOutput<'a> {
         free_floor_source: &'a str,
         attempt_scratch_max_bytes: u64,
         attempt_scratch_max_source: &'a str,
+        scratch_grace_seconds: u64,
+        scratch_grace_source: &'a str,
+        preview_budget_seconds: u64,
+        preview_budget_source: &'a str,
+        preview_budget_stopped: bool,
+        scratch_warning_share: f64,
+        scratch_warning_share_source: &'a str,
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         uncollected: Vec<crate::gc_support::UncollectedItem>,
         sweep_cursor: &'a Option<crate::gc_sweep::Cursor>,
@@ -1870,6 +1943,13 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         free_floor_source: &data.free_floor_source,
         attempt_scratch_max_bytes: data.attempt_scratch_max_bytes,
         attempt_scratch_max_source: &data.attempt_scratch_max_source,
+        scratch_grace_seconds: data.scratch_grace_seconds,
+        scratch_grace_source: &data.scratch_grace_source,
+        preview_budget_seconds: data.preview_budget_seconds,
+        preview_budget_source: &data.preview_budget_source,
+        preview_budget_stopped: data.preview_budget_stopped,
+        scratch_warning_share: data.scratch_warning_share,
+        scratch_warning_share_source: &data.scratch_warning_share_source,
         uncollected: gc_uncollected(data),
         sweep_cursor: &data.sweep_cursor,
         sweep_warning: &data.sweep_warning,
@@ -2590,6 +2670,30 @@ fn gc(
         .get("gc.attempt_scratch_max")
         .map(gc_origin_source)
         .unwrap_or_else(|| "compiled default".into());
+    let scratch_grace_seconds = config
+        .gc
+        .scratch_grace_seconds()
+        .map_err(|_| Error::GcObservation("invalid gc.scratch_grace"))?;
+    let scratch_grace_source = config
+        .origins
+        .get("gc.scratch_grace")
+        .map(gc_origin_source)
+        .unwrap_or_else(|| "compiled default".into());
+    let preview_budget_seconds = config
+        .gc
+        .preview_budget_seconds()
+        .map_err(|_| Error::GcObservation("invalid gc.preview_budget"))?;
+    let preview_budget_source = config
+        .origins
+        .get("gc.preview_budget")
+        .map(gc_origin_source)
+        .unwrap_or_else(|| "compiled default".into());
+    let scratch_warning_share = config.gc.scratch_warning_share_value();
+    let scratch_warning_share_source = config
+        .origins
+        .get("gc.scratch_warning_share")
+        .map(gc_origin_source)
+        .unwrap_or_else(|| "compiled default".into());
     if (command.scheduled || command.pressure) && !config.gc.schedule {
         return Ok(GcData {
             report: provenant_confinement::cache::CacheGcReport {
@@ -2603,6 +2707,12 @@ fn gc(
             free_floor_source: free_floor_source.clone(),
             attempt_scratch_max_bytes,
             attempt_scratch_max_source: attempt_scratch_max_source.clone(),
+            scratch_grace_seconds,
+            scratch_grace_source: scratch_grace_source.clone(),
+            preview_budget_seconds,
+            preview_budget_source: preview_budget_source.clone(),
+            scratch_warning_share,
+            scratch_warning_share_source: scratch_warning_share_source.clone(),
             provider_state: Default::default(),
             unobserved_projects,
             skipped_transient,
@@ -2648,6 +2758,12 @@ fn gc(
                     free_floor_source: free_floor_source.clone(),
                     attempt_scratch_max_bytes,
                     attempt_scratch_max_source: attempt_scratch_max_source.clone(),
+                    scratch_grace_seconds,
+                    scratch_grace_source: scratch_grace_source.clone(),
+                    preview_budget_seconds,
+                    preview_budget_source: preview_budget_source.clone(),
+                    scratch_warning_share,
+                    scratch_warning_share_source: scratch_warning_share_source.clone(),
                     sweep_warning: warning.clone(),
                     notice: Some(
                         warning.unwrap_or_else(|| "sweep already running; skipped".into()),
@@ -2792,6 +2908,12 @@ fn gc(
                 free_floor_source: free_floor_source.clone(),
                 attempt_scratch_max_bytes,
                 attempt_scratch_max_source: attempt_scratch_max_source.clone(),
+                scratch_grace_seconds,
+                scratch_grace_source: scratch_grace_source.clone(),
+                preview_budget_seconds,
+                preview_budget_source: preview_budget_source.clone(),
+                scratch_warning_share,
+                scratch_warning_share_source: scratch_warning_share_source.clone(),
                 sweep_cursor: initial_cursor,
                 sweep_warning,
                 retired_projects: retired_projects.clone(),
@@ -3182,6 +3304,12 @@ fn gc(
             free_floor_source: free_floor_source.clone(),
             attempt_scratch_max_bytes,
             attempt_scratch_max_source: attempt_scratch_max_source.clone(),
+            scratch_grace_seconds,
+            scratch_grace_source: scratch_grace_source.clone(),
+            preview_budget_seconds,
+            preview_budget_source: preview_budget_source.clone(),
+            scratch_warning_share,
+            scratch_warning_share_source: scratch_warning_share_source.clone(),
             sweep_warning,
             stranded_work,
             unobserved_projects,
@@ -4332,6 +4460,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     .and_then(|path| path.file_name()?.to_str()?.parse().ok()),
                 detail: self.resume_detail(),
                 keep_going: Some(&keep_going),
+                preview_budget: Duration::from_secs(self.data.preview_budget_seconds),
             };
             crate::provider_retention::collect_provider_state(
                 self.roots,
@@ -4357,6 +4486,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             .append(&mut scratch.scratch_deferred);
         report.kept.append(&mut scratch.kept);
         report.errors.append(&mut scratch.errors);
+        self.data.preview_budget_stopped |= report.preview_budget_stopped;
         self.data.provider_state = report;
         Ok(())
     }
@@ -4375,6 +4505,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     .and_then(|path| path.file_name()?.to_str()?.parse().ok()),
                 detail: self.resume_detail(),
                 keep_going: Some(&keep_going),
+                preview_budget: Duration::from_secs(self.data.preview_budget_seconds),
             };
             crate::provider_retention::collect_attempt_scratch(
                 self.roots,
@@ -4382,6 +4513,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 self.assets,
                 self.data.idle_seconds,
                 self.data.attempt_scratch_max_bytes,
+                self.data.scratch_grace_seconds,
                 (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),
                 self.command.dry_run,
                 cancel,
@@ -4406,6 +4538,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             .append(&mut report.scratch_deferred);
         self.data.provider_state.kept.append(&mut report.kept);
         self.data.provider_state.errors.append(&mut report.errors);
+        self.data.preview_budget_stopped |= report.preview_budget_stopped;
         Ok(())
     }
     fn payload_cap(&mut self) -> Result<(), Error> {
@@ -4423,6 +4556,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     .and_then(|path| path.file_name()?.to_str()?.parse().ok()),
                 detail: self.resume_detail(),
                 keep_going: Some(&keep_going),
+                preview_budget: Duration::from_secs(self.data.preview_budget_seconds),
             };
             crate::provider_retention::collect_payload_cap(
                 (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),

@@ -94,6 +94,8 @@ pub const CONFIG_UNAVAILABLE: WarningCode = WarningCode("CONFIG_UNAVAILABLE");
 pub const PROJECT_DIRECTORY_IGNORED: WarningCode = WarningCode("PROJECT_DIRECTORY_IGNORED");
 /// Free disk space fell below the configured floor; collection may proceed.
 pub const DISK_FLOOR_LOW: WarningCode = WarningCode("DISK_FLOOR_LOW");
+/// Attempt scratch holds more than the configured share of free space.
+pub const ATTEMPT_SCRATCH_HIGH: WarningCode = WarningCode("ATTEMPT_SCRATCH_HIGH");
 /// Native package cache settings could not be resolved safely and were kept.
 pub const PACKAGE_CACHE_SETTINGS_UNRESOLVED: WarningCode =
     WarningCode("PACKAGE_CACHE_SETTINGS_UNRESOLVED");

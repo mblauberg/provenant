@@ -367,6 +367,48 @@ impl Inspection {
         }
     }
 }
+/// Advisory: attempt scratch above the configured share of free space. A
+/// bounded, read-only census; an incomplete observation never claims safety or
+/// danger it did not measure.
+fn warn_on_attempt_scratch(roots: &provenant_core::Roots) {
+    let Ok(config) = provenant_cli::config_reads::show_for(roots, "check config") else {
+        return;
+    };
+    let share = config.gc.scratch_warning_share_value();
+    if share <= 0.0 {
+        return;
+    }
+    let scratch = roots.state.as_path().join(provenant_run::ATTEMPT_SCRATCH);
+    let mut census = provenant_os::disk::DiskReport::with_walk_budget(
+        scratch.clone().into(),
+        0,
+        10_000,
+        Duration::from_millis(500),
+    )
+    .with_cancellation(CancelToken::new());
+    census.measure("attempt_scratch", &scratch);
+    let bytes = census.entries.iter().fold(0_u64, |sum, entry| {
+        sum.saturating_add(entry.allocated_bytes)
+    });
+    let Ok(free) = provenant_confinement::disk::available_bytes_at_existing(roots.state.as_path())
+    else {
+        return;
+    };
+    let share_micros = (share * 1_000_000.0) as u128;
+    let threshold = u128::from(free) * share_micros / 1_000_000;
+    if u128::from(bytes) > threshold {
+        warn(
+            Warning::new(
+                provenant_records::warning::ATTEMPT_SCRATCH_HIGH,
+                format!(
+                    "attempt scratch holds {bytes} bytes with {free} bytes free, above gc.scratch_warning_share={share}; run `provenant gc --apply` to reclaim settled scratch"
+                ),
+            )
+            .subject(scratch.display().to_string()),
+        );
+    }
+}
+
 fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
     let workspace = if matches!(check, Inspectable::Release { .. }) {
         roots::Workspace::Checkout
@@ -380,6 +422,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
         roots,
         ..
     } = roots::resolve(globals, workspace, roots::Product::Required)?;
+    warn_on_attempt_scratch(&roots);
     let selector = (
         env!("PROVENANT_SOURCE_DIGEST"),
         assets.as_os_str().as_encoded_bytes(),

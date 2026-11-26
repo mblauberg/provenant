@@ -30,6 +30,15 @@ provenant --project /absolute/path/to/repo gc --apply --json
   is collected without waiting out `gc.idle`; the effective value and source
   appear as `attempt scratch cap` in text and `attempt_scratch_max_bytes`/
   `attempt_scratch_max_source` in JSON. An unmeasurable tree stays.
+- A settled attempt whose record is unreadable or cannot prove custody is kept
+  only for `gc.scratch_grace` (default `1d`, source shown by `provenant gc`),
+  measured from the scratch tree's newest write. Fresh locks and no live
+  continuation still gate collection; settlement releases the same scratch.
+- A read-only preview stops at `gc.preview_budget` (default `1s`); applied passes
+  stop at `gc.sweep_budget`. Exit 3 names which bound stopped the pass, its
+  value and source, and whether to raise the setting or use `--apply`. Attempt
+  scratch is collected largest first within each resume page, and the report
+  lists reclaimed bytes per retention class.
 - The advisory dweller census runs after collection with one cached observation
   per pass, so a large settled store cannot spend `gc.sweep_budget` before
   anything is collected. The report names how many settled candidates were
