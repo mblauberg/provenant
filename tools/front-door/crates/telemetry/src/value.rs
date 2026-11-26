@@ -305,7 +305,8 @@ mod tests {
         let readings = [
             reading(1_000, 9_000, false),
             reading(2_000, 500, true), // first cycle reset after one reading
-            reading(3_000, 4_000, false),
+            reading(2_500, 2_000, false), // last cycle's first reading
+            reading(3_000, 4_000, false), // last reading before the reset sets the share
             reading(4_000, 2_000, true),
         ];
         let share = unused_at_reset(&readings).expect("a series with readings");

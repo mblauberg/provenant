@@ -60,7 +60,7 @@ mod tests {
             .1;
         let documented: Vec<String> = after
             .trim_start()
-            .split(|c: char| c == ']' || c == '`')
+            .split([']', '`'])
             .next()
             .ok_or("runbook --by has no list")?
             .split('|')

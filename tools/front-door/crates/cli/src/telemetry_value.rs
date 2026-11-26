@@ -295,7 +295,7 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
             in_window
                 .iter()
                 .copied()
-                .filter(|row| attributed(*row, provider, &identity_key)),
+                .filter(|row| attributed(row, provider, &identity_key)),
         )
         .map_err(io)?;
         let price = provenant_quota::price_in_force(&entry.plans, reading.observed_unix_seconds);
@@ -350,10 +350,10 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
                 let cost_rows: Vec<&Row> = in_window
                     .iter()
                     .copied()
-                    .filter(|row| attributed(*row, provider, &identity_key))
+                    .filter(|row| attributed(row, provider, &identity_key))
                     .filter(|row| match (w.resets_unix_seconds, w.window_seconds) {
                         (Some(reset), Some(len)) => {
-                            let at = seconds(*row);
+                            let at = seconds(row);
                             at >= reset.saturating_sub(i64::try_from(len).unwrap_or(i64::MAX))
                                 && at <= reset
                         }
