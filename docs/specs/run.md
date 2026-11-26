@@ -306,18 +306,21 @@ decision, a missing capability or no kind given). Both take the `stopped_early` 
 overrides it: a new route in a fresh session on the retained worktree. A junior route escalates to
 senior; otherwise a declared route not yet launched is used, and an alias route may resolve again.
 
-A lane's graph outcome is projected from the one sealed settlement fact. `declared_stop` and
-`stopped_no_work` are display codes keyed by that projected outcome, not by observed refs or the
-stop path that reported them. No-work requires a known, unchanged head: the head must be known and
-equal to the launch pin, and the cause must be `StoppedNoWork`. A `Moved` or `Unknown` head keeps
-`declared_stop` (or `StoppedEarly` for a stop without a declaration), so a lane that committed and
-pushed before declaring `blocked` stays `blocked` and is never called no-work. Graph-owned overrides
-— a result warning, failed or not-attempted delivery, and a configured deadline — apply above the
-projection, and the sealed stop agrees with the projected cause.
+A lane's outcome is projected from its sealed settlement class and the verified delivery evidence.
+No-work requires a known, unchanged head: the head must equal the launch pin, and the cause must be
+`StoppedNoWork`. A `Moved` or `Unknown` head never produces no-work, so a lane that committed and
+pushed before declaring `blocked` stays `blocked`. A verified pushed head with a moved input head
+and a sealed `done` handoff closes the writer brief, even when a provisional failed settlement
+reason was recorded (#4065). These facts are part of the terminal observation; no remote ref is
+re-read during graph projection. Graph-owned overrides — a result warning, failed or not-attempted
+delivery, and a configured deadline — apply above the projection, and the sealed stop agrees with
+the projected cause.
 
 The settlement-derived advance codes are `declared_stop` and `stopped_no_work`, owned by
 `records::graph::GraphAttemptOutcome::advance_code`. Every other advance code comes from the owner or a
-launch refusal.
+launch refusal. A real precondition failure on a successful-looking attempt is reported with its
+settlement class as a named cause, never bare `other_failure`. Findings counts are not a writer
+success criterion: a writer without a findings contract is not failed for absent findings.
 
 With no different route, a stop that can continue on its own route (`stopped_early`,
 `lane_token_lost`, `context_handoff`) takes the same route with a fresh session on the

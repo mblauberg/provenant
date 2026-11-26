@@ -525,13 +525,53 @@ pub(super) fn apply_attempt_observation(
                         .iter()
                         .any(|warning| warning.starts_with(FINDINGS_INVALID))
                     && disposition_error.is_none();
-                // The sealed declaration is the only handoff this node reads.
-                // Refs and pushes never revise a settled outcome: the owner has
-                // already projected it from the one settlement fact (#4010).
+                // A sealed done handoff plus a verified moved delivery head
+                // completes a classifiable writer brief (#4065).
                 let handoff = result
                     .as_ref()
                     .and_then(|capture| capture.handoff.as_ref().ok())
                     .and_then(Option::as_ref);
+                let commits_ahead = node.access == AccessMode::WorktreeWrite
+                    && commit
+                        .as_deref()
+                        .and_then(|head| GitOid::parse(head).ok())
+                        .zip(
+                            progress
+                                .source_commit
+                                .as_deref()
+                                .and_then(|base| GitOid::parse(base).ok()),
+                        )
+                        .is_some_and(|(head, base)| head != base);
+                let handoff_done = handoff.is_some_and(|handoff| !handoff.unfinished());
+                let stop_classifiable = matches!(
+                    outcome,
+                    GraphAttemptOutcome::Succeeded
+                        | GraphAttemptOutcome::ReviewRequired
+                        | GraphAttemptOutcome::DeclaredStop
+                        | GraphAttemptOutcome::StoppedNoWork
+                );
+                // A done brief plus a commit beyond the input head closes the
+                // writer whatever provisional reason was recorded. In particular
+                // a `failed` reason cannot deny a pushed, finished brief (#4065).
+                // The provider outcome still has to be classifiable below, so a
+                // genuinely failed attempt is never promoted by this escape.
+                let completed_by_evidence = launched
+                    && commits_ahead
+                    && handoff_done
+                    && matches!(
+                        settlement_class,
+                        None | Some(
+                            provenant_records::run::SettlementClass::Completed
+                                | provenant_records::run::SettlementClass::DeclaredStop
+                                | provenant_records::run::SettlementClass::CompletedBeforeBudget
+                                | provenant_records::run::SettlementClass::Failed
+                        )
+                    );
+                let outcome = if stop_classifiable && completed_by_evidence {
+                    GraphAttemptOutcome::Succeeded
+                } else {
+                    outcome
+                };
                 let outcome = if matches!(
                     outcome,
                     GraphAttemptOutcome::Succeeded
@@ -621,14 +661,36 @@ pub(super) fn apply_attempt_observation(
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
-                let release = settlement_class
-                    .map(|reason| reason.release(attempt.stop))
-                    .unwrap_or(provenant_records::run::DependantRelease::Hold);
+                let node_outcome = if completed_by_evidence {
+                    provenant_records::run::SettlementNodeOutcome::Succeeded
+                } else {
+                    settlement_class
+                        .map(|class| class.rule().node_outcome)
+                        .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed)
+                };
+                let release = if completed_by_evidence {
+                    provenant_records::run::DependantRelease::Release
+                } else {
+                    settlement_class
+                        .map(|reason| reason.release(attempt.stop))
+                        .unwrap_or(provenant_records::run::DependantRelease::Hold)
+                };
                 let outcome = if matches!(
                     outcome,
                     GraphAttemptOutcome::Succeeded | GraphAttemptOutcome::ReviewRequired
-                ) && release == provenant_records::run::DependantRelease::Hold
+                ) && (node_outcome
+                    == provenant_records::run::SettlementNodeOutcome::Failed
+                    || release == provenant_records::run::DependantRelease::Hold)
                 {
+                    // A successful-looking attempt still has a real precondition
+                    // failure here. Name it instead of reporting bare
+                    // `other_failure`, which hides why the node stayed open.
+                    progress.advance_code = Some(
+                        settlement_class
+                            .map(|reason| reason.as_str())
+                            .unwrap_or("settlement_failed")
+                            .to_owned(),
+                    );
                     GraphAttemptOutcome::OtherFailure
                 } else {
                     outcome

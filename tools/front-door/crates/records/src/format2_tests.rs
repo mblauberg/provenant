@@ -42,6 +42,7 @@ fn settlement_reasons_round_trip_against_the_declared_rules() {
     use crate::run::{SETTLEMENT_CLASS_TABLE, SettlementClass};
     for reason in SettlementClass::ALL {
         let encoded = serde_json::to_value(reason).unwrap();
+        assert_eq!(encoded.as_str(), Some(reason.as_str()));
         assert_eq!(
             serde_json::from_value::<SettlementClass>(encoded).unwrap(),
             *reason

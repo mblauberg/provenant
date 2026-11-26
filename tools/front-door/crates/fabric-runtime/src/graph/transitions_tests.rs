@@ -688,6 +688,94 @@ fn writer_stop_code_follows_the_projected_outcome() {
     }
 }
 
+/// #4065: an inline implement writer with a successful attempt, a done handoff
+/// and a pushed delivery head settles succeeded whatever provisional settlement
+/// reason was recorded, and its dependant is unblocked. No findings block is
+/// present: findings are not a writer success criterion.
+#[test]
+fn inline_implement_pushed_head_and_done_handoff_unblock_dependants() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "inline-implement-pushed",
+        "nodes": [
+            {"id":"work", "access":"worktree_write", "worktree":"/fixture/writer",
+             "write_scope":["src"], "prompt":"do the work",
+             "routes":[{"adapter":"first", "model":"first/model"}]},
+            {"id":"after", "access":"read_only", "prompt":"follow up",
+             "depends_on":["work"],
+             "routes":[{"adapter":"first", "model":"first/model"}]}
+        ]
+    }))
+    .unwrap();
+    let limits = crate::config::GraphLimits::default();
+    let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
+    let base = "1111111111111111111111111111111111111111";
+    let pushed = "2222222222222222222222222222222222222222";
+    let text = format!(
+        "```handoff\n{}\n```",
+        serde_json::json!({
+            "schema_version": 2, "status": "done", "note": "brief complete",
+            "remaining": [], "decisions": [], "verify": []
+        })
+    );
+    let mut capture = crate::result_capture::ResultCapture::new(None);
+    capture.push(text.as_bytes());
+    let mut result = capture.finish();
+    result.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
+    for settlement_class in [Some(provenant_records::run::SettlementClass::Failed), None] {
+        let mut checkpoint =
+            initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
+        let _ = start(&plan, &positions, &mut checkpoint, &limits);
+        checkpoint.nodes[0].source_commit = Some(base.into());
+        apply_attempt_observation(
+            &plan,
+            &mut checkpoint,
+            &positions,
+            0,
+            &limits,
+            AttemptObservation::Terminal {
+                attempt_ref: Some("host/attempt".into()),
+                outcome: GraphAttemptOutcome::Succeeded,
+                launched: true,
+                result: Some(Box::new(result.clone())),
+                result_warning: None,
+                result_path: None,
+                branch: Some("fix/4065".into()),
+                // owner.rs supplies the pushed delivery head here (#4065).
+                commit: Some(pushed.into()),
+                stop: None,
+                settlement_class,
+            },
+            ObservationFacts {
+                route_index: 0,
+                usage: None,
+                fallback_evidence: None,
+                evidence_unreadable: false,
+                fallback_evidence_retry: None,
+                fallback_cause: None,
+                skipped_accounts: Vec::new(),
+                review_range: ReviewRange::Unknown,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            checkpoint.nodes[0].attempts[0].outcome,
+            Some(GraphAttemptOutcome::Succeeded),
+            "settlement_class={settlement_class:?}"
+        );
+        assert_eq!(checkpoint.nodes[0].state, NodeState::Succeeded);
+        assert_eq!(
+            dependency_state(
+                &plan.nodes[positions["after"]],
+                &plan,
+                &checkpoint,
+                &positions
+            ),
+            None,
+            "dependant must be unblocked; settlement_class={settlement_class:?}"
+        );
+    }
+}
+
 #[test]
 fn handoff_missing_classification_keeps_dependants_closed() {
     let (plan, positions, mut checkpoint, limits) = fixture();
