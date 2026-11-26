@@ -139,6 +139,10 @@ fn compose_steer_restart_notice(
     provenant_records::warning::Warning::new(
         provenant_records::warning::STEER_INTERRUPTS_ATTEMPT,
         format!("steer will interrupt this attempt and resume its session; delivery=now (source: {delivery_source}); fallback={name} (source: {fallback_source}); {behaviour}"),
+        provenant_records::provenance::Source {
+            layer: provenant_records::provenance::Layer::Launch,
+            origin: Some("--now".into()),
+        },
     )
     .subject("steer restart")
 }
@@ -1659,6 +1663,13 @@ mod steer_notice_tests {
                 notice.code.as_ref(),
                 provenant_records::warning::STEER_INTERRUPTS_ATTEMPT.as_str()
             );
+            assert_eq!(
+                notice.source,
+                provenant_records::provenance::Source {
+                    layer: provenant_records::provenance::Layer::Launch,
+                    origin: Some("--now".into()),
+                }
+            );
             assert!(
                 !notice.message.contains('\n'),
                 "notice must be a single line"
@@ -1688,6 +1699,13 @@ mod steer_notice_tests {
             captured[0].code.as_ref(),
             provenant_records::warning::STEER_INTERRUPTS_ATTEMPT.as_str()
         );
+        assert_eq!(
+            captured[0].source,
+            provenant_records::provenance::Source {
+                layer: provenant_records::provenance::Layer::Launch,
+                origin: Some("--now".into()),
+            }
+        );
         assert_eq!(captured[0].message, warning.message);
     }
 
@@ -1698,6 +1716,10 @@ mod steer_notice_tests {
         let notice = provenant_records::warning::Warning::new(
             provenant_records::warning::STEER_INTERRUPTS_ATTEMPT,
             "steer will interrupt this attempt",
+            provenant_records::provenance::Source {
+                layer: provenant_records::provenance::Layer::Launch,
+                origin: Some("--now".into()),
+            },
         );
         let result = super::announce_before(
             Some(&notice),
