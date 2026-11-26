@@ -1057,44 +1057,51 @@ fn smoke_nodes_resolve_on_a_free_capable_tier() {
 // pinned to its base only when a launch supplies one.
 fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
     let library = library();
-    let review_bases = |with: Value| -> Vec<Option<String>> {
+    let review_lenses = |with: Value| -> Vec<GraphNode> {
         let compiled = Compiler::new(&library)
             .compile(&json!({"id":"smoke", "use":"smoke", "with":with}))
             .unwrap();
         let composite = compiled.composite.unwrap();
-        // The non-review nodes stay in the graph in either case.
+        // The review runs after the write so its source is the writer's own
+        // scratch commit, not whatever commit the caller checkout is on.
         assert_eq!(
             composite
                 .nodes
                 .iter()
                 .map(|node| node.id.as_str())
                 .collect::<Vec<_>>(),
-            ["read", "review", "write", "retry-route", "steer-route"]
+            ["read", "write", "review", "retry-route", "steer-route"]
         );
-        composite
+        let review = composite
             .nodes
             .into_iter()
             .find(|node| node.id == "review")
-            .unwrap()
-            .composite
-            .unwrap()
-            .nodes
-            .into_iter()
-            .map(|lens| lens.review_base)
-            .collect()
+            .unwrap();
+        assert!(
+            matches!(
+                &review.source,
+                Some(SourceBinding::Head { node }) if node == "write"
+            ),
+            "the smoke review must read the writer's head: {review:?}"
+        );
+        review.composite.unwrap().nodes
     };
-    // A launch binds the fixture's base so every review lens has that range.
+    // A launch binds the writer's base so every review lens has a bounded range.
     let base = "1111111111111111111111111111111111111111";
-    let bound = review_bases(json!({"diff_base":base}));
+    let bound = review_lenses(json!({"diff_base":base}));
     assert_eq!(bound.len(), 2);
-    assert!(bound.iter().all(|value| value.as_deref() == Some(base)));
+    assert!(
+        bound
+            .iter()
+            .all(|lens| lens.review_base.as_deref() == Some(base))
+    );
 
     // Without a launch binding no review lens carries a base at all, so the
     // facade decides whether to skip review while read and write compile unchanged.
-    let unbound = review_bases(json!({}));
+    let unbound = review_lenses(json!({}));
     assert_eq!(unbound.len(), bound.len());
     assert!(
-        unbound.iter().all(|value| value.is_none()),
+        unbound.iter().all(|lens| lens.review_base.is_none()),
         "a smoke review lens was pinned without diff_base: {unbound:?}"
     );
 }

@@ -162,9 +162,12 @@ branch of that fixture. On a peer the writer runs in a worktree the peer creates
 in its own clone from a scratch branch supplied by the launch's sourced default;
 pass `--branch B --base REF` to override it, while a caller worktree path is
 refused. A manual
-`run smoke` with no `diff_base` uses the checkout's first parent as a fixed
-review range and warns with its source. If the parent is unavailable, it skips
-review with a reason; supply `--set diff_base=BASE` to enable review.
+`run smoke` reviews the writer's own scratch commit: the review node runs after
+the write and reads the writer's head against the commit it branched from, so
+the cost is bounded by the smoke change and never by the caller checkout. A
+launch with no writer skips review with a sourced reason. Supply
+`--set diff_base=BASE` to override the review base; its source is shown in the
+warnings.
 The scratch
 project's host binding is removed when the verification ends, including on
 failure, so the deleted fixture never

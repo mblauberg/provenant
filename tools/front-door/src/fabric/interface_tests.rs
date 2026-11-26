@@ -1829,71 +1829,89 @@ fn replay_digest_tracks_delivery_source_commit() -> Result {
 }
 
 #[test]
-fn smoke_root_commit_skips_review_without_blocking_other_nodes() -> Result {
+fn smoke_review_is_bounded_to_the_writer_scratch_commit() -> Result {
     let rig = crate::worktree_tests::repository()?;
     let factory = factory(&rig)?;
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let cancel = CancelToken::new();
-    let preview = factory.graph_document(
-        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
-        budget,
-        &cancel,
-    )?;
-    let skipped = preview["skipped"].as_array().ok_or("skipped rows")?;
-    assert!(
-        skipped.iter().any(|row| {
-            row["node"]
-                .as_str()
-                .is_some_and(|id| id.contains("review--"))
-                && row["reason"]
+    let review_skipped = |preview: &Value| {
+        preview["skipped"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["node"]
                     .as_str()
-                    .is_some_and(|reason| reason.contains("smoke-review"))
-        }),
-        "review must be skipped: {preview}"
-    );
-    assert!(
-        !skipped.iter().any(|row| {
-            row["node"].as_str().is_some_and(|id| {
-                id.ends_with("task--read")
-                    || id.ends_with("task--retry-route")
-                    || id.ends_with("task--steer-route")
+                    .is_some_and(|id| id.contains("review--"))
+                    && row["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("smoke-review"))
             })
-        }),
-        "other read nodes must remain eligible: {preview}"
-    );
-    assert!(
-        preview["warnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| {
-                warning
-                    .as_str()
-                    .is_some_and(|text| text.contains("checkout first parent is unavailable"))
-            })),
-        "the reason must be recorded: {preview}"
-    );
-
-    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    std::fs::write(rig.project.join("subject.txt"), "subject\n")?;
-    crate::worktree_tests::git(&rig, &["add", "subject.txt"])?;
-    crate::worktree_tests::git(&rig, &["commit", "-qm", "subject"])?;
-    let with_parent = factory.graph_document(
-        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
+        })
+    };
+    let preview = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "explain":true}),
         budget,
         &cancel,
     )?;
     assert!(
-        !with_parent["skipped"]
+        review_skipped(&preview),
+        "a launch with no writer must skip review, never review the caller checkout: {preview}"
+    );
+    assert!(
+        !preview["skipped"]
             .as_array()
             .ok_or("skipped rows")?
             .iter()
             .any(|row| {
-                row["node"]
-                    .as_str()
-                    .is_some_and(|id| id.contains("review--"))
+                row["node"].as_str().is_some_and(|id| {
+                    id.ends_with("task--read")
+                        || id.ends_with("task--retry-route")
+                        || id.ends_with("task--steer-route")
+                })
             }),
-        "a parent must enable review: {with_parent}"
+        "other read nodes must remain eligible: {preview}"
     );
-    assert!(serde_json::to_string(&with_parent["document"])?.contains(&base));
+    let warns = |preview: &Value, text: &str| {
+        preview["warnings"].as_array().is_some_and(|warnings| {
+            warnings
+                .iter()
+                .any(|warning| warning.as_str().is_some_and(|w| w.contains(text)))
+        })
+    };
+    assert!(
+        warns(&preview, "no writer scratch commit"),
+        "the reason must be recorded: {preview}"
+    );
+
+    // A writer bounds the review to its own scratch base, not the caller's
+    // first parent: the range is the writer's single smoke commit.
+    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    let with_writer = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "branch":"smoke-test", "base":base, "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    assert!(
+        !review_skipped(&with_writer),
+        "a writer must enable review: {with_writer}"
+    );
+    assert!(
+        serde_json::to_string(&with_writer["document"])?.contains(&base),
+        "the review base must be the writer's source commit: {with_writer}"
+    );
+    assert!(
+        warns(&with_writer, "source: smoke writer base"),
+        "the default's source must be shown: {with_writer}"
+    );
+
+    let overridden = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "branch":"smoke-test-2", "base":base,
+               "set":{"diff_base":"2222222222222222222222222222222222222222"}, "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    assert!(
+        warns(&overridden, "source: --set diff_base"),
+        "an explicit override must show its source: {overridden}"
+    );
     Ok(())
 }
 

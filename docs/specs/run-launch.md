@@ -224,13 +224,16 @@ sender's graph does not bind or provision a local worktree for that writer; its 
 the peer provisioning intent for replay. A graph reader without an explicit worktree or attempt
 directory uses its selected project as its source; `upgrade --verify` selects a temporary
 committed scratch project for its smoke graph and binds a fixed review range so no lens fails on
-an empty range. For a manual bundled smoke launch without a `diff_base`, the checkout's first
-parent supplies the range; if unavailable, review is skipped with a reason and the other eligible
-nodes continue. A node may name a small project-relative fixture;
+an empty range. A bundled smoke review runs after the write node and reads the writer's head, so
+its diff is the writer's own scratch commit; its base is the commit the writer branched from
+unless `--set diff_base=BASE` pins another one, with the chosen source shown in the warnings.
+A manual smoke launch with no writer has no scratch commit to review, so review is skipped with a
+reason and the other eligible nodes continue. A node may name a small project-relative fixture;
 the host stages its bytes with the task, so a peer places the same file in its own candidate
 scratch and the brief names its path instead of leaking a caller path.
-- Why: a verification graph must run on a real install and exercise a writer, and a skipped node
-  must not refuse the run it does not take part in. A fixture must reach every host that runs a
+- Why: a verification graph must run on a real install and exercise a writer, a skipped node must
+  not refuse the run it does not take part in, and a smoke review must stay bounded by its own
+  scratch change rather than the caller checkout. A fixture must reach every host that runs a
   reader, not just the host that owns the checkout.
 
 Every refusal of a launch input names the field that caused it, or the decoded path of a document

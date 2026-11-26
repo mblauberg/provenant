@@ -2451,9 +2451,8 @@ fn upgrade_verify_dry_run_explains_a_scratch_project() -> Result {
 
 // Spec: docs/specs/run-launch.md#writer-binding
 #[test]
-fn smoke_explanation_skips_review_only_when_no_base_is_available() -> Result {
+fn smoke_explanation_skips_review_without_a_writer() -> Result {
     let rig = GraphProject::new()?;
-    let (_, root) = rig.run(&["run", "smoke", "--explain"])?;
     let review_skipped = |reply: &Value| {
         reply["data"]["skipped"].as_array().is_some_and(|rows| {
             rows.iter().any(|row| {
@@ -2466,28 +2465,55 @@ fn smoke_explanation_skips_review_only_when_no_base_is_available() -> Result {
             })
         })
     };
+    let warns = |reply: &Value, text: &str| {
+        reply["data"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| {
+                warnings
+                    .iter()
+                    .any(|warning| warning.as_str().is_some_and(|w| w.contains(text)))
+            })
+    };
+    let (_, root) = rig.run(&["run", "smoke", "--explain"])?;
     assert!(
         review_skipped(&root),
-        "root commit must skip review: {root}"
+        "a launch with no writer must skip review: {root}"
     );
     assert!(
-        root["data"]["warnings"].as_array().is_some_and(|warnings| {
-            warnings.iter().any(|warning| {
-                warning
-                    .as_str()
-                    .is_some_and(|text| text.contains("checkout first parent is unavailable"))
-            })
-        }),
-        "root commit must explain the skip: {root}"
+        warns(&root, "no writer scratch commit"),
+        "the skip must name its source: {root}"
     );
     rig.add_review_subject()?;
     let (_, parent) = rig.run(&["run", "smoke", "--explain"])?;
     assert!(
-        !review_skipped(&parent),
-        "a parent must enable review: {parent}"
+        review_skipped(&parent),
+        "a caller commit must never enable review: {parent}"
+    );
+
+    let head = String::from_utf8(
+        provenant_os::fixture::git_command()
+            .current_dir(&rig.project)
+            .args(["rev-parse", "HEAD"])
+            .output()?
+            .stdout,
+    )?
+    .trim()
+    .to_owned();
+    let (_, writer) = rig.run(&[
+        "run",
+        "smoke",
+        "--branch",
+        "smoke-test",
+        "--base",
+        &head,
+        "--explain",
+    ])?;
+    assert!(
+        !review_skipped(&writer),
+        "a writer must enable review: {writer}"
     );
     assert!(
-        parent["data"]["source_admission"]
+        writer["data"]["source_admission"]
             .as_array()
             .is_some_and(|rows| {
                 rows.iter().any(|row| {
@@ -2496,7 +2522,11 @@ fn smoke_explanation_skips_review_only_when_no_base_is_available() -> Result {
                         .is_some_and(|id| id.contains("review--"))
                 })
             }),
-        "review must be admitted: {parent}"
+        "review must be admitted: {writer}"
+    );
+    assert!(
+        warns(&writer, "source: smoke writer base"),
+        "the bounded default must show its source: {writer}"
     );
     Ok(())
 }
