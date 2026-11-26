@@ -3642,19 +3642,16 @@ fn gate_failure(
             ..
         } => {
             use provenant_records::workflow::ReviewVerdict;
-            // A split was resolved by one adjudication node; the gate reads that
-            // single verdict instead of the panel's conflicting reduction.
-            let adjudication = checkpoint.nodes.iter().find_map(|progress| {
-                (progress.id.contains("adjudicate") && progress.state == NodeState::Succeeded)
-                    .then(|| {
-                        progress
-                            .outputs
-                            .as_ref()
-                            .and_then(|outputs| outputs.verdict.clone())
-                    })
-                    .flatten()
-            });
             for input in &node.inputs {
+                let head = repair::split_panel_head(&input.node, checkpoint)
+                    .ok()
+                    .flatten();
+                let adjudication = repair::panel_adjudicator(&input.node, head, checkpoint)
+                    .and_then(|adjudicator| positions.get(&adjudicator.id))
+                    .and_then(|&index| checkpoint.nodes.get(index))
+                    .filter(|progress| progress.state == NodeState::Succeeded)
+                    .and_then(|progress| progress.outputs.as_ref())
+                    .and_then(|outputs| outputs.verdict.as_deref());
                 if adjudication.is_none()
                     && let Some(error) = checkpoint.nodes[positions[&input.node]]
                         .outputs
@@ -3682,8 +3679,16 @@ fn gate_failure(
                                     ))
                         });
                     }
+                    let head = repair::split_panel_head(&input.node, checkpoint)
+                        .ok()
+                        .flatten();
+                    let adjudication = repair::panel_adjudicator(&input.node, head, checkpoint)
+                        .and_then(|adjudicator| positions.get(&adjudicator.id))
+                        .and_then(|&index| checkpoint.nodes.get(index))
+                        .filter(|progress| progress.state == NodeState::Succeeded)
+                        .and_then(|progress| progress.outputs.as_ref())
+                        .and_then(|outputs| outputs.verdict.as_deref());
                     adjudication
-                        .as_deref()
                         .or_else(|| outputs.and_then(|outputs| outputs.verdict.as_deref()))
                         .is_some_and(|actual| {
                             match (

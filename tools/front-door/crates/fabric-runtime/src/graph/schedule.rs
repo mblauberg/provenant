@@ -315,14 +315,14 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
     // A split verdict on one head goes to one adjudication node. The patch adds
     // no round, so the gate waits for the adjudicator instead of failing into a
     // fresh repair cycle. Only a gate downstream of the split panel admits it.
-    if let Some((parent, revision)) = repair::split_adjudication(&*checkpoint)
-        && positions
-            .get(&parent)
-            .is_some_and(|&index| node_depends_on(node_index, index, plan, positions))
-    {
+    let split = repair::split_adjudication(node, checkpoint);
+    if let Err(error) = &split {
+        replan_error = Some((*error).to_owned());
+    }
+    if let Ok(Some((parent, head, revision))) = split {
         let library = template::TemplateLibrary::bundled();
         let resolvers = Default::default();
-        let change = repair::split_verdict_patch(&parent, revision);
+        let change = repair::split_verdict_patch(&parent, head.as_deref(), revision);
         let result = (|| -> Result<_, String> {
             let mut prospective = checkpoint.clone();
             patch::admit_patch(

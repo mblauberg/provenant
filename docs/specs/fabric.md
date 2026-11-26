@@ -510,7 +510,10 @@ invariant, which then follows the same contract. Two distinct findings with the
 same invariant are one shared flaw and route to the principal design continuation.
 A split verdict on one head goes to one adjudication node that returns a single
 verdict; the read-only adjudicator runs as an agent on the configured `senior`
-route, and the gate consumes its verdict. It returns `VERDICT: PASS` only when
+route on the panel members' pinned head when one is recorded. Each gate consumes only the adjudicator
+associated with its own panel and head; later panels receive their own adjudicator.
+A panel whose members have different pinned heads cannot be adjudicated as one
+split. It returns `VERDICT: PASS` only when
 no blocking finding survives; otherwise it returns `VERDICT: FAIL` or
 `VERDICT: INCONCLUSIVE`. An upheld finding therefore reaches the gate as a
 successful `FAIL` verdict and can route to repair. The split itself never starts

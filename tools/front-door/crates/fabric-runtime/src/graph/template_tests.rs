@@ -1124,7 +1124,7 @@ fn renamed_composites_keep_their_behaviour_and_bindings() {
 #[test]
 // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn split_verdict_yields_one_adjudication_node_and_no_new_round() {
-    let patch = super::repair::split_verdict_patch("panel", 2);
+    let patch = super::repair::split_verdict_patch("panel", None, 2);
     assert_eq!(
         patch.nodes.len(),
         1,
@@ -1145,8 +1145,8 @@ fn split_verdict_yields_one_adjudication_node_and_no_new_round() {
     );
     assert_eq!(
         patch.idempotency_key,
-        super::repair::split_verdict_patch("panel", 2).idempotency_key,
-        "split detection is idempotent per head"
+        super::repair::split_verdict_patch("panel", None, 2).idempotency_key,
+        "split detection is idempotent per panel and head"
     );
 }
 
