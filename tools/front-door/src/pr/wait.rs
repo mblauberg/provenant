@@ -385,8 +385,9 @@ mod tests {
         // The port declares `verdict` as a review gate: it is not CI, so the
         // open head is green and both waits settle.
         let gates = ["verdict".to_owned()];
+        let required_gate = [need("verdict")];
         assert_eq!(
-            ci_completion("OPEN", head, &normalized, &[], &gates),
+            ci_completion("OPEN", head, &normalized, &required_gate, &gates),
             CiCompletion::Green
         );
         let declared =

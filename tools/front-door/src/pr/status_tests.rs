@@ -356,6 +356,46 @@ fn a_head_with_only_a_pending_selector_waits_for_the_aggregate_check() {
 }
 
 #[test]
+fn a_declared_review_gate_is_not_a_required_ci_check() {
+    let check = |name: &str, bucket: &str| super::super::observer::Check {
+        head: "head".into(),
+        name: name.into(),
+        job_id: None,
+        bucket: bucket.into(),
+        app: None,
+        app_slug: None,
+        conclusion: None,
+        registered: None,
+        url: None,
+        excerpt: String::new(),
+    };
+    let view = super::View {
+        state: "OPEN".into(),
+        head: "head".into(),
+        merge: "clean".into(),
+        review: None,
+        draft: false,
+        url: "https://github.com/owner/repo/pull/7".into(),
+    };
+    let gates = ["verdict".to_owned()];
+    let line = super::status_line_with(
+        7,
+        view,
+        Some(&[check("build", "pass"), check("verdict", "pending")]),
+        super::Requirement::Known(vec![super::Required {
+            name: "verdict".into(),
+            app: None,
+        }]),
+        &gates,
+    );
+
+    assert!(line.required_checks.is_empty());
+    assert!(line.required_pending.is_empty());
+    assert_eq!(line.verdict(), Some(true));
+    assert_eq!(line.wait_verdict(true), Some(true));
+}
+
+#[test]
 fn a_settling_head_without_actions_runs_awaits_them() {
     let mut passed = row(1668, "head", None);
     assert!(passed.awaits_actions(false));

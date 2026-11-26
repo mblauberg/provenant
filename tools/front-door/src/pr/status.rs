@@ -593,13 +593,38 @@ pub(crate) enum CiCompletion {
     Unavailable,
 }
 
-/// Decide whether CI is complete and green for exactly `head`.
-pub(super) fn ci_completion(head: &str, checks: &[CiCheck], required: &[Required]) -> CiCompletion {
+/// Decide whether CI is complete and green for exactly `head`. This is the one
+/// completion definition for `wait --until complete`, `pr status` and landing.
+/// A terminal pull request settles before any pending check: a merged or closed
+/// PR is no longer waiting for CI. Review-gate contexts come from the project's
+/// `ci_observation` port; they are not CI and cannot hold a wait open.
+pub(super) fn ci_completion(
+    state: &str,
+    head: &str,
+    checks: &[CiCheck],
+    required: &[Required],
+    review_gate_contexts: &[String],
+) -> CiCompletion {
+    let required: Vec<&Required> = required
+        .iter()
+        .filter(|need| !is_review_gate_context(&need.name, review_gate_contexts))
+        .collect();
+    let checks: Vec<&CiCheck> = checks
+        .iter()
+        .filter(|check| !is_review_gate_context(&check.name, review_gate_contexts))
+        .collect();
     if checks.iter().any(|check| check.head != head) {
         return CiCompletion::Unavailable;
     }
-    let selected: Vec<_> = checks
+    if state == "MERGED" {
+        return CiCompletion::Green;
+    }
+    if state != "OPEN" {
+        return CiCompletion::Failed;
+    }
+    let selected: Vec<&CiCheck> = checks
         .iter()
+        .copied()
         .filter(|check| {
             required.is_empty()
                 || required
@@ -633,6 +658,10 @@ pub(super) fn ci_completion(head: &str, checks: &[CiCheck], required: &[Required
         return CiCompletion::Unavailable;
     }
     CiCompletion::Green
+}
+
+fn is_review_gate_context(name: &str, review_gate_contexts: &[String]) -> bool {
+    review_gate_contexts.iter().any(|gate| gate == name)
 }
 
 pub(super) struct Policy {
@@ -1134,7 +1163,12 @@ fn status_line_with(
     checks: Option<&[super::observer::Check]>,
     requirement: Requirement,
 ) -> Line {
-    let checks = checks.filter(|checks| !checks.is_empty());
+    let observed: Vec<&super::observer::Check> = checks
+        .unwrap_or(&[])
+        .iter()
+        .filter(|check| !is_review_gate_context(&check.name, review_gate_contexts))
+        .collect();
+    let present = !observed.is_empty();
     let count = |buckets: &[&str]| {
         checks.map(|checks| {
             checks
@@ -1154,9 +1188,14 @@ fn status_line_with(
         Requirement::NotConsulted => (Vec::new(), Vec::new(), false),
         Requirement::Unreadable => (Vec::new(), Vec::new(), true),
         Requirement::Known(needs) => {
-            let names = needs.iter().map(|need| need.name.clone()).collect();
+            let names = needs
+                .iter()
+                .filter(|need| !is_review_gate_context(&need.name, review_gate_contexts))
+                .map(|need| need.name.clone())
+                .collect();
             let pending = needs
                 .iter()
+                .filter(|need| !is_review_gate_context(&need.name, review_gate_contexts))
                 .filter(|need| {
                     !checks
                         .unwrap_or(&[])

@@ -624,6 +624,11 @@ GraphQL and REST when either is unavailable or rate limited. A wait's
 conditional observation reports `review=unknown` because the REST response has no
 review decision; CI settlement alone decides the verdict.
 
+Contexts declared as review gates in the `ci_observation` port are excluded
+from observed CI and from required-check evaluation, even when branch policy
+also lists the same context. Wait, status and landing therefore share one
+completion result for that overlap.
+
 Review-subject selection reads the same observer. When its REST core quota is
 spent, a batched GraphQL row with valid base and head subject fields and a usable
 PR URL serves the launch even if its check rollup is truncated; rollup completeness

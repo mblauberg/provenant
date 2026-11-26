@@ -853,6 +853,30 @@ mod tests {
             .insert("h1".into(), vec![evidence(GateResult::Pending, None)]);
         forge
     }
+    #[test]
+    fn required_review_gate_does_not_hold_landing_ci_pending() {
+        use crate::pr::landing::ports::RequiredCiCheck;
+
+        let mut forge = FakeForge::default();
+        forge.pull_requests.insert(1, open_info(1, "h1"));
+        forge.required_ci_policies.insert(
+            "main".into(),
+            Some(vec![RequiredCiCheck {
+                name: "verdict".into(),
+                app_id: None,
+            }]),
+        );
+        forge.review_gate_contexts = vec!["verdict".into()];
+        let mut build = evidence(GateResult::Passed, None);
+        build.checks[0].name = "build".into();
+        let mut verdict = evidence(GateResult::Pending, None);
+        verdict.checks[0].name = "verdict".into();
+        forge.check_runs.insert("h1".into(), vec![build, verdict]);
+
+        let result = require_delivery_queue_ci(&mut forge, &pr(1, "h1"));
+
+        assert!(result.is_ok(), "a review gate listed as required is not CI");
+    }
     // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
     #[test]
     fn pending_pr_ci_reports_repeatedly_while_waiting() {
