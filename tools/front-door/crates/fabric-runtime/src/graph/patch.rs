@@ -1229,7 +1229,6 @@ pub fn compile_submission(
     }
     let mut document = GraphDocument {
         review: None,
-        review_subject_missing: false,
         subject: None,
         exclude: Vec::new(),
         network: None,

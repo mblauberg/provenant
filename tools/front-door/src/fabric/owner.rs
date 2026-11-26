@@ -3459,9 +3459,13 @@ impl BoundGraphOwner<'_> {
             &key.graph_id,
         )
         .map_err(graph_journal_error)?;
+        // A graph admitted before subject was recorded behaves as today: no
+        // missing-subject pin. An admitted subject without a base is the same
+        // advisory state the old flag named.
         let review_subject_missing = execution
             .as_ref()
-            .is_some_and(|execution| execution.document.review_subject_missing);
+            .and_then(|execution| execution.document.subject.as_ref())
+            .is_some_and(|subject| subject.base.is_none());
         let review_launch = node.review_launch;
         let review_base = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
             &self.factory.context.roots.state,
@@ -4626,7 +4630,11 @@ mod journal_error_tests {
                 "source":{"type":"commit","commit":subject}}]
         });
         if scenario == "parent-missing" {
-            document["review_subject_missing"] = serde_json::json!(true);
+            document["subject"] = serde_json::json!({
+                "head": subject,
+                "origin": {"kind":"local_ref","name":"HEAD"},
+                "observed_at": "2000-01-01T00:00:00.000000Z"
+            });
         }
         let graph_base = scenario == "graph-base" || scenario == "behaviour";
         if graph_base {
