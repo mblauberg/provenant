@@ -175,6 +175,17 @@ provisioning, and provisioning verifies the exact branch and head.
 - Why: an owned writer must land in one project-owned location wherever the launch ran, and a
   failed bind must not leave a half-made worktree.
 
+A writer node that reuses an existing worktree declares its comparison `base`. When none is
+declared, the host resolves one from the worktree branch's upstream, else from its merge base
+with the default branch; `run --explain` reports each chosen commit and its source. The base is
+pinned only to review panels sourcing that writer, so each panel compares its writer's base
+against its pushed head without turning one writer's inferred base into a graph-wide fallback.
+A node-sourced review panel with no resolved base and no authored review base refuses the graph
+before launch, naming the writer and the remedy; a plain writer without a base remains advisory
+and falls back to the caller checkout.
+- Why: without a pinned base every lens reviews an empty range and reports equal commits, which
+  hides the missing Git evidence instead of naming it once before any lane starts.
+
 `run --explain` runs the same pre-attempt admission checks as a launch, in read-only form:
 graph exclusions, the submission snapshot, the refusal of host-authored writer-preflight
 fields, protected delivery targets and every declared writer branch, read from an existing

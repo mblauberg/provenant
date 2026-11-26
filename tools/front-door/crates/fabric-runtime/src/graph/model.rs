@@ -828,6 +828,11 @@ pub struct GraphNode {
     pub family_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// The commit or ref a writer node starts from. On a node that reuses a
+    /// worktree this is the merge target for its review range, distinct from
+    /// the writer's own head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_base: Option<String>,
     /// Launch conditions resolved at submission; the node is skipped unless every term holds.

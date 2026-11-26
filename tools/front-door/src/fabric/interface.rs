@@ -1,12 +1,12 @@
 //! Document-based graph service shared by the CLI and the lane relay.
 use super::subject::{
     ReadPlan, SubjectAdmission, WRITER_BASE_KNOB, WriterBaseChoice, WriterBaseSetting,
-    bind_provisioning_base, bind_read_source,
+    bind_provisioning_base, bind_read_source, resolve_reused_worktree_base,
 };
 use super::*;
 use provenant_fabric_runtime::graph::{
-    FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, QueueKnobs, Template,
-    TemplateLibrary,
+    AccessMode, FileJournal, GraphDocument, GraphJournal, GraphNode, GraphStatus, Layer,
+    QueueKnobs, SourceBinding, Template, TemplateLibrary,
     patch::{self, LiveGraph, Patch, PatchContext},
 };
 use serde_json::{Value, json};
@@ -435,6 +435,88 @@ fn bind_review_base(node: &mut provenant_fabric_runtime::graph::GraphNode, base:
     }
 }
 
+/// Whether a node, or one of its members, carries a review protocol. A
+/// composite boundary owns no protocol of its own; its lens members do.
+fn carries_review_protocol(node: &GraphNode) -> bool {
+    node.review_behaviour.is_some()
+        || node.delivery_review.is_some()
+        || node.role.as_deref().is_some_and(|role| {
+            role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
+        })
+        || node.template.as_deref().is_some_and(|name| {
+            name == "findings-panel" || name == "review-panel" || name.starts_with("review")
+        })
+        || node
+            .composite
+            .as_ref()
+            .is_some_and(|composite| composite.nodes.iter().any(carries_review_protocol))
+        || node
+            .loop_body
+            .as_ref()
+            .is_some_and(|loop_spec| loop_spec.body.iter().any(carries_review_protocol))
+}
+
+/// Whether a node reads one named writer by node source and carries a review
+/// protocol. Only those nodes compare base..head; other readers of a writer's
+/// head (hygiene, publication, conflict) have no review range to resolve.
+fn is_node_sourced_review_of(node: &GraphNode, writer: &str) -> bool {
+    matches!(&node.source, Some(SourceBinding::Node { node }) if node == writer)
+        && node.access == AccessMode::ReadOnly
+        && carries_review_protocol(node)
+}
+
+fn has_node_sourced_review(node: &GraphNode, writer: &str) -> bool {
+    is_node_sourced_review_of(node, writer)
+        || node.composite.as_ref().is_some_and(|composite| {
+            composite
+                .nodes
+                .iter()
+                .any(|child| has_node_sourced_review(child, writer))
+        })
+        || node.loop_body.as_ref().is_some_and(|loop_spec| {
+            loop_spec
+                .body
+                .iter()
+                .any(|child| has_node_sourced_review(child, writer))
+        })
+}
+
+/// Whether this writer has a node-sourced review without a panel-specific or
+/// graph-authored comparison base.
+fn has_unbased_node_sourced_review(node: &GraphNode, writer: &str) -> bool {
+    (is_node_sourced_review_of(node, writer) && node.review_base.is_none())
+        || node.composite.as_ref().is_some_and(|composite| {
+            composite
+                .nodes
+                .iter()
+                .any(|child| has_unbased_node_sourced_review(child, writer))
+        })
+        || node.loop_body.as_ref().is_some_and(|loop_spec| {
+            loop_spec
+                .body
+                .iter()
+                .any(|child| has_unbased_node_sourced_review(child, writer))
+        })
+}
+
+/// Any review node that sources `writer` gets the resolved base. The composite
+/// boundary and its members are both pinned so every lens receives base..head.
+fn bind_writer_review_base(node: &mut GraphNode, writer: &str, base: &str) {
+    if is_node_sourced_review_of(node, writer) {
+        bind_review_base(node, base);
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_writer_review_base(child, writer, base);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_writer_review_base(child, writer, base);
+        }
+    }
+}
+
 /// Warn when a user-authored review brief asks for a verdict line outside the
 /// standalone PASS/FAIL/INCONCLUSIVE contract. ResultCapture remains the owner
 /// of parsing and can normalise common wording, but launch should expose drift
@@ -708,10 +790,20 @@ pub(super) fn writer_base_choice(
 /// The writer base reported in `run --explain` and the launch result. `source`
 /// names both the effective value and the layer that chose it; `commit` is null
 /// when the writer keeps the caller checkout.
-fn writer_base_report(base: Option<&provenant_core::GitOid>, choice: &WriterBaseChoice) -> Value {
+/// The writer base and what chose it: the `lanes.writer_base` value with its
+/// layer, or the source that resolved a reused worktree's base when that base
+/// became the launch's writer base.
+fn writer_base_report(
+    base: Option<&provenant_core::GitOid>,
+    choice: &WriterBaseChoice,
+    resolved_by: Option<&str>,
+) -> Value {
     json!({
         "commit": base.map(|base| base.to_string()),
-        "source": format!("{} ({})", choice.value, choice.description()),
+        "source": resolved_by.map_or_else(
+            || format!("{} ({})", choice.value, choice.description()),
+            str::to_owned,
+        ),
     })
 }
 
@@ -2287,7 +2379,7 @@ impl Factory {
         // starts from its resolved base, which is then the graph's only read
         // commit, so a moving checkout HEAD never enters a writer's identity. A
         // review keeps its range subject either way.
-        let writer_base = writer_base.filter(|_| writer_launch);
+        let mut writer_base = writer_base.filter(|_| writer_launch);
         if writer_launch {
             input_warnings.extend(writer_warnings);
         }
@@ -2491,6 +2583,69 @@ impl Factory {
                 }
             }
             document = decode_input(compiled, "document")?;
+        }
+        // #4064: a writer that reuses an existing worktree has no launch-level
+        // base. Resolve one from the node (declared base, the branch's upstream,
+        // else its merge base with the default branch) so a findings-panel that
+        // sources that writer compares base..pushed head instead of an empty
+        // range. A plain writer stays advisory: only a node-sourced review
+        // needs the base to be present before launch.
+        let mut reused_writer_bases = Vec::new();
+        for node in &document.nodes {
+            if node.access == AccessMode::WorktreeWrite && node.worktree.is_some() {
+                reused_writer_bases.push((
+                    node.id.clone(),
+                    resolve_reused_worktree_base(
+                        node,
+                        &self.context.project_root,
+                        &self.cwd,
+                        self.context.roots.state.as_path(),
+                        &read_source,
+                        git.as_deref(),
+                    ),
+                ));
+            }
+        }
+        // The source that chose a reused writer's base, when it became the
+        // launch's writer base; the report names it instead of the knob.
+        let mut writer_base_source = None;
+        for (writer_id, base) in &reused_writer_bases {
+            if writer_base.is_none()
+                && reused_writer_bases.len() == 1
+                && let Some(base) = base.as_ref()
+                && let Some(commit) = base
+                    .commit
+                    .as_deref()
+                    .and_then(|commit| provenant_core::GitOid::parse(commit).ok())
+            {
+                writer_base = Some(commit);
+                writer_base_source = Some(base.source.label());
+            }
+            match base.as_ref().and_then(|base| base.commit.as_deref()) {
+                Some(commit) => {
+                    let has_review = document
+                        .nodes
+                        .iter()
+                        .any(|node| has_node_sourced_review(node, writer_id));
+                    for node in &mut document.nodes {
+                        bind_writer_review_base(node, writer_id, commit);
+                    }
+                    if has_review {
+                        document.schema_version = document.schema_version.max(2);
+                    }
+                }
+                None if document.review_base.is_none()
+                    && document
+                        .nodes
+                        .iter()
+                        .any(|node| has_unbased_node_sourced_review(node, writer_id)) =>
+                {
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field(format!(
+                        "review_base_unresolved: writer {writer_id} reuses a worktree with no declared base, upstream or default-branch merge base; declare base on the node or supply review_base"
+                    ))));
+                }
+                None => {}
+            }
         }
         // NameDecision::Replay returns above. A graph_id in the raw document
         // can still name a new full-document submission, so queue presence is
@@ -2740,14 +2895,25 @@ impl Factory {
             let refused = source_admission
                 .iter()
                 .any(|row| row["status"] == "refused");
+            let reused_writer_bases = reused_writer_bases
+                .iter()
+                .map(|(node, base)| {
+                    json!({
+                        "node": node,
+                        "commit": base.as_ref().and_then(|base| base.commit.as_deref()),
+                        "source": base.as_ref().map(|base| base.source.label()),
+                    })
+                })
+                .collect::<Vec<_>>();
             return Ok(json!({
                 "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
+                "reused_writer_bases": reused_writer_bases,
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,
                 "subject": subject,
                 "read_source": read_source_report(default_source.as_ref(), &read_source),
-                "writer_base": writer_base_report(writer_base.as_ref(), &writer_base_setting),
+                "writer_base": writer_base_report(writer_base.as_ref(), &writer_base_setting, writer_base_source),
                 // The silence threshold is a host default with a named source,
                 // just like the other settings an explanation reports.
                 "stall": {
@@ -2805,7 +2971,11 @@ impl Factory {
         result["subject"] = json!(subject);
         result["warnings"] = json!(warnings);
         result["read_source"] = read_source_report(default_source.as_ref(), &read_source);
-        result["writer_base"] = writer_base_report(writer_base.as_ref(), &writer_base_setting);
+        result["writer_base"] = writer_base_report(
+            writer_base.as_ref(),
+            &writer_base_setting,
+            writer_base_source,
+        );
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });

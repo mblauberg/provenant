@@ -1305,16 +1305,22 @@ pub(super) enum WriterBaseSource {
     BranchDefault,
     ConfiguredRef,
     WorktreeHead,
+    NodeBase,
+    WorktreeUpstream,
+    DefaultBranchMergeBase,
     CallerCheckout,
 }
 
 impl WriterBaseSource {
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::ExplicitBase => "explicit --base",
             Self::BranchDefault => "the --branch default",
             Self::ConfiguredRef => "lanes.writer_base",
             Self::WorktreeHead => "the named worktree HEAD",
+            Self::NodeBase => "the writer node's base",
+            Self::WorktreeUpstream => "the reused worktree branch's upstream",
+            Self::DefaultBranchMergeBase => "the worktree's merge base with the default branch",
             Self::CallerCheckout => "no base expression",
         }
     }
@@ -1423,6 +1429,48 @@ pub(super) fn resolve_writer_base(
         source: WriterBaseSource::CallerCheckout,
         warning: None,
     }
+}
+
+/// Resolve the base of a writer node that reuses an existing worktree (#4064).
+/// The node's declared `base` wins; otherwise the worktree branch's upstream,
+/// else the point where it diverged from the default branch of the configured
+/// forge remote (never an assumed `origin`). A worktree with neither has no
+/// Git evidence to pin, so its base stays unresolved and a graph that needs
+/// one is refused before launch.
+/// Spec: docs/specs/run-launch.md#writer-binding
+pub(super) fn resolve_reused_worktree_base(
+    node: &GraphNode,
+    project_root: &Path,
+    cwd: &Path,
+    state: &Path,
+    read_source: &ReadSourceChoice,
+    git: Option<&Path>,
+) -> Option<WriterBase> {
+    if let Some(base) = node.base.as_deref().filter(|base| !base.is_empty()) {
+        return Some(WriterBase {
+            commit: resolve_ref(state, cwd, base, read_source, "node base"),
+            source: WriterBaseSource::NodeBase,
+            warning: None,
+        });
+    }
+    let worktree = node.worktree.as_deref().filter(|path| !path.is_empty())?;
+    let git = git?;
+    let path = absolute(project_root, worktree);
+    if let Ok(commit) = provenant_run::resolve_git_base(git, &path, "HEAD@{upstream}") {
+        return Some(WriterBase {
+            commit: Some(commit),
+            source: WriterBaseSource::WorktreeUpstream,
+            warning: None,
+        });
+    }
+    Some(WriterBase {
+        commit: resolve_default_branch(state, &path).and_then(|pin| {
+            provenant_run::review_merge_base_between(git, &path, "HEAD", &pin.commit.to_string())
+                .ok()
+        }),
+        source: WriterBaseSource::DefaultBranchMergeBase,
+        warning: None,
+    })
 }
 
 /// A `--worktree` control, or a composite's `--set worktree=PATH` binding.
