@@ -142,7 +142,11 @@ its underlying model.
 Set `domains.lanes.user_skills` at host or project scope, or per route in
 `domains.routing.model_policy`. Configure project `shared_paths` and
 `exec_roots` for writer access, or `domains.run.writer_writes` for host-wide
-write grants. `provenant fabric identity` prints the project ID.
+write grants. `domains.lanes.projects.{project}.grants` names the capabilities
+(currently `postgres`) granted to that project's writer lanes; node settings
+and invocation flags may override them, and read-only lanes inherit none.
+Install renames a stored `capabilities` key to `grants` once; there is no alias.
+`provenant fabric identity` prints the project ID.
 
 ## Lane verification
 
