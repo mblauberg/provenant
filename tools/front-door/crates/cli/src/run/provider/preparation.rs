@@ -2292,28 +2292,30 @@ fn stale_observation_index(
 
 /// The models a route's account reports when the requested model is not among
 /// them, with the age of that recorded offer list. Accounts that report no
-/// models place no restriction.
+/// models place no restriction. Launch preparation reads the same owner as
+/// resolve instead of its own probe-only offer rule.
 fn unoffered_model(
     availability: &[provenant_providers::AvailabilityRecord],
     route: &ResolvedRoute,
-    now: i64,
+    policy: &provenant_routing::OfferEvidencePolicy<'_>,
+    catalogue: &provenant_routing::Catalogue,
 ) -> Option<(Vec<String>, u64)> {
     let key = route.account_key.as_deref()?;
     if !AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.offered_models) {
         return None;
     }
-    let record = availability.iter().find(|record| {
-        record.adapter == route.adapter
-            && record.account_key.as_deref() == Some(key)
-            && record.expires_unix_seconds > now
-            && !record.observed_models.is_empty()
-    })?;
-    (!provenant_providers::model_matches_offered(&route.model, &record.observed_models)).then(
-        || {
-            let age_seconds = now.saturating_sub(record.observed_unix_seconds) as u64;
-            (record.observed_models.clone(), age_seconds)
-        },
-    )
+    let model =
+        provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model)).ok()?;
+    let probe = availability.iter().find(|record| {
+        record.adapter == route.adapter && record.account_key.as_deref() == Some(key)
+    });
+    let evidence = provenant_routing::recorded_offer_models(
+        policy.inputs(probe, &route.adapter, key),
+        &model,
+        catalogue,
+        provenant_routing::OfferSupersedence::Allow,
+    )?;
+    (!evidence.serves).then_some((evidence.offered_models, evidence.age_seconds))
 }
 
 /// The typed lane refusal for an account whose recorded offers exclude the
@@ -2397,6 +2399,16 @@ mod stale_readiness_tests {
     use super::*;
     use std::cell::Cell;
 
+    fn offer_policy(now: i64) -> provenant_routing::OfferEvidencePolicy<'static> {
+        provenant_routing::OfferEvidencePolicy {
+            accounts: &[],
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
+            quota_policies: &[],
+            catalogue_revision: "revision",
+            now_seconds: now,
+        }
+    }
+
     #[test]
     fn model_outside_the_accounts_offered_list_is_refused_with_that_list() {
         let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
@@ -2423,14 +2435,25 @@ mod stale_readiness_tests {
             observed_unix_seconds: 10,
             expires_unix_seconds: 400,
         };
+        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
         assert_eq!(
-            unoffered_model(std::slice::from_ref(&record), &route, 20),
+            unoffered_model(
+                std::slice::from_ref(&record),
+                &route,
+                &offer_policy(20),
+                &catalogue
+            ),
             Some((record.observed_models.clone(), 10))
         );
         let mut flash = route.clone();
         flash.model = "gemini-9-flash".into();
         assert_eq!(
-            unoffered_model(std::slice::from_ref(&record), &flash, 20),
+            unoffered_model(
+                std::slice::from_ref(&record),
+                &flash,
+                &offer_policy(20),
+                &catalogue
+            ),
             None
         );
         let unknown = provenant_providers::AvailabilityRecord {
@@ -2438,7 +2461,10 @@ mod stale_readiness_tests {
             observed_models: vec![],
             ..record
         };
-        assert_eq!(unoffered_model(&[unknown], &route, 20), None);
+        assert_eq!(
+            unoffered_model(&[unknown], &route, &offer_policy(20), &catalogue),
+            None
+        );
     }
 
     #[test]
@@ -3399,6 +3425,8 @@ pub(super) fn prepare_candidates_inner(
     // pacing decision this launch makes.
     let freshness = crate::quota::quota_freshness(&config.origins, &config.domains.quota);
     config.domains.routing.freshness = freshness;
+    let quota_policies =
+        provenant_providers::scheduling_policies(&config.domains.quota, provider_registry);
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
     let (mut request, retained_identity) = match resume {
@@ -4091,8 +4119,17 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(offer_mismatch_skip(&route, mismatch));
             continue;
         }
+        let offer_policy = provenant_routing::OfferEvidencePolicy {
+            accounts: &diagnostic_records,
+            freshness: &freshness,
+            quota_policies: &quota_policies,
+            // Judge the availability the route was resolved against, not a
+            // later catalogue revision discovered after the decision.
+            catalogue_revision: &route.catalogue_revision,
+            now_seconds: clock.unix_seconds(),
+        };
         if let Some((offered, age_seconds)) =
-            unoffered_model(&availability, &route, clock.unix_seconds())
+            unoffered_model(&availability, &route, &offer_policy, &catalogue)
         {
             reason_boundaries.insert(
                 reasons.len(),
@@ -5934,8 +5971,6 @@ pub(super) fn prepare_candidates_inner(
             (false, _) => None,
         };
         apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut provider);
-        let allowance_policies =
-            provenant_providers::scheduling_policies(&config.domains.quota, provider_registry);
         let mut pacing_config = config.domains.routing.clone();
         crate::route::resolve_pacing_accounts(&mut pacing_config, &config.domains.accounts)
             .map_err(|error| error.to_string())?;
@@ -5945,7 +5980,7 @@ pub(super) fn prepare_candidates_inner(
             &paths.attempt_id.to_string(),
             &pacing_config,
             &catalogue,
-            &allowance_policies,
+            &quota_policies,
             provenant_os::clock::SystemClock::new()
                 .wall_now()
                 .map_err(|e| e.to_string())?,
