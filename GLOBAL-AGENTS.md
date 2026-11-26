@@ -19,7 +19,9 @@ SKILL.md.
   code, checks that warn before they refuse, and tests that pin invariants
   (`deliver` holds the stance). Say when an idea is weak or a better one
   exists; unexamined agreement wastes attention. A correction names a class of
-  defect: sweep for it.
+  defect: sweep for it. A repair that deletes a stated rule (a "never" or
+  "only" comment, a spec sentence) is a contract change: settle which side is
+  wrong against the spec before merging it.
 - **Delegation.** Delegate decoupled, context-heavy or cross-family work, or
   to use another subscription. Keep small, coupled and user-facing steps with
   the chair. Split by context and dependency, not role; settle shared interfaces
@@ -61,15 +63,21 @@ SKILL.md.
   touched tests only when that cache is warm, and never start a cold build; CI
   runs the tests and gates the merge. Review follows risk (`code-review`): a
   small change needs none; when review runs, the author is never its reviewer
-  and lens coverage comes before provider family.
+  and lens coverage comes before provider family. A test that pins a
+  restriction makes the restriction the suspect.
 - **Waiting.** Never poll with `sleep` or repeated reads. Block on `provenant wait`
   (`--pr NUMBER` for a pull request) in the background and carry on.
 - **Memory.** Durable knowledge goes in project docs, cross-project preferences
   in these rules or a skill. Private memory holds only what must outlive the
-  session but justifies neither; delete entries once promoted or obsolete.
-- **Style.** Terse between agents; the domain's register for the user.
+  session but justifies neither: one current entry per topic, superseded in
+  place, never a dated chronicle. A rule the user restates belongs in these
+  rules or a skill, not memory. Delete entries once promoted or obsolete.
+- **Style.** Terse between agents; the domain's register for the user. In
+  public trackers, commits and pull requests, describe other private projects
+  generically.
 - **Shell.** In zsh, unquoted variables do not split, an unmatched glob aborts
-  and a pipeline reports only its last status: check output, not exit codes.
+  and a pipeline reports only its last status: check output, not exit codes. Make scratch directories with `mktemp -d`; never
+  `rm -rf` a variable path.
 
 Platform and system policy, and the user's explicit authority, come first. The
 Git rule is durable authorisation for the actions it names. Project
