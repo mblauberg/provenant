@@ -264,14 +264,6 @@ fn unsafe_wip(tree: &Tree) -> bool {
     tree.primary || tree.branch.is_none() || tree.live_writer || tree.writer_unknown || tree.unknown
 }
 
-fn write_writer_advisory(output: &mut impl io::Write, advisory: &str) -> io::Result<()> {
-    writeln!(
-        output,
-        "warning: {}",
-        provenant_fabric_runtime::hosts::plain_text(advisory, 4096)
-    )
-}
-
 fn wip_unsafe_description(tree: &Tree) -> String {
     let detail = match (tree.writer_unknown, tree.writer_evidence.as_deref()) {
         (true, Some(evidence)) => format!("; writer custody unknown: {evidence}"),
@@ -735,7 +727,13 @@ fn execute(
         .iter()
         .filter_map(|tree| tree.writer_advisory.as_deref())
     {
-        let _ = write_writer_advisory(&mut std::io::stderr().lock(), advisory);
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::WRITER_ADVISORY,
+                provenant_fabric_runtime::hosts::plain_text(advisory, 4096),
+            )
+            .once_per_change(),
+        );
     }
     let problems: Vec<Tree> = trees
         .iter()

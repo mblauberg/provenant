@@ -2128,10 +2128,16 @@ impl RunStore {
             format!("{}{steering}", crate::controls::STEER_PROMPT_PREFIX)
         };
         if let Some(warning) = repin_warning.take() {
-            provenant_records::warning::warn(provenant_records::warning::Warning::new(
-                provenant_records::warning::BRANCH_BEHIND_BASE,
-                warning.clone(),
-            ));
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::BRANCH_BEHIND_BASE,
+                    warning.clone(),
+                )
+                .source(provenant_records::Source {
+                    layer: provenant_records::Layer::Detected,
+                    origin: Some("writer branch repin".to_owned()),
+                }),
+            );
             prompt.push_str("\n\n");
             prompt.push_str(&warning);
         }

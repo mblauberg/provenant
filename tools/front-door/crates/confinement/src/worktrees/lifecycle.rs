@@ -24,6 +24,10 @@ fn branch_behind_base_warning(
     warn(
         Warning::new(BRANCH_BEHIND_BASE, message.clone())
             .subject(branch.to_owned())
+            .source(provenant_records::Source {
+                layer: provenant_records::Layer::Detected,
+                origin: Some(format!("git base {base}")),
+            })
             .repair("merge the base into the branch before landing".to_owned()),
     );
     message

@@ -170,6 +170,23 @@ Every command exits with the code of its envelope `status`. This tier is stable.
 - Why: a script branches on the exit code before it parses any output.
 - Owner: `crates/records/src/command_result.rs`
 
+## JSON output
+
+Every JSON command result is a version-2 `CommandResult`. Besides
+`schema_version`, `command`, `status`, `data` and `error`, it always carries a
+typed `warnings` array, empty when nothing warned. A consumer reads warnings
+from that array instead of stderr. The field's name and presence belong to the
+evolving envelope; the warning codes themselves follow the stable-code rules in
+[the CLI spec](cli.md#warnings-are-typed-values). The `process-tree` envelope is
+the one stable JSON output (see below).
+
+| Object | Field | Stability |
+|---|---|---|
+| envelope | `warnings` | evolving |
+
+- Why: a consumer must know which envelope fields it may parse and at which tier.
+- Owner: `crates/records/src/command_result.rs`, `crates/cli/src/external_contract.rs`
+
 ## Process tree
 
 Inside a lane where `PROVENANT_PROCESS_TREE` is set, `provenant process-tree

@@ -1,4 +1,5 @@
 //! One executable policy table, shared by enforcement and presentation.
+use crate::provenance::{Layer, Source as ProvenanceSource};
 use crate::warning::{self, CONFIG_KEY_IGNORED, CONFIG_MALFORMED, Warning, WarningCode};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
@@ -55,6 +56,27 @@ pub enum Source {
     Host,
     Project,
     Dispatch,
+}
+
+impl Source {
+    /// The provenance a warning from this effective rule carries, so a
+    /// consumer can see which layer set the rule that warned. The code names
+    /// the exact knob or table row; the layer uses the shared vocabulary.
+    pub fn provenance(self, code: &str) -> ProvenanceSource {
+        let (layer, origin) = match self {
+            Self::CompiledDefault => (Layer::Default, "compiled policy table".to_owned()),
+            Self::Host => (Layer::Host, format!("config.toml#policy.{code}")),
+            Self::Project => (
+                Layer::Project,
+                format!(".provenant/policy.toml#policy.{code}"),
+            ),
+            Self::Dispatch => (Layer::Launch, format!("dispatch#policy.{code}")),
+        };
+        ProvenanceSource {
+            layer,
+            origin: Some(origin),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,7 +318,13 @@ impl Policy {
         match rule.strength {
             Strength::Off => Effect::Proceed,
             Strength::Warn => Effect::Warn(
-                Warning::new(rule_warning_code(code), message).subject(code.to_owned()),
+                Warning::new(rule_warning_code(code), message)
+                    .subject(code.to_owned())
+                    .source(effective.source.provenance(code))
+                    // Observational rules warn and proceed: one notice per
+                    // state change is enough for a person, while the JSON
+                    // envelope keeps every warning as data.
+                    .once_per_change(),
             ),
             Strength::Refuse if rule.boundary == Boundary::None => Effect::Stop(Box::new(
                 crate::diagnostic::Diagnostic::new(code).detail(message),
@@ -513,6 +541,46 @@ mod tests {
         assert_eq!(warnings[0].code.as_ref(), "LANE_DEPTH");
         assert_eq!(warnings[1].code.as_ref(), "PR_ATTEMPT_STATE");
         assert_ne!(warnings[0].code, warnings[1].code);
+    }
+
+    /// A policy warning is observational: it names the layer that set the rule
+    /// and asks to be shown once per change, while the JSON envelope keeps it.
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
+    #[test]
+    fn a_policy_warning_carries_the_rule_source_and_dedups_per_change() {
+        let policy = Policy::default();
+        let Effect::Warn(warning) =
+            policy.check("WRITER_CENSUS", Facts::violation("census incomplete"))
+        else {
+            panic!("an observational rule must warn")
+        };
+        assert_eq!(warning.code.as_ref(), "WRITER_CENSUS");
+        assert_eq!(warning.subject.as_deref(), Some("WRITER_CENSUS"));
+        assert_eq!(warning.dedup, crate::warning::Dedup::PerChange);
+        let source = warning.source.expect("compiled rule has a source");
+        assert_eq!(source.layer, Layer::Default);
+        assert_eq!(source.origin.as_deref(), Some("compiled policy table"));
+
+        let mut overlaid = Policy::default();
+        overlaid.overlay(
+            &BTreeMap::from([("WRITER_CENSUS".into(), Strength::Off)]),
+            Source::Host,
+        );
+        overlaid.overlay(
+            &BTreeMap::from([("WRITER_CENSUS".into(), Strength::Warn)]),
+            Source::Project,
+        );
+        let Effect::Warn(warning) =
+            overlaid.check("WRITER_CENSUS", Facts::violation("census incomplete"))
+        else {
+            panic!("an observational rule must warn")
+        };
+        let source = warning.source.expect("overlaid rule has a source");
+        assert_eq!(source.layer, Layer::Project);
+        assert_eq!(
+            source.origin.as_deref(),
+            Some(".provenant/policy.toml#policy.WRITER_CENSUS")
+        );
     }
 
     #[test]

@@ -271,6 +271,10 @@ pub const LOCAL_GATE_ADVISORY: WarningCode = WarningCode("LOCAL_GATE_ADVISORY");
 pub const INSTALL_FINDING_ADVISORY: WarningCode = WarningCode("INSTALL_FINDING_ADVISORY");
 /// A wait budget exceeded its maximum and was clamped.
 pub const WAIT_BUDGET_CLAMPED: WarningCode = WarningCode("WAIT_BUDGET_CLAMPED");
+/// A wait inside a lane named no targets follows the lane's children instead.
+pub const WAIT_TARGET_FALLBACK: WarningCode = WarningCode("WAIT_TARGET_FALLBACK");
+/// A writer worktree carried an advisory that did not block the handoff.
+pub const WRITER_ADVISORY: WarningCode = WarningCode("WRITER_ADVISORY");
 /// The model catalogue could not be read; a bundled or empty catalogue applied.
 pub const MODEL_CATALOGUE_UNAVAILABLE: WarningCode = WarningCode("MODEL_CATALOGUE_UNAVAILABLE");
 /// Quota readiness could not be synchronised with its stored record.

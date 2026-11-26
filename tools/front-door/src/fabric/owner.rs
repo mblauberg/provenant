@@ -1731,6 +1731,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 warn(
                     Warning::new(BRANCH_BEHIND_BASE, warning.clone())
                         .subject(branch.to_string())
+                        .source(provenant_records::Source {
+                            layer: provenant_records::Layer::Detected,
+                            origin: Some(format!("git remote tip {tip}")),
+                        })
                         .repair(format!("use --base {tip}")),
                 );
                 self.launch_warnings.push(warning);
@@ -3109,7 +3113,12 @@ impl BoundGraphOwner<'_> {
             (None, None)
         };
         if let Some(warning) = repin_warning.take() {
-            warn(Warning::new(BRANCH_BEHIND_BASE, warning.clone()));
+            warn(Warning::new(BRANCH_BEHIND_BASE, warning.clone()).source(
+                provenant_records::Source {
+                    layer: provenant_records::Layer::Detected,
+                    origin: Some("writer branch repin".to_owned()),
+                },
+            ));
             submission_prompt.push_str("\n\n");
             submission_prompt.push_str(&warning);
         }

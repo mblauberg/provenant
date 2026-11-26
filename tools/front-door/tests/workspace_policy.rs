@@ -1945,3 +1945,232 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
     );
     Ok(())
 }
+
+// The `warning: ` prefix belongs to the binary edge's one emitter and to the
+// library fallback that runs when no edge is installed. A library that writes
+// its own prefix bypasses dedup and JSON delivery, so a source check keeps the
+// seam singular. Spec: docs/specs/cli.md#warnings-are-typed-values
+const WARNING_EMITTERS: &[&str] = &["src/output.rs", "crates/records/src/warning.rs"];
+
+/// Byte offsets of string literals whose text starts with `warning: `.
+/// Comments and character literals are skipped so examples cannot trip the
+/// rule; raw and byte strings are handled like plain ones.
+fn warning_prefix_literals(source: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"//") {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i..].starts_with(b"/*") {
+            i += 2;
+            let mut depth = 1;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i..].starts_with(b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        let raw_start = if bytes[i..].starts_with(b"br") || bytes[i..].starts_with(b"cr") {
+            i + 1
+        } else {
+            i
+        };
+        if bytes.get(raw_start) == Some(&b'r') {
+            let mut quote = raw_start + 1;
+            while bytes.get(quote) == Some(&b'#') {
+                quote += 1;
+            }
+            if bytes.get(quote) == Some(&b'"') {
+                let hashes = quote - raw_start - 1;
+                let start = quote + 1;
+                i = start;
+                while i < bytes.len() {
+                    if bytes[i] == b'"'
+                        && bytes
+                            .get(i + 1..i + 1 + hashes)
+                            .is_some_and(|tail| tail.iter().all(|byte| *byte == b'#'))
+                    {
+                        break;
+                    }
+                    i += 1;
+                }
+                if source[start..i.min(source.len())].starts_with("warning: ") {
+                    found.push(raw_start);
+                }
+                i = (i + hashes + 1).min(bytes.len());
+                continue;
+            }
+        }
+        if bytes[i] == b'\'' {
+            let mut end = i + 1;
+            if bytes.get(end) == Some(&b'\\') {
+                end = (end + 2).min(bytes.len());
+            } else if let Some(character) = source[end..].chars().next() {
+                end += character.len_utf8();
+            }
+            if bytes.get(end) == Some(&b'\'') {
+                i = end + 1;
+                continue;
+            }
+        }
+        if bytes[i] == b'"' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i = (i + 2).min(bytes.len()),
+                    b'"' => {
+                        i += 1;
+                        break;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let text = &source[start + 1..i.saturating_sub(1).max(start + 1)];
+            if text.starts_with("warning: ") {
+                found.push(start);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    found
+}
+
+/// Whether the literal at `at` is an argument of a write/print macro that
+/// targets a standard stream. `format!` and other string builders are how the
+/// emitter renders a human view; they are not direct writes.
+fn warning_prefix_stream_write(source: &str, at: usize) -> bool {
+    const MACROS: &[&str] = &["eprintln", "eprint", "println", "print", "writeln", "write"];
+    let before = &source[..at];
+    let window = before.len().saturating_sub(240);
+    let mut nearest: Option<(usize, &str)> = None;
+    for name in MACROS {
+        let needle = format!("{name}!");
+        let Some(relative) = before[window..].rfind(&needle) else {
+            continue;
+        };
+        let position = window + relative;
+        let boundary = position == 0
+            || !before.as_bytes()[position - 1].is_ascii_alphanumeric()
+                && before.as_bytes()[position - 1] != b'_';
+        if boundary && nearest.is_none_or(|(found, _)| position > found) {
+            nearest = Some((position, name));
+        }
+    }
+    let Some((position, name)) = nearest else {
+        return false;
+    };
+    let Some(open) = source[position..at].find('(') else {
+        return false;
+    };
+    // The literal must be inside this invocation, not merely nearby code.
+    let mut depth = 0_i32;
+    for byte in source[position + open + 1..at].bytes() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    let invocation = &source[position..at];
+    match name {
+        "eprintln" | "eprint" | "println" | "print" => true,
+        _ => invocation.contains("stderr") || invocation.contains("stdout"),
+    }
+}
+
+fn warning_prefix_write_violations(source: &str, test_file: bool) -> bool {
+    let offset = |part: &str| part.as_ptr() as usize - source.as_ptr() as usize;
+    let tests = selected_test_scopes(source, test_file, false);
+    warning_prefix_literals(source).into_iter().any(|at| {
+        let in_test = tests.iter().any(|scope| {
+            let start = offset(scope);
+            (start..start + scope.len()).contains(&at)
+        });
+        !in_test && warning_prefix_stream_write(source, at)
+    })
+}
+
+#[test]
+fn warning_prefix_rule_distinguishes_emission_from_prose() {
+    for source in [
+        "fn f() { eprintln!(\"warning: x\"); }",
+        "fn f() { println!(\"warning: {}\", x); }",
+        "fn f() { writeln!(std::io::stderr().lock(), \"warning: {}\", x); }",
+        "fn f() { write!(io::stdout(), \"warning: {}\", x); }",
+        "fn f() { eprintln!(r#\"warning: x\"#); }",
+        "fn f() { let before = 1; eprintln!(\"warning: x\"); }",
+    ] {
+        assert!(
+            warning_prefix_write_violations(source, false),
+            "missed: {source}"
+        );
+    }
+    for source in [
+        "/// prints `warning: <message>` to stderr",
+        "// eprintln!(\"warning: x\");",
+        "fn f() { let text = \"warning: x\"; }",
+        "fn f() { let text = format!(\"warning: {x}\"); }",
+        "fn f() { writeln!(human, \"warning: {}\", x); }",
+        "fn f() { let x = 1; let text = \"warning: x\"; }",
+        "#[cfg(test)] fn f() { eprintln!(\"warning: x\"); }",
+        "#[cfg(test)] mod tests { fn f() { eprintln!(\"warning: x\"); } }",
+    ] {
+        assert!(
+            !warning_prefix_write_violations(source, false),
+            "false positive: {source}"
+        );
+    }
+    assert!(!warning_prefix_write_violations(
+        "fn f() { eprintln!(\"warning: x\"); }",
+        true
+    ));
+}
+
+#[test]
+fn warning_prefix_is_written_only_by_the_emitter() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    for path in source_roots() {
+        rust_sources(&path, &mut sources)?;
+    }
+    let mut violations = Vec::new();
+    for path in sources {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if WARNING_EMITTERS.contains(&relative.as_str()) {
+            continue;
+        }
+        let source = fs::read_to_string(&path)?;
+        if warning_prefix_write_violations(&source, is_test_source(&path.to_string_lossy())) {
+            violations.push(relative);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "route warnings through provenant_records::warning::warn; only the edge writes the prefix:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}

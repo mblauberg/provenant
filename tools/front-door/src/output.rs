@@ -67,6 +67,16 @@ struct CommandSink {
 }
 
 impl CommandSink {
+    /// Whether this command's warnings travel as data rather than being
+    /// printed. JSON mode must not let one invocation's memory suppress a
+    /// warning a later consumer still needs to read.
+    fn is_json(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .json
+    }
+
     /// Show an accepted warning through the supplied writer, then record its
     /// per-change key only when the message actually reached the reader. A
     /// failed write leaves the key unseen so the same warning can be retried
@@ -101,11 +111,13 @@ impl CommandSink {
 }
 
 impl Sink for CommandSink {
-    /// A warning arrives here from `records::warning::warn`. Collapse repeats by
-    /// key; skip per-change keys already remembered in the state root; then
-    /// either print to stderr as it arrives or keep it for the envelope.
+    /// A warning arrives here from `records::warning::warn`. Under `--json` it
+    /// is data: every warning is kept for the envelope, repeats included, and
+    /// no state-root memory can hide it from the consumer. In human mode a
+    /// repeat collapses by key and a per-change key already shown in an earlier
+    /// invocation is skipped; a warning is remembered only once displayed.
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
     fn accept(&self, warning: Warning) {
-        let key = warning.key();
         // Read the root and its resolved retention window before taking the
         // mutex. Nothing called under this lock may load config or raise a
         // warning, or a malformed `[warnings]` setting would re-enter `accept`
@@ -119,6 +131,11 @@ impl Sink for CommandSink {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.json {
+            state.warnings.push(warning);
+            return;
+        }
+        let key = warning.key();
         if !state.seen.insert(key.clone()) {
             return;
         }
@@ -128,12 +145,8 @@ impl Sink for CommandSink {
         {
             return;
         }
-        if state.json {
-            state.warnings.push(warning);
-        } else {
-            drop(state);
-            self.display(warning);
-        }
+        drop(state);
+        self.display(warning);
     }
 }
 
@@ -225,8 +238,18 @@ pub(crate) fn take_warnings() -> Vec<Warning> {
 }
 
 /// Remember a batch of per-change keys after their envelope reached the reader.
-/// An undelivered warning must not be marked seen just because it was drained.
+/// An undelivered warning must not be marked seen just because it was drained;
+/// a JSON-delivered warning is never remembered, so a later human run still
+/// shows it and a later envelope still carries it.
 fn remember_warnings(warnings: &[Warning]) {
+    let json = COMMAND_SINK
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .is_some_and(|sink| sink.is_json());
+    if json {
+        return;
+    }
     for warning in warnings {
         remember_for_change(warning);
     }
@@ -1358,19 +1381,27 @@ mod tests {
 
     #[test]
     // Spec: docs/specs/cli.md#warnings-are-typed-values
-    fn a_per_change_warning_is_remembered_only_after_a_successful_write() {
+    fn a_json_delivered_warning_is_kept_but_not_remembered() {
         with_root(|root| {
             set_state_root(root);
-            let warning = Warning::new(NAME_CASE_FOLDED, "folded `Reader` to `reader`")
-                .subject("reader")
+            let shown = Warning::new(NAME_CASE_FOLDED, "folded `Reader` to `reader`")
+                .subject("reader-shown")
                 .once_per_change();
-            let key = warning.key();
-            let _sink = install_command_sink(true);
-            warning::warn(warning);
-            assert!(
-                !dedup::was_seen(root, &key, 30),
-                "a warning held for the envelope is not remembered before it is shown"
-            );
+            let shown_key = shown.key();
+            let fresh = Warning::new(NAME_CASE_FOLDED, "folded `Writer` to `writer`")
+                .subject("writer-fresh")
+                .once_per_change();
+            let fresh_key = fresh.key();
+            // A prior human display must not hide the warning from a consumer.
+            assert!(dedup::remember(
+                root,
+                &shown_key,
+                NAME_CASE_FOLDED.as_str(),
+                30
+            ));
+            let sink = install_command_sink(true);
+            warning::warn(shown);
+            warning::warn(fresh);
             let result = CommandResult::new("fixture", Outcome::Ok, json!({"ok": true}));
             let globals = provenant_cli::Globals {
                 json: true,
@@ -1382,11 +1413,24 @@ mod tests {
                 emit_with_writers(&result, &globals, &mut out, &mut err, "", false, None),
                 0
             );
+            let envelope: Value = serde_json::from_slice(&out).expect("envelope");
+            let codes: Vec<_> = envelope["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .map(|warning| warning["code"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(codes, [NAME_CASE_FOLDED.as_str(); 2], "{envelope}");
             assert!(
-                dedup::was_seen(root, &key, 30),
-                "delivering the warning in the envelope remembers its key"
+                dedup::was_seen(root, &shown_key, 30),
+                "a JSON delivery does not clear prior human memory"
+            );
+            assert!(
+                !dedup::was_seen(root, &fresh_key, 30),
+                "a JSON delivery never marks a key as shown; a later person still sees it"
             );
             assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+            drop(sink);
         });
     }
 
@@ -1556,6 +1600,74 @@ mod tests {
             assert!(
                 dedup::was_seen(root, &key, 30),
                 "a warning the reader received is remembered"
+            );
+        });
+    }
+
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
+    /// Two launches in one state root show an observational policy warning once
+    /// to a person, while a later JSON envelope still carries it with its code
+    /// and source. The warning is the real one `Policy::check` produces.
+    #[test]
+    fn writer_census_is_shown_once_but_every_envelope_carries_it() {
+        use provenant_records::policy::{Effect, Facts, Policy};
+        with_root(|root| {
+            set_state_root(root);
+            let Effect::Warn(warning) = Policy::default().check(
+                "WRITER_CENSUS",
+                Facts::violation("process census reports an occupant"),
+            ) else {
+                panic!("WRITER_CENSUS is an observational rule")
+            };
+            let result = CommandResult::new("run", Outcome::Ok, json!({}));
+            let human = provenant_cli::Globals {
+                json: false,
+                ..Default::default()
+            };
+            let json_globals = provenant_cli::Globals {
+                json: true,
+                ..Default::default()
+            };
+
+            let mut printed = 0;
+            for _ in 0..2 {
+                let _sink = install_command_sink(false);
+                warning::warn(warning.clone());
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+                assert_eq!(
+                    emit_with_writers(&result, &human, &mut out, &mut err, "", false, None),
+                    0
+                );
+                printed += String::from_utf8_lossy(&err)
+                    .lines()
+                    .filter(|line| line.contains("WRITER_CENSUS"))
+                    .count();
+            }
+            assert_eq!(printed, 1, "a person sees the census notice once");
+
+            let _sink = install_command_sink(true);
+            warning::warn(warning);
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            assert_eq!(
+                emit_with_writers(&result, &json_globals, &mut out, &mut err, "", false, None),
+                0
+            );
+            assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+            let envelope: Value = serde_json::from_slice(&out).expect("envelope");
+            let carried = envelope["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|entry| {
+                    entry["code"] == "WRITER_CENSUS"
+                        && entry["source"]["layer"] == "default"
+                        && entry["source"]["origin"] == "compiled policy table"
+                });
+            assert!(
+                carried,
+                "the second envelope still lists the warning: {envelope}"
             );
         });
     }

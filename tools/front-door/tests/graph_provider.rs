@@ -1612,17 +1612,25 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         "recovery must retain the selected remote tip before provisioning"
     );
     // Spec: docs/specs/cli.md#warnings-are-typed-values -- under
-    // --json warnings travel in the envelope, never on raw stderr.
+    // --json warnings travel in the envelope, never on raw stderr, each with
+    // its stable code and the source of the state that caused it.
+    let warnings = settled.launch_value["warnings"]
+        .as_array()
+        .ok_or("launch envelope warnings")?;
     assert!(
-        settled.launch_value["warnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| {
-                warning["code"] == "BRANCH_BEHIND_BASE"
-                    && warning["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains("ignoring --base"))
-            })),
-        "no BRANCH_BEHIND_BASE warning in the launch envelope: {combined}"
+        warnings.iter().all(|warning| warning["code"].is_string()),
+        "every launch warning carries a code: {combined}"
+    );
+    assert!(
+        warnings.iter().any(|warning| {
+            warning["code"] == "BRANCH_BEHIND_BASE"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("ignoring --base"))
+                && warning["source"]["layer"] == "detected"
+                && warning["source"]["origin"].is_string()
+        }),
+        "no sourced BRANCH_BEHIND_BASE warning in the launch envelope: {combined}"
     );
 
     let args = vec![
