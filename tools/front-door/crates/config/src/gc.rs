@@ -197,8 +197,8 @@ retention_classes! {
         owner: Run,
         adapter: attempt_scratch,
         eligibility: Declared,
-        detail: "released, unreserved attempt; finished work or unowned idle lifetime",
-        settings: ["gc.idle"],
+        detail: "released, unreserved attempt; finished work, unowned idle lifetime or over-cap scratch",
+        settings: ["gc.idle", "gc.attempt_scratch_max"],
         triggers: GC
     },
     ProviderState => {
@@ -588,6 +588,9 @@ pub struct GcSettings {
     pub discard_archive_retention: String,
     /// Age after which a private Cargo target no build has used is collected.
     pub cargo_target_idle: String,
+    /// Per-attempt scratch size above which a settled attempt's scratch is
+    /// collectible without waiting out `idle`. Zero disables the cap.
+    pub attempt_scratch_max: String,
     pub free_floor: Option<String>,
     /// Only this small critical threshold may stop new builds; free_floor warns.
     pub critical_free: Option<String>,
@@ -605,6 +608,7 @@ impl Default for GcSettings {
             graph_checkpoint_days: 90,
             discard_archive_retention: "14d".into(),
             cargo_target_idle: "30d".into(),
+            attempt_scratch_max: "2G".into(),
             free_floor: None,
             critical_free: None,
             alert_below: None,
@@ -722,6 +726,12 @@ impl GcSettings {
         parse_gc_idle_duration(&self.cargo_target_idle)
     }
 
+    /// Size above which a settled attempt's scratch becomes collectible before
+    /// `gc.idle`; zero disables the cap.
+    pub fn attempt_scratch_max_bytes(&self) -> Result<u64, &'static str> {
+        parse_cache_size(&self.attempt_scratch_max)
+    }
+
     /// Age after which gc offers to stop a stale graph, in seconds.
     pub fn stale_graph_age_seconds(&self) -> Result<u64, &'static str> {
         parse_gc_idle_duration(&self.stale_graph_age)
@@ -791,6 +801,7 @@ impl GcSettings {
         self.sweep_budget_seconds()?;
         self.discard_archive_retention_seconds()?;
         self.cargo_target_idle_seconds()?;
+        self.attempt_scratch_max_bytes()?;
         self.stale_graph_age_seconds()?;
         if !(1..=3650).contains(&self.graph_checkpoint_days) {
             return Err("graph_checkpoint_days_range");
@@ -974,6 +985,30 @@ mod tests {
         settings.sweep_budget = "0".into();
         assert_eq!(settings.sweep_budget_seconds(), Ok(0));
         assert_eq!(settings.validate(), Ok(()));
+    }
+
+    #[test]
+    fn attempt_scratch_cap_uses_size_units_and_rejects_bad_values() {
+        let mut settings = super::GcSettings::default();
+        assert_eq!(
+            settings.attempt_scratch_max_bytes(),
+            Ok(2 * 1024_u64.pow(3))
+        );
+        assert_eq!(settings.validate(), Ok(()));
+        settings.attempt_scratch_max = "512M".into();
+        assert_eq!(
+            settings.attempt_scratch_max_bytes(),
+            Ok(512 * 1024_u64.pow(2))
+        );
+        assert_eq!(settings.validate(), Ok(()));
+        settings.attempt_scratch_max = "0".into();
+        assert_eq!(settings.attempt_scratch_max_bytes(), Ok(0));
+        settings.attempt_scratch_max = "bogus".into();
+        assert_eq!(
+            settings.attempt_scratch_max_bytes(),
+            Err("invalid_cache_size")
+        );
+        assert_eq!(settings.validate(), Err("invalid_cache_size"));
     }
 
     #[test]
