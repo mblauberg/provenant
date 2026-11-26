@@ -62,7 +62,7 @@ impl JournalState {
                             }),
                         ),
                     );
-                    state.accepted = Some(sealed.clone());
+                    state.accepted = Some(sealed.as_ref().clone());
                 }
                 DeclarationLine::Rejected {
                     sequence,
@@ -224,13 +224,13 @@ impl RunStore {
                 return Err(DeclarationError::Invalid(error));
             }
         };
-        let line = DeclarationLine::Accepted(SealedDeclaration {
+        let line = DeclarationLine::Accepted(Box::new(SealedDeclaration {
             schema_version: DECLARATION_SCHEMA,
             sequence,
             request_id: input.request_id.clone(),
             digest,
             handoff,
-        });
+        }));
         let bytes = encoded_line(&line).map_err(io)?;
         admit(&bytes, lines_bytes(&dir), limit)?;
         append_line(&dir, &line).map_err(io)?;

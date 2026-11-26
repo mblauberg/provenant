@@ -1033,7 +1033,7 @@ mod graph_writer_admission_tests {
                 .iter()
                 .all(|lane| lane.provider_launched == Some(false))
         );
-        for cause in [
+        for refusal_cause in [
             provenant_records::run::CauseKind::DiskFloor,
             provenant_records::run::CauseKind::DiskObservationUnavailable,
             provenant_records::run::CauseKind::RetainedWriterImport,
@@ -1042,7 +1042,7 @@ mod graph_writer_admission_tests {
             if let provenant_records::run::AttemptState::Terminal { cause, .. } =
                 &mut refused.state
             {
-                *cause = Some(cause);
+                *cause = Some(refusal_cause);
             }
             assert!(durable_launch_refusal(&[refused.clone()]).is_some());
             assert!(durable_launch_refusal(&[refused, lanes[0].clone()]).is_none());
@@ -1095,10 +1095,10 @@ mod graph_writer_admission_tests {
         assert!(durable_launch_refusal(&[launched_failure.clone()]).is_none());
         assert!(durable_launch_refusal(&[lanes[0].clone(), launched_failure]).is_none());
         let attempt = lanes[0].attempt_id;
-        let sealed = |cause: provenant_records::run::CauseKind| -> Result<provenant_run::AttemptRecord, Box<dyn std::error::Error>> {
+        let sealed = |sealed_cause: provenant_records::run::CauseKind| -> Result<provenant_run::AttemptRecord, Box<dyn std::error::Error>> {
             let mut lane = lanes[0].clone();
             if let provenant_records::run::AttemptState::Terminal { cause, .. } = &mut lane.state {
-                *cause = Some(cause);
+                *cause = Some(sealed_cause);
             }
             Ok(lane)
         };
