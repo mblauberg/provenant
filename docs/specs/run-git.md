@@ -76,7 +76,8 @@ A delivery destination is either `Local` or `Remote(RemoteName)`; an empty strin
 The request, its sealed launch binding and the delivery receipt carry this typed value, parsed once
 on decode with the single `RemoteName` grammar. There is no second remote alphabet in delivery
 validation and no empty-name sentinel to re-derive: a local integration is `Local`, a named
-publication is `Remote(name)`, and a persisted record carrying `""` is malformed and refused.
+publication is `Remote(name)`, and direct decoding refuses an empty remote name. The run-store
+migration rewrites legacy local delivery receipts before decoding, as described in [state](state.md).
 - Why: the resolver accepts names the write path used to refuse, and an empty string cannot name a
   usable remote or a local destination without a second source of truth.
 - Owner: `crates/records/src/run.rs`, `crates/run/src/delivery.rs`

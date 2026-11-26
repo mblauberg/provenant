@@ -1,5 +1,5 @@
 ## Fixes
 
-### Delivery
+### Git and safety
 
-- A delivery destination is now typed: `Local` or `Remote(<name>)`, parsed once with the same `RemoteName` grammar the forge resolver uses. A resolved remote such as `team/upstream` can now be delivered instead of being refused by a second, narrower alphabet in the write path, and the read and write paths validate identically. The empty remote string is gone from delivery requests, launch bindings and receipts: a local integration records a local destination, and an old record whose remote is `""` is refused by strict decoding rather than being silently read as "no remote". (#3895)
+- Delivery uses one typed destination and the same remote-name grammar as the forge resolver, so names such as `team/upstream` are accepted consistently. Local integrations record a local destination; direct decoding refuses an empty remote name. (#3895)
