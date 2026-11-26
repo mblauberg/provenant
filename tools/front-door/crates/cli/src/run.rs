@@ -300,8 +300,10 @@ fn command_error(fail: &Fail) -> CommandError {
     error
 }
 
-/// The upstream head a stale read-only checkout should review. `head` is kept
-/// so a launch can name both the tree it would have read and the one it reads.
+/// The pinned commit a read-only lane reads. Under the compiled default this is
+/// the fetched upstream head when the checkout is behind it, and the observed
+/// checkout HEAD otherwise. `head` is kept so a launch can name both the tree
+/// the checkout held at admission and the one the lane reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadOnlySourceRef {
     pub commit: provenant_core::GitOid,
@@ -334,7 +336,8 @@ impl Default for ReadSourceChoice {
 }
 
 impl ReadSourceChoice {
-    /// The compiled default: only a stale checkout is pinned, as last fetched.
+    /// The compiled default: pin the fetched upstream when the checkout is
+    /// behind it, otherwise pin the checkout HEAD observed at admission.
     pub fn automatic() -> Self {
         Self::default()
     }
@@ -351,10 +354,10 @@ impl ReadSourceChoice {
     }
 }
 
-/// Resolve the source of a read-only launch through the one resolver. Only a
-/// checkout behind its fetched upstream yields a pin under the compiled
-/// default; an explicit choice pins its own commit. Missing Git evidence is
-/// advisory, never a refusal.
+/// Resolve the source of a read-only launch through the one resolver. The
+/// compiled default pins the upstream when the checkout is behind it, and the
+/// checkout HEAD otherwise; an explicit choice pins its own commit. Missing Git
+/// evidence is advisory, never a refusal.
 pub fn read_only_source_ref(
     state: &Path,
     source: &Path,
@@ -394,8 +397,9 @@ pub fn read_only_source_warning(
     }
 }
 
-/// The warning for an unpinned read-only launch. The lane still reads the
-/// local checkout; the fetched upstream is only the reason it is stale.
+/// The warning for a read-only launch that keeps the local checkout. Under the
+/// compiled default the observed HEAD itself is the pin, so a later commit
+/// cannot move it; the fetched upstream is only the reason it was stale.
 pub fn read_only_local_checkout_warning(source: &Path, selected: &ReadOnlySourceRef) -> String {
     format!(
         "{} is {} commit{} behind {} ({}); read-only lane will read the local checkout ({}) because no upstream source was pinned",

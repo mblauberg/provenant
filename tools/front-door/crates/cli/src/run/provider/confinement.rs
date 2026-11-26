@@ -1939,9 +1939,11 @@ fn fetch_read_source(remote: &provenant_config::RemoteName, repo: &Path) -> bool
 }
 
 /// The one resolver for a read-only lane's source. The compiled default pins
-/// only a checkout behind its fetched upstream; `checkout` keeps the local tree,
-/// `default_branch` the fetched default, and any other value an explicit ref.
-/// `fetch_first` fetches first; unusable Git evidence is advisory, never fatal.
+/// the fetched upstream when the checkout is behind it, and pins the observed
+/// checkout HEAD otherwise, so a commit after admission cannot move the tree a
+/// read-only lane reads; `checkout` keeps the local tree, `default_branch` the
+/// fetched default, and any other value an explicit ref. `fetch_first` fetches
+/// first; unusable Git evidence is advisory, never fatal.
 pub(in crate::run) fn read_only_source_ref(
     state: &Path,
     source: &Path,
@@ -2018,7 +2020,17 @@ pub(in crate::run) fn read_only_source_ref(
     let behind =
         commits_behind(&executor, &repo, &utility, budget, &cancel, head, commit).unwrap_or(0);
     if choice.value.is_empty() && behind == 0 {
-        return None;
+        // An up-to-date auto checkout still pins the HEAD observed here: the
+        // tree a read-only lane reads must not move after admission. The
+        // reference names the checked-out branch, or HEAD when detached.
+        let reference = current_branch(&executor, &repo, &utility, budget, &cancel)
+            .unwrap_or_else(|| "HEAD".to_owned());
+        return Some(crate::run::ReadOnlySourceRef {
+            commit: head,
+            reference,
+            behind: 0,
+            head,
+        });
     }
     Some(crate::run::ReadOnlySourceRef {
         commit,
