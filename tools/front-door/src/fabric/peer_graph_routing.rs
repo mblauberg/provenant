@@ -127,7 +127,7 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
     assert_eq!(error.to_string(), settlement_error);
     // The failure is recorded on A, the graph its work key names, and on no
     // other graph.
-    let recorded = FileJournal::read_advance_error(
+    let recorded = FileJournal::read_advance_note(
         &fixture.roots.state,
         fixture.settled.project_id,
         "a-settlement-error",
@@ -150,7 +150,7 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
         .is_some()
     );
     assert!(
-        FileJournal::read_advance_error(
+        FileJournal::read_advance_note(
             &fixture.roots.state,
             fixture.settled.project_id,
             "b-completes"

@@ -429,7 +429,7 @@ impl FileJournal {
             Ok(vec![
                 path.join(events::name(graph_id)),
                 path.join(checkpoint_file_name(graph_id)),
-                path.join(advance_error_name(graph_id)),
+                path.join(advance_note_name(graph_id)),
             ])
         })()
         .map_err(|error: JournalError| error.for_graph(&error_graph_id))
@@ -556,7 +556,7 @@ impl FileJournal {
                 Ok(Some(checkpoint)) => checkpoint,
                 Ok(None) => continue,
                 Err(error) => {
-                    Self::set_advance_error(root, project, &id, Some(&error.to_string()))?;
+                    Self::set_advance_note(root, project, &id, Some(&error.to_string()))?;
                     continue;
                 }
             };
@@ -1091,7 +1091,7 @@ impl FileJournal {
                     );
                     return Ok(());
                 }
-                for sidecar in [unreadable_marker_name(id), advance_error_name(id)] {
+                for sidecar in [unreadable_marker_name(id), advance_note_name(id)] {
                     if !control.should_continue() {
                         interrupt_graph_collection(
                             &mut report,
@@ -1425,7 +1425,7 @@ impl FileJournal {
             result.prompt_cookie = prompts.continuation;
             return Ok(result);
         }
-        for sidecar in [unreadable_marker_name(id), advance_error_name(id)] {
+        for sidecar in [unreadable_marker_name(id), advance_note_name(id)] {
             if !control.should_continue() {
                 result.interrupted_at = Some(candidate.to_path_buf());
                 return Ok(result);
@@ -1733,7 +1733,7 @@ impl FileJournal {
 
     /// Record why an automatic advance failed, or clear the record with
     /// `None`. It takes no graph lock, because the failure may be that lock.
-    pub fn set_advance_error(
+    pub fn set_advance_note(
         root: &StateRoot,
         project: ProjectId,
         graph_id: &str,
@@ -1745,7 +1745,7 @@ impl FileJournal {
                 return Err(JournalError::InvalidGraphId);
             }
             let directory = graph_directory(root, project)?;
-            let name = advance_error_name(graph_id);
+            let name = advance_note_name(graph_id);
             let Some(error) = error else {
                 return match directory.unlink(&name) {
                     Err(error) if error.is_not_found() => Ok(()),
@@ -1768,7 +1768,7 @@ impl FileJournal {
     }
 
     /// The recorded failure of the last automatic advance, if any.
-    pub fn read_advance_error(
+    pub fn read_advance_note(
         root: &StateRoot,
         project: ProjectId,
         graph_id: &str,
@@ -1783,7 +1783,7 @@ impl FileJournal {
                 Err(error) if error.is_not_found() => return Ok(None),
                 Err(error) => return Err(error.into()),
             };
-            let file = match directory.open_read(&advance_error_name(graph_id)) {
+            let file = match directory.open_read(&advance_note_name(graph_id)) {
                 Ok(file) => file,
                 Err(error) if error.is_not_found() => return Ok(None),
                 Err(error) => return Err(error.into()),
@@ -2190,7 +2190,7 @@ pub(super) fn unreadable_marker_name(graph_id: &str) -> OsString {
     format!("graph-{graph_id}.unreadable").into()
 }
 
-pub(super) fn advance_error_name(graph_id: &str) -> OsString {
+pub(super) fn advance_note_name(graph_id: &str) -> OsString {
     format!("graph-{graph_id}.advance-error").into()
 }
 

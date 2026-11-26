@@ -162,7 +162,7 @@ fn lane_settings(globals: &crate::Globals) -> HandoffSettings {
 
 fn error() -> ServiceError {
     ServiceError::Cli {
-        code: "handoff_refused".into(),
+        code: "declaration_refused".into(),
         message: "the host-bound declaration owner refused the request".into(),
         data: Value::Null,
     }
@@ -208,7 +208,7 @@ pub fn serve_lane(
             data: serde_json::to_value(&invalid).unwrap_or(Value::Null),
         }),
         Err(failure) => Err(ServiceError::Cli {
-            code: "handoff_refused".into(),
+            code: "declaration_refused".into(),
             message: failure.to_string(),
             // The Full refusal carries its key and source in the message so
             // the lane is told exactly which setting to raise.

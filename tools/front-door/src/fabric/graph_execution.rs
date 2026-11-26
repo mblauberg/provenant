@@ -758,11 +758,11 @@ pub(crate) fn tick_graphs(
                         let reason = format!(
                             "graph {id}: worktree is missing; restore it or run `provenant stop NAME`"
                         );
-                        if FileJournal::read_advance_error(&resolved.roots.state, project, &id)?
+                        if FileJournal::read_advance_note(&resolved.roots.state, project, &id)?
                             .as_deref()
                             != Some(reason.as_str())
                         {
-                            FileJournal::set_advance_error(
+                            FileJournal::set_advance_note(
                                 &resolved.roots.state,
                                 project,
                                 &id,
@@ -850,7 +850,7 @@ pub(crate) fn tick_graphs(
                 Ok(true) => {
                     report.advanced += 1;
                     if let Err(error) =
-                        FileJournal::set_advance_error(&resolved.roots.state, project, &id, None)
+                        FileJournal::set_advance_note(&resolved.roots.state, project, &id, None)
                     {
                         report.errors.push(format!("{project}/{id}: {error}"));
                     }
@@ -859,7 +859,7 @@ pub(crate) fn tick_graphs(
                 Err(error) => {
                     let reason = error.to_string();
                     if !error.is::<provenant_fabric_runtime::graph::UnreadableCheckpointNotice>() {
-                        let _ = FileJournal::set_advance_error(
+                        let _ = FileJournal::set_advance_note(
                             &resolved.roots.state,
                             project,
                             &id,
@@ -1402,7 +1402,7 @@ impl Factory {
                 graph_status_elapsed(&mut checkpoint, &boot, now);
             }
             let mut run = graph_snapshot(checkpoint);
-            let sidecar_error = FileJournal::read_advance_error(
+            let sidecar_error = FileJournal::read_advance_note(
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,
@@ -1653,7 +1653,7 @@ impl Factory {
                     // who created this submission. A matching waiter only reads.
                     *replayed = true;
                     let mut run = graph_snapshot(checkpoint.ok_or(FacadeError::StateCorrupt)?);
-                    run.advance_note = FileJournal::read_advance_error(
+                    run.advance_note = FileJournal::read_advance_note(
                         &self.context.roots.state,
                         self.context.identity.project,
                         id,
@@ -1890,7 +1890,7 @@ impl Factory {
                 _ => FacadeError::StateCorrupt,
             })?;
             // A manual advance that succeeded supersedes an earlier failure.
-            FileJournal::set_advance_error(
+            FileJournal::set_advance_note(
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,

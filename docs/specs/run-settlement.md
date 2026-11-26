@@ -58,7 +58,7 @@ terminal record, so a resume does not repeat them and `status` can show them.
 The guardian transfers its writer exclusion to recovery, and import and cleanup reuse that guard
 for the same scope. Failed steps before import share a durable budget of three failures. A resumed
 worker honours `retry_after_ms` before its first pass and paces every later pass. Exhausted
-retries keep their cause and stop automatic recovery: status reports settlement blocked and calls
+retries keep their cause and stop automatic recovery: status reports settlement held and calls
 for explicit reconciliation. A retry deadline overdue by three minutes is flagged stalled in the
 status reason, and a stalled custody-path refusal names the remedy (replace a symlink or restore a
 path inside the attempt directory).

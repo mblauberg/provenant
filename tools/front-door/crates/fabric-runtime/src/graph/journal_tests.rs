@@ -644,7 +644,7 @@ fn interrupted_terminal_collection_resumes_derived_cleanup() {
             .count()
     };
     assert!(prompt_blobs() > 0);
-    FileJournal::set_advance_error(&root, project, "g-test", Some("interrupted cleanup")).unwrap();
+    FileJournal::set_advance_note(&root, project, "g-test", Some("interrupted cleanup")).unwrap();
     let pending = directory.join("pending");
     std::fs::create_dir_all(&pending).unwrap();
     std::fs::write(pending.join("g-test.pending"), b"1").unwrap();
@@ -1602,8 +1602,8 @@ fn tick_reports_corrupt_checkpoints_once_until_bytes_change_or_retired() {
         std::fs::read_to_string(&marker).unwrap().lines().nth(1),
         Some("decode")
     );
-    FileJournal::set_advance_error(&root, project, "g-test", Some("another error")).unwrap();
-    FileJournal::set_advance_error(&root, project, "g-test", None).unwrap();
+    FileJournal::set_advance_note(&root, project, "g-test", Some("another error")).unwrap();
+    FileJournal::set_advance_note(&root, project, "g-test", None).unwrap();
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
             .unwrap()
@@ -1696,7 +1696,7 @@ fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     );
 }
 #[test]
-fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
+fn advance_note_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     let root = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(root.path()).unwrap();
@@ -1717,7 +1717,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
         }]
     }))
     .unwrap();
-    let read = || FileJournal::read_advance_error(&root, project, "errors").unwrap();
+    let read = || FileJournal::read_advance_note(&root, project, "errors").unwrap();
     assert_eq!(read(), None);
     let mut journal = FileJournal::open(&root, project, "errors", budget, &cancel, &clock).unwrap();
     for directory in [inputs.checkout.clone(), inputs.home.clone()] {
@@ -1739,7 +1739,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
         .unwrap();
     assert_eq!(execution.directory, inputs.checkout);
     // Recording takes no graph lock, so it works while the journal is held.
-    let set = |error| FileJournal::set_advance_error(&root, project, "errors", error).unwrap();
+    let set = |error| FileJournal::set_advance_note(&root, project, "errors", error).unwrap();
     set(Some("first"));
     assert_eq!(read().as_deref(), Some("first"));
     set(Some("second"));

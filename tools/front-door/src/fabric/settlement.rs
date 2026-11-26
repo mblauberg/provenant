@@ -164,7 +164,7 @@ pub(crate) fn advance_graphs_after_settlement(
                         &before_steer,
                         &operation,
                     ) {
-                        let _ = FileJournal::set_advance_error(
+                        let _ = FileJournal::set_advance_note(
                             &roots.state,
                             settled.project_id,
                             &graph,
@@ -226,7 +226,7 @@ pub(crate) fn advance_graphs_after_settlement(
         let settlement_class = settlement_class.as_deref();
         // The guardian's output is discarded, so `graph status` shows a failure.
         let advance_reason = result.as_ref().err().map(|error| error.to_string());
-        let recorded = FileJournal::set_advance_error(
+        let recorded = FileJournal::set_advance_note(
             &roots.state,
             settled.project_id,
             &id,

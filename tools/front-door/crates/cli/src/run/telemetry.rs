@@ -488,14 +488,14 @@ pub(super) fn stats_inner(
     match &partial {
         Ok(partial) if partial.is_empty() => {}
         Ok(partial) => human.push_str(&format!(
-            "partial signals: {}\n",
+            "settlement signals: {}\n",
             partial
                 .iter()
                 .map(|(name, count)| format!("{name}={count}"))
                 .collect::<Vec<_>>()
                 .join(" ")
         )),
-        Err(cause) => human.push_str(&format!("partial signals: unavailable ({cause})\n")),
+        Err(cause) => human.push_str(&format!("settlement signals: unavailable ({cause})\n")),
     }
     data["signals"] = signals_value(partial);
     data["handoff_declarations_accepted"] = declarations["accepted"].clone();
