@@ -2797,3 +2797,82 @@ mod launch_recovery {
         assert_eq!(ledger.lock().unwrap().starts.len(), 2);
     }
 }
+
+// Binding is the first of the two paths that enforce the subject/base
+// agreement (journal.rs bind and decode). A subject whose base disagrees with
+// the bound review base must be refused before any checkpoint is stored.
+#[test]
+fn bind_refuses_a_subject_that_disagrees_with_the_bound_review_base() {
+    let temp = crate::test_support::tempdir().unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "g-test",
+        "nodes": [{
+            "id": "reader",
+            "prompt": "work for reader",
+            "access": "read_only",
+            "route": {"adapter": "fixture", "model": "fixture/model"}
+        }]
+    }))
+    .unwrap();
+    document.subject = Some(provenant_records::subject::PinnedSubject {
+        extra: Default::default(),
+        base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
+        head: provenant_core::GitOid::parse(&"1".repeat(40)).unwrap(),
+        origin: provenant_records::subject::SubjectOrigin::LocalRef {
+            name: "main".into(),
+        },
+        observed_at: provenant_core::WallTime::from_micros(1).unwrap(),
+        policy: provenant_records::subject::SubjectPolicy::Pinned,
+    });
+
+    let make_execution = |graph_id: &str, review: &str| GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+        requester_path: None,
+        extra: Default::default(),
+        bases: GraphBaseBinding::new(Some(provenant_core::GitOid::parse(review).unwrap()), None),
+        directory: inputs.checkout.clone(),
+        document: GraphDocument {
+            graph_id: graph_id.to_owned(),
+            ..document.clone()
+        },
+    };
+
+    let mut agreeing = FileJournal::open(
+        &root,
+        project,
+        "g-agree",
+        WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+        &cancel,
+        &clock,
+    )
+    .unwrap();
+    assert!(
+        agreeing
+            .bind(make_execution("g-agree", &"a".repeat(40)))
+            .is_ok()
+    );
+
+    let mut disagreeing = FileJournal::open(
+        &root,
+        project,
+        "g-disagree",
+        WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+        &cancel,
+        &clock,
+    )
+    .unwrap();
+    assert!(matches!(
+        disagreeing.bind(make_execution("g-disagree", &"b".repeat(40))),
+        Err(JournalError::BadEnvelope)
+    ));
+}

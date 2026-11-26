@@ -330,6 +330,10 @@ impl GraphBaseBinding {
 }
 
 impl GraphExecution {
+    /// Keeps the host-bound bases self-consistent and consistent with the
+    /// admitted subject: when both carry a review base they must name the same
+    /// commit. Absence on either side is allowed, so graphs admitted before
+    /// this field existed (subject `None`) still validate.
     pub(super) fn valid_bases(&self) -> bool {
         let (review, integration) = self
             .bases
@@ -345,6 +349,12 @@ impl GraphExecution {
                 .integration_branch
                 .as_deref()
                 .is_none_or(|reference| reference.is_empty() || integration.is_some())
+            && self
+                .document
+                .subject
+                .as_ref()
+                .and_then(|subject| subject.base)
+                .is_none_or(|base| review.is_none_or(|review| review == base))
     }
 }
 
