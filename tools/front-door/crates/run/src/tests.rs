@@ -1011,7 +1011,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     );
     assert_eq!(
         store.attempt(id, &call)?.terminal_state,
-        provenant_records::AttemptOutcome::ReviewRequired
+        provenant_records::run::Outcome::ReviewRequired
     );
     Ok(())
 }

@@ -58,7 +58,7 @@ fn verifier_copies_count_once_and_unknown_dispositions_stay_unknown()
 fn mixed_model_node_stays_unknown_instead_of_charging_the_final_model()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, ProjectId, WallTime};
-    use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
+    use provenant_records::{run::Outcome,AttemptFact, RouteFact, Usage};
     let mut fact = AttemptFact {
         routing_context: Some(Default::default()),
         context: None,
@@ -66,7 +66,7 @@ fn mixed_model_node_stays_unknown_instead_of_charging_the_final_model()
         key: provenant_records::WorkKey::new(ProjectId::from_bytes([3; 16]), "graph", "node", 1)?,
         attempt_number: 1,
         project_id: ProjectId::from_bytes([3; 16]),
-        terminal_state: AttemptOutcome::Succeeded,
+        terminal_state: Outcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Unavailable,
         settlement_class: None,
         account_identity: provenant_records::AccountIdentity::unknown(),

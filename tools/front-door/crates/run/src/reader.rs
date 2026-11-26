@@ -184,7 +184,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         key: r.key,
         attempt_number: r.attempt_number,
         project_id: r.project_id,
-        terminal_state: outcome.into(),
+        terminal_state: outcome,
         cause_source,
         settlement_class: r.settlement_class,
         account_identity,

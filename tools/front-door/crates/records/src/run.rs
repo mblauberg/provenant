@@ -1392,7 +1392,7 @@ pub struct OperationRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal_chair: Option<crate::custody::Chair>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Succeeded,
@@ -1458,29 +1458,6 @@ impl Outcome {
     }
 }
 
-impl From<Outcome> for crate::AttemptOutcome {
-    fn from(outcome: Outcome) -> Self {
-        match outcome {
-            Outcome::Succeeded => Self::Succeeded,
-            Outcome::ReviewRequired => Self::ReviewRequired,
-            Outcome::Failed => Self::Failed,
-            Outcome::Rejected => Self::Rejected,
-            Outcome::Cancelled => Self::Cancelled,
-            Outcome::TimedOut => Self::TimedOut,
-            Outcome::RateLimited => Self::RateLimited,
-            Outcome::QuotaLimited => Self::QuotaLimited,
-            Outcome::AuthRequired => Self::AuthRequired,
-            Outcome::ModelUnavailable => Self::ModelUnavailable,
-            Outcome::PermissionDenied => Self::PermissionDenied,
-            Outcome::Quarantined => Self::Quarantined,
-            Outcome::Lost => Self::Lost,
-            Outcome::Unsettled => Self::Unsettled,
-            Outcome::Uncommitted => Self::Uncommitted,
-            Outcome::InputRequired => Self::InputRequired,
-            Outcome::Unclassified => Self::Unclassified,
-        }
-    }
-}
 /// Safe cause of a terminal decision, independent of provider text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

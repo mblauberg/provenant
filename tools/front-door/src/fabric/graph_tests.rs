@@ -4169,9 +4169,9 @@ mod provisioned_writer_submission_tests {
         assert_eq!(
             fact.terminal_state,
             if quota {
-                provenant_records::AttemptOutcome::QuotaLimited
+                provenant_records::run::Outcome::QuotaLimited
             } else {
-                provenant_records::AttemptOutcome::Succeeded
+                provenant_records::run::Outcome::Succeeded
             }
         );
         use graph::AttemptOwner as _;

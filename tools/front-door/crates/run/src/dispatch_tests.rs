@@ -722,7 +722,7 @@ fn assert_unreadable_prompt_rejected(
     let fact = store.attempt(id, &call)?;
     assert_eq!(
         fact.terminal_state,
-        provenant_records::AttemptOutcome::Rejected
+        provenant_records::run::Outcome::Rejected
     );
     assert!(fact.started_at.is_none());
     let [Started::Refused { reason, .. }] = &started[..] else {

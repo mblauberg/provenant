@@ -4,7 +4,7 @@ use super::*;
 fn graph_quality_reports_missing_checkpoint_without_failing()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, ProjectId, WallTime};
-    use provenant_records::{AttemptFact, AttemptOutcome, Usage};
+    use provenant_records::{run::Outcome,AttemptFact, Usage};
     let temp = tempfile::tempdir()?;
     let base = std::fs::canonicalize(temp.path())?;
     let inputs = provenant_test_support::root_inputs(&base)?;
@@ -20,7 +20,7 @@ fn graph_quality_reports_missing_checkpoint_without_failing()
         key: provenant_records::WorkKey::new(project, "retired", "node", 1)?,
         attempt_number: 1,
         project_id: project,
-        terminal_state: AttemptOutcome::Succeeded,
+        terminal_state: Outcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Unavailable,
         settlement_class: None,
         account_identity: provenant_records::AccountIdentity::unknown(),

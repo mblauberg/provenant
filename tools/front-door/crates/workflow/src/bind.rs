@@ -4,7 +4,7 @@
 //! the route tier, which no owner publishes yet, come from the claim.
 use crate::review::{self, ReviewError};
 use provenant_core::{DeliveryId, Digest};
-use provenant_records::{AttemptFact, AttemptOutcome, ReviewerProvenance, workflow::*};
+use provenant_records::{run::Outcome,AttemptFact, ReviewerProvenance, workflow::*};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -50,7 +50,7 @@ pub fn review_fact(
     delivery: DeliveryId,
     policy: &ReviewPolicy,
 ) -> Result<ReviewFact, BindError> {
-    if attempt.terminal_state != AttemptOutcome::Succeeded {
+    if attempt.terminal_state != Outcome::Succeeded {
         return Err(BindError::NotSucceeded);
     }
     if attempt.delivery_id != Some(delivery) {
@@ -167,7 +167,7 @@ mod tests {
                 .unwrap(),
             attempt_number: 1,
             project_id: ProjectId::from_bytes([4; 16]),
-            terminal_state: AttemptOutcome::Succeeded,
+            terminal_state: Outcome::Succeeded,
             cause_source: provenant_records::run::CauseSource::Unavailable,
             settlement_class: None,
             account_identity: provenant_records::AccountIdentity::unknown(),
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn failed_headless_wrong_head_and_foreign_delivery_attempts_are_refused() {
         let mut a = attempt();
-        a.terminal_state = AttemptOutcome::Failed;
+        a.terminal_state = Outcome::Failed;
         assert_eq!(bind(&a, &subject()), Err(BindError::NotSucceeded));
         let mut a = attempt();
         a.reviewer = None;

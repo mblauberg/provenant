@@ -132,7 +132,7 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     let fact = store.attempt(run.attempt_id, &call)?;
     assert_eq!(
         fact.terminal_state,
-        provenant_records::AttemptOutcome::Rejected
+        provenant_records::run::Outcome::Rejected
     );
     assert!(fact.started_at.is_none());
     assert!(
@@ -349,7 +349,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     let fact = store.attempt(id, &call)?;
     assert_eq!(
         fact.terminal_state,
-        provenant_records::AttemptOutcome::Rejected
+        provenant_records::run::Outcome::Rejected
     );
     assert_eq!(fact.reason.as_deref(), Some("admission refused"));
     let record = store.record(id, &call)?;

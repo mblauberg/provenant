@@ -1,6 +1,6 @@
 use crate::{BillingKind, Categories, PriceError, PriceIdentity, PriceTable};
 use provenant_core::{AttemptId, ProjectId, WallTime};
-use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
+use provenant_records::{run::Outcome,AttemptFact, RouteFact, Usage};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use thiserror::Error;
@@ -270,7 +270,7 @@ pub struct Totals {
     pub usage: Categories<TokenTotal>,
     pub cache: CacheSummary,
     pub cost: CostTotal,
-    pub outcomes: BTreeMap<AttemptOutcome, u64>,
+    pub outcomes: BTreeMap<Outcome, u64>,
 }
 fn route_fields(route: &RouteFact) -> [&Option<String>; 4] {
     [
@@ -361,7 +361,7 @@ pub struct StatsReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_accounts: Option<Vec<DailyGroup>>,
     /// Highest numbered selected terminal attempt per task; never active work.
-    pub latest_task_outcomes: BTreeMap<AttemptOutcome, u64>,
+    pub latest_task_outcomes: BTreeMap<Outcome, u64>,
     pub coverage: Coverage,
     /// Cache-read share, the figure to raise, by model, account, provider and
     /// source (lane or chair).
@@ -379,7 +379,7 @@ struct Accumulator {
     numerator: u128,
     missing_cost: u64,
     subscription_attempts: u64,
-    outcomes: BTreeMap<AttemptOutcome, u64>,
+    outcomes: BTreeMap<Outcome, u64>,
 }
 fn add(value: &mut u64, increment: u64) -> Result<(), TelemetryError> {
     *value = value
@@ -417,7 +417,7 @@ impl Accumulator {
     fn record_usage(
         &mut self,
         usage: &Usage,
-        outcome: Option<AttemptOutcome>,
+        outcome: Option<Outcome>,
         numerator: u128,
         missing: bool,
         subscription: bool,
@@ -767,7 +767,7 @@ fn stats_inner(
     let mut daily = BTreeMap::<(String, RouteFact), Accumulator>::new();
     let mut attempts = BTreeSet::<AttemptId>::new();
     let mut numbers = BTreeSet::new();
-    let mut latest = BTreeMap::<(ProjectId, String), (u64, AttemptOutcome)>::new();
+    let mut latest = BTreeMap::<(ProjectId, String), (u64, Outcome)>::new();
     let mut coverage = Coverage::default();
     let mut budget = GroupBudget::default();
     for mut fact in facts {

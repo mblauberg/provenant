@@ -4,7 +4,7 @@ use crate::{
 };
 use provenant_core::{AttemptId, ProjectId};
 use provenant_os::clock::SystemClock;
-use provenant_records::{AttemptOutcome, RouteFact, Usage, UsageSource, WorkKey};
+use provenant_records::{run::Outcome, RouteFact, Usage, UsageSource, WorkKey};
 use std::path::PathBuf;
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -62,7 +62,7 @@ fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<Attemp
         )?,
         attempt_number: number,
         project_id: ProjectId::from_bytes([2; 16]),
-        terminal_state: AttemptOutcome::Succeeded,
+        terminal_state: Outcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Unavailable,
         settlement_class: None,
         account_identity: provenant_records::AccountIdentity::unknown(),

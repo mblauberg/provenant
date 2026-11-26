@@ -1,7 +1,7 @@
 //! Attempt outcomes joined to retained access and route-selection evidence.
 use std::collections::BTreeMap;
 
-use provenant_records::{AttemptFact, AttemptOutcome};
+use provenant_records::{run::Outcome,AttemptFact, Outcome};
 use provenant_routing::{ModelId, OutcomeKey, PriorKey, RoutePrior};
 use serde::Serialize;
 
@@ -56,7 +56,7 @@ fn has_quality_outcome(fact: &AttemptFact) -> bool {
     use provenant_records::run::{CauseSource, SettlementTerminalOutcome};
     fact.cause_source == CauseSource::Provider
         || (fact.cause_source == CauseSource::Host
-            && fact.terminal_state == AttemptOutcome::Succeeded
+            && fact.terminal_state == Outcome::Succeeded
             && fact.settlement_class.is_some_and(|reason| {
                 reason.rule().terminal_outcome == SettlementTerminalOutcome::Succeeded
             }))
@@ -104,8 +104,8 @@ pub fn priors(
             continue;
         };
         let success = match item.fact.terminal_state {
-            AttemptOutcome::Succeeded => !item.partial,
-            AttemptOutcome::Failed | AttemptOutcome::Rejected | AttemptOutcome::ReviewRequired => {
+            Outcome::Succeeded => !item.partial,
+            Outcome::Failed | Outcome::Rejected | Outcome::ReviewRequired => {
                 false
             }
             _ => continue,
@@ -202,7 +202,7 @@ pub fn report(
             let successes = items
                 .iter()
                 .filter(|item| {
-                    item.fact.terminal_state == AttemptOutcome::Succeeded && !item.partial
+                    item.fact.terminal_state == Outcome::Succeeded && !item.partial
                 })
                 .count() as u64;
             let mut time = 0u64;
