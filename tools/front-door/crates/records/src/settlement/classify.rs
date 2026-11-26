@@ -12,7 +12,7 @@ use crate::handoff::{HandoffResult, HandoffStatus};
 use crate::provenance::Sourced;
 use crate::run::{
     Outcome, SettlementSignal, SettlementNodeOutcome, SettlementReason, CauseKind,
-    TerminalEvidence,
+    TerminalBasis,
 };
 use crate::settlement::policy::{AppliedPolicy, NoWork, SettlementPolicy, SignalAction};
 use crate::settlement::{
@@ -44,7 +44,7 @@ fn bounded(note: &str) -> String {
 /// The old reason-derivation ladder, now private to the one decider.
 fn derived_reason(
     outcome: Outcome,
-    evidence: &TerminalEvidence,
+    evidence: &TerminalBasis,
     partial: &[SettlementSignal],
     cause: Option<CauseKind>,
     handoff: &HandoffResult,
@@ -59,10 +59,10 @@ fn derived_reason(
     if outcome == Outcome::Unclassified {
         return SettlementReason::Unclassified;
     }
-    if matches!(evidence, TerminalEvidence::Lost { .. }) {
+    if matches!(evidence, TerminalBasis::Lost { .. }) {
         return SettlementReason::Lost;
     }
-    if matches!(evidence, TerminalEvidence::Unsettled { .. }) {
+    if matches!(evidence, TerminalBasis::Unsettled { .. }) {
         return SettlementReason::Unsettled;
     }
     if outcome == Outcome::Cancelled && cause == Some(CauseKind::Steered) {
@@ -71,7 +71,7 @@ fn derived_reason(
     if outcome == Outcome::Cancelled {
         return SettlementReason::Cancelled;
     }
-    if !launched || matches!(evidence, TerminalEvidence::PreLaunchRefusal) {
+    if !launched || matches!(evidence, TerminalBasis::PreLaunchRefusal) {
         return SettlementReason::PreLaunchRefusal;
     }
     if handoff.is_err() {
@@ -515,10 +515,10 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     }
 
     // 13. Terminal evidence follows the custody ladder, not the prose.
-    let terminal_evidence = if custody.import_cancelled {
-        TerminalEvidence::ImportCancellation
+    let terminal_basis = if custody.import_cancelled {
+        TerminalBasis::ImportCancellation
     } else if outcome == Outcome::Unsettled {
-        TerminalEvidence::Unsettled {
+        TerminalBasis::Unsettled {
             reason: reason
                 .clone()
                 .unwrap_or_else(|| Outcome::Unsettled.diagnostic_reason().to_owned()),
@@ -527,11 +527,11 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         && cause != Some(CauseKind::Steered)
         && custody.cancellation_delivered == Some(true)
     {
-        TerminalEvidence::EffectiveCancellation
+        TerminalBasis::EffectiveCancellation
     } else if custody.process_exit {
-        TerminalEvidence::ProcessExit
+        TerminalBasis::ProcessExit
     } else {
-        TerminalEvidence::PreLaunchRefusal
+        TerminalBasis::PreLaunchRefusal
     };
 
     // 14. One reason, then one stop, source and graph result from that reason.
@@ -567,7 +567,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         };
     let settlement_reason = derived_reason(
         outcome,
-        &terminal_evidence,
+        &terminal_basis,
         &class_signals,
         class_cause,
         &class_declaration,
@@ -606,7 +606,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         stop,
         source,
         node,
-        terminal_evidence,
+        terminal_basis,
         signals,
         progress,
         handoff: declaration,

@@ -9,7 +9,7 @@ use crate::declaration::{DeclarationCounts, DeclarationEvidence};
 use crate::handoff::Handoff;
 use crate::run::{
     CauseSource, Outcome, SettlementSignal, SettlementNodeOutcome, SettlementReason, CauseKind,
-    TerminalEvidence,
+    TerminalBasis,
 };
 use crate::settlement::policy::{AppliedPolicy, SettlementPolicy};
 use crate::stop::Stop;
@@ -148,7 +148,7 @@ pub struct OutcomeFact {
     pub stop: Option<Stop>,
     pub source: CauseSource,
     pub node: SettlementNodeOutcome,
-    pub terminal_evidence: TerminalEvidence,
+    pub terminal_basis: TerminalBasis,
     pub signals: Vec<SettlementSignal>,
     pub progress: Option<Progress>,
     pub handoff: crate::handoff::HandoffResult,

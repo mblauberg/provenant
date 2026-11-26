@@ -3789,7 +3789,7 @@ fn persisted_attempt_with(
             reason: Some("lost before recording a route".into()),
         };
         // Version 2 records carry the evidence that justifies the decision.
-        running.terminal_evidence = Some(provenant_run::TerminalEvidence::Lost {
+        running.terminal_basis = Some(provenant_run::TerminalBasis::Lost {
             reason: "lost before recording a route".into(),
         });
         let bytes = CanonicalV1::bytes(&running)?.as_bytes().to_vec();

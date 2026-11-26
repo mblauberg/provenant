@@ -225,8 +225,8 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         assert_eq!(record.provider_launched, Some(false));
         assert_eq!(record.skipped_routes[1].cause, cause);
         assert_eq!(
-            record.terminal_evidence,
-            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+            record.terminal_basis,
+            Some(provenant_records::run::TerminalBasis::PreLaunchRefusal)
         );
     }
     Ok(())
@@ -303,8 +303,8 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         );
         let record = store.record(id, &call)?;
         assert_eq!(
-            record.terminal_evidence,
-            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+            record.terminal_basis,
+            Some(provenant_records::run::TerminalBasis::PreLaunchRefusal)
         );
         assert_eq!(record.provider_launched, Some(false));
         assert_eq!(

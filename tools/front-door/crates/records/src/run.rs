@@ -2194,7 +2194,7 @@ pub enum WriteSource {
 /// Evidence on which a terminal decision was based.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TerminalEvidence {
+pub enum TerminalBasis {
     ProcessExit,
     PreLaunchRefusal,
     EffectiveCancellation,
@@ -2718,7 +2718,7 @@ pub struct AttemptRecord {
     pub state: AttemptState,
     /// Absent on records written before terminal decisions were recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_evidence: Option<TerminalEvidence>,
+    pub terminal_basis: Option<TerminalBasis>,
     /// Why the attempt ended, as a closed set a waiter can match on. Stamped
     /// with every terminal decision, including refusals before launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]

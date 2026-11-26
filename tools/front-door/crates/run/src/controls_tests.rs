@@ -2239,8 +2239,8 @@ fn stop_settles_a_sealed_running_attempt_without_a_holder() -> TestResult {
         "stop must settle a vanished provider as cancelled: {settled:?}"
     );
     assert_eq!(
-        settled.terminal_evidence,
-        Some(TerminalEvidence::ProcessExit)
+        settled.terminal_basis,
+        Some(TerminalBasis::ProcessExit)
     );
     assert_eq!(
         settled.cancellation_disposition,

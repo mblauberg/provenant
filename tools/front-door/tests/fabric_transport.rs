@@ -914,8 +914,8 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             }));
             assert_eq!(record.provider_launched, Some(false));
             assert_eq!(
-                record.terminal_evidence,
-                Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+                record.terminal_basis,
+                Some(provenant_records::run::TerminalBasis::PreLaunchRefusal)
             );
             cleanup.disarm();
             continue;
@@ -955,8 +955,8 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         );
         assert_eq!(record.provider_launched, Some(false));
         assert_eq!(
-            record.terminal_evidence,
-            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+            record.terminal_basis,
+            Some(provenant_records::run::TerminalBasis::PreLaunchRefusal)
         );
         cleanup.disarm();
     }

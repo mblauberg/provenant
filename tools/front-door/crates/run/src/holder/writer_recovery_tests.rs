@@ -3201,8 +3201,8 @@ fn settlement_import_cancellation_preserves_provider_exit_ordering()
             matches!(record.record.state, AttemptState::Terminal {outcome: Outcome::Cancelled, reason: Some(ref reason), ..} if reason == "cancelled during Git import")
         );
         assert_eq!(
-            record.record.terminal_evidence,
-            Some(TerminalEvidence::ImportCancellation)
+            record.record.terminal_basis,
+            Some(TerminalBasis::ImportCancellation)
         );
         assert_eq!(
             record.record.cancellation_disposition,
@@ -3331,8 +3331,8 @@ fn never_spawned_exit_survives_cancel_during_import()
             matches!(record.state, AttemptState::Terminal { outcome, .. } if outcome == expected)
         );
         assert_eq!(
-            record.terminal_evidence,
-            Some(TerminalEvidence::ProcessExit)
+            record.terminal_basis,
+            Some(TerminalBasis::ProcessExit)
         );
         assert_eq!(record.provider_launched, Some(false));
         assert!(read_sealed(&attempt, "import-cancelled.json", RECORD_LIMIT)?.is_none());

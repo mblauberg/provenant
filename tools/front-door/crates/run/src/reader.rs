@@ -1531,23 +1531,23 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
     } = r.state
     {
         if r.schema_version == 2 {
-            match (&r.terminal_evidence, outcome) {
-                (Some(TerminalEvidence::Unsettled { reason: evidence }), Outcome::Unsettled)
+            match (&r.terminal_basis, outcome) {
+                (Some(TerminalBasis::Unsettled { reason: evidence }), Outcome::Unsettled)
                     if !evidence.is_empty()
                         && evidence.len() <= 4096
                         && reason.as_ref() == Some(evidence) => {}
-                (Some(TerminalEvidence::ProcessExit), outcome)
+                (Some(TerminalBasis::ProcessExit), outcome)
                     if outcome != Outcome::Unsettled && r.exit_evidence.is_some() => {}
                 (
-                    Some(TerminalEvidence::PreLaunchRefusal),
+                    Some(TerminalBasis::PreLaunchRefusal),
                     Outcome::Rejected | Outcome::Cancelled | Outcome::AuthRequired,
                 ) if r.provider_launched == Some(false) => {}
-                (Some(TerminalEvidence::EffectiveCancellation), Outcome::Cancelled) => {}
-                (Some(TerminalEvidence::ImportCancellation), Outcome::Cancelled)
+                (Some(TerminalBasis::EffectiveCancellation), Outcome::Cancelled) => {}
+                (Some(TerminalBasis::ImportCancellation), Outcome::Cancelled)
                     if r.exit_evidence.is_some()
                         && r.cancellation_disposition
                             == Some(CancellationDisposition::ImportEffective) => {}
-                (Some(TerminalEvidence::Lost { reason: evidence }), Outcome::Lost)
+                (Some(TerminalBasis::Lost { reason: evidence }), Outcome::Lost)
                     if !evidence.is_empty() && reason.as_ref() == Some(evidence) => {}
                 _ => return Err(RunError::Validation("terminal decision evidence")),
             }

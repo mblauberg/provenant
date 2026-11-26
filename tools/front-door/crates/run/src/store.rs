@@ -722,7 +722,7 @@ impl RunStore {
                     return Err(RunError::Conflict);
                 };
                 let owner_stopped_after_exit = outcome == Outcome::Cancelled
-                    && pending.terminal_evidence == Some(TerminalEvidence::ProcessExit)
+                    && pending.terminal_basis == Some(TerminalBasis::ProcessExit)
                     && matches!(
                         pending.cancellation_disposition,
                         Some(
@@ -740,7 +740,7 @@ impl RunStore {
                     && !owner_stopped_after_exit
                     && !stored.never_spawned
                     && stored.cancel_delivered_before_exit != Some(true)
-                    && !(pending.terminal_evidence == Some(TerminalEvidence::ImportCancellation)
+                    && !(pending.terminal_basis == Some(TerminalBasis::ImportCancellation)
                         && import_cancelled(&dir, Self::scope(&current))?))
                     || (outcome == Outcome::Cancelled
                         && !owner_stopped_after_exit
@@ -1004,7 +1004,7 @@ impl RunStore {
                 schema_version: 2, attempt_id, project_id: context.project_id, attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
                 delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, steering: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, stop_work: None, warnings: Vec::new(), verified_owner: Some(context.actor_id), session: None,
                 queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, process_observation_valid: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
-                terminal_evidence: None, settlement_reason: None, progress: None, settlement_evidence: None, declarations: None, handoff_source: None, settlement_policy_applied: Vec::new(), cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
+                terminal_basis: None, settlement_reason: None, progress: None, settlement_evidence: None, declarations: None, handoff_source: None, settlement_policy_applied: Vec::new(), cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                 prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: input.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                 trace: provenant_records::Trace {extra: Default::default(),
                     telemetry_context: Some(telemetry_context.clone()),
@@ -1704,7 +1704,7 @@ impl RunStore {
             reason: publication.fact.reason.clone(),
         };
         next.schema_version = 2;
-        next.terminal_evidence = Some(publication.fact.terminal_evidence.clone());
+        next.terminal_basis = Some(publication.fact.terminal_basis.clone());
         next.settlement_reason = Some(publication.fact.settlement_reason);
         next.progress = publication.fact.progress.clone();
         next.settlement_evidence = publication.evidence;
@@ -2039,7 +2039,7 @@ impl RunStore {
         next.revision = old.revision.checked_add(1).ok_or(RunError::Conflict)?;
         crate::launch::mark_admission_release_pending(&mut next)?;
         next.schema_version = 2;
-        next.terminal_evidence = Some(TerminalEvidence::Lost {
+        next.terminal_basis = Some(TerminalBasis::Lost {
             reason: reason.into(),
         });
         next.settlement_reason = Some(SettlementReason::Lost);

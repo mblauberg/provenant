@@ -22,7 +22,7 @@ use provenant_records::{
         EffectDisposition, LaneAccess, OriginReceipt, Outcome, SettlementSignal, PathScope,
         PreparationFailure, RepositoryAdmissionPhase, RequestedRoute, SandboxFloorStrength,
         SettlementEffect, SettlementReason, SkipKind, StopWorkPush, StopWorkTrigger, CauseKind,
-        TerminalEvidence, UserSkillsMode, WriteGrantLimitOrigin, WriteSource, WriterDeliveryStage,
+        TerminalBasis, UserSkillsMode, WriteGrantLimitOrigin, WriteSource, WriterDeliveryStage,
         WriterDeliveryState,
     },
     stop::StopCause,
@@ -250,8 +250,8 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             ),
         ],
     )?;
-    assert_tagged::<TerminalEvidence>(
-        "TerminalEvidence",
+    assert_tagged::<TerminalBasis>(
+        "TerminalBasis",
         "kind",
         &[
             ("process_exit", json!({"kind": "process_exit"})),

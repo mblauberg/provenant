@@ -2746,7 +2746,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
                 EffectDisposition::Failed { reason, retryable: true } if reason == "crash-retained conflict")
             );
         }
-        assert!(store.record(id, &call)?.terminal_evidence.is_some());
+        assert!(store.record(id, &call)?.terminal_basis.is_some());
         assert!(
             store
                 .read_output(
@@ -2915,14 +2915,14 @@ fn receipt_cancellation_requires_ordered_delivery() -> TestResult {
         let mut publication = publication();
         publication.fact.outcome = Outcome::Cancelled;
         if delivered == Some(true) {
-            publication.fact.terminal_evidence = TerminalEvidence::EffectiveCancellation;
+            publication.fact.terminal_basis = TerminalBasis::EffectiveCancellation;
         }
         let result = store.publish_terminal(id, 1, &publication, &observation, &call);
         if delivered == Some(true) {
             let record = result?;
             assert_eq!(
-                record.terminal_evidence,
-                Some(TerminalEvidence::EffectiveCancellation)
+                record.terminal_basis,
+                Some(TerminalBasis::EffectiveCancellation)
             );
         } else {
             assert!(result.is_err());
@@ -3217,8 +3217,8 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
             record.cancellation_disposition
         );
         assert_eq!(
-            replayed.terminal_evidence,
-            Some(TerminalEvidence::ProcessExit)
+            replayed.terminal_basis,
+            Some(TerminalBasis::ProcessExit)
         );
     }
     Ok(())
