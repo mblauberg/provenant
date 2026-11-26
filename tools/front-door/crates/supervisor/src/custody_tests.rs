@@ -61,6 +61,34 @@ fn every_stop_uses_one_intent_and_cancel_file_cannot_carry_a_steer() -> TestResu
 }
 
 #[test]
+fn advisory_stop_never_replaces_an_existing_stop() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let requester = ActorId::from_bytes([3; 16]);
+    request_stop(
+        directory.try_clone()?,
+        scope(),
+        requester,
+        StopReason::WallDeadline,
+    )?;
+    let handle = CustodyHandle {
+        directory: directory.try_clone()?,
+        scope: scope(),
+        requester,
+        held: false,
+    };
+    assert!(matches!(
+        stop_if_unrequested(&handle, StopReason::SupervisorSignal),
+        Err(CustodyError::StopConflict)
+    ));
+    let StopIntentState::Requested(intent) = read_stop_intent(&directory, scope())? else {
+        return Err("missing stop intent".into());
+    };
+    assert_eq!(intent.reason, StopReason::WallDeadline);
+    Ok(())
+}
+
+#[test]
 fn admission_clock_error_stays_an_admission_refusal() {
     let error = CustodyError::from(AdmissionError::Clock);
     assert!(matches!(

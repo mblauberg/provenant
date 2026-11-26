@@ -67,7 +67,7 @@ pub use admission::{
 pub use controls::{
     AttemptPresence, CancelReceipt, Reconciled, Resume, SteerIntent, SteerReceipt, TemporaryReason,
     TemporaryReasonKind, UncertainReason, attempt_presence, attempt_presence_with_census,
-    attempt_presence_with_unavailable_census, holder_absent, overdue_at,
+    attempt_presence_with_unavailable_census, holder_absent, overdue_at, stalled_at,
 };
 #[cfg(any(test, feature = "fixture"))]
 pub use delivery::forge_for;

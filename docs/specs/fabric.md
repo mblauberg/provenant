@@ -569,13 +569,18 @@ when no independent approval remains.
 - Why: an accepted graph must be able to save its checkpoint, and no reader may
   see a state another reader rejects.
 
-### Fallback only for unavailability
+### Route fallback
 
-A node moves to its next route only on a typed pre-launch authentication, quota or
+A node moves to its next route on a typed pre-launch authentication, quota or
 adapter refusal with custody released, or a classified refusal of a launched
-read-only attempt within its [retry](retry-owner.md) budget. Launched writers and
-uncertain launches never switch.
-- Why: a launched writer may already have had effects.
+read-only attempt within its [retry](retry-owner.md) budget. The explicit
+`provider_stalled_retry` outcome is the opt-in exception: run-side custody stops
+the stalled provider before the graph advances, and the switch consumes that
+same retry budget. Its next route reuses the node's worktree so any partial
+effects remain visible to the retry. Fail-policy stalls and uncertain launches
+never switch.
+- Why: preserving a writer's partial work makes an explicit stall retry safe to
+  inspect and continue, while the retry budget bounds route changes.
 
 ### Graph delivery
 

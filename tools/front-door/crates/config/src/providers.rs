@@ -39,6 +39,13 @@ pub struct ProviderSettings {
     /// A cap on any lane's runtime deadline on this provider, in seconds. A
     /// dispatch's own `--provider-timeout` applies when it is shorter.
     pub runtime_deadline_seconds: Option<u64>,
+    /// Seconds without provider output after which a running attempt is
+    /// reported as stalled in status, wait and the digest. 0 disables the
+    /// report. This never signals the provider; see `stall_policy` for the
+    /// opt-in response.
+    pub stall_after_seconds: u64,
+    /// Opt-in action once an attempt is stalled. The default only warns.
+    pub stall_policy: crate::StallPolicy,
 }
 
 impl Default for ProviderSettings {
@@ -51,6 +58,8 @@ impl Default for ProviderSettings {
             update_interval_seconds: 24 * 60 * 60,
             update_timeout_seconds: 300,
             runtime_deadline_seconds: None,
+            stall_after_seconds: provenant_records::DEFAULT_STALL_AFTER_SECONDS,
+            stall_policy: crate::StallPolicy::default(),
         }
     }
 }

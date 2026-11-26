@@ -18,10 +18,11 @@ relative to `tools/front-door/`.
 The guardian does only what a provider cannot do for itself: start it with its
 environment, wait for its exit on events, end the lane's own process tree,
 record exit and settlement durably, and hold the writer, credential and
-authority boundaries. It never judges activity (CPU, output silence, progress),
-samples disk or matches command names.
-- Why: one guardian runs per lane, so every periodic read multiplies across
-  parallel lanes.
+authority boundaries. It does not judge CPU activity or progress, sample disk,
+or match command names. It supplies captured output activity to Run's holder,
+which applies the configured silence policy described below.
+- Why: the live guardian observes output and can give Run a bounded policy tick
+  without a separate host daemon.
 - Owner: `crates/supervisor/src/guardian.rs`
 
 ### Closed stop reasons; natural exit wins
@@ -72,6 +73,39 @@ attempt state.
 - Why: a dead guardian or recycled PID cannot hide a surviving provider child,
   and uncertainty must not become a running writer or an unsafe retry.
 - Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/controls.rs`
+
+### Attempt silence is reported; action is opt-in
+
+`providers.<id>.stall_after_seconds` (compiled default 1800, `0` disables) is
+the silence threshold for a running attempt on that route. The threshold counts
+from the last output, or from the provider start when it has emitted nothing.
+Queued time is never used to measure silence. A live attempt past the threshold
+is reported as
+stalled with its last-event time in `status --json`, in `wait` and in the chair's
+digest. The effective threshold and its source appear in `run --explain` and on
+the lane's recorded limits.
+
+Detection is read-only and warns with `PROVIDER_STALLED`; it never signals a
+provider. `providers.<id>.stall_policy` defaults to `report`. Only an explicit
+`steer`, `retry` or `fail` acts, and every action warns first: `steer` queues one
+steering turn for that attempt; `retry` and `fail` stop the provider through
+run-side custody. The guardian periodically supplies live activity to Run's
+holder, which applies the policy; recovery may repeat an interrupted action.
+`retry` seals a
+typed `provider_stalled_retry` intent that advances the graph to the next route
+within its retry budget; `fail` settles with the typed `provider_stalled` cause
+and stays terminal.
+The warning is recorded on the attempt before any stop or steer request, so it
+remains visible in status after the detached guardian has acted. A stop intent is
+sealed before requesting custody, and reconciliation retries
+an interrupted request. Settlement attributes a stall stop only when custody
+observed the supervisor signal; a natural exit or cancellation keeps its cause.
+Steering uses an idempotent operation and records completion after queueing.
+Silence remains distinct from the guardian's existing supervisor-signal stop reason.
+- Why: a quiet provider must be visible to a chair within a bounded time, but a
+  slow or thinking provider must not be killed on a guess.
+- Owner: `crates/run/src/controls.rs`, `crates/run/src/limits.rs`,
+  `crates/cli/src/run/status.rs`, `src/status_wait.rs`
 
 ### Tick-driven settlement
 

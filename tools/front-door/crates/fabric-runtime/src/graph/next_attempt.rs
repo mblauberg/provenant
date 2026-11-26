@@ -449,9 +449,10 @@ pub(crate) fn fallback_candidate(
     _access: AccessMode,
     launched: bool,
 ) -> bool {
-    !launched
-        && fallback_cause(outcome)
-            .is_some_and(|cause| cause.default_next() == provenant_records::NextStep::NewRoute)
+    (launched && matches!(outcome, AttemptOutcome::ProviderStalledRetry))
+        || (!launched
+            && fallback_cause(outcome)
+                .is_some_and(|cause| cause.default_next() == provenant_records::NextStep::NewRoute))
 }
 
 /// The stop class that decides a route fallback. A host refusal before launch

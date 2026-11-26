@@ -2,16 +2,33 @@
 //! `status` all read the record this builds, so they cannot disagree.
 use provenant_confinement::run_config::RunConfig;
 use provenant_records::{
-    BudgetAction, BudgetGrace, BudgetPolicy, LaneLimits, Layer, Limit, LimitStrength,
+    BudgetAction, BudgetGrace, BudgetPolicy, LaneLimits, Layer, Limit, LimitStrength, StallPolicy,
     run::{HarnessProfile, RequestedRoute, TaskRequest, WorkContext},
 };
 use std::path::Path;
 
 /// Host settings that bound one lane.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct HostCaps {
     /// The provider's cap on the wall clock.
     pub runtime_seconds: Option<u64>,
+    /// The provider's silence threshold and opt-in action. Both come from
+    /// `providers.<id>` and are recorded on the lane with their source.
+    pub stall_after_seconds: u64,
+    /// The layer that supplied the threshold, shown in status and explain.
+    pub stall_source: Layer,
+    pub stall_policy: StallPolicy,
+}
+
+impl Default for HostCaps {
+    fn default() -> Self {
+        Self {
+            runtime_seconds: None,
+            stall_after_seconds: provenant_records::DEFAULT_STALL_AFTER_SECONDS,
+            stall_source: Layer::Default,
+            stall_policy: StallPolicy::default(),
+        }
+    }
 }
 
 /// Resolve `task`'s limits for a lane on `provider`, once, at preparation.
@@ -71,6 +88,14 @@ pub fn lane_limits(
         deadline_seconds,
         repair_cycles: knob("lanes.max_repair_cycles"),
         gh_invocations: gh_budget(&task.profile),
+        // Preserve zero and its source: it explicitly disables detection and
+        // differs from a legacy record that has no recorded threshold.
+        stall_after_seconds: Some(Limit::new(
+            caps.stall_after_seconds,
+            caps.stall_source,
+            LimitStrength::Default,
+        )),
+        stall_policy: caps.stall_policy,
     };
     // Raises the owner asked for with `retry --extend`; the command refused a
     // ceiling already, and one that arrives here anyway stays as it is.
@@ -202,6 +227,18 @@ mod tests {
         limit.as_ref().map(|l| (l.value, l.source))
     }
 
+    #[test]
+    fn disabled_stall_threshold_remains_explicit_with_its_source() {
+        let state = state("");
+        let caps = HostCaps {
+            stall_after_seconds: 0,
+            stall_source: Layer::Host,
+            ..HostCaps::default()
+        };
+        let limits = lane_limits(&writer_task(), state.path(), "p", "claude", caps);
+        assert_eq!(found(&limits.stall_after_seconds), Some((0, Layer::Host)));
+    }
+
     /// Acceptance 1: each limit reports the source that won.
     #[test]
     fn each_limit_reports_the_winning_source() {
@@ -219,6 +256,7 @@ mod tests {
         task.provider_timeout_seconds = 3600;
         let caps = HostCaps {
             runtime_seconds: Some(600),
+            ..HostCaps::default()
         };
         let limits = lane_limits(&task, state.path(), "p", "claude", caps);
         assert_eq!(found(&limits.token_budget), Some((900, Layer::Project)));
@@ -298,6 +336,7 @@ mod tests {
         .into();
         let caps = HostCaps {
             runtime_seconds: Some(600),
+            ..HostCaps::default()
         };
         let limits = lane_limits(&task, state.path(), "p", "claude", caps);
         assert_eq!(found(&limits.token_budget), Some((5000, Layer::Launch)));

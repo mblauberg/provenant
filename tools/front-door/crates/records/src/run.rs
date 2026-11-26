@@ -1522,6 +1522,12 @@ pub enum TerminalCause {
     TokenBudget,
     SettlementFailure,
     ProviderEarlyStop,
+    /// The opt-in stall policy stopped a live attempt that had been silent
+    /// past `providers.<id>.stall_after_seconds`. Detection itself only warns.
+    ProviderStalled,
+    /// The opt-in `retry` stall policy stopped a silent provider and asks the
+    /// graph to continue on its next route.
+    ProviderStalledRetry,
     FreePoolQuota,
     CommandUnavailable,
     HostNativeUnconfigured,
@@ -1581,6 +1587,8 @@ impl TerminalCause {
             Self::TokenBudget => "token budget exhausted; provenant output ID",
             Self::SettlementFailure => "settlement failed; provenant output ID",
             Self::ProviderEarlyStop => "provider stopped early; provenant output ID",
+            Self::ProviderStalled => "provider stalled (no output); provenant output ID",
+            Self::ProviderStalledRetry => "provider stalled (no output); retry next route",
             Self::FreePoolQuota => "free-pool quota exhausted; provenant output ID",
             Self::CommandUnavailable => "command unavailable; provenant output ID",
             Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",
@@ -1681,6 +1689,12 @@ impl TerminalCause {
             Self::SettlementFailure => "lane settlement failed; inspect local recovery evidence",
             Self::ProviderEarlyStop => {
                 "provider stopped early; inspect the result and resume if needed"
+            }
+            Self::ProviderStalled => {
+                "the provider went silent past its stall_after_seconds threshold; inspect the last-event time in status, then retry or steer the attempt"
+            }
+            Self::ProviderStalledRetry => {
+                "the provider went silent past its stall_after_seconds threshold; the graph will try the next route"
             }
             Self::FreePoolQuota => {
                 crate::diagnostic::ProviderFailureFact::Quota { free_pool: true }.reason()
@@ -2344,7 +2358,11 @@ impl SettlementReason {
             _ => match terminal_cause {
                 Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
                 Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
-                Some(TerminalCause::ProviderEarlyStop) => Self::ProviderStop,
+                Some(
+                    TerminalCause::ProviderEarlyStop
+                    | TerminalCause::ProviderStalled
+                    | TerminalCause::ProviderStalledRetry,
+                ) => Self::ProviderStop,
                 _ if partial.contains(&PartialSignal::StrayWork) => Self::StrayWork,
                 _ if handoff
                     .is_ok_and(|handoff| handoff.is_some_and(|handoff| handoff.unfinished())) =>

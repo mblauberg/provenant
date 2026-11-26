@@ -5,7 +5,9 @@ use crate::{
     launch::Providers,
     *,
 };
-use provenant_core::{ActorId, AttemptId, CancelToken, Clock, OperationId, ProjectId, RootInputs};
+use provenant_core::{
+    ActorId, AttemptId, CancelToken, Clock, OperationId, ProjectId, RootInputs, WallTime,
+};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
 #[cfg(test)]
 use provenant_records::Tokens;
@@ -123,6 +125,23 @@ mod codex_usage_tests {
             false,
         );
         assert_eq!(unknown.tokens.input, None);
+    }
+}
+
+// A marker records intent, not proof that the provider was stopped. Natural
+// completion and competing cancellation retain their actual settlement.
+fn stall_stop_cause(
+    stop: Option<StopReason>,
+    cancelled: bool,
+    marker: &serde_json::Value,
+) -> Option<TerminalCause> {
+    if cancelled || stop != Some(StopReason::SupervisorSignal) {
+        return None;
+    }
+    match marker["policy"].as_str() {
+        Some("retry") => Some(TerminalCause::ProviderStalledRetry),
+        Some("fail") => Some(TerminalCause::ProviderStalled),
+        _ => None,
     }
 }
 
@@ -1105,6 +1124,24 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                 )?;
                 Ok(())
             })
+            .map_err(custody_error)
+    }
+    fn provider_activity(&self, raw: &[u8], last_output: Option<WallTime>) -> custody::Result<()> {
+        let (context, store) = HolderContext::open_once(raw, self.clock).map_err(custody_error)?;
+        let cancel = CancelToken::new();
+        let call = call(self.clock, &cancel).map_err(custody_error)?;
+        let mut record = store
+            .record(context.attempt_id, &call)
+            .map_err(custody_error)?;
+        // The live capture is newer than the periodically published checkpoint.
+        record.last_output_at = last_output;
+        let attempt = store
+            .attempt_dir(context.attempt_id, false)
+            .map_err(custody_error)?;
+        let handle = custody::reattach(attempt, RunStore::scope(&record))?;
+        store
+            .apply_stall_policy(&record, &handle, &call)
+            .map(drop)
             .map_err(custody_error)
     }
     fn budget_warning(&self, raw: &[u8], tokens: u64, budget: u64) -> custody::Result<()> {
@@ -3936,6 +3973,20 @@ impl RunStore {
             &task,
         );
         apply_provider_identity(exit, &mut decoded, &policy);
+        // An opt-in stall policy sealed its action before the stop. The typed
+        // cause travels with the exit; provider text never supplies it.
+        if let Some(raw) = read_sealed(attempt, "stall-action.json", RECORD_LIMIT)?
+            && let Ok(marker) = serde_json::from_slice::<serde_json::Value>(&raw)
+            && !matches!(
+                decoded.terminal_cause,
+                Some(TerminalCause::IdentityMismatch | TerminalCause::ProviderCaptureDefect { .. })
+            )
+            && let Some(cause) = stall_stop_cause(exit.stop_reason, cancelled, &marker)
+        {
+            decoded.outcome = Outcome::Failed;
+            decoded.terminal_cause = Some(cause);
+            decoded.reason = Some(cause.detail().into());
+        }
         if matches!(
             decoded.outcome,
             Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
@@ -3945,6 +3996,8 @@ impl RunStore {
                 TerminalCause::Steered
                     | TerminalCause::IdentityMismatch
                     | TerminalCause::ProviderCaptureDefect { .. }
+                    | TerminalCause::ProviderStalled
+                    | TerminalCause::ProviderStalledRetry
             )
         ) {
             decoded.terminal_cause = None;
@@ -4526,6 +4579,24 @@ mod budget_result_tests {
             provenant_records::handoff::HandoffStatus::StoppedEarly
         );
         assert_eq!(handoff.remaining, ["unknown: inspect branch"]);
+    }
+
+    #[test]
+    fn stall_intent_requires_the_observed_stop_to_classify_settlement() {
+        let marker = serde_json::json!({"policy": "retry"});
+        assert_eq!(stall_stop_cause(None, false, &marker), None);
+        assert_eq!(
+            stall_stop_cause(Some(StopReason::ExplicitCancellation), false, &marker),
+            None
+        );
+        assert_eq!(
+            stall_stop_cause(Some(StopReason::SupervisorSignal), true, &marker),
+            None
+        );
+        assert_eq!(
+            stall_stop_cause(Some(StopReason::SupervisorSignal), false, &marker),
+            Some(TerminalCause::ProviderStalledRetry)
+        );
     }
 
     /// Settle a budget-stopped lane whose host sealed a done handoff. `answer`

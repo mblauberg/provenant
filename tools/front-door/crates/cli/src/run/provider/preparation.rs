@@ -4848,16 +4848,32 @@ pub(super) fn prepare_candidates_inner(
         }
         let handoff = private_state.join("handoff.json");
         let writable_handoff = handoff_writable(&request.permissions);
+        let provider_settings = config.providers.get(adapter.id());
+        let stall_key = format!("providers.{}.stall_after_seconds", adapter.id());
+        let stall_source = if matches!(
+            config.origins.get(&stall_key),
+            Some(provenant_config::Origin::User { .. })
+        ) {
+            provenant_records::Layer::Host
+        } else {
+            provenant_records::Layer::Default
+        };
         let limits = run::lane_limits(
             task,
             state_root,
             &project_id.to_string(),
             adapter.id(),
             run::HostCaps {
-                runtime_seconds: config
-                    .providers
-                    .get(adapter.id())
+                runtime_seconds: provider_settings
                     .and_then(|provider| provider.runtime_deadline_seconds),
+                stall_after_seconds: provider_settings.map_or_else(
+                    || provenant_records::DEFAULT_STALL_AFTER_SECONDS,
+                    |provider| provider.stall_after_seconds,
+                ),
+                stall_source,
+                stall_policy: provider_settings
+                    .map(|provider| provider.stall_policy)
+                    .unwrap_or_default(),
             },
         );
         let build_class =

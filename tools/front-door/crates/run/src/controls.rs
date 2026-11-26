@@ -665,6 +665,40 @@ pub fn overdue_at(record: &AttemptRecord, now: WallTime) -> bool {
         .is_ok_and(|limit| now >= limit)
 }
 
+/// The silence threshold recorded on this attempt, or the compiled default for
+/// records written before the limit existed. Zero disables the report.
+pub fn stall_after_seconds(record: &AttemptRecord) -> u64 {
+    record
+        .limits
+        .as_ref()
+        .and_then(|limits| limits.stall_after_seconds.as_ref())
+        .map_or(provenant_records::DEFAULT_STALL_AFTER_SECONDS, |limit| {
+            limit.value
+        })
+}
+
+/// Read-only stall fact for a running, live attempt: the threshold and the
+/// last output time, or the start time if the provider has emitted nothing.
+/// A queued attempt is never measured as a running provider.
+pub fn stall_fact(record: &AttemptRecord, now: WallTime) -> Option<(u64, WallTime)> {
+    if !matches!(record.state, AttemptState::Running { .. }) {
+        return None;
+    }
+    let last = record.last_output_at.or(record.started_at)?;
+    let threshold = stall_after_seconds(record);
+    // `as_micros` is i64; a clock that moved backwards has not gone silent, so
+    // clamp the age at zero before widening it for the u64 threshold.
+    let elapsed = now.as_micros().saturating_sub(last.as_micros()).max(0) as u128;
+    (threshold > 0 && elapsed >= u128::from(threshold) * 1_000_000).then_some((threshold, last))
+}
+
+/// Whether a live running attempt has exceeded its silence threshold. `live`
+/// is the host's presence observation: an unattended or unknown writer is a
+/// custody problem, not a silent provider.
+pub fn stalled_at(record: &AttemptRecord, now: WallTime, live: bool) -> bool {
+    live && stall_fact(record, now).is_some()
+}
+
 /// Whether a running attempt has reboot-confirmed guardian/provider absence
 /// with no exit recorded. Same-boot absence remains unknown because its last
 /// checkpoint may miss an escaped child. Read-only; `root` is the execution
@@ -691,6 +725,11 @@ pub enum Reconciled {
     /// A live guardian outlived its attempt's runtime deadline, so a stop at
     /// the deadline was requested of it. It settles the attempt as a timeout.
     DeadlineStop,
+    /// A silent provider was stopped after the opt-in stall policy warned.
+    /// Settlement records the policy-specific typed provider-stall cause.
+    StallStop {
+        policy: provenant_records::StallPolicy,
+    },
     /// The supervisor is resuming durable settlement in the background.
     Settling {
         phase: String,
@@ -732,6 +771,7 @@ impl std::fmt::Display for Reconciled {
             Self::Queued => f.write_str("queued"),
             Self::Held => f.write_str("held"),
             Self::DeadlineStop => f.write_str("deadline_stop"),
+            Self::StallStop { policy } => write!(f, "stall_stop ({})", policy.as_str()),
             Self::Settling {
                 phase,
                 blocking_reason,
@@ -1144,6 +1184,125 @@ fn lock_timeout_reports_a_concurrently_settled_attempt() {
 }
 
 impl RunStore {
+    /// Apply Run's policy after warning. The guardian and recovery can retry
+    /// an interrupted action; steering and custody requests are idempotent.
+    pub(crate) fn apply_stall_policy(
+        &self,
+        record: &AttemptRecord,
+        handle: &provenant_supervisor::custody::CustodyHandle,
+        call: &Request<'_>,
+    ) -> Result<Option<Reconciled>> {
+        use provenant_records::StallPolicy;
+        use provenant_records::warning::{self, Warning};
+        let limit = record
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.stall_after_seconds.clone());
+        let policy = record
+            .limits
+            .as_ref()
+            .map_or(StallPolicy::Report, |limits| limits.stall_policy);
+        if limit.is_none() {
+            return Ok(None);
+        }
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
+        const MARKER: &str = "stall-action.json";
+        if let Some(raw) = read_sealed(&attempt, MARKER, RECORD_LIMIT)? {
+            let marker: serde_json::Value = serde_json::from_slice(&raw)
+                .map_err(|_| RunError::Validation("stall action marker"))?;
+            if matches!(marker["policy"].as_str(), Some("retry" | "fail")) {
+                warning::warn(
+                    Warning::new(
+                        warning::PROVIDER_STALLED,
+                        "retrying the recorded stall stop request",
+                    )
+                    .subject(record.attempt_id.to_string())
+                    .once_per_change(),
+                );
+                custody::stop_if_unrequested(handle, StopReason::SupervisorSignal)
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+                return Ok(Some(Reconciled::StallStop { policy }));
+            }
+            return Ok(None);
+        }
+        let now = call
+            .clock
+            .wall_now()
+            .map_err(|_| RunError::Validation("wall clock"))?;
+        let Some((threshold, last)) = stall_fact(record, now) else {
+            return Ok(None);
+        };
+        let marker = serde_json::json!({
+            "schema_version": 1,
+            "policy": policy.as_str(),
+            "threshold_seconds": threshold,
+            "last_event_at": last,
+            "source": limit.as_ref().map(|limit| limit.source),
+        });
+        let source = provenant_records::provenance::Source {
+            layer: limit
+                .as_ref()
+                .map_or(provenant_records::Layer::Default, |limit| limit.source),
+            origin: Some(format!(
+                "providers.{}.stall_after_seconds",
+                record
+                    .applied_route
+                    .as_ref()
+                    .and_then(|route| route.provider.as_deref())
+                    .unwrap_or("unknown")
+            )),
+        };
+        let message = format!(
+            "PROVIDER_STALLED: provider silent for at least {threshold}s since {last}; policy {}",
+            policy.as_str()
+        );
+        // Guardian stdio is detached. Publish the warning for status before
+        // requesting an action, rather than relying on its stderr sink.
+        if read_sealed(&attempt, "stall-warning.json", RECORD_LIMIT)?.is_none() {
+            crate::artifacts::seal(
+                &attempt,
+                "stall-warning.json",
+                &crate::db::bytes(&message)?,
+                RECORD_LIMIT,
+            )?;
+        }
+        warning::warn(
+            Warning::new(warning::PROVIDER_STALLED, message)
+                .subject(record.attempt_id.to_string())
+                .source(source)
+                .once_per_change(),
+        );
+        match policy {
+            StallPolicy::Report => Ok(None),
+            StallPolicy::Steer => {
+                // The operation must keep identical text across an interrupted
+                // reconcile, even if further provider output was observed.
+                let text = "The provider has gone silent. Continue the task now; if you cannot, report the blocker.";
+                let operation = OperationId::parse(&format!("stall-{}", record.attempt_id))
+                    .map_err(|_| RunError::Validation("stall steer operation"))?;
+                self.steer(record.attempt_id, operation, text, call)?;
+                crate::artifacts::seal(
+                    &attempt,
+                    MARKER,
+                    &crate::db::bytes(&marker)?,
+                    RECORD_LIMIT,
+                )?;
+                Ok(Some(Reconciled::Held))
+            }
+            StallPolicy::Retry | StallPolicy::Fail => {
+                crate::artifacts::seal(
+                    &attempt,
+                    MARKER,
+                    &crate::db::bytes(&marker)?,
+                    RECORD_LIMIT,
+                )?;
+                custody::stop_if_unrequested(handle, StopReason::SupervisorSignal)
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+                Ok(Some(Reconciled::StallStop { policy }))
+            }
+        }
+    }
+
     /// Persist one idempotent steer for an exact running attempt. Settlement
     /// delivers it at the next turn boundary without interrupting this attempt.
     pub fn steer(
@@ -4867,15 +5026,25 @@ impl RunStore {
                             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
                         Ok(Reconciled::Finished)
                     }
-                    Ok(Observation::Live) if past_runtime_deadline(record, call) => {
-                        // The guardian should have stopped the provider at the
-                        // deadline itself; ask again through its own channel.
-                        Ok(match custody::stop(&handle, StopReason::WallDeadline) {
-                            Ok(_) => Reconciled::DeadlineStop,
-                            Err(error) => Reconciled::custody_unavailable(&error),
-                        })
+                    Ok(Observation::Live) => {
+                        // Recovery may repeat the guardian holder's idempotent
+                        // policy action after warning.
+                        if let Some(state) = self.apply_stall_policy(record, &handle, call)? {
+                            return Ok(state);
+                        }
+                        if past_runtime_deadline(record, call) {
+                            // The guardian should have stopped the provider at
+                            // the deadline itself; ask again through its own
+                            // channel.
+                            Ok(match custody::stop(&handle, StopReason::WallDeadline) {
+                                Ok(_) => Reconciled::DeadlineStop,
+                                Err(error) => Reconciled::custody_unavailable(&error),
+                            })
+                        } else {
+                            Ok(Reconciled::Held)
+                        }
                     }
-                    Ok(Observation::Live | Observation::PublicationPending) => Ok(Reconciled::Held),
+                    Ok(Observation::PublicationPending) => Ok(Reconciled::Held),
                     Ok(Observation::Unknown) => {
                         let settled =
                             match self.settle_unreserved_loss(record, call, observer, false)? {

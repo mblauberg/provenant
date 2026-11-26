@@ -13,8 +13,11 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, mpsc},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
+
+mod stall;
+use stall::{local_stall_wait, timeout_wake};
 
 #[derive(Clone, Debug)]
 enum Source {
@@ -46,6 +49,9 @@ pub(crate) enum Settle {
     NeedsInput,
     Succeeded,
     Unsuccessful,
+    /// A live attempt silent past its threshold. The wait ends, but the work
+    /// continues: this is a report, not a settlement verdict.
+    Stalled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +106,7 @@ fn settle_phrase(settle: Settle, done: bool) -> &'static str {
         Settle::Succeeded => "settled ok",
         Settle::Unsuccessful => "failed",
         Settle::NeedsInput => "needs input",
+        Settle::Stalled => "stalled",
         Settle::Pending if done => "still running",
         Settle::Pending => "still running at timeout",
     }
@@ -404,14 +411,36 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
             }
         }
         _ if state == "unreadable" => Settle::Unsuccessful,
+        _ if row["stalled"] == true => Settle::Stalled,
         _ => Settle::Pending,
     };
+    // A graph or node row stays running while its attempt is silent, so the
+    // stall fact lives on the attempt row even when a parent row was picked.
+    let settle = if settle == Settle::Pending
+        && rows
+            .iter()
+            .any(|row| row["kind"] == "attempt" && row["stalled"] == true)
+    {
+        Settle::Stalled
+    } else {
+        settle
+    };
+    let mut line = crate::fabric::status_line(label, row, None)
+        .trim_end()
+        .to_owned();
+    if settle == Settle::Stalled {
+        let last = rows
+            .iter()
+            .rfind(|row| row["kind"] == "attempt" && row["stalled"] == true)
+            .map(|row| &row["last_event_at"])
+            .unwrap_or(&row["last_event_at"]);
+        if let Some(at) = last.as_str() {
+            line.push_str(&format!(" last event {at}"));
+        }
+    }
     Reading {
         settle,
-        line: provenant_cli::bounded_text(
-            crate::fabric::status_line(label, row, None).trim_end(),
-            bound,
-        ),
+        line: provenant_cli::bounded_text(&line, bound),
         data,
     }
 }
@@ -657,6 +686,7 @@ fn reading_locally_represented(reading: &Reading, host: Option<&provenant_core::
 enum GraphWake {
     Event,
     NativeTimeout,
+    StallDeadline,
     PacedFallback,
 }
 
@@ -860,7 +890,7 @@ fn graph_reads_for_wake(
     wake: GraphWake,
 ) -> Vec<usize> {
     match wake {
-        GraphWake::Event => pending
+        GraphWake::Event | GraphWake::StallDeadline => pending
             .iter()
             .copied()
             .filter(|index| !remote.contains(index))
@@ -1193,6 +1223,8 @@ fn outcome(latest: &[Option<Reading>], settled: &[usize], done: bool, mode: Wait
         .collect();
     if settles.contains(&Settle::Unsuccessful) {
         Outcome::Failed
+    } else if settles.contains(&Settle::Stalled) {
+        Outcome::Stalled
     } else if settles.contains(&Settle::NeedsInput) {
         Outcome::Pending
     } else {
@@ -1805,6 +1837,10 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 })
                 .collect::<std::collections::BTreeSet<_>>();
             let mut observation_history = ObservationHistory::default();
+            let mut sampled_readings = pending
+                .iter()
+                .filter_map(|index| latest[*index].clone().map(|reading| (*index, reading)))
+                .collect::<std::collections::BTreeMap<_, _>>();
             for index in &pending {
                 if let Some(reading) = latest[*index].as_ref() {
                     observation_history.record(reading, local_host.as_ref());
@@ -1842,6 +1878,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         &stop.cancel,
                     );
                     observation_history.record(&reading, local_host.as_ref());
+                    sampled_readings.insert(index, reading.clone());
                     let locally_represented =
                         reading_locally_represented(&reading, local_host.as_ref());
                     if locally_represented {
@@ -1877,13 +1914,26 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                     if left.is_zero() {
                         break;
                     }
+                    let stall_after = pending
+                        .iter()
+                        .filter(|index| !remote_indices.contains(*index))
+                        .filter_map(|index| sampled_readings.get(index).cloned())
+                        .collect::<Vec<_>>();
+                    let stall_deadline = local_stall_wait(&stall_after, SystemTime::now())
+                        .map(|after| Instant::now() + after);
+                    let until_stall = stall_deadline
+                        .map(|due| due.saturating_duration_since(Instant::now()))
+                        .unwrap_or(left);
                     let wake = if let Some(source) = watcher.as_mut() {
                         let until_remote = if remote_indices.is_empty() {
                             left
                         } else {
                             next_remote_poll.saturating_duration_since(Instant::now())
                         };
-                        let wait_for = left.min(until_remote).min(Duration::from_secs(60).saturating_sub(last_graph_reconcile.elapsed()));
+                        let wait_for = left
+                            .min(until_remote)
+                            .min(Duration::from_secs(60).saturating_sub(last_graph_reconcile.elapsed()))
+                            .min(until_stall);
                         match source.wait(wait_for) {
                             Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
                                 Some(GraphWake::Event)
@@ -1892,7 +1942,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 if deadline.saturating_duration_since(Instant::now()).is_zero() {
                                     break;
                                 }
-                                Some(GraphWake::NativeTimeout)
+                                Some(timeout_wake(Instant::now(), stall_deadline))
                             }
                             Ok(provenant_os::changes::watch::WaitOutcome::Woken) => break,
                             Err(error) => {
@@ -1906,17 +1956,25 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                     );
                                 }
                                 let left = deadline.saturating_duration_since(Instant::now());
-                                if !stop.pause(interval.min(left)) {
+                                if !stop.pause(interval.min(left).min(until_stall)) {
                                     break;
                                 }
-                                Some(GraphWake::PacedFallback)
+                                Some(if stall_deadline.is_some_and(|due| Instant::now() >= due) {
+                                    GraphWake::StallDeadline
+                                } else {
+                                    GraphWake::PacedFallback
+                                })
                             }
                         }
                     } else {
-                        if !stop.pause(interval.min(left)) {
+                        if !stop.pause(interval.min(left).min(until_stall)) {
                             break;
                         }
-                        Some(GraphWake::PacedFallback)
+                        Some(if stall_deadline.is_some_and(|due| Instant::now() >= due) {
+                            GraphWake::StallDeadline
+                        } else {
+                            GraphWake::PacedFallback
+                        })
                     };
                     let Some(wake) = wake else {
                         continue;
@@ -1966,6 +2024,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             pr_read_timeout,
                             &stop.cancel,
                         );
+                        sampled_readings.insert(index, reading.clone());
                         observation_history.record(&reading, local_host.as_ref());
                         let locally_represented =
                             reading_locally_represented(&reading, local_host.as_ref());
@@ -2544,6 +2603,10 @@ mod tests {
         assert_eq!(as_set(event_reads.clone()), [0].into_iter().collect());
         let native_timeout = graph_reads_for_wake(&pending, &remote, GraphWake::NativeTimeout);
         assert!(native_timeout.is_empty());
+        assert_eq!(
+            graph_reads_for_wake(&pending, &remote, GraphWake::StallDeadline),
+            [0]
+        );
         let mut due_event_reads = event_reads;
         include_due_remote_reads(&mut due_event_reads, &pending, &remote, true);
         assert_eq!(as_set(due_event_reads), pending.into_iter().collect());
@@ -3140,6 +3203,39 @@ mod tests {
             Settle::Succeeded
         );
         assert_eq!(settle(&[attempt("running", Value::Null)]), Settle::Pending);
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#waits-are-readers
+    fn a_silent_attempt_ends_the_wait_without_claiming_settlement() {
+        let rows = [
+            json!({"kind":"graph","state":"running"}),
+            json!({
+                "kind":"attempt","state":"running","presence":"live","stalled":true,
+                "last_event_at":"2026-11-26T04:58:00Z"
+            }),
+        ];
+        let reading = classify_rows("quiet", &rows);
+        assert_eq!(reading.settle, Settle::Stalled);
+        assert!(reading.done(), "a stall must end the wait");
+        assert!(
+            reading.line.contains("2026-11-26T04:58:00Z"),
+            "stalled line names its last-event time: {}",
+            reading.line
+        );
+        assert_eq!(
+            outcome(&[Some(reading)], &[0], true, WaitMode::All),
+            Outcome::Stalled
+        );
+        // A settled graph still decides: a stale stall cannot win.
+        let settled = classify_rows(
+            "quiet",
+            &[
+                json!({"kind":"graph","state":"complete","outcome":"succeeded"}),
+                json!({"kind":"attempt","state":"running","stalled":true}),
+            ],
+        );
+        assert_eq!(settled.settle, Settle::Succeeded);
     }
 
     #[test]

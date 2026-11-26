@@ -39,6 +39,7 @@ fn row() -> LaneRow {
         last_output_at: Value::Null,
         last_event_at: Value::Null,
         last_event_source: None,
+        stalled: None,
         runtime_deadline: Value::Null,
         overdue: Some(false),
         stale: Some(false),
@@ -615,7 +616,7 @@ fn envelopes_validate_for_every_command_and_for_errors() {
 fn status_values_match_the_envelope_enum() {
     // Exhaustive: a new Outcome fails to compile here until it gets an index,
     // and then ALL must list every index.
-    const VARIANTS: usize = 10;
+    const VARIANTS: usize = 11;
     let index = |outcome: Outcome| match outcome {
         Outcome::Ok => 0,
         Outcome::Failed => 1,
@@ -627,6 +628,7 @@ fn status_values_match_the_envelope_enum() {
         Outcome::Cancelled => 7,
         Outcome::Pending => 8,
         Outcome::Waiting => 9,
+        Outcome::Stalled => 10,
     };
     let listed: std::collections::BTreeSet<usize> = Outcome::ALL.into_iter().map(index).collect();
     assert_eq!(listed, (0..VARIANTS).collect());

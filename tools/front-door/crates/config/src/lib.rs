@@ -49,6 +49,7 @@ pub use overlays::{OVERLAY_PRECEDENCE, OverlayLayer, OverlayWarning};
 pub mod policy;
 mod presets;
 mod providers;
+pub use provenant_records::StallPolicy;
 pub use providers::{
     OutOfScopePin, ProviderSettings, ProviderUpdate, defaults as provider_defaults,
 };

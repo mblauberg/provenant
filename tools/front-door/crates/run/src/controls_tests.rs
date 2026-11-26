@@ -2736,3 +2736,64 @@ fn steer_stop_conflict_preserves_each_durable_intent_and_receipt() -> TestResult
     assert_eq!(intents[1].text, "Keep this second instruction too.");
     Ok(())
 }
+
+#[test]
+// Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
+fn stall_age_uses_output_or_start_and_requires_live_presence() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let call = crate::tests::call(&clock, &cancel);
+    let context = crate::tests::context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = crate::tests::input();
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(run.attempt_id, &call)?,
+        &crate::tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    // Silence is reported only for a running attempt with live custody; a
+    // starting attempt has not handed off to a provider yet.
+    let mut record = store
+        .claim(run.attempt_id, &clock, &call)?
+        .ok_or("not admitted")?;
+    let last = WallTime::from_micros(1_000_000)?;
+    let now = WallTime::from_micros(32_000_000)?;
+    record.last_output_at = Some(last);
+    record.limits = Some(provenant_records::LaneLimits {
+        stall_after_seconds: Some(provenant_records::Limit::new(
+            30,
+            provenant_records::Layer::Host,
+            provenant_records::LimitStrength::Default,
+        )),
+        ..Default::default()
+    });
+    assert_eq!(stall_after_seconds(&record), 30);
+    assert_eq!(stall_fact(&record, now), Some((30, last)));
+    assert!(stalled_at(&record, now, true));
+    // An unobserved or absent writer is a custody problem, not silence.
+    assert!(!stalled_at(&record, now, false));
+    // A provider that never emits output is measured from its start, not queue.
+    record.last_output_at = None;
+    record.started_at = Some(last);
+    assert_eq!(stall_fact(&record, now), Some((30, last)));
+    assert!(stalled_at(&record, now, true));
+    record.started_at = None;
+    assert_eq!(stall_fact(&record, now), None);
+    // Zero disables the report rather than stalling every live attempt.
+    record.last_output_at = Some(last);
+    record.limits = Some(provenant_records::LaneLimits {
+        stall_after_seconds: Some(provenant_records::Limit::new(
+            0,
+            provenant_records::Layer::Host,
+            provenant_records::LimitStrength::Default,
+        )),
+        ..Default::default()
+    });
+    assert!(!stalled_at(&record, now, true));
+    Ok(())
+}

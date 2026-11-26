@@ -2385,6 +2385,38 @@ fn attempt_settings_merge_before_graph_and_child_template_binding() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
+fn explain_names_the_stall_threshold_and_its_source() -> Result {
+    let rig = TestRig::new()?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+    let response = factory.graph_document(
+        json!({"op":"run", "brief":"Inspect", "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    assert_eq!(
+        response["stall"]["default_threshold_seconds"],
+        provenant_records::DEFAULT_STALL_AFTER_SECONDS
+    );
+    let providers = response["stall"]["providers"]
+        .as_object()
+        .ok_or("stall providers")?;
+    let codex = providers.get("codex").ok_or("codex stall settings")?;
+    assert_eq!(
+        codex["threshold_seconds"],
+        provenant_records::DEFAULT_STALL_AFTER_SECONDS
+    );
+    assert_eq!(codex["policy"], "report");
+    assert!(
+        !codex["source"].is_null(),
+        "stall source is hidden: {codex}"
+    );
+    Ok(())
+}
+
+#[test]
 fn graph_and_child_launch_refuse_invalid_attempt_settings_before_publication() -> Result {
     let rig = TestRig::new()?;
     let factory = factory(&rig)?;
