@@ -368,7 +368,7 @@ mod tests {
             "schema_version=1\n[[adapter_capabilities]]\nadapter = \"no-such-adapter\"\ndisable = [\"model\"]\n",
         )
         .unwrap();
-        let ((), warnings) =
+        let (_, warnings) =
             provenant_records::warning::capture(|| super::capability_overlay(&roots));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(

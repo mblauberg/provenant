@@ -334,7 +334,7 @@ fn blocked_environment_lens_settles_the_panel_and_names_the_gap() {
             {"id":"panel", "kind":"composite", "access":"read_only", "composite": {
                 "min_successful":2, "reduce_verdict":true,
                 "nodes":[lens("lens-a"), lens("lens-b"), lens("lens-c")],
-                "exports":["lens-a","lens-b","lens-c"].iter().map(|id| serde_json::json!({
+                "exports":(["lens-a","lens-b","lens-c"]).iter().map(|id| serde_json::json!({
                     "node":id, "outputs":["result","findings","verdict"]
                 })).collect::<Vec<_>>()
             }},
