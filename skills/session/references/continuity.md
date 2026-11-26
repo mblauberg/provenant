@@ -44,4 +44,7 @@ section first after compaction and name the host transcript for checking an
 entry in doubt; save it at each ruling or correction and before a long task.
 
 Retain rulings, authority, evidence pointers, open questions and the next
-action. Drop transcripts, tool output and anything that can be reopened.
+action. Drop transcripts, tool output and anything that can be reopened. The
+PreCompact summary instruction separately drops summary items untouched for
+24 h unless they are owner asks and moves them to the tracker; that is guidance
+for the summary, not a change to what the saved checkpoint retains.

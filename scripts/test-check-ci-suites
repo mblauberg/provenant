@@ -14,10 +14,10 @@ spec = importlib.util.spec_from_loader(loader.name, loader)
 checker = importlib.util.module_from_spec(spec)
 loader.exec_module(checker)
 config = {'jobs': {'always': ['scope'], 'ungated': ['health']}, 'suite': [
-    {'name': 'rust', 'tier': 'pr', 'jobs': ['test']},
-    {'name': 'native', 'tier': 'main', 'jobs': ['native-test'],
+    {'name': 'rust', 'tier': 'pr', 'jobs': ['test', 'lint']},
+    {'name': 'native', 'tier': 'main', 'jobs': ['native-test', 'native-inventory'],
      'pr_paths': ['crates/*/Cargo.toml', 'crates/a/**', 'crates/b/src/narrow.rs']},
-]}
+], 'gate': [{'job': 'lint', 'suites': ['native']}]}
 packages = {'a': 'crates/a', 'b': 'crates/b', 'c': 'crates/c'}
 workflow = yaml.safe_load('''
 jobs:
@@ -26,25 +26,38 @@ jobs:
     if: "${{ fromJSON(needs.scope.outputs.suites).rust == 'run' }}"
     steps:
       - run: nextest -E 'package(=c)'
+  lint:
+    needs: [scope]
+    if: "${{ fromJSON(needs.scope.outputs.suites).rust == 'run' }}"
+    steps:
+      - run: cargo check --workspace --all-targets --locked
   native-test:
-    if: "${{ fromJSON(needs.scope.outputs.suites).native == 'run' }}"
+    needs: [scope, lint]
+    if: "${{ (success() || needs.lint.result == 'skipped') && fromJSON(needs.scope.outputs.suites).native == 'run' }}"
     steps:
       - run: nextest -E 'package(=a) | (package(=b) & test(narrow))'
+  native-inventory:
+    needs: [scope, native-test]
+    if: "${{ fromJSON(needs.scope.outputs.suites).native == 'run' }}"
   ci-status:
-    needs: [scope, test, native-test]
+    needs: [scope, test, lint, native-test, native-inventory]
   health: {}
 ''')
 # Spec: docs/specs/ci.md#suites-are-declared-once
 # A pull-request suite may name any package; a main-tier one names packages
 # its pr_paths reach, whole or by a narrow file.
 assert not checker.check(config, workflow, packages)
-for mutation in ('missing', 'needs', 'unmapped', 'binding', 'always', 'unwatched', 'unknown'):
+for mutation in ('missing', 'needs', 'unmapped', 'binding', 'always', 'unwatched', 'unknown', 'gate', 'gate-chain', 'gate-if'):
     w = yaml.safe_load(yaml.safe_dump(workflow))
     if mutation == 'missing': del w['jobs']['test']
     if mutation == 'needs': w['jobs']['ci-status']['needs'].remove('test')
     if mutation == 'unmapped': w['jobs']['extra'] = {}; w['jobs']['ci-status']['needs'].append('extra')
     if mutation == 'binding': w['jobs']['test']['if'] = 'true'
     if mutation == 'always': w['jobs']['scope']['if'] = 'needs.scope.outputs.suites.rust'
+    # A gated job must wait on the cheap gate, directly or through a chain.
+    if mutation == 'gate': w['jobs']['native-test']['needs'] = ['scope']
+    if mutation == 'gate-chain': del w['jobs']['native-inventory']['needs']
+    if mutation == 'gate-if': w['jobs']['native-test']['if'] = '${{ fromJSON(needs.scope.outputs.suites).native == \'run\' }}'
     # Only the shared crates/*/Cargo.toml glob reaches c: its tests would be deferred.
     if mutation == 'unwatched': w['jobs']['native-test']['steps'].append({'run': "nextest -E 'package(=c)'"})
     if mutation == 'unknown': w['jobs']['native-test']['steps'].append({'run': "nextest -E 'package(=zz)'"})

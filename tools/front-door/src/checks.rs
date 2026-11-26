@@ -497,6 +497,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 provenant_cli::config_reads::read_for(&install_roots, "check install")
             {
                 targets.accounts = provenant_cli::accounts::homes(&config.domains.accounts);
+                targets.hook_timeout_secs = config.domains.hooks.timeout_secs;
                 targets.shared_settings =
                     crate::install::shared_settings(&config.domains.accounts, &targets.home)
                         .ok()

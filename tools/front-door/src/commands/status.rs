@@ -23,7 +23,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let command = inv.command.clone();
     let status = match command {
         Command::Status(cmd) => {
-            if cmd.mine {
+            if cmd.mine || cmd.adoptable {
                 crate::custody::status(&cmd, globals)
             } else if cmd.session_stream {
                 crate::run_edge(inv.leaf, globals, |edge| {

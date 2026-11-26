@@ -79,6 +79,8 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<Hosts>,
     },
+    /// Report host health, installed hook settings and recent hook timeouts
+    Doctor,
     /// Show and edit configuration
     #[command(subcommand)]
     Config(Config),
@@ -1018,6 +1020,9 @@ pub struct Ingest {
     /// Ingest transcripts written, and messages stamped, from this date or timestamp, or a span such as 1d ago
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
+    /// Resume from the durable cursor instead of rescanning a time window
+    #[arg(long)]
+    pub incremental: bool,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Mileage {
@@ -1410,8 +1415,11 @@ pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str>
 #[derive(Clone, Debug, Args)]
 pub struct Status {
     /// Active custody of this chair and unattended items, across projects unless --project is set
-    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all"])]
+    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all", "adoptable"])]
     pub mine: bool,
+    /// Unattended custody open to adoption, across projects unless --project is set
+    #[arg(long, conflicts_with_all = ["mine", "targets", "session_stream", "all"])]
+    pub adoptable: bool,
     /// Exact chair session for the custody view (used by the session-start digest)
     #[arg(long = "session", requires = "mine")]
     pub custody_session: Option<String>,
