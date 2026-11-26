@@ -64,6 +64,18 @@ unreleased attempts are never touched, and collection preserves durable results,
 handoffs, logs and process records. After a merge, cleanup targets only
 the merged branch's worktree and attempt scratch.
 
+Three size caps bound the classes that grow without a retention age.
+`lanes.cargo_cache_max` budgets the lane Cargo cache, `retention.payload_cap_bytes`
+budgets bulk payload across attempt directories, and `gc.attempt_scratch_max`
+(an overridable default whose value and source appear in GC output) caps one
+attempt's scratch. `0` disables the scratch cap. An attempt whose scratch is
+measured over that cap becomes collectible once settled, without waiting out
+`gc.idle`; a bounded observation that cannot measure the whole tree keeps the
+scratch rather than assuming it is over cap. Live, continuing and unsettled
+attempts are never collected by a cap.
+- Why: a single large settled attempt must not hold the volume hostage until
+  its idle age passes, while uncertain measurement must never authorise removal.
+
 Lanes do not build. Cargo targets here belong to the chair's warm check, CI or
 a person's worktree; the host never allocates one per lane. Discard archives
 exclude ignored build output (`target/` and

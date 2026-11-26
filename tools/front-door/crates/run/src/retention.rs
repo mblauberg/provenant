@@ -199,6 +199,9 @@ impl Drop for SqlCancellation {
 
 pub struct ScratchPolicy<'a> {
     pub idle_seconds: u64,
+    /// Per-attempt scratch size above which a settled attempt's scratch is
+    /// collectible before `idle_seconds`; zero disables the cap.
+    pub scratch_cap_bytes: u64,
     pub projects: Option<&'a [provenant_core::ProjectId]>,
     pub attempts: Option<&'a [AttemptId]>,
     pub owner: Option<&'a ScratchOwnerResolver<'a>>,
@@ -207,6 +210,7 @@ impl ScratchPolicy<'_> {
     pub fn new(idle_seconds: u64) -> Self {
         Self {
             idle_seconds,
+            scratch_cap_bytes: 0,
             projects: None,
             attempts: None,
             owner: None,
@@ -500,13 +504,44 @@ impl RunStore {
                         }
                     ) && record.exit_evidence.is_none();
                     // Settlement and custody are checked separately; every
-                    // attempt observes the same minimum scratch idle period.
+                    // attempt observes the same minimum scratch idle period,
+                    // unless a bounded measurement finds its scratch over the
+                    // configured cap. An unmeasured tree is never over cap.
+                    let cap = scratch.and_then(|policy| {
+                        (policy.scratch_cap_bytes > 0).then_some(policy.scratch_cap_bytes)
+                    });
+                    let over_cap = match cap {
+                        Some(cap) if !continuing => {
+                            let temporary = self
+                                .context
+                                .state_root
+                                .as_path()
+                                .join(crate::plan::ATTEMPT_SCRATCH)
+                                .join(&id)
+                                .join("tmp");
+                            temporary_sizes.entries.clear();
+                            temporary_sizes.errors.clear();
+                            let present = !std::fs::symlink_metadata(&temporary)
+                                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+                            let measured = if present && scan.permits(call) {
+                                temporary_sizes.measure("attempt_tmp", &temporary)
+                            } else {
+                                None
+                            };
+                            measured
+                                .filter(|_| temporary_sizes.errors.is_empty())
+                                .map(|index| temporary_sizes.entries[index].allocated_bytes)
+                                .is_some_and(|bytes| bytes > cap)
+                        }
+                        _ => false,
+                    };
                     let scratch_eligible = if let Some(policy) = scratch {
                         !continuing
-                            && age
+                            && (age
                                 >= i64::try_from(policy.idle_seconds)
                                     .unwrap_or(i64::MAX)
                                     .saturating_mul(1_000_000)
+                                || over_cap)
                     } else {
                         false
                     };
