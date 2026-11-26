@@ -319,7 +319,7 @@ fn default_retained_custody_seconds() -> u64 {
     provenant_supervisor::custody::DEFAULT_RETAINED_CUSTODY_SECONDS
 }
 fn default_handoff_journal_bytes() -> u64 {
-    provenant_records::declaration::DECLARATION_JOURNAL_BYTES
+    provenant_records::declaration::DEFAULT_DECLARATION_JOURNAL_BYTES
 }
 fn default_handoff_relay_seconds() -> u64 {
     10

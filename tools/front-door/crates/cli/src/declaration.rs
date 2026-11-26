@@ -51,7 +51,7 @@ impl HandoffSettings {
     /// the compiled near-full warning rule.
     pub fn shipped() -> Self {
         Self {
-            journal_bytes: provenant_records::declaration::DECLARATION_JOURNAL_BYTES,
+            journal_bytes: provenant_records::declaration::DEFAULT_DECLARATION_JOURNAL_BYTES,
             journal_key: "domains.run.handoff_journal_bytes".into(),
             journal_source: "compiled defaults".into(),
             relay_seconds: 10,
