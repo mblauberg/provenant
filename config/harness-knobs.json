@@ -195,7 +195,13 @@
       "resource_sample_interval_ms": {"type": "int", "allowed": "0 to 60000 milliseconds", "min": 0, "max": 60000, "default": "0", "effect": "Interval for sampling lane resource use; zero disables sampling."},
       "admission_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Default admission deadline in seconds before launch."},
       "projects.{project}.review_exempt": {"type": "array", "allowed": "list of paths", "default": "host review_exempt", "effect": "Replace the host review-exempt paths for this project."},
-      "projects.{project}.admission_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Project admission deadline in seconds before launch."}
+      "projects.{project}.admission_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Project admission deadline in seconds before launch."},
+      "handoff_journal_bytes": {"type": "int", "allowed": "65536 to 16777216 bytes", "min": 65536, "max": 16777216, "default": "1048576", "effect": "Maximum canonical bytes in one attempt's declarations.jsonl. A call past the bound is refused with Full; the refusal names this key and its source. Below 10% remaining the receipt warns HANDOFF_JOURNAL_NEAR_FULL and still succeeds."},
+      "projects.{project}.handoff_journal_bytes": {"type": "int", "allowed": "65536 to 16777216 bytes", "min": 65536, "max": 16777216, "default": "host handoff_journal_bytes", "effect": "Replace the host declaration journal bound for this project; the project value wins and its source is named in a Full refusal."},
+      "handoff_relay_seconds": {"type": "int", "allowed": "1 to 300 seconds", "min": 1, "max": 300, "default": "10", "effect": "Seconds the lane's `provenant handoff` waits for one reply from the host-bound declaration relay."},
+      "projects.{project}.handoff_relay_seconds": {"type": "int", "allowed": "1 to 300 seconds", "min": 1, "max": 300, "default": "host handoff_relay_seconds", "effect": "Replace the host declaration relay timeout for this project."},
+      "handoff_relay_retries": {"type": "int", "allowed": "0 to 5 retries", "min": 0, "max": 5, "default": "1", "effect": "Extra relay attempts after a transport failure. Retries reuse the same request_id, so they are idempotent; 0 disables retry."},
+      "projects.{project}.handoff_relay_retries": {"type": "int", "allowed": "0 to 5 retries", "min": 0, "max": 5, "default": "host handoff_relay_retries", "effect": "Replace the host declaration relay retry count for this project."}
     }
   },
   "host_land_settings": {

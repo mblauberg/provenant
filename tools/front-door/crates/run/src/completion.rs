@@ -1216,6 +1216,7 @@ mod tests {
                 request_id: request_id.into(),
                 payload,
             },
+            &provenant_records::declaration::DeclarationLimit::shipped(),
         )?;
         Ok(())
     }
@@ -1729,6 +1730,7 @@ mod tests {
                     request_id: "bad".into(),
                     payload: bad,
                 },
+                &provenant_records::declaration::DeclarationLimit::shipped(),
             )
             .expect_err("invalid fields must be refused");
         let provenant_records::declaration::DeclarationError::Invalid(invalid) = error else {
@@ -1741,6 +1743,7 @@ mod tests {
                 request_id: "good".into(),
                 payload: declared_payload("done")?,
             },
+            &provenant_records::declaration::DeclarationLimit::shipped(),
         )?;
         assert_eq!(receipt.sequence, 2, "the rejected line counts");
         record = store.record(id, &call)?;
@@ -1775,7 +1778,8 @@ mod tests {
                 &DeclarationInput {
                     request_id: "bad".into(),
                     payload: bad
-                }
+                },
+                &provenant_records::declaration::DeclarationLimit::shipped(),
             ),
             Err(provenant_records::declaration::DeclarationError::Invalid(_))
         ));

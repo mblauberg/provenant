@@ -2,7 +2,36 @@
 use serde::{Deserialize, Serialize};
 
 pub const DECLARATION_JOURNAL_BYTES: u64 = 1 << 20;
+/// Ceiling of the configurable bound: a journal can never grow past this even
+/// when an operator raises `domains.run.handoff_journal_bytes`.
+pub const MAX_DECLARATION_JOURNAL_BYTES: u64 = 16 << 20;
 pub const DECLARATION_SCHEMA: u64 = 1;
+
+/// The effective journal bound and the setting that supplied it. The key and
+/// source travel with a `Full` refusal so the lane is told what to change,
+/// and the bound travels to the receipt so a near-full call can warn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclarationLimit {
+    pub journal_bytes: u64,
+    pub key: String,
+    pub source: String,
+}
+
+impl DeclarationLimit {
+    pub fn shipped() -> Self {
+        Self {
+            journal_bytes: DECLARATION_JOURNAL_BYTES,
+            key: "domains.run.handoff_journal_bytes".into(),
+            source: "compiled defaults".into(),
+        }
+    }
+
+    /// Below one tenth of the bound, a receipt carries a warning-worthy
+    /// remainder. A zero bound can never be near full.
+    pub fn near_full(&self, remaining: u64) -> bool {
+        self.journal_bytes > 0 && remaining < self.journal_bytes / 10
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeclarationInput {
@@ -37,6 +66,10 @@ pub struct DeclarationReceipt {
     pub sequence: u64,
     pub request_id: String,
     pub digest: crate::FileDigest,
+    /// Bytes left in the journal after this line was sealed. Additive on the
+    /// wire: an older receipt without it decodes as zero.
+    #[serde(default)]
+    pub remaining_bytes: u64,
 }
 
 /// How many declaration lines an attempt collected, by disposition. Counts are
@@ -66,8 +99,8 @@ pub enum DeclarationError {
     Conflict,
     #[error("attempt is settling; declarations are closed")]
     Closed,
-    #[error("declaration journal is full")]
-    Full,
+    #[error("declaration journal is full: {key} from {source}")]
+    Full { key: String, source: String },
     #[error("not inside a lane: PROVENANT_PARENT_ATTEMPT_ID is unset")]
     NotInLane,
     #[error("declaration journal: {0}")]

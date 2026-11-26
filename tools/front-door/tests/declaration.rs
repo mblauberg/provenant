@@ -6,7 +6,9 @@ use provenant_core::{
 use provenant_os::clock::SystemClock;
 use provenant_records::{
     CanonicalRequest,
-    declaration::{DeclarationError, DeclarationInput, DeclarationReceipt, JournalLine},
+    declaration::{
+        DeclarationError, DeclarationInput, DeclarationLimit, DeclarationReceipt, JournalLine,
+    },
 };
 use provenant_run::{ExecutionContext, PreparedRun, Request, RunStore};
 use serde_json::{Value, json};
@@ -101,12 +103,23 @@ impl Fixture {
         id: &str,
         body: Value,
     ) -> std::result::Result<DeclarationReceipt, DeclarationError> {
+        self.declare_with(store, id, body, &DeclarationLimit::shipped())
+    }
+
+    fn declare_with(
+        &self,
+        store: &RunStore,
+        id: &str,
+        body: Value,
+        limit: &DeclarationLimit,
+    ) -> std::result::Result<DeclarationReceipt, DeclarationError> {
         store.declare(
             self.attempt,
             &DeclarationInput {
                 request_id: id.into(),
                 payload: body,
             },
+            limit,
         )
     }
 
@@ -257,6 +270,7 @@ fn concurrent_appends_get_distinct_gapless_sequences() -> Result {
                             request_id: format!("lane-{index}"),
                             payload: payload("parallel"),
                         },
+                        &DeclarationLimit::shipped(),
                     )
                     .map(|receipt| receipt.sequence)
                     .map_err(|e| e.to_string())
@@ -270,5 +284,104 @@ fn concurrent_appends_get_distinct_gapless_sequences() -> Result {
     sequences.sort_unstable();
     assert_eq!(sequences, (1..=8).collect::<Vec<u64>>());
     assert_eq!(fixture.journal_lines()?.len(), 8);
+    Ok(())
+}
+
+/// Build the project-overridable declaration settings from a host config file.
+fn settings_from(
+    rig: &TestRig,
+    project: &str,
+    source: &str,
+) -> Result<provenant_cli::declaration::HandoffSettings> {
+    std::fs::write(rig.state.join("config.toml"), source)?;
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let config = provenant_cli::config_reads::read_for(&roots, "handoff")?;
+    Ok(provenant_cli::declaration::HandoffSettings::resolve(
+        &config,
+        project,
+        roots.state.as_path(),
+    ))
+}
+
+#[test]
+fn a_project_limit_overrides_the_host_limit() -> Result {
+    let rig = TestRig::new()?;
+    let project = project(&rig)?.to_string();
+    let settings = settings_from(
+        &rig,
+        &project,
+        &format!(
+            "schema_version=1\n[domains.run]\nhandoff_journal_bytes = 2097152\nhandoff_relay_seconds = 12\nhandoff_relay_retries = 2\n[domains.run.projects.\"{project}\"]\nhandoff_journal_bytes = 65536\nhandoff_relay_seconds = 3\nhandoff_relay_retries = 0\n"
+        ),
+    )?;
+    assert_eq!(settings.journal_bytes, 65536);
+    assert!(settings.journal_key.contains(&format!("projects.{project}")));
+    assert_eq!(settings.relay_seconds, 3);
+    assert_eq!(settings.retries, 0);
+    assert_eq!(settings.relay_attempts(), 1);
+    Ok(())
+}
+
+#[test]
+fn near_full_policy_off_still_reports_the_bound() -> Result {
+    let rig = TestRig::new()?;
+    let settings = settings_from(
+        &rig,
+        "",
+        "schema_version=1\n[knobs]\n'policy.HANDOFF_JOURNAL_NEAR_FULL'='off'\n",
+    )?;
+    assert!(settings.near_full(0));
+    let effect = settings.near_full_policy.check(
+        "HANDOFF_JOURNAL_NEAR_FULL",
+        provenant_records::policy::Facts::violation("three bytes left".into()),
+    );
+    assert_eq!(effect, provenant_records::policy::Effect::Proceed);
+    Ok(())
+}
+
+#[test]
+fn a_full_journal_names_its_key_and_source() -> Result {
+    let fixture = Fixture::new()?;
+    let store = fixture.store()?;
+    let limit = DeclarationLimit {
+        journal_bytes: 1,
+        key: "domains.run.projects.p.handoff_journal_bytes".into(),
+        source: "host (config.toml#handoff)".into(),
+    };
+    let failure = fixture.declare_with(&store, "too-big", payload("done"), &limit);
+    let DeclarationError::Full { key, source } = failure.expect_err("journal is full") else {
+        panic!("expected a Full refusal")
+    };
+    assert_eq!(key, limit.key);
+    assert_eq!(source, limit.source);
+    assert!(fixture.journal_lines()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn the_receipt_reports_bytes_left_for_the_near_full_warning() -> Result {
+    let fixture = Fixture::new()?;
+    let store = fixture.store()?;
+    let large = DeclarationLimit {
+        journal_bytes: 16 << 20,
+        key: "domains.run.handoff_journal_bytes".into(),
+        source: "compiled defaults".into(),
+    };
+    let first = fixture.declare_with(&store, "same", payload("done"), &large)?;
+    let used = large.journal_bytes - first.remaining_bytes;
+    assert!(used > 0);
+    let tight = DeclarationLimit {
+        journal_bytes: used + used / 20,
+        key: large.key.clone(),
+        source: large.source.clone(),
+    };
+    // A replay keeps the original disposition but refreshes the remainder
+    // from the live journal under the effective bound.
+    let replay = fixture.declare_with(&store, "same", payload("done"), &tight)?;
+    assert_eq!(replay.sequence, first.sequence);
+    assert!(tight.near_full(replay.remaining_bytes));
+    assert!(!large.near_full(replay.remaining_bytes));
     Ok(())
 }
