@@ -5526,14 +5526,12 @@ fn resolve_on_stop_defaults(
     // typed domain settings, so an unknown cause or step is refused where
     // the configuration is read, with its file and line.
     let graph = &config.domains.fabric.graph;
+    // The layer is the scope of the entry; the origin names where it was set.
     let source = |layer: provenant_records::Layer, key: String| provenant_records::Source {
         layer,
-        origin: Some(
-            config
-                .origins
-                .get(&key)
-                .map_or(key, |origin| origin.to_string()),
-        ),
+        origin: provenant_cli::config_reads::origin_source(config.origins.get(&key), &key)
+            .origin
+            .or(Some(key)),
     };
     let host = graph.on_stop.iter().map(|(cause, step)| {
         (
