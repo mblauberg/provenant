@@ -893,6 +893,11 @@ fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
 
 #[cfg(any(test, feature = "fixture"))]
 #[allow(dead_code)] // The fixture-gated worktree harness uses only some helpers.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test harness linked into the library; clippy's allow-in-tests only applies under cfg(test)"
+)]
 pub(crate) mod peer_tests {
     use super::*;
     #[allow(unused_imports)]

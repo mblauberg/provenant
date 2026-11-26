@@ -1346,7 +1346,7 @@ mod land_log_tests {
 /// Test seam: the cleanup check for `feat` merged at `merged` into `main`, then
 /// the Git command `between` (another process acting, none when empty), then
 /// the branch deletion. The status and detail of the `branch` step.
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 pub(crate) fn delete_after_check(
     project: &Path,
     host_state: &Path,

@@ -62,6 +62,11 @@ mod stranded_work;
 mod usage;
 mod verify;
 #[cfg(any(test, feature = "fixture"))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test harness linked into the library; clippy's allow-in-tests only applies under cfg(test)"
+)]
 pub mod worktree_tests;
 mod worktrees;
 use provenant_cli::{Command, ParseOutcome};

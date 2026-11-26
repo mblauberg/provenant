@@ -2017,3 +2017,40 @@ fn worktree_driver_links_the_library_instead_of_including_source() -> Result<(),
     );
     Ok(())
 }
+
+#[test]
+fn linked_harness_keeps_its_native_observation_seams_under_fixture() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture_gate = "#[cfg(any(test, feature = \"fixture\"))]";
+    let production_gate = "#[cfg(not(any(test, feature = \"fixture\")))]";
+
+    let gc = fs::read_to_string(root.join("src/fabric/gc_cleanup.rs"))?;
+    let gc_lines = gc.lines().collect::<Vec<_>>();
+    assert!(
+        gc.contains(&format!("{fixture_gate}\nthread_local! {{")),
+        "SPAWNED must exist in fixture builds so the harness can inject collection failures"
+    );
+    assert!(
+        gc_lines.windows(2).any(|pair| {
+            pair[0] == fixture_gate
+                && pair[1]
+                    .trim_start()
+                    .starts_with("return SPAWNED.with_borrow_mut")
+        }),
+        "detached collection must record its request in the fixture-linked library"
+    );
+    assert!(
+        gc.contains(&format!("{production_gate}\n    {{")),
+        "real detached collection must stay disabled whenever the harness is linked"
+    );
+
+    let land = fs::read_to_string(root.join("src/pr/land.rs"))?;
+    let land_lines = land.lines().collect::<Vec<_>>();
+    assert!(
+        land_lines.windows(2).any(|pair| {
+            pair[0] == fixture_gate && pair[1] == "pub(crate) fn delete_after_check("
+        }),
+        "delete_after_check must compile into the fixture-linked library"
+    );
+    Ok(())
+}
