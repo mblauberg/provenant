@@ -215,7 +215,9 @@ pub enum HookTimeoutUnit {
 macro_rules! hook_actions {
     ($( $action:ident => $command:literal ),+ $(,)?) => {
         /// Provenant hook handler independent of a provider's wire event name.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        /// Ordered by declaration so it can key the managed-hook sets that
+        /// decide which retired leaves transfer ownership.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
         pub enum HookAction { $( $action, )+ }
         impl HookAction {
             pub const ALL: &'static [Self] = &[ $( Self::$action, )+ ];
