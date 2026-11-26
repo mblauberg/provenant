@@ -8,7 +8,8 @@
 //! chair's current understanding of the live rulings. The body ceiling is a
 //! template budget, separate from the configured, 8 KiB-floored soft budget.
 use super::standing::{STANDING_KEY, parse_standing};
-use super::summary::header_end;
+use super::summary::{empty_header, header_end, parse_header};
+use serde_json::{Map, Value};
 
 /// A body larger than this is a gap against the template. It is measured
 /// after frontmatter, so a typed standing record never counts as body text.
@@ -30,7 +31,6 @@ const TITLE: &str = "# Session checkpoint";
 /// The frontmatter a first save gets when neither the input nor the previous
 /// revision carries a typed standing record. Empty lists are explicit: an
 /// omitted `waiting_on_owner` must never read as "nothing waits".
-const STANDING_YAML: &str = "provenant_standing:\n  schema_version: 1\n  goal: \"\"\n  grants: []\n  obligations: []\n  waiting_on_owner: []\n";
 const EMPTY_STANDING: &str = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"\"\n  grants: []\n  obligations: []\n  waiting_on_owner: []\n---\n";
 
 fn body(markdown: &str) -> &str {
@@ -104,45 +104,51 @@ fn section<'a>(sections: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .map(|(_, text)| text.as_str())
 }
 
-/// Add an empty typed standing record to a frontmatter the input supplied,
-/// keeping its other keys (a structured summary, say) intact. A stale,
-/// invalid `provenant_standing` line stays in place and is still named as a
-/// gap; the save never silently rewrites an owner's frontmatter.
-fn with_standing(header: &str) -> String {
-    let Some(end) = header_end(header).ok().flatten() else {
-        return EMPTY_STANDING.to_owned();
-    };
-    let prefix = if header.starts_with("---\r\n") { 5 } else { 4 };
-    let closing = header[..end].trim_end_matches(['\r', '\n']);
-    let stop = closing.rfind('\n').map_or(prefix, |index| index + 1);
-    let content = if stop >= prefix {
-        &header[prefix..stop]
+fn frontmatter_values(header: Option<&str>) -> Option<Map<String, Value>> {
+    let header = header?;
+    let end = header_end(header).ok()??;
+    if empty_header(header, end) {
+        Some(Map::new())
     } else {
-        ""
-    };
-    let mut out = String::from("---\n");
-    out.push_str(STANDING_YAML);
-    out.push_str(content);
-    if !out.ends_with('\n') {
-        out.push('\n');
+        parse_header(header, end).ok()
     }
-    out.push_str("---\n");
-    out
 }
 
-/// The standing record the scaffold starts from: the input's when it has a
-/// valid one, then the previous revision's, then the empty record. A header
-/// that lacks a usable record is kept and given one rather than discarded.
+fn empty_standing() -> Value {
+    let end = header_end(EMPTY_STANDING)
+        .expect("static standing frontmatter is valid")
+        .expect("static standing frontmatter has a closing delimiter");
+    parse_header(EMPTY_STANDING, end)
+        .expect("static standing frontmatter is valid")
+        .remove(STANDING_KEY)
+        .expect("static standing frontmatter contains its record")
+}
+
+/// Merge root keys from both headers, with the input taking precedence. The
+/// typed standing record is selected separately so an invalid input record
+/// cannot discard a valid record from the previous checkpoint.
 fn merged_frontmatter(input: Option<&str>, previous: Option<&str>) -> String {
-    if let Some(header) = input.filter(|text| matches!(parse_standing(text), Ok(Some(_)))) {
-        return header.to_owned();
+    let input_values = frontmatter_values(input);
+    let previous_values = frontmatter_values(previous);
+    let standing = input
+        .filter(|text| matches!(parse_standing(text), Ok(Some(_))))
+        .and_then(|_| input_values.as_ref()?.get(STANDING_KEY).cloned())
+        .or_else(|| {
+            previous
+                .filter(|text| matches!(parse_standing(text), Ok(Some(_))))
+                .and_then(|_| previous_values.as_ref()?.get(STANDING_KEY).cloned())
+        })
+        .unwrap_or_else(empty_standing);
+
+    let mut values = previous_values.unwrap_or_default();
+    if let Some(input_values) = input_values {
+        values.extend(input_values);
     }
-    if let Some(header) = previous.filter(|text| matches!(parse_standing(text), Ok(Some(_)))) {
-        return header.to_owned();
-    }
-    input
-        .filter(|text| !text.trim().is_empty())
-        .map_or_else(|| EMPTY_STANDING.to_owned(), with_standing)
+    values.insert(STANDING_KEY.to_owned(), standing);
+
+    let yaml = serde_json::to_string_pretty(&values)
+        .expect("frontmatter values are serializable JSON values");
+    format!("---\n{yaml}\n---\n")
 }
 
 fn push_section(out: &mut String, text: &str) {
@@ -155,7 +161,8 @@ fn push_section(out: &mut String, text: &str) {
 /// Build a template-shaped checkpoint from the new input, prefilled from the
 /// current revision. Each section from `--file` wins over the same section in
 /// the previous revision; a section present in neither is scaffolded empty.
-/// The typed standing record carries forward unless the input supplies one.
+/// Root frontmatter keys carry forward unless the input supplies that key; the
+/// typed standing record carries forward unless the input supplies a valid one.
 /// Unknown sections are appended so a scaffold never drops owner content.
 /// A first save has no previous revision and gets the empty scaffold.
 pub fn scaffold_checkpoint(previous: Option<&str>, input: &str) -> String {
@@ -209,6 +216,7 @@ pub fn scaffold_checkpoint(previous: Option<&str>, input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::summary::parse_summary;
     use super::*;
 
     const REV5: &str = "# Session checkpoint\n\n## Goal\nLand the review fixes.\n\n## Plan\nResume on the fleet.\n";
@@ -281,6 +289,20 @@ mod tests {
         let input = "---\nprovenant_summary:\n  schema_version: 1\n  now: \"Keep me\"\n---\n# Title\n\n## Intent\nA because B.\n";
         let scaffold = scaffold_checkpoint(None, input);
         assert!(scaffold.contains("Keep me"), "{scaffold}");
+        assert!(template_gaps(&scaffold).is_empty(), "{scaffold}");
+    }
+
+    #[test]
+    fn scaffold_merges_root_frontmatter_and_preserves_omitted_summary() {
+        let previous = "---\nprovenant_summary:\n  schema_version: 1\n  revision: 7\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"Keep this checkpoint summary\"\n  next: \"Continue the work\"\n  needs_you: []\n  risk: \"None\"\ncustom: previous\n---\n# Session checkpoint\n";
+        let input = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"Save the checkpoint\"\n  grants: []\n  obligations: []\n  waiting_on_owner: []\ncustom: input\n---\n# Session checkpoint\n\n## Intent\nKeep this intent.\n";
+
+        let scaffold = scaffold_checkpoint(Some(previous), input);
+
+        let summary = parse_summary(&scaffold).unwrap().unwrap();
+        assert_eq!(summary.now, "Keep this checkpoint summary");
+        assert!(scaffold.contains("custom: input"), "{scaffold}");
+        assert!(scaffold.contains("Save the checkpoint"), "{scaffold}");
         assert!(template_gaps(&scaffold).is_empty(), "{scaffold}");
     }
 

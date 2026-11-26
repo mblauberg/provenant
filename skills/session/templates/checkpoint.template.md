@@ -19,10 +19,13 @@ not in memory prose. A hook restores only sourced, unexpired grants.
 `provenant workflow session save SESSION --file FILE --from-template`
 scaffolds this shape: every section below is present, filled from the previous
 revision where the new `--file` does not supply it (`-` reads stdin). Sections
-from `--file` win; the standing record carries forward unless the input
-replaces it. The first save has no previous revision and starts from the empty
-record above. A save warns, without refusing, when the record or `## Intent`
-is missing or the body passes 2 KiB after frontmatter.
+from `--file` win. Frontmatter root keys carry forward unless the input supplies
+the same key, so structured summary metadata survives edits that omit it. A
+valid standing record carries forward unless the input supplies a valid one;
+the empty record is scaffolded only when neither header has a valid record. The
+first save has no previous revision and starts from the empty record above. A
+save warns, without refusing, when the record or `## Intent` is missing or the
+body passes 2 KiB after frontmatter.
 
 ## Goal
 Outcome, done-criteria and the tracker or project document that owns them.
