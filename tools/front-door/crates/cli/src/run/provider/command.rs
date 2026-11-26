@@ -58,7 +58,7 @@ pub(super) fn prepare_command(
     #[cfg(feature = "fixture")]
     hold_command_preparation_for_fixture();
     if !AdapterSpec::get(provider)
-        .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)
+        .is_some_and(|spec| spec.identity.named_entry == provenant_records::NamedEntry::Command)
     {
         let hint =
             provenant_routing::close_matches_hint(&provenant_routing::adapter_candidates(provider));

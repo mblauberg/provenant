@@ -3,14 +3,14 @@
 
 mod adapters;
 pub use adapters::{
-    ADAPTER_SPECS, AccountIdentityProbe, AccountModelPlan, AccountQuota, AdapterSpec,
-    COMMAND_OUTPUT_TAIL_BYTES, Capabilities, ClientEnvMarkers, Declaration, GithubAuth,
-    HarnessInstall, HookAction, HookEvent, HookProtocol, HookTimeoutUnit, INSTRUCTION_ASSET,
-    LaunchAction, LaunchCapabilities, LaunchCheck, LaunchDecision, LaunchField, LaunchRequest,
-    LoginObservation, LoginReprobe, ModelListingFormat, ModelObservation, NamedEntry,
-    NativeAuthWarning, QuotaProbeKind, ROW_REASON, ROW_SOURCE, RetainedArtifact, Retention,
-    SetupRoot, SkillLocation, StreamContract, TerminalEvent, UpdateCommand, UsageAttribution,
-    normalise_model_id,
+    ADAPTER_SPECS, AccountIdentityProbe, AccountModelPlan, AccountQuota, AdapterAccounts,
+    AdapterIdentity, AdapterLaunch, AdapterLogin, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES,
+    Capabilities, ClientEnvMarkers, Declaration, GithubAuth, HarnessInstall, HookAction, HookEvent,
+    HookProtocol, HookTimeoutUnit, INSTRUCTION_ASSET, LaunchAction, LaunchCapabilities,
+    LaunchCheck, LaunchDecision, LaunchField, LaunchRequest, LoginObservation, LoginReprobe,
+    ModelListingFormat, ModelObservation, NamedEntry, NativeAuthWarning, QuotaProbeKind,
+    ROW_REASON, ROW_SOURCE, RetainedArtifact, Retention, SetupRoot, SkillLocation, StreamContract,
+    TerminalEvent, UpdateCommand, UsageAttribution, normalise_model_id,
 };
 
 /// The instruction content bound into this product build and projected into

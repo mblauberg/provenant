@@ -29,7 +29,7 @@ pub struct Launch {
     #[arg(long)]
     pub file: PathBuf,
     /// Cloud provider
-    #[arg(long, value_enum, default_value = provenant_records::Harness::Claude.spec().name)]
+    #[arg(long, value_enum, default_value = provenant_records::Harness::Claude.spec().identity.name)]
     pub provider: Provider,
     /// Provider environment name (required for codex; claude defaults to hosted)
     #[arg(long)]
@@ -113,7 +113,11 @@ pub fn launch_argv(
     match launch.provider {
         Provider::Claude => {
             let mut argv = vec![
-                provenant_records::Harness::Claude.spec().binary.into(),
+                provenant_records::Harness::Claude
+                    .spec()
+                    .identity
+                    .binary
+                    .into(),
                 "--cloud".into(),
                 prompt.into(),
             ];
@@ -132,7 +136,11 @@ pub fn launch_argv(
         Provider::Codex => {
             let environment = given(&launch.environment).ok_or("codex needs --environment")?;
             let argv = vec![
-                provenant_records::Harness::Codex.spec().binary.into(),
+                provenant_records::Harness::Codex
+                    .spec()
+                    .identity
+                    .binary
+                    .into(),
                 "cloud".into(),
                 "exec".into(),
                 "--env".into(),

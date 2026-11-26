@@ -20,7 +20,7 @@ pub enum Verdict {
 /// no reader maintains a parallel list of provider names. Codex reports usage
 /// after each completed turn, so it can be stopped between turns, not mid-turn.
 pub fn enforces(provider: &str) -> bool {
-    provenant_records::AdapterSpec::get(provider).is_some_and(|spec| spec.usage.live)
+    provenant_records::AdapterSpec::get(provider).is_some_and(|spec| spec.launch.usage.live)
 }
 
 /// Fresh tokens the provider reported, summed. Cache reads do not count:
@@ -128,7 +128,12 @@ mod tests {
     #[test]
     fn enforcement_is_read_from_the_adapter_declaration() {
         for spec in provenant_records::ADAPTER_SPECS {
-            assert_eq!(enforces(spec.name), spec.usage.live, "{}", spec.name);
+            assert_eq!(
+                enforces(spec.identity.name),
+                spec.launch.usage.live,
+                "{}",
+                spec.identity.name
+            );
         }
     }
 }

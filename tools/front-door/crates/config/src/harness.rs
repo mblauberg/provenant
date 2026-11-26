@@ -400,7 +400,7 @@ pub(crate) fn capture(
             }
         }
         if let Some(settings) = &targets.shared_settings
-            && target.harness.spec().shared_account_settings
+            && target.harness.spec().accounts.shared_account_settings
             && let Some(hook) = &target.hook_file
             && !same_file(hook, &settings.source_file)
         {
@@ -547,7 +547,7 @@ pub(crate) fn permitted_selector(
             }));
     }
     if let Some(key) = entry.selector.strip_prefix(crate::shared_settings::PREFIX) {
-        return Ok(target.harness.spec().shared_account_settings
+        return Ok(target.harness.spec().accounts.shared_account_settings
             && target.hook_file.as_ref() == Some(&entry.path)
             && crate::shared_settings::check_key(key).is_ok());
     }

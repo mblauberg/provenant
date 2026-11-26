@@ -663,8 +663,8 @@ fn account_directories(
     specs
         .iter()
         .filter_map(|spec| {
-            let (environment, _) = spec.default_account_directory?;
-            lookup(environment).map(|path| (spec.name.to_owned(), PathBuf::from(path)))
+            let (environment, _) = spec.accounts.default_account_directory?;
+            lookup(environment).map(|path| (spec.identity.name.to_owned(), PathBuf::from(path)))
         })
         .collect()
 }
@@ -1317,7 +1317,7 @@ fn record_budget_warning(
     use provenant_records::control::*;
     let support = provenant_records::ADAPTER_SPECS
         .iter()
-        .find(|spec| Some(spec.name) == provider)
+        .find(|spec| Some(spec.identity.name) == provider)
         .map_or(ControlSupport::Unsupported, |spec| {
             spec.capabilities.control.for_launch(LaunchKind::Lane)
         });

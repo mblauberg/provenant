@@ -85,7 +85,9 @@ fn handler(action: HookAction) -> Handler {
 }
 
 fn resolve_provider(name: &str, command: &str) -> Option<ResolvedHook> {
-    let spec = ADAPTER_SPECS.iter().find(|spec| spec.name == name)?;
+    let spec = ADAPTER_SPECS
+        .iter()
+        .find(|spec| spec.identity.name == name)?;
     let install = spec.install?;
     let requested = HookAction::ALL
         .iter()
@@ -150,7 +152,7 @@ mod tests {
                     cap.provider == spec.id && cap.transport == AnswerTransport::FabricMail
                 })
                 .collect();
-            assert_eq!(mail.len(), 1, "{} mail capability", spec.name);
+            assert_eq!(mail.len(), 1, "{} mail capability", spec.identity.name);
             assert_eq!(mail[0].local_offer_reader, supported);
             assert!(!mail[0].live_injection);
 
@@ -164,7 +166,7 @@ mod tests {
                 hooks.len(),
                 usize::from(supported),
                 "{} hook capability",
-                spec.name
+                spec.identity.name
             );
             for hook in hooks {
                 assert!(hook.local_offer_reader && hook.live_injection);
@@ -183,7 +185,7 @@ mod tests {
                     continue;
                 };
                 let hook = Hook::Provider(vec![
-                    OsString::from(spec.name),
+                    OsString::from(spec.identity.name),
                     OsString::from(action.command()),
                 ])
                 .spec()
@@ -205,7 +207,7 @@ mod tests {
         {
             for spec in ADAPTER_SPECS {
                 if let Some(hook) = Hook::Provider(vec![
-                    OsString::from(spec.name),
+                    OsString::from(spec.identity.name),
                     OsString::from(action.command()),
                 ])
                 .spec()
@@ -213,7 +215,7 @@ mod tests {
                     assert!(
                         matches!(hook.handler, Handler::AnswerDelivery),
                         "{} {:?}",
-                        spec.name,
+                        spec.identity.name,
                         action
                     );
                     assert!(hook.client.is_some_and(|client| client == spec.id));
@@ -222,7 +224,7 @@ mod tests {
         }
         assert!(
             Hook::Provider(vec![
-                OsString::from(provenant_records::Harness::Claude.spec().name),
+                OsString::from(provenant_records::Harness::Claude.spec().identity.name),
                 OsString::from(POST_TOOL_USE),
             ])
             .spec()

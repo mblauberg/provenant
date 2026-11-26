@@ -668,7 +668,7 @@ pub(super) fn validate_flat_plan(
         // other adapter runs in its own lane. Read that from the registry row.
         let delegated = |name: &str| {
             provenant_records::AdapterSpec::get(name).is_some_and(|spec| {
-                spec.named_entry == provenant_records::NamedEntry::DelegatedAgent
+                spec.identity.named_entry == provenant_records::NamedEntry::DelegatedAgent
             })
         };
         for (index, route) in routes.iter().enumerate() {

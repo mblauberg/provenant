@@ -402,7 +402,7 @@ impl LiveQuota {
             .ok_or(ProbeFailure::Auth)?;
         let check_identity = || {
             if provenant_records::AdapterSpec::get(&account.scope.adapter)
-                .is_some_and(|spec| spec.quota_identity_check)
+                .is_some_and(|spec| spec.accounts.quota_identity_check)
                 && identity
                     .and_then(|read_identity| read_identity(&account.identity_dir))
                     .as_deref()
@@ -501,7 +501,7 @@ pub fn registered_claude(
     let mut accounts = Vec::new();
     for registration in settings.entries.values() {
         if !provenant_records::AdapterSpec::get(&registration.adapter)
-            .is_some_and(|spec| spec.chair_switch)
+            .is_some_and(|spec| spec.launch.chair_switch)
         {
             continue;
         }
@@ -1569,9 +1569,9 @@ mod account_plan_tests {
     #[test]
     fn non_ledger_plans_keep_quota_unknown_without_reading_ledger() {
         let spec = provenant_records::AdapterSpec::get("opencode").unwrap();
-        let entries = spec.account_model_plans.iter().map(|plan| Some(plan.plan))
+        let entries = spec.accounts.account_model_plans.iter().map(|plan| Some(plan.plan))
             .chain([None, Some("unrecognised")]).enumerate().map(|(index, plan)| {
-                (format!("entry-{index}"), json!({"adapter":spec.name, "label":"fixture", "key":format!("identity-{index}"),
+                (format!("entry-{index}"), json!({"adapter":spec.identity.name, "label":"fixture", "key":format!("identity-{index}"),
                     "directory":format!("/fixture/nonexistent-{index}"), "plan":plan}))
             }).collect::<serde_json::Map<_, _>>();
         let settings: Settings = serde_json::from_value(json!({"entries": entries})).unwrap();
@@ -1605,7 +1605,7 @@ mod account_plan_tests {
                 .unwrap();
             for at in [101, 3700] {
                 let plan = crate::quota::plan(
-                    spec.name,
+                    spec.identity.name,
                     account,
                     &QuotaProbeInput {
                         now_unix_seconds: at,
@@ -1618,7 +1618,7 @@ mod account_plan_tests {
                 let snapshot = crate::REGISTRY
                     .iter()
                     .filter_map(|registration| registration.quota_source)
-                    .find(|source| source.adapter_id() == spec.name)
+                    .find(|source| source.adapter_id() == spec.identity.name)
                     .unwrap()
                     .decode(&plan, &capture)
                     .unwrap();

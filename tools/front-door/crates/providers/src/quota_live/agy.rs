@@ -53,7 +53,7 @@ impl LiveQuota {
         let log_arg = log.to_str().ok_or(ProbeFailure::Malformed)?;
         let payload = self.json_command(
             &probe_home,
-            provenant_records::Harness::Agy.spec().binary,
+            provenant_records::Harness::Agy.spec().identity.binary,
             &[
                 "-p",
                 "/usage",
@@ -117,7 +117,7 @@ impl LiveQuota {
                                 ACCOUNT_SWITCH_RECONCILE_FAILED,
                                 format!(
                                     "failed to reconcile {} account switch: {error}",
-                                    provenant_records::Harness::Agy.spec().name
+                                    provenant_records::Harness::Agy.spec().identity.name
                                 ),
                             )
                             .subject(account.scope.account_key.clone()),

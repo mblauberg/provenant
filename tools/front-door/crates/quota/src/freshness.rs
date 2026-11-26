@@ -129,7 +129,7 @@ impl FreshnessPolicy {
         reset: Option<i64>,
     ) -> Result<i64, QuotaError> {
         let revalidation = provenant_records::AdapterSpec::get(adapter)
-            .and_then(|spec| spec.refusal_revalidation_seconds);
+            .and_then(|spec| spec.accounts.refusal_revalidation_seconds);
         if revalidation.is_none()
             && let Some(reset) = reset
         {

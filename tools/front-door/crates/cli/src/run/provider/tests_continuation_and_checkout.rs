@@ -1089,7 +1089,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 assert!(error.contains("retained provider continuation is missing or expired"));
                 assert_eq!(
                     error.contains("attempt-private state"),
-                    AdapterSpec::get(adapter).is_some_and(|spec| spec.relocated_session_state)
+                    AdapterSpec::get(adapter).is_some_and(|spec| spec.retention.relocated_session_state)
                 );
                 assert!(error.contains("start a new lane"));
             }

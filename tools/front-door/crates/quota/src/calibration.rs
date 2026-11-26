@@ -36,7 +36,7 @@ impl crate::Settings {
         let mut keys = std::collections::BTreeSet::new();
         for record in records.iter().filter(|r| {
             provenant_records::AdapterSpec::get(&r.account.adapter).is_some_and(|spec| {
-                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                spec.accounts.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
             })
         }) {
             *labels.entry(record.account.label.clone()).or_default() += 1;

@@ -806,7 +806,7 @@ fn opencode_effort_normalisation_is_visible_in_exact_pool_and_launch_routes()
     for entry in catalogue
         .models()
         .iter()
-        .filter(|entry| entry.model.adapter() == spec.name)
+        .filter(|entry| entry.model.adapter() == spec.identity.name)
     {
         let plan = spec
             .account_model_plans
@@ -814,7 +814,7 @@ fn opencode_effort_normalisation_is_visible_in_exact_pool_and_launch_routes()
             .find(|plan| entry.model.model().starts_with(plan.model_prefix))
             .ok_or("registered plan")?;
         let records = [AvailabilityRecord {
-            adapter: spec.name.into(),
+            adapter: spec.identity.name.into(),
             account_key: Some("registered-identity".into()),
             plan: Some(plan.plan.into()),
             observed_models: vec![],

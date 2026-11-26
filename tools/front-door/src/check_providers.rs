@@ -183,7 +183,7 @@ fn inventory(roots: &provenant_core::Roots) -> Result<Vec<Row>, Box<dyn std::err
         };
         let harness_found = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
             .filter(|path| path.is_absolute())
-            .any(|path| provenant_os::sys::is_executable(&path.join(spec.binary)));
+            .any(|path| provenant_os::sys::is_executable(&path.join(spec.identity.binary)));
         let login = logins.iter().find(|row| {
             row.account.adapter == account.adapter && row.account.account_key == account.key
         });
@@ -233,7 +233,7 @@ fn inventory(roots: &provenant_core::Roots) -> Result<Vec<Row>, Box<dyn std::err
             let quota = Quota {
                 coverage: if !known {
                     Coverage::Unknown
-                } else if spec.quota_model_prefix.is_some()
+                } else if spec.accounts.quota_model_prefix.is_some()
                     || snapshot
                         .and_then(|snapshot| snapshot.details.as_ref())
                         .and_then(|details| details.coverage.as_deref())
@@ -599,13 +599,13 @@ fn compatibility_findings(
     for spec in provenant_records::ADAPTER_SPECS {
         let Some(executable) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
             .filter(|path| path.is_absolute())
-            .map(|path| path.join(spec.binary))
+            .map(|path| path.join(spec.identity.binary))
             .find(|path| provenant_os::sys::is_executable(path))
         else {
             continue;
         };
         let version = cache.read(&executor, &executable, state);
-        let assessment = table.assess(spec.name, version.as_deref());
+        let assessment = table.assess(spec.identity.name, version.as_deref());
         let Some(code) = compatibility::policy_code(assessment.status) else {
             continue;
         };

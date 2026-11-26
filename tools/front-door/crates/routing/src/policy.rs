@@ -195,7 +195,7 @@ impl ModelPolicy {
     /// task-boundary advice, never guessed provider environment variables.
     pub fn launch_env(&self, adapter: &str) -> Vec<(String, String)> {
         if let Some(variable) = provenant_records::AdapterSpec::get(adapter)
-            .and_then(|spec| spec.compaction_env)
+            .and_then(|spec| spec.launch.compaction_env)
             .filter(|_| self.compaction.mode != Some(CompactionMode::Never))
         {
             self.compaction
@@ -1721,7 +1721,7 @@ mod tests {
             )
             .policy;
         let variable = provenant_records::AdapterSpec::get("claude")
-            .and_then(|spec| spec.compaction_env)
+            .and_then(|spec| spec.launch.compaction_env)
             .ok_or("Claude compaction control declaration")?;
         assert_eq!(
             claude.launch_env("claude"),

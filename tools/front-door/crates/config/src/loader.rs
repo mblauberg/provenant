@@ -2723,7 +2723,7 @@ mod warning_tests {
 
     #[test]
     fn answer_delivery_hook_arguments_are_identified() {
-        let claude = provenant_records::Harness::Claude.spec().name;
+        let claude = provenant_records::Harness::Claude.spec().identity.name;
         for command in [
             provenant_records::HookAction::PreToolUse.command(),
             provenant_records::HookAction::PostToolUse.command(),
