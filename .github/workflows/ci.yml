@@ -804,7 +804,7 @@ jobs:
   rust-macos-inventory:
     name: Verify macOS native evidence
     needs: [scope, rust-macos-archive, rust-macos-tests]
-    if: ${{ always() && fromJSON(needs.scope.outputs.suites).macos_native == 'run' }}
+    if: ${{ always() && needs.rust-macos-archive.result == 'success' && fromJSON(needs.scope.outputs.suites).macos_native == 'run' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -123,6 +123,30 @@ class ReferenceTests(unittest.TestCase):
                     GEN['with_declared_enums'](section(**{'projects.{project}.choice': {
                         'type': 'string', 'effect': 'Choose.', **restated}}), declared)
 
+    def test_steer_delivery_registry_takes_values_and_default_from_its_owner(self):
+        # The fabric asset and FIELD_METADATA declare delivery's values and
+        # default. Restating either in the knob registry makes the strict
+        # reference generator reject the whole config source.
+        data = json.loads((SCRIPTS.parent / GEN['KNOBS']).read_text())
+        setting = data['domain_steer_settings']['settings']['delivery']
+        for restated in ('allowed', 'values', 'default'):
+            self.assertNotIn(restated, setting)
+        declared = [
+            {'path': 'domains.fabric.steer.delivery',
+             'values': ['queued', 'now'], 'default': 'queued'},
+            {'path': 'domains.fabric.steer.fallback',
+             'values': ['fresh_with_handoff', 'refuse'], 'default': 'fresh_with_handoff'},
+        ]
+        GEN['with_declared_enums'](data, declared)
+        filled = data['domain_steer_settings']['settings']['delivery']
+        self.assertEqual(filled['values'], ['queued', 'now'])
+        self.assertEqual(filled['default'], 'queued')
+        text = GEN['config_reference'](
+            {'knobs': {}, 'domain_steer_settings': data['domain_steer_settings']},
+            all_fields=True)
+        self.assertIn('| `delivery` | queued |', text)
+        self.assertIn('(queued, now).', text)
+
     def test_reference_distinguishes_review_defaults_from_bundled_shapes(self):
         data = json.loads((SCRIPTS.parent / GEN['KNOBS']).read_text())
         settings = data['domain_routing_settings']['settings']

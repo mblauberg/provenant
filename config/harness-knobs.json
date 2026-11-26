@@ -14,7 +14,6 @@
       "lanes.pr",
       "lanes.cargo_cache_max",
       "lanes.ci_scope",
-      "lanes.verification",
       "lanes.writer_dirty",
       "lanes.read_source",
       "lanes.gh_budget",
@@ -53,6 +52,7 @@
       "cargo_target_idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "30d", "effect": "Collect a managed Cargo target (target or target-lint in a legacy private lane cache or a shared cache) when nothing under it was written for this long, whatever lanes.cargo_cache_max allows; a target held by a Cargo lock or live lane is always kept. The value and source appear in GC output"},
       "schedule": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Run the daily scheduled sweep. false also skips admission collection; completion cleanup and landing cleanup still run"},
       "idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "6h", "effect": "Idle age for settled attempt scratch, unowned artifacts and standalone caches; a busy or unreleased attempt is always kept"},
+      "attempt_scratch_max": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB; 0 disables the cap", "default": "2G", "effect": "Per-attempt scratch size above which GC collects that attempt's scratch once it is settled, without waiting out gc.idle. A bounded observation that cannot measure the tree keeps it. The effective value and source appear in GC output"},
       "sweep_budget": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "5m", "effect": "Maximum wall time for one GC pass; the saved retention class and candidate cursor resume on the next pass, and the effective value and source appear in GC output"},
       "free_floor": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB", "default": "1% of the state volume, capped at 5 GiB", "effect": "Advisory free-space floor for admission, new builds and pressure collection; below it GC removes further eligible caches oldest first"},
       "critical_free": {"type": "size", "allowed": "same syntax as free_floor; 0B disables the critical decision", "default": "2G", "effect": "Critical free space for dispatch and new builds. Below free_floor, warn and proceed. Both effective thresholds and sources are reported."},
@@ -640,7 +640,7 @@
     "where": "the `build` object of host `state/ports.json`, a host-project `state/projects/<key>/ports.json` or project `.provenant/ports.json`",
     "settings": {
       "strategy": {"type": "string", "allowed": "slots", "default": "slots", "effect": "The chair's one host-owned warm-check strategy: the job runs in the host slot pool. Lanes never compile."},
-      "prepare": {"type": "argv_list", "allowed": "ordered arrays of argv; each program is non-empty", "default": "[]", "effect": "Ordered argv arrays run from the checkout root before a slot job's first step; a failing command fails that job."},
+      "prepare": {"type": "argv_list", "allowed": "ordered arrays of argv; each program is non-empty", "default": "[]", "effect": "Ordered argv arrays run from the checkout root before a slot job's first step and on lane worktree provisioning when their digest changes. A slot failure fails the job; a lane preparation failure warns and remains retryable."},
       "offload": {"type": "string", "allowed": "auto, off", "default": "auto", "effect": "Auto allows supported Rust build jobs to use slots; off runs every build locally with exception offload_off."},
       "overflow": {"type": "string", "allowed": "auto, queue, local", "default": "auto", "effect": "Auto queues under slots and uses the configured local overflow for local strategies; queue always waits for a slot and local runs locally after the admission wait."},
       "clean": {"type": "string", "allowed": "none, untracked, ignored", "default": "untracked", "effect": "Controls slot cleanup before a job: none preserves files, untracked runs git clean -ffd, and ignored runs git clean -ffdx."},
@@ -674,6 +674,7 @@
     "path": "verify",
     "where": "the `verify` object of host, host-project or project ports.json",
     "settings": {
+      "lane": {"type": "array", "allowed": "list of {tier, argv, scope} entries with non-empty strings and argv", "default": "[]", "effect": "Writer preamble commands and applicability, labelled with the declaring port layer. Invalid entries warn and are omitted; an empty list defaults to the repository formatter and declared pre-commit hooks."},
       "static_checks": {"type": "array", "allowed": "list of {argv, cwd, timeout_seconds} entries; argv has a non-empty program, cwd is repository-relative and timeout_seconds is positive", "default": "[]", "effect": "Cheap repository checks a writer runs before pushing, named in the writer preamble with this leaf's source. They need no build; an absent or empty list adds no preamble text, and a failure is reported in the handoff without refusing the push. CI still gates the merge."}
     }
   },
@@ -748,6 +749,7 @@
   "domain_steer_settings": {
     "path": "domains.fabric.steer",
     "settings": {
+      "delivery": {"type": "enum", "effect": "How a steer reaches a running attempt: queued delivers at the next turn boundary without interrupting (the default); now requests a session-preserving restart through --now or this host default. provenant steer --explain shows the effective value and its source."},
       "fallback": {"type": "enum", "effect": "What to do when a stopped session is unavailable: start fresh with a handoff or refuse."},
       "restart_spacing_ms": {"type": "int", "allowed": "0 to 600000 milliseconds", "min": 0, "max": 600000, "default": "2000", "effect": "Minimum spacing between steer restarts; 0 disables the stagger."}
     }
@@ -1018,8 +1020,8 @@
       "host_only": true,
       "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/preparation.rs, tools/front-door/crates/config/src/cache_budget.rs, tools/front-door/crates/run/src/build_dir_gc.rs, tools/front-door/crates/run/src/writer.rs, tools/front-door/src/worktrees.rs",
-      "effect": "Limit allocated bytes across private lane and shared Cargo targets. Accept a byte size or whole-volume percentage; the default is 10% of the cache volume. Set for the host under [knobs]. Per-lane overrides are ignored. At launch and during GC, least-recently-used targets are reclaimed when no live attempt or Cargo build lock holds them. Effective size and source appear in launch warnings and GC reports.",
-      "trade_off": "A lower cap reclaims warm build output sooner; locked targets stay protected and the launch proceeds with a warning when the cap cannot be met."
+      "effect": "Limit allocated bytes across private lane and shared Cargo targets. Accept a byte size or whole-volume percentage; the default is 10% of the cache volume. Set for the host under [knobs]. Per-lane overrides are ignored. During GC, least-recently-used targets are reclaimed when no live attempt or Cargo build lock holds them; lane launches no longer evict or create lane caches. Effective size and source appear in GC reports.",
+      "trade_off": "A lower cap reclaims warm build output sooner in the next GC pass; locked targets stay protected and a pass that cannot measure a target keeps it."
     },
     "lanes.ci_scope": {
       "type": "enum",
@@ -1045,13 +1047,13 @@
       "default": "targeted",
       "status": "wired",
       "reader": "tools/front-door/crates/run/src/verification.rs",
-      "effect": "Verification guidance in a writer lane's preamble. The lane formats only: it never compiles, seeds or admits a build. targeted (default) names the touched crates and their tests that the chair's integrated check compiles and lints; check narrows that to the touched crates; full names the whole workspace. CI runs the full suite in every case. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set with `provenant config set lanes.verification targeted` or under `[knobs]` in config.toml.",
+      "effect": "Verification guidance in a writer lane's preamble. The lane formats only: it never compiles, seeds or admits a build. targeted (default) names the touched crates and their tests that the chair's integrated check compiles and lints; check narrows that to the touched crates; full names the whole workspace. CI runs the full suite in every case. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set with `provenant config set lanes.verification targeted` or under [knobs] in config.toml.",
       "trade_off": "Advisory guidance; a wider scope spends the chair's host build cap, never the lane's, because lanes do not build."
     },
     "lanes.brief_preamble": {
       "type": "string", "default": "", "status": "wired",
       "reader": "tools/front-door/crates/run/src/completion.rs",
-      "effect": "Path to a standing lane-rules file, set at the host layer in <state>/config.toml or the project layer in .provenant/config.toml under [knobs]. Host, project and launch (--preamble-file) layers concatenate in that order, each labelled with its source and skippable to roles writer, review or read-only through a first-line `<!-- provenant-roles: ... -->` header. A missing or unreadable file warns with its layer and the launch proceeds. Cargo target, CI scope and verification lines keep their own knobs.",
+      "effect": "Path to a standing lane-rules file, set at the host layer in <state>/config.toml or the project layer in .provenant/config.toml under [knobs]. Host, project and launch (--preamble-file) layers concatenate in that order, each labelled with its source and skippable to roles writer, review or read-only through a first-line `<!-- provenant-roles: ... -->` header. A missing or unreadable file warns with its layer and the launch proceeds. CI scope keeps its own knob; verification comes from verify.lane.",
       "trade_off": "A layered file keeps repeated lane rules in one place so briefs carry only the task; an unreadable layer adds a warning without blocking launch."
     },
     "lanes.writer_dirty": {

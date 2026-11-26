@@ -4926,6 +4926,7 @@ pub(super) fn prepare_candidates_inner(
         };
         if let Ok(ports) = provenant_config::PortTable::read_for(project_root, state_root) {
             brief.set_static_checks_from_ports(&ports, role);
+            brief.set_lane_checks_from_ports(&ports, role);
         }
         let extras = run::PreambleExtras {
             route: Some(provider.clone()),
@@ -5888,6 +5889,32 @@ pub(super) fn prepare_candidates_inner(
                 key: "lanes.ci_scope".into(),
                 extra: Default::default(),
             });
+            provider.lane_verification = extras.brief.as_ref().and_then(|brief| {
+                if brief.lane_checks.is_empty() {
+                    return None;
+                }
+                Some(provenant_records::run::LaneVerificationReceipt {
+                    checks: brief
+                        .lane_checks
+                        .iter()
+                        .map(
+                            |check| provenant_records::run::LaneVerificationCheckReceipt {
+                                tier: check.tier.clone(),
+                                argv: check.argv.clone(),
+                                scope: check.scope.clone(),
+                            },
+                        )
+                        .collect(),
+                    source: brief.lane_checks_source.clone()?,
+                    extra: Default::default(),
+                })
+            });
+            // The same sourced list the writer's preamble names goes on the
+            // launch receipt. An absent or empty tier records nothing.
+            provider.static_checks = extras
+                .brief
+                .as_ref()
+                .and_then(|brief| brief.static_checks_receipt());
         }
         gh_selection.finalise_environment(&mut spec.env);
         if adapter_spec.is_some_and(|spec| {

@@ -829,7 +829,13 @@ pub struct RouteRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci_scope: Option<CiScopeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_verification: Option<LaneVerificationReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_policy: Option<PrPolicyReceipt>,
+    /// The project's declared no-build checks and the layer/key that declared
+    /// them, carried on the launch receipt beside `ci_scope` and `pr_policy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_checks: Option<StaticChecksReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxModeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1147,6 +1153,23 @@ pub struct CiScopeReceipt {
     pub extra: crate::ExtraFields,
 }
 
+/// The valid project-declared checks included in a writer's launch brief.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneVerificationReceipt {
+    pub checks: Vec<LaneVerificationCheckReceipt>,
+    pub source: crate::Source,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// One tier and command from `verify.lane`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneVerificationCheckReceipt {
+    pub tier: String,
+    pub argv: Vec<String>,
+    pub scope: String,
+}
+
 /// The lane's effective pull-request policy and the layer that set it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1157,6 +1180,35 @@ pub struct PrPolicyReceipt {
     pub source: crate::Layer,
     #[serde(default)]
     pub key: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// One project-declared no-build check recorded on the launch receipt.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StaticCheckReceipt {
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub timeout_seconds: u64,
+    /// The layer and file/key that declared this check.
+    #[serde(default)]
+    pub source: crate::Layer,
+    #[serde(default)]
+    pub key: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// The no-build checks declared for a writer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StaticChecksReceipt {
+    #[serde(default)]
+    pub checks: Vec<StaticCheckReceipt>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -2272,7 +2324,7 @@ impl SettlementTerminalOutcome {
 /// One declaration owns the durable reasons and their cross-cutting policy.
 /// Generated enum, ALL and table cannot drift apart.
 macro_rules! settlement_reasons {
-    ($($(#[$meta:meta])* $reason:ident { source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
+    ($($(#[$meta:meta])* $reason:ident { code: $code:literal, source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum SettlementReason {
@@ -2281,6 +2333,14 @@ macro_rules! settlement_reasons {
 
         impl SettlementReason {
             pub const ALL: &'static [Self] = &[$(Self::$reason),+];
+
+            /// Stable snake_case code for status and advance diagnostics. It is
+            /// the same value the sealed serde wire name uses.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$reason => $code),+
+                }
+            }
 
             pub const fn rule(self) -> SettlementRule {
                 match self {
@@ -2309,35 +2369,35 @@ macro_rules! settlement_reasons {
 
 settlement_reasons! {
     /// The provider finished and reported its results.
-    Completed { source: Provider, node: Succeeded, outcome: Preserve, stop: None },
+    Completed { code: "completed", source: Provider, node: Succeeded, outcome: Preserve, stop: None },
     /// A complete handoff preceded the host token-budget stop.
-    CompletedBeforeBudget { source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
+    CompletedBeforeBudget { code: "completed_before_budget", source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
     /// The provider finished without a final handoff, so nothing was reported.
-    HandoffMissing { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
+    HandoffMissing { code: "handoff_missing", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
     /// A final handoff was present but malformed; retain its field diagnostics.
-    HandoffMalformed { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
+    HandoffMalformed { code: "handoff_malformed", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
     /// The writer exited without a final message.
-    EmptyResult { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
+    EmptyResult { code: "empty_result", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
     /// The lane declared that work remains.
-    DeclaredStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
+    DeclaredStop { code: "declared_stop", source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
     /// The provider stopped for a reason other than a finished turn.
-    ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
+    ProviderStop { code: "provider_stop", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
     /// A writer left edits it did not commit.
-    UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    UncommittedWork { code: "uncommitted_work", source: Provider, node: Failed, outcome: Uncommitted, stop: None },
     /// The bound branch stayed at base while the primary checkout moved with
     /// unaccounted work: the lane's work went to the wrong checkout (#3611).
-    StrayWork { source: Host, node: Failed, outcome: ReviewRequired, stop: None },
+    StrayWork { code: "stray_work", source: Host, node: Failed, outcome: ReviewRequired, stop: None },
     /// Refused before any process started.
-    PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
-    Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
+    PreLaunchRefusal { code: "pre_launch_refusal", source: Host, node: Failed, outcome: Preserve, stop: None },
+    Cancelled { code: "cancelled", source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
     /// The host interrupted a run to deliver its queued continuation turn.
-    Steered { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
-    Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
-    Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
+    Steered { code: "steered", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
+    Lost { code: "lost", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
+    Unsettled { code: "unsettled", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
     /// The provider reported an unclassified error.
-    Unclassified { source: Provider, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
+    Unclassified { code: "unclassified", source: Provider, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
     /// The provider ran and ended in a non-success outcome.
-    Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
+    Failed { code: "failed", source: Provider, node: Failed, outcome: Preserve, stop: None },
 }
 impl SettlementReason {
     /// Derive the reason from the complete terminal facts before any reader
@@ -3643,6 +3703,24 @@ mod tests {
             (
                 "ci_scope",
                 serde_json::json!({"value":"none","source":"default","key":"lanes.ci_scope"}),
+            ),
+            (
+                "lane_verification",
+                serde_json::json!({
+                    "checks":[{"tier":"T1","argv":["cargo","test"],"scope":"crate tests"}],
+                    "source":{"layer":"project","origin":".provenant/ports.json#verify.lane"}
+                }),
+            ),
+            (
+                "static_checks",
+                serde_json::json!({
+                    "checks":[{
+                        "argv":["scripts/check-extra-fields"],"cwd":".","timeout_seconds":30,
+                        "source":"project","key":".provenant/ports.json#verify.static_checks",
+                        "future_nested":{"kept":true}
+                    }],
+                    "future_nested":{"kept":true}
+                }),
             ),
             (
                 "sandbox",

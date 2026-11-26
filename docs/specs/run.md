@@ -31,14 +31,15 @@ the read-only Cargo home and `PROVENANT_CARGO_SOURCE_WRITES`. `credentials` and 
 are always denied read and write, including in relocated homes; host `config` files are read-only
 data.
 
-## Lanes do not build
+## Lane verification
 
-Lanes format and coordinate only. The chair runs one warm host-owned integrated
-check per epic through the build port, capped by `[admission.build].slots`, and
-CI runs clippy and the tests. `lanes.verification` sets the format-only writer
-preamble. Lane Cargo output is bounded by `lanes.cargo_cache_max` and collected
-after `gc.cargo_target_idle`; `domains.fabric.lanes.cargo_source_writes`
-controls writes to the shared source caches.
+Writer lanes run the commands and scopes declared in the project's `verify.lane`
+port. A valid declaration is authoritative over the resolved legacy
+`lanes.verification` format-only scope; its tiers, commands, scopes and source
+also appear in the launch receipt. With no valid declaration writers run the
+repository formatter and declared pre-commit hooks. Git hooks are part of
+commit and push. Build admission and shared caches remain subject to host
+policy.
 
 ## Publication order
 
@@ -113,15 +114,16 @@ and never fails the tick.
 | OS purges Caches | slot recreated with its record |
 | ledger unwritable | row goes to the attempt scratch ledger and the report counts it missing |
 
-- Why: the chair and landing share one strategy, one outcome row and one host cap; lanes do not build.
+- Why: the chair and landing share one strategy, one outcome row and one host cap.
 - Owner: `crates/run/src/build/`, `src/admit.rs`, `src/verify.rs`, `src/pr/landing/gate.rs`
 
 ## Verification and admission
 
-A writer preamble describes its verification scope (`lanes.verification`,
-default `targeted`) but the lane performs no build; the summary names what the
-chair's integrated check and CI will run. A brief line `Verification scope:
-check|targeted|full` overrides the paragraph and names source `brief`.
+A writer preamble renders the project's `verify.lane` entries with their tier,
+argv, scope and source. Invalid entries warn and are omitted; without a usable
+entry the resolved `lanes.verification` scope or formatter and declared
+pre-commit hooks remain in force. The launch receipt records the same effective
+valid entries and source as the writer preamble.
 
 Admission attribution has host scope and serves the chair's host-owned warm
 check. Before confinement each lane registers under
@@ -310,10 +312,15 @@ otherwise a declared route not yet launched is used, and an alias route may reso
 
 A lane's graph outcome is classified from evidence, not from the stop path that reported it:
 commits ahead of the node's input head count whether or not they were pushed, and a sealed `done`
-handoff closes the brief. Neither a terminal cause nor a partial signal may call a lane with new
+handoff closes the brief. For a writer the verified pushed delivery head is itself that evidence:
+a published commit proves new work even when the sealed writer head is absent or still names the
+input commit (#4065). Neither a terminal cause nor a partial signal may call a lane with new
 commits `stopped_no_work`; with a done handoff and a moved head the node succeeds even when a stop
-was recorded. The same observed refs decide the advance code: `writer_declared_stop` when a stop
-left new commits, `stopped_no_work` only when it left none.
+or a provisional `failed` settlement reason was recorded. The same observed refs decide the advance
+code: `writer_declared_stop` when a stop left new commits, `stopped_no_work` only when it left none.
+A real precondition failure on a successful-looking attempt is reported with its settlement reason
+as a named cause, never bare `other_failure`. Findings counts are not a writer success criterion:
+a writer without a findings contract is not failed for absent findings.
 
 With no different route, a stop that can continue on its own route (`stopped_early`,
 `lane_token_lost`, `context_handoff`) takes the same route with a fresh session on the

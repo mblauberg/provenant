@@ -60,6 +60,8 @@ pub const SETTING_LAYER_IGNORED: WarningCode = WarningCode("SETTING_LAYER_IGNORE
 pub const NAME_CASE_FOLDED: WarningCode = WarningCode("NAME_CASE_FOLDED");
 /// A name matched a declared alias rather than its canonical spelling.
 pub const NAME_ALIAS_USED: WarningCode = WarningCode("NAME_ALIAS_USED");
+/// A target was found in a registered project other than the caller's.
+pub const CROSS_PROJECT_TARGET_FOUND: WarningCode = WarningCode("CROSS_PROJECT_TARGET_FOUND");
 /// The lane's branch is behind its base and will be updated.
 pub const BRANCH_BEHIND_BASE: WarningCode = WarningCode("BRANCH_BEHIND_BASE");
 /// An existing worktree was adopted although it had uncommitted changes.
@@ -244,6 +246,7 @@ pub const PORT_DECLARATION_IGNORED: WarningCode = WarningCode("PORT_DECLARATION_
 /// An invalid verify port full-after duration fell back to the builtin.
 pub const PORT_DURATION_INVALID: WarningCode = WarningCode("PORT_DURATION_INVALID");
 /// An invalid `verify.static_checks` entry was dropped from the writer preamble.
+pub const PORT_LANE_CHECK_INVALID: WarningCode = WarningCode("PORT_LANE_CHECK_INVALID");
 pub const PORT_STATIC_CHECK_INVALID: WarningCode = WarningCode("PORT_STATIC_CHECK_INVALID");
 /// An installed agent's PATH would fall back from the trusted Rust toolchain.
 pub const AGENT_TOOLCHAIN_PATH: WarningCode = WarningCode("AGENT_TOOLCHAIN_PATH");

@@ -70,18 +70,20 @@ on every page. Lane pages use ordered index scans and defer the host census
 until a non-terminal row needs it. A source that cannot produce its header is
 reported unavailable, never empty, and the hook still returns inside its budget.
 Hook state carries custody-ledger, lane and worktree rows. Inside a lane,
-hook context is one line directing progress to the lane handoff, and chair
-checkpoint text, standing grants and save commands are withheld; outside a lane
-it carries the chair checkpoint guidance. When the digest is shown, the
-autosave's duplicate custody section is withheld so the custody list is printed
-once. If output must be bounded, derived sections shrink first: the chair's
-`## Intent` (up to 3 KiB) and `## Now` (up to 1 KiB) stay intact while the
-derived digest and then the checkpoint excerpt give way. A fresh checkpoint
-with nothing actionable drops the "no save needed by freshness policy"
-boilerplate.
+hook context is one line directing progress to the lane handoff; for a native
+subagent marked by a non-empty `agent_id` or agent transcript path it is empty.
+In both, chair checkpoint text, standing grants and save commands are withheld;
+outside them it carries the chair checkpoint guidance. `agent_type` alone does
+not mark a subagent because top-level `--agent` sessions also provide it.
+When the digest is shown, the autosave's duplicate custody section is withheld
+so the custody list is printed once. If output must be bounded, derived sections
+shrink first: the chair's `## Intent` (up to 3 KiB) and `## Now` (up to 1 KiB)
+stay intact while the derived digest and then the checkpoint excerpt give way.
+A fresh checkpoint with nothing actionable drops the "no save needed by
+freshness policy" boilerplate.
 - Why: restoring the wrong or a lost checkpoint misdirects an agent, absent
-  evidence must not read as an empty queue, and a repeated custody list or a
-  cut Intent/Now wastes the bounded hook output.
+  evidence must not read as an empty queue, and repeated custody or cut Intent/Now
+  wastes the bounded hook output.
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/state.rs`
 
 ### Bounded restore after compaction
