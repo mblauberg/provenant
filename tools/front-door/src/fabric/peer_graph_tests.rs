@@ -1,6 +1,6 @@
 #[allow(unused_imports)] // The worktree driver includes the peer harness without libtest.
 use super::*;
-use provenant_fabric_runtime::graph::{self, FileJournal};
+use provenant_fabric_runtime::graph::{self, FileJournal, SourceBinding};
 use provenant_fabric_runtime::runs::SubmissionReceipt;
 use serde_json::json;
 
@@ -388,6 +388,81 @@ fn peer_placed_reader_binds_its_own_source_like_a_local_reader() -> TestResult {
     assert!(!access.source_live, "{access:?}");
     assert!(access.read_roots.is_empty(), "{access:?}");
     assert!(access.write_roots.is_empty(), "{access:?}");
+    Ok(())
+}
+
+/// Invariant 3: a peer placed reader pins to the head its initiator submitted,
+/// never to a caller checkout or an absent source (#4015). The task the peer
+/// seals carries the same head, so the reader sees the admitted subject.
+#[test]
+fn peer_reader_is_pinned_to_the_initiator_subject() -> TestResult {
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::peer_reader_is_pinned_to_the_initiator_subject",
+    )? {
+        return Ok(());
+    }
+    let (rig, factory) = receiver()?;
+    let cancel = CancelToken::new();
+    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    let input = serde_json::from_value(json!({
+        "op":"submit", "operation_id":"peer-reader-subject-pin",
+        "origin_work_key":origin_key(),
+        "task":{"prompt":"Read the pinned subject", "access":"read_only", "head":head,
+            "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
+            "timeout_seconds":30,
+            "context":{"graph_id":"origin-graph", "node_id":"read", "attempt":1,
+                "graph_template_launch":true}}
+    }))?;
+    let receipt = provenant_cli::run::with_deferred_provider_launch(|| {
+        super::super::peer::peer_submit_graph(
+            &factory,
+            input,
+            factory.context.identity.inbox.actor,
+            Default::default(),
+            None,
+            None,
+            WaitBudget::cli(factory.clock.mono_now(), 30).unwrap(),
+            &cancel,
+        )
+    })?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
+    let execution = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )?
+    .ok_or("receiver graph missing")?;
+    let node = execution.document.nodes.first().ok_or("receiver node")?;
+    let bound = node.source.as_ref().and_then(|binding| match binding {
+        SourceBinding::Commit { commit } => Some(commit.as_str()),
+        _ => None,
+    });
+    assert_eq!(
+        bound,
+        Some(head.as_str()),
+        "peer reader must pin to the initiator's subject: {node:?}"
+    );
+    let attempt = receipt.targets[0].attempt;
+    let owner = BinaryRunOwner {
+        factory: &factory,
+        allow_remote: false,
+        actor: None,
+        chair: None,
+    };
+    let store = owner.store(&cancel)?;
+    let call = owner.call(&cancel);
+    let record = store.record(attempt, &call)?;
+    let request = store.request(record.attempt_id, &call)?;
+    assert_eq!(
+        request.task.head.as_deref(),
+        Some(head.as_str()),
+        "peer task head must be the initiator subject, never None"
+    );
     Ok(())
 }
 

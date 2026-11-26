@@ -1,9 +1,38 @@
-//! One host-owned subject for review selection, evidence and provider launch.
+//! The one host-owned subject an operation acts on, resolved once at admission.
+//!
+//! A review, a read-only graph and a writer each resolve their subject here;
+//! nothing downstream re-reads a ref or re-resolves a source for this graph.
+use super::interface::read_source_choice;
 use super::*;
 use crate::pr::observer::Observer;
+use provenant_cli::run::{ReadSourceChoice, read_only_source_ref};
+use provenant_fabric_runtime::graph::{
+    AccessMode, GraphDocument, GraphNode, NodeKind, SourceBinding,
+};
+use provenant_records::Layer;
+use provenant_records::subject::{PinnedSubject, SubjectOrigin, SubjectPolicy, ref_origin};
 use serde::Deserialize;
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// How a read-only lane sees its tree. `Pinned` binds an exact commit; `Live`
+/// keeps the checkout's working tree, which is only valid on the local host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadPlan {
+    Pinned,
+    Live,
+}
+
+/// The one subject, base and read policy resolved for a graph at admission.
+pub(crate) struct GraphSubject {
+    pub subject: Option<PinnedSubject>,
+    pub writer_base: Option<provenant_core::GitOid>,
+    pub read: ReadPlan,
+    pub warnings: Vec<String>,
+    /// The review advisory that must also be bound into review node prompts.
+    pub review_warning: Option<String>,
+}
 
 /// Read one pull request's subject through the one CI observation transport.
 /// No caller shells out to `gh` for this: the observer selects the forge port,
@@ -143,6 +172,8 @@ pub(super) struct ReviewSubject {
     pub base: String,
     pub head: String,
     pub warning: Option<String>,
+    /// The route that resolved the head, so one subject records its own origin.
+    pub origin: SubjectOrigin,
 }
 
 impl Factory {
@@ -242,7 +273,7 @@ impl Factory {
         let resolve = |reference: &str| {
             provenant_run::resolve_git_base(&git, &self.cwd, reference).map_err(run_error)
         };
-        let (base, head, warning) = if let Some(pr) = pr {
+        let (base, head, warning, origin) = if let Some(pr) = pr {
             // Issue #3878: a repair range may narrow a pinned PR review with
             // `--set review_base=SHA`. The head and PR binding still come from
             // the forge; only the base is taken from the explicit pin. Supplying
@@ -326,9 +357,18 @@ impl Factory {
                     )
                 })
                 .flatten();
-            (base, head, warning)
+            let origin = if expected_head.is_some() {
+                // An explicit --head is the authoritative pin, even with --pr.
+                SubjectOrigin::Commit
+            } else {
+                SubjectOrigin::ForgePr {
+                    repository: repository.to_owned(),
+                    number,
+                }
+            };
+            (base, head, warning, origin)
         } else if let (Some(subject), Some(base)) = (subject, base) {
-            (resolve(base)?, resolve(subject)?, None)
+            (resolve(base)?, resolve(subject)?, None, ref_origin(subject))
         } else if subject.is_some() || base.is_some() {
             return Err(graph_subject_error(
                 "review requires both subject and review_base",
@@ -359,7 +399,15 @@ impl Factory {
             let warning = format!(
                 "No review subject was supplied; host chose {base}...{head} from {reason}. Pin --pr N or --set subject=HEAD --set review_base=BASE."
             );
-            (base, head, Some(warning))
+            let origin = local_git(&git, &self.cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .filter(|name| name != "HEAD")
+                .unwrap_or_else(|| "HEAD".to_owned());
+            (
+                base,
+                head,
+                Some(warning),
+                SubjectOrigin::LocalRef { name: origin },
+            )
         };
         if base == head && warning.is_none() {
             return Err(graph_subject_error(
@@ -374,7 +422,155 @@ impl Factory {
             base,
             head,
             warning,
+            origin,
         }))
+    }
+}
+
+impl Factory {
+    /// Resolve the operation's one subject. Admission calls this once; nothing
+    /// inside the admitted graph re-reads a ref or re-resolves a source.
+    pub(crate) fn resolve_graph_subject(
+        &self,
+        input: &Value,
+        document: &GraphDocument,
+        remote: bool,
+        cancel: &CancelToken,
+    ) -> Result<GraphSubject, FacadeError> {
+        let observed_at =
+            self.clock
+                .wall_now()
+                .map_err(|error| FacadeError::StateCorruptDetail {
+                    detail: format!("subject observation clock: {error}"),
+                })?;
+        let read_config = provenant_cli::config_reads::read_for(&self.context.roots, "run").ok();
+        let read_source = read_config
+            .as_ref()
+            .map(|config| read_source_choice(input, config))
+            .unwrap_or_default();
+        let git = provenant_os::git::git_executable();
+        let mut warnings = Vec::new();
+        if read_config.is_none() {
+            warnings.push(
+                "could not read the run configuration; lanes.read_source keeps its compiled default"
+                    .to_owned(),
+            );
+        }
+        if document.review.is_some() {
+            let review = self
+                .review_subject(input, true, cancel)?
+                .ok_or_else(|| graph_subject_error("no review subject"))?;
+            // An advisory empty range leaves no review base: that is the
+            // subject state the old review_subject_missing flag described.
+            let base = if review.base == review.head && review.warning.is_some() {
+                None
+            } else {
+                Some(
+                    review
+                        .base
+                        .parse::<provenant_core::GitOid>()
+                        .map_err(|_| graph_subject_error("invalid review base"))?,
+                )
+            };
+            let head = review
+                .head
+                .parse::<provenant_core::GitOid>()
+                .map_err(|_| graph_subject_error("invalid review head"))?;
+            let review_warning = review.warning.clone();
+            if let Some(warning) = review.warning {
+                warnings.push(warning);
+            }
+            return Ok(GraphSubject {
+                subject: Some(PinnedSubject {
+                    extra: Default::default(),
+                    base,
+                    head,
+                    origin: review.origin,
+                    observed_at,
+                    policy: SubjectPolicy::Pinned,
+                }),
+                writer_base: None,
+                read: ReadPlan::Pinned,
+                warnings,
+                review_warning,
+            });
+        }
+        // A writer's base is resolved by role: explicit base, branch default,
+        // named worktree HEAD, then no base at all. A missing base is advisory.
+        let writer_base = resolve_writer_base(
+            input,
+            &self.context.project_root,
+            &self.cwd,
+            self.context.roots.state.as_path(),
+            &read_source,
+            git.as_deref(),
+        );
+        if let Some(warning) = writer_base.fallback_warning(&self.cwd) {
+            warnings.push(warning);
+        }
+        let writer_base_oid = writer_base
+            .commit
+            .as_deref()
+            .and_then(|commit| provenant_core::GitOid::parse(commit).ok());
+        // Every other graph resolves its one read source here. A pinned source
+        // is a commit; the checkout choice is HEAD with a follow-latest policy,
+        // live locally and pinned to that same HEAD on a peer.
+        let selected =
+            read_only_source_ref(self.context.roots.state.as_path(), &self.cwd, &read_source);
+        let (subject, read) = if let Some(selected) = selected {
+            (
+                PinnedSubject {
+                    extra: Default::default(),
+                    base: None,
+                    head: selected.commit,
+                    origin: ref_origin(&selected.reference),
+                    observed_at,
+                    policy: SubjectPolicy::Pinned,
+                },
+                ReadPlan::Pinned,
+            )
+        } else {
+            let git = git
+                .as_deref()
+                .ok_or_else(|| graph_subject_error("Git unavailable"))?;
+            let head = provenant_run::resolve_git_base(git, &self.cwd, "HEAD")
+                .map_err(run_error)?
+                .parse::<provenant_core::GitOid>()
+                .map_err(|_| graph_subject_error("invalid HEAD"))?;
+            let name = local_git(git, &self.cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .filter(|name| name != "HEAD")
+                .unwrap_or_else(|| "HEAD".to_owned());
+            if remote {
+                let message = format!("live read source pinned to {head} for a peer placement");
+                provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                    provenant_records::warning::READ_SOURCE_PINNED_FOR_PEER,
+                    message.clone(),
+                ));
+                warnings.push(message);
+            }
+            (
+                PinnedSubject {
+                    extra: Default::default(),
+                    base: None,
+                    head,
+                    origin: SubjectOrigin::LocalRef { name },
+                    observed_at,
+                    policy: SubjectPolicy::FollowLatest,
+                },
+                if remote {
+                    ReadPlan::Pinned
+                } else {
+                    ReadPlan::Live
+                },
+            )
+        };
+        Ok(GraphSubject {
+            subject: Some(subject),
+            writer_base: writer_base_oid,
+            read,
+            warnings,
+            review_warning: None,
+        })
     }
 }
 
@@ -882,5 +1078,192 @@ mod tests {
         assert_eq!(subject.head_ref_oid.to_string(), head);
         assert_eq!(subject.base_ref_name, "main");
         Ok(())
+    }
+}
+
+/// The base a `--branch` writer starts from when it names no `--base`.
+pub(super) const DEFAULT_WRITER_BASE: &str = "refs/remotes/origin/HEAD";
+
+/// The launch expression that supplied a writer's base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WriterBaseSource {
+    ExplicitBase,
+    BranchDefault,
+    WorktreeHead,
+    CallerCheckout,
+}
+
+impl WriterBaseSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ExplicitBase => "explicit --base",
+            Self::BranchDefault => "the --branch default",
+            Self::WorktreeHead => "the named worktree HEAD",
+            Self::CallerCheckout => "no base expression",
+        }
+    }
+}
+
+/// The one base a writer launch starts from, resolved before its identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WriterBase {
+    pub(super) commit: Option<String>,
+    pub(super) source: WriterBaseSource,
+}
+
+impl WriterBase {
+    /// Name the expression and the fallback when no base could be resolved.
+    /// Missing Git evidence is advisory, never a refusal.
+    pub(super) fn fallback_warning(&self, cwd: &Path) -> Option<String> {
+        self.commit.is_none().then(|| {
+            format!(
+                "writer launch has no resolved base (source: {}); its identity falls back to the caller checkout at {}",
+                self.source.label(),
+                cwd.display()
+            )
+        })
+    }
+}
+
+/// Resolve one writer base by role: explicit `--base`, else the `--branch`
+/// default, else the named worktree's HEAD, else none.
+pub(super) fn resolve_writer_base(
+    input: &Value,
+    project_root: &Path,
+    cwd: &Path,
+    state: &Path,
+    read_source: &ReadSourceChoice,
+    git: Option<&Path>,
+) -> WriterBase {
+    if let Some(base) = input
+        .get("base")
+        .and_then(Value::as_str)
+        .filter(|base| !base.is_empty())
+    {
+        return WriterBase {
+            commit: resolve_ref(state, cwd, base, read_source, "--base"),
+            source: WriterBaseSource::ExplicitBase,
+        };
+    }
+    if input.get("branch").is_some_and(|branch| !branch.is_null()) {
+        return WriterBase {
+            commit: resolve_ref(state, cwd, DEFAULT_WRITER_BASE, read_source, "--branch"),
+            source: WriterBaseSource::BranchDefault,
+        };
+    }
+    if let Some(worktree) = named_worktree(input) {
+        let path = absolute(project_root, worktree);
+        return WriterBase {
+            commit: git.and_then(|git| provenant_run::resolve_git_base(git, &path, "HEAD").ok()),
+            source: WriterBaseSource::WorktreeHead,
+        };
+    }
+    WriterBase {
+        commit: None,
+        source: WriterBaseSource::CallerCheckout,
+    }
+}
+
+/// A `--worktree` control, or a composite's `--set worktree=PATH` binding.
+fn named_worktree(input: &Value) -> Option<&str> {
+    input
+        .get("worktree")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            input
+                .pointer("/set/worktree")
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty())
+        })
+}
+
+fn absolute(project_root: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        project_root.join(path)
+    }
+}
+
+/// Resolve a named base through the same read-source resolver as any explicit
+/// ref, keeping the launch layer and the expression that chose it.
+fn resolve_ref(
+    state: &Path,
+    cwd: &Path,
+    base: &str,
+    read_source: &ReadSourceChoice,
+    origin: &str,
+) -> Option<String> {
+    read_only_source_ref(
+        state,
+        cwd,
+        &ReadSourceChoice {
+            value: base.to_owned(),
+            fetch_first: read_source.fetch_first,
+            layer: Layer::Launch,
+            origin: Some(origin.to_owned()),
+        },
+    )
+    .map(|selected| selected.commit.to_string())
+}
+
+/// Pin a read-only node and its read-only members to the commit their launch
+/// reads. Writer nodes, continuations and explicit source bindings keep their
+/// own subject; nested templates are visited so every reader in a composite
+/// sees the same tree.
+pub(super) fn bind_default_read_only_source(node: &mut GraphNode, commit: &str) {
+    if node.access == AccessMode::ReadOnly && node.source.is_none() && node.continues.is_none() {
+        node.source = Some(SourceBinding::Commit {
+            commit: commit.into(),
+        });
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_default_read_only_source(child, commit);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_default_read_only_source(child, commit);
+        }
+    }
+}
+
+/// Pin a writer graph's read-only leaves to the writer base. A composite that
+/// names its own source keeps it: its members inherit that subject when the
+/// graph expands, and a fixed base must not override (say) the writer head a
+/// review panel reads. Container nodes stay unbindable so a writer member never
+/// inherits a read source from its read-only boundary.
+pub(super) fn bind_writer_base_source(node: &mut GraphNode, commit: &str) {
+    if node.source.is_some() {
+        return;
+    }
+    // Only an agent node executes, so only it takes an execution binding;
+    // graph validation refuses a source on a gate, decision or landing.
+    let agent = matches!(
+        node.kind,
+        None | Some(NodeKind::Task | NodeKind::Synthesise)
+    );
+    if agent
+        && node.access == AccessMode::ReadOnly
+        && node.continues.is_none()
+        && node.composite.is_none()
+        && node.loop_body.is_none()
+    {
+        node.source = Some(SourceBinding::Commit {
+            commit: commit.into(),
+        });
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_writer_base_source(child, commit);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_writer_base_source(child, commit);
+        }
     }
 }

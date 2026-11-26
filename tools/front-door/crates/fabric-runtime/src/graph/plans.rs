@@ -1436,7 +1436,6 @@ pub(super) fn flatten_fragment(
     }
     let mut local = GraphDocument {
         review: None,
-        review_subject_missing: false,
         subject: None,
         exclude: Vec::new(),
         network: None,

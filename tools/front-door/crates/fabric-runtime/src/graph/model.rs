@@ -149,9 +149,6 @@ pub struct GraphDocument {
     /// Review resolution inputs retained with the submitted graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<provenant_routing::ReviewRequest>,
-    /// The graph requested a review without a resolvable review subject.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub review_subject_missing: bool,
     /// Written by the host at admission; a caller-supplied value is overwritten.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<provenant_records::subject::PinnedSubject>,

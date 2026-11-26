@@ -7,7 +7,7 @@ mod interface;
 #[cfg(test)]
 mod lane_read_tests;
 mod refusal_detail;
-mod review_subject;
+mod subject;
 pub(crate) mod unified;
 pub(crate) use unified::{
     GraphCommand, check_targets, command_fail, final_status_rows, graph_listing, read_lane_graph,
@@ -25,7 +25,6 @@ mod peer_source_binding;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
 mod steer;
-mod writer_base;
 
 pub(crate) use git_facts::*;
 pub(crate) use owner::*;

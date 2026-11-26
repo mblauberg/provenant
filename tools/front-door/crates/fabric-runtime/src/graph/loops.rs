@@ -409,7 +409,6 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
         }
         let body_document = GraphDocument {
             review: None,
-            review_subject_missing: false,
             subject: None,
             nodes: body,
             delivery: None,
