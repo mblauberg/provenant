@@ -136,7 +136,10 @@ caller's live guardian ancestor. The proof follows the kernel-reported parent
 chain with exact current identities and rechecks each child identity and parent
 PID while walking; process start timestamps do not determine ancestry. A scoped
 or host-wide census is neither required nor consulted, so an inconclusive or
-unavailable census cannot present a healthy relay as replaced. Settlement reactions (graph advance, chair notice,
+unavailable census cannot present a healthy relay as replaced. On macOS, when
+libproc cannot inspect an ancestor across a sandbox boundary, the observer uses
+checked kernel sysctl process metadata and revalidates the identity and parent
+link; inaccessible or inconsistent metadata still refuses the call. Settlement reactions (graph advance, chair notice,
 chair log) run once in effect, and notices never instruct.
 - Why: a lenient parser turns a typo into another request, and a lost lane must
   never commit after its deadline.
