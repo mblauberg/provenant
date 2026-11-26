@@ -343,7 +343,7 @@ fn blocked_environment_lens_settles_the_panel_and_names_the_gap() {
     }))
     .unwrap();
     let mut blocked_observation =
-        terminal_with_result(GraphAttemptOutcome::DeclaredStop, &blocked);
+        terminal_with_result(GraphAttemptOutcome::DeclaredStop, blocked);
     if let AttemptObservation::Terminal { stop, .. } = &mut blocked_observation {
         *stop = Some(provenant_records::StopCause::BlockedEnvironment);
     }
