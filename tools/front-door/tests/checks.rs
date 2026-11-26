@@ -95,6 +95,49 @@ fn config_and_install_defects_are_findings_but_escape_is_an_error() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+#[test]
+fn check_config_warns_when_warm_cache_toolchain_differs_from_pin() -> Result {
+    use std::{fs, os::unix::fs::DirBuilderExt};
+
+    let rig = check_rig()?;
+    fs::write(
+        rig.project.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.100.0\"\n",
+    )?;
+    // Slot caches are private run stores; the fixture must use the same mode.
+    let key = provenant_config::project_key(rig.project.as_path());
+    let slot = rig
+        .home
+        .join("Library/Caches/provenant-slots")
+        .join(&key)
+        .join("0");
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700).create(&slot)?;
+    provenant_run::build::slots::SlotRecord {
+        schema: 1,
+        project_key: key,
+        index: 0,
+        warm_toolchain: Some("1.99.1".into()),
+        ..Default::default()
+    }
+    .write(&slot.join("slot.json"))?;
+
+    let output = rig.command(&["check", "config", "--json"])?;
+    let findings = json(&output)?["data"]["findings"].clone();
+    assert!(
+        findings
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| {
+                row["rule"] == "build.toolchain_drift"
+                    && row["message"].as_str().is_some_and(|message| {
+                        message.contains("1.99.1") && message.contains("1.100.0")
+                    })
+            })),
+        "findings: {findings:?}"
+    );
+    Ok(())
+}
+
 /// Install a staged release through the real installer, recording roots under
 /// `rig.home`. Returns the source digest that names its release tree.
 fn install_staged_release(rig: &TestRig) -> Result<provenant_records::SourceDigest> {

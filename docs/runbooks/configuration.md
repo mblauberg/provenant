@@ -101,6 +101,15 @@ separately in `verify.lane`. `strategy` accepts only `slots`, with
   `queue` always waits; `local` runs locally after the admission wait.
 - `clean` before a slot job: `none` keeps files, `untracked` runs
   `git clean -ffd`, `ignored` runs `git clean -ffdx`.
+- `target` keys the slot's warm Cargo target directory by comma-separated
+  components. `toolchain` uses the compiler's resolved `rustc -vV` identity
+  (never the channel string, which is not unique), so a warm cache built by a
+  different toolchain cannot be reused; `worktree` keeps workspace-member
+  artifacts per checkout so two worktrees never share stale members. The
+  default is `toolchain,worktree`; `shared` restores one legacy target. The
+  configured layer is reported by `check config` and `config show`, and
+  `check config` warns when a warm slot's toolchain differs from the
+  repository's `rust-toolchain.toml` pin.
 - `priority` maps a job class to a queue level and orders waiters; it never
   preempts a running job. `queue_aging` raises a waiter's effective level to
   bound lower-priority waits.

@@ -970,6 +970,7 @@ fn build_defaults_are_slots_and_generic() {
     assert_eq!(build.offload, "auto");
     assert_eq!(build.overflow, "auto");
     assert_eq!(build.clean, "untracked");
+    assert_eq!(build.target, "toolchain,worktree");
     assert!(build.stacks.is_empty());
     assert_eq!(build.snapshot_retention, "7d");
     assert_eq!(build.priority, default_build_priority());
@@ -981,6 +982,10 @@ fn build_defaults_are_slots_and_generic() {
     assert_eq!(build.strategy_name().value, BuildStrategyName::Slots);
     assert_eq!(build.overflow_policy().value, BuildOverflow::Auto);
     assert_eq!(build.clean_policy().value, BuildClean::Untracked);
+    assert_eq!(
+        build.target_layout().value,
+        DEFAULT_BUILD_TARGET_KEYS.to_vec()
+    );
     assert_eq!(build.offload_policy().value, BuildOffload::Auto);
     assert_eq!(build.priority_for("test").value, BuildPriority::Test);
     assert_eq!(build.queue_aging_duration().value, Duration::from_secs(120));
@@ -990,6 +995,39 @@ fn build_defaults_are_slots_and_generic() {
     assert_eq!(backend, PortBackendKind::Builtin);
     assert!(valid);
     assert!(reason.is_none());
+}
+
+#[test]
+fn build_target_layout_derives_per_toolchain_and_per_worktree_keys() {
+    let table = PortTable::builtin();
+    let build = &table.build;
+    assert_eq!(
+        build.target_layout().value,
+        vec![BuildTargetKey::Toolchain, BuildTargetKey::Worktree]
+    );
+    assert_eq!(build.source_for_leaf("target"), Layer::Default);
+
+    let mut reordered = build.clone();
+    reordered.target = "worktree, toolchain, worktree".into();
+    let resolved = reordered.target_layout();
+    // The order is the user's, duplicates are dropped, and the source follows
+    // the leaf layer so `config show`/`check config` can name it.
+    assert_eq!(
+        resolved.value,
+        vec![BuildTargetKey::Worktree, BuildTargetKey::Toolchain]
+    );
+    assert!(resolved.warnings.is_empty());
+
+    let mut shared = build.clone();
+    shared.target = "shared".into();
+    assert!(shared.target_layout().value.is_empty());
+
+    let mut unknown = build.clone();
+    unknown.target = "toolchain,channel".into();
+    let fallback = unknown.target_layout();
+    assert_eq!(fallback.value, DEFAULT_BUILD_TARGET_KEYS.to_vec());
+    assert!(fallback.warnings[0].contains("build.target"));
+    assert!(fallback.warnings[0].contains("channel"));
 }
 
 #[test]
