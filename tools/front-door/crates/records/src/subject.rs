@@ -21,10 +21,10 @@ pub struct PinnedSubject {
     /// ref name already lives in `origin`; this names the comparison side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
-    /// `KEY from SOURCE` for the policy that fixed this head, so every policy
-    /// reports its source at the point of use.
+    /// The layer and exact place of the policy that fixed this head, so every
+    /// policy reports its source at the point of use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_source: Option<String>,
+    pub policy_source: Option<crate::provenance::Source>,
     /// Earlier pinned heads in order, oldest first, recorded when a
     /// `follow_latest` policy re-pins; empty for a subject that never moved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

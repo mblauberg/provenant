@@ -68,7 +68,7 @@ fn event_reading(number: u64, complete: bool, detail: Value) -> Reading {
             number,
             repository: &Ok("owner/repo".into()),
             policy: SubjectPolicy::Pinned,
-            policy_source: "domains.wait.pr_head_policy from the compiled test profile",
+            policy_source: &super::test_policy_source(),
             now: WallTime::UNIX_EPOCH,
         },
         complete,
@@ -334,7 +334,7 @@ fn a_target_settling_after_the_last_sample_is_reported_settled_at_expiry() {
         subject: None,
         pinned_head_seen: false,
         policy: SubjectPolicy::Pinned,
-        policy_source: "domains.wait.pr_head_policy from the compiled test profile".into(),
+        policy_source: super::test_policy_source(),
         complete: false,
     };
     for (with_pull, expected) in [(false, Outcome::Ok), (true, Outcome::Timeout)] {
@@ -978,7 +978,7 @@ fn test_sample(policy: SubjectPolicy) -> PrSample<'static> {
         number: 7,
         repository: &FIXTURE_REPOSITORY,
         policy,
-        policy_source: "domains.wait.pr_head_policy from the compiled test profile",
+        policy_source: &super::test_policy_source(),
         now: WallTime::UNIX_EPOCH,
     }
 }
@@ -996,7 +996,7 @@ fn pinned_subject(head: GitOid, policy: SubjectPolicy) -> Box<PinnedSubject> {
         policy,
         repository: Some("owner/repo".into()),
         base_ref: None,
-        policy_source: Some("domains.wait.pr_head_policy from the compiled test profile".into()),
+        policy_source: Some(super::test_policy_source()),
         followed_from: Vec::new(),
     })
 }
@@ -1144,7 +1144,7 @@ fn a_wait_pins_the_forge_head_at_admission() {
         &Ok("owner/repo".into()),
         SubjectPolicy::Pinned,
         PrHeadSource::Auto,
-        "domains.wait.pr_head_policy from the compiled test profile",
+        &super::test_policy_source(),
         now,
         None,
         Some((forge.clone(), "feature".into())),
@@ -1179,7 +1179,10 @@ fn a_wait_pins_the_forge_head_at_admission() {
     assert_eq!(forced.head, oid(&explicit));
     assert_eq!(forced.origin, SubjectOrigin::Explicit);
     assert_eq!(forced.policy, SubjectPolicy::Pinned, "--head always pins");
-    assert_eq!(forced.policy_source.as_deref(), Some("--head"));
+    assert_eq!(
+        forced.policy_source,
+        Some(provenant_records::Source::at(provenant_records::Layer::Launch, "--head"))
+    );
 
     let local = "e".repeat(40);
     let local_subject = pr_subject(
@@ -1187,7 +1190,7 @@ fn a_wait_pins_the_forge_head_at_admission() {
         &Ok("owner/repo".into()),
         SubjectPolicy::Pinned,
         PrHeadSource::Auto,
-        "domains.wait.pr_head_policy from the compiled test profile",
+        &super::test_policy_source(),
         now,
         None,
         Some((forge, "feature".into())),
@@ -1243,7 +1246,7 @@ fn a_forge_head_source_ignores_a_differing_local_tip() {
         &Ok("owner/repo".into()),
         SubjectPolicy::Pinned,
         PrHeadSource::Forge,
-        "domains.wait.pr_head_policy from the compiled test profile",
+        &super::test_policy_source(),
         now,
         None,
         Some((forge.clone(), "feature".into())),
@@ -1276,7 +1279,7 @@ fn a_local_head_source_without_a_branch_warns_and_uses_the_forge() {
             &Ok("owner/repo".into()),
             SubjectPolicy::Pinned,
             PrHeadSource::Local,
-            "domains.wait.pr_head_policy from the compiled test profile",
+            &super::test_policy_source(),
             now,
             None,
             Some((forge.clone(), "feature".into())),
@@ -1332,7 +1335,7 @@ fn pr_timeout_reports_the_last_known_check_summary_and_next_step() {
         subject: None,
         pinned_head_seen: false,
         policy: SubjectPolicy::Pinned,
-        policy_source: "domains.wait.pr_head_policy from the compiled test profile".into(),
+        policy_source: super::test_policy_source(),
         complete: false,
     }];
     let pending = Reading {
@@ -1391,7 +1394,7 @@ fn a_timed_out_complete_wait_keeps_its_last_known_line() {
             subject: None,
             pinned_head_seen: false,
             policy: SubjectPolicy::Pinned,
-            policy_source: "domains.wait.pr_head_policy from the compiled test profile".into(),
+            policy_source: super::test_policy_source(),
             complete,
         }]
     };

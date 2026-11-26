@@ -51,7 +51,10 @@ fn dispatch_persists_the_admitted_subject_on_the_request() -> TestResult {
         policy: provenant_records::subject::SubjectPolicy::Pinned,
         repository: Some("owner/repo".into()),
         base_ref: Some("main".into()),
-        policy_source: Some("graph admission (always pinned)".into()),
+        policy_source: Some(provenant_records::Source::at(
+            provenant_records::Layer::Default,
+            "graph admission (always pinned)",
+        )),
         followed_from: Vec::new(),
     };
     let mut request = submission("subject on request");
@@ -239,7 +242,6 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
             fixture: None,
             pinned_base: None,
             head: None,
-            subject: None,
             source_head: None,
             route: RequestedRoute::Named {
                 required_family: None,

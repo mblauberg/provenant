@@ -42,9 +42,9 @@ enum Source {
         /// The effective `domains.wait.pr_head_policy` (or its command
         /// override) this wait applies to every sample, one-off reads included.
         policy: SubjectPolicy,
-        /// `KEY from SOURCE` for the policy that fixed this head, carried on
+        /// The typed source of the policy that fixed this head, carried on
         /// every sample so a first pin reports the same source as admission.
-        policy_source: String,
+        policy_source: provenant_records::Source,
         complete: bool,
     },
 }
@@ -358,14 +358,16 @@ fn pr_subject(
     repository: &Result<String, String>,
     policy: SubjectPolicy,
     source: PrHeadSource,
-    policy_source: &str,
+    policy_source: &provenant_records::Source,
     now: WallTime,
     command_head: Option<&str>,
     forge: Option<(String, String)>,
     local_tip: Option<String>,
 ) -> Option<PinnedSubject> {
-    let make =
-        |head: GitOid, origin: SubjectOrigin, policy: SubjectPolicy, source: &str| PinnedSubject {
+    let make = |head: GitOid,
+                origin: SubjectOrigin,
+                policy: SubjectPolicy,
+                source: &provenant_records::Source| PinnedSubject {
             extra: Default::default(),
             base: None,
             head,
@@ -374,7 +376,7 @@ fn pr_subject(
             policy,
             repository: repository.as_ref().ok().cloned(),
             base_ref: None,
-            policy_source: Some(source.to_owned()),
+            policy_source: Some(source.clone()),
             followed_from: Vec::new(),
         };
     if let Some(head) = command_head {
@@ -383,7 +385,7 @@ fn pr_subject(
                 head,
                 SubjectOrigin::Explicit,
                 SubjectPolicy::Pinned,
-                "--head",
+                &provenant_records::Source::at(provenant_records::Layer::Launch, "--head"),
             )
         });
     }
@@ -435,7 +437,7 @@ pub(crate) struct PrSample<'a> {
     pub(crate) number: u64,
     pub(crate) repository: &'a Result<String, String>,
     pub(crate) policy: SubjectPolicy,
-    pub(crate) policy_source: &'a str,
+    pub(crate) policy_source: &'a provenant_records::Source,
     pub(crate) now: WallTime,
 }
 
@@ -474,7 +476,7 @@ fn apply_subject_sample(
                 policy,
                 repository: repository.as_ref().ok().cloned(),
                 base_ref: None,
-                policy_source: Some(policy_source.to_owned()),
+                policy_source: Some(policy_source.clone()),
                 followed_from: Vec::new(),
             }));
         }
@@ -2015,11 +2017,11 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     let head = settings.effective_pr_head(project_key.as_deref());
     let pr_head_policy = command.pr_head_policy.unwrap_or(head.policy);
     let pr_policy_source = if command.head.is_some() {
-        "--head".to_owned()
+        provenant_records::Source::at(provenant_records::Layer::Launch, "--head")
     } else if command.pr_head_policy.is_some() {
-        "--pr-head-policy".to_owned()
+        provenant_records::Source::at(provenant_records::Layer::Launch, "--pr-head-policy")
     } else {
-        origin.describe(&head.policy_key)
+        origin.source(&head.policy_key)
     };
     let head_source_source = origin.describe(&head.source_key);
     let unpinned_source = origin.describe(&head.unpinned_key);
@@ -2804,6 +2806,15 @@ fn write_line(line: &str) -> std::io::Result<()> {
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "{line}")?;
     stdout.flush()
+}
+
+/// The policy source the unit tests pin with: the compiled profile's key.
+#[cfg(test)]
+pub(crate) fn test_policy_source() -> provenant_records::Source {
+    provenant_records::Source::at(
+        provenant_records::Layer::Profile,
+        "test#domains.wait.pr_head_policy",
+    )
 }
 
 #[cfg(test)]

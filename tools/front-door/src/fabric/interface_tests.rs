@@ -5127,7 +5127,10 @@ fn one_subject_per_origin_survives_a_push() -> Result {
             policy: SubjectPolicy::Pinned,
             repository: None,
             base_ref: None,
-            policy_source: Some(format!("test source {index}")),
+            policy_source: Some(provenant_records::Source::at(
+                provenant_records::Layer::Launch,
+                format!("test source {index}"),
+            )),
             followed_from: Vec::new(),
         };
         let document: GraphDocument = serde_json::from_value(json!({
@@ -5195,7 +5198,7 @@ fn one_subject_per_origin_survives_a_push() -> Result {
         assert_eq!(reloaded.subject, Some(expected.clone()), "{index}");
         let wire = serde_json::to_value(&reloaded)?;
         assert!(
-            wire["subject"]["policy_source"].is_string(),
+            wire["subject"]["policy_source"]["layer"].is_string(),
             "every admitted subject names its policy source: {index}: {wire}"
         );
     }

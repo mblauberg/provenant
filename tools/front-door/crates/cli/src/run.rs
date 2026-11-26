@@ -387,6 +387,14 @@ impl ReadSourceChoice {
             None => self.layer.as_str().to_owned(),
         }
     }
+
+    /// The typed source of this choice, as a pinned subject records it.
+    pub fn provenance(&self) -> provenant_records::Source {
+        provenant_records::Source {
+            layer: self.layer,
+            origin: self.origin.clone(),
+        }
+    }
 }
 
 /// Resolve the source of a read-only launch through the one resolver. The

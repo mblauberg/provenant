@@ -496,7 +496,8 @@ otherwise pins checkout HEAD; `live` reads the live tree locally and is pinned t
 HEAD on a peer with `READ_SOURCE_PINNED_FOR_PEER`; `default_branch` pins the
 fetched default branch; any other value is a Git ref. `--source` accepts the same
 vocabulary and overrides configuration. The admitted subject's `policy_source`
-names the layer that chose the pin. A repository file that still says `checkout`
+is a typed provenance source (`{layer, origin}`) naming the layer and the exact
+file, key or flag that chose the pin. A repository file that still says `checkout`
 warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`; it never acts as `live`.
 
 A writer's base is selected separately by `lanes.writer_base`: `default_branch`

@@ -453,7 +453,7 @@ impl Factory {
                 policy: SubjectPolicy::Pinned,
                 repository: forge_repository,
                 base_ref: subject_base_ref,
-                policy_source: Some(REVIEW_SUBJECT_SOURCE.into()),
+                policy_source: Some(review_subject_source()),
                 followed_from: Vec::new(),
             },
             warning,
@@ -466,9 +466,14 @@ impl Factory {
 /// source is what tells the two apart when a task's base is chosen.
 pub(crate) const REVIEW_SUBJECT_SOURCE: &str = "graph admission (always pinned)";
 
+/// The typed source of a review subject: admission always pins it.
+pub(crate) fn review_subject_source() -> provenant_records::Source {
+    provenant_records::Source::at(provenant_records::Layer::Default, REVIEW_SUBJECT_SOURCE)
+}
+
 /// Whether an admitted subject is the review fallback with an empty range.
 pub(crate) fn is_empty_review_range(subject: &PinnedSubject) -> bool {
-    subject.base.is_none() && subject.policy_source.as_deref() == Some(REVIEW_SUBJECT_SOURCE)
+    subject.base.is_none() && subject.policy_source == Some(review_subject_source())
 }
 
 impl Factory {
@@ -579,7 +584,7 @@ impl Factory {
                     policy: SubjectPolicy::Pinned,
                     repository: None,
                     base_ref: None,
-                    policy_source: Some(read_source.description()),
+                    policy_source: Some(read_source.provenance()),
                     followed_from: Vec::new(),
                 }),
                 writer_base,
@@ -640,7 +645,7 @@ impl Factory {
                 policy: SubjectPolicy::FollowLatest,
                 repository: None,
                 base_ref: None,
-                policy_source: Some(read_source.description()),
+                policy_source: Some(read_source.provenance()),
                 followed_from: Vec::new(),
             }),
             writer_base,
@@ -918,10 +923,7 @@ mod tests {
             assert_eq!(result.0.base.unwrap().to_string(), fx.base);
             assert_eq!(result.0.repository.as_deref(), Some("owner/repo"));
             assert_eq!(result.0.base_ref.as_deref(), Some("main"));
-            assert_eq!(
-                result.0.policy_source.as_deref(),
-                Some("graph admission (always pinned)")
-            );
+            assert_eq!(result.0.policy_source, Some(review_subject_source()));
             assert!(result.1.is_none());
         }
 

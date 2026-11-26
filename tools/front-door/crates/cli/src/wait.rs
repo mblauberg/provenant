@@ -204,6 +204,26 @@ impl Origin {
         self.unavailable.as_deref()
     }
 
+    /// The typed source of `key`: the compiled profile, the host config file,
+    /// or a host-project config file, each with `FILE#KEY` as its origin.
+    pub fn source(&self, key: &str) -> provenant_records::Source {
+        use provenant_records::{Layer, Source};
+        match self.of(key) {
+            provenant_config::Origin::Compiled { profile } => {
+                Source::at(Layer::Profile, format!("{}#{key}", profile.as_str()))
+            }
+            provenant_config::Origin::User { path } => {
+                let path = path.as_path_text().unwrap_or("config.toml").to_owned();
+                let layer = if path == "config.toml" {
+                    Layer::Host
+                } else {
+                    Layer::HostProject
+                };
+                Source::at(layer, format!("{path}#{key}"))
+            }
+        }
+    }
+
     /// `KEY from SOURCE`, the form every wait report names a setting in.
     pub fn describe(&self, key: &str) -> String {
         let source = match self.of(key) {
