@@ -1283,7 +1283,7 @@ impl PrepareError {
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
             Self::Unsupported(error) => run::PrepareRefusal::boxed(
-                provenant_records::run::CauseKind::HandoffRefused,
+                provenant_records::run::CauseKind::LaunchHandoffRefused,
                 error.to_string(),
             ),
             Self::ContinuationRequest(error) => {
@@ -1322,7 +1322,7 @@ impl PrepareError {
                             head: actual,
                         }
                     }
-                    _ => provenant_records::run::CauseKind::HandoffRefused,
+                    _ => provenant_records::run::CauseKind::LaunchHandoffRefused,
                 };
                 let mut refusal = run::PrepareRefusal::boxed(cause, error.to_string());
                 refusal.boundary_class = boundary_class;
@@ -1333,7 +1333,7 @@ impl PrepareError {
                 let policy_code = provider_policy_code(&error);
                 let boundary_class = error.boundary_class();
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::CauseKind::HandoffRefused,
+                    provenant_records::run::CauseKind::LaunchHandoffRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = boundary_class;
@@ -1430,7 +1430,7 @@ impl PrepareError {
                 refusal
             }
             other => run::PrepareRefusal::boxed(
-                provenant_records::run::CauseKind::HandoffRefused,
+                provenant_records::run::CauseKind::LaunchHandoffRefused,
                 other.to_string(),
             ),
         }
@@ -1471,7 +1471,7 @@ fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
         let text = refusal.terminal_cause.diagnostic(true);
         assert!(text.contains(&pinned.to_string()), "{text}");
         assert!(text.contains(&head.to_string()), "{text}");
-        assert!(!text.contains(CauseKind::HandoffRefused.detail()));
+        assert!(!text.contains(CauseKind::LaunchHandoffRefused.detail()));
     }
 }
 
@@ -1608,7 +1608,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert!(home.policy_code.is_none());
     assert_eq!(
         home.terminal_cause,
-        provenant_records::run::CauseKind::HandoffRefused
+        provenant_records::run::CauseKind::LaunchHandoffRefused
     );
     let extensions =
         PlanCheckError::Plan(provenant_confinement::PlanError::UnconfinedExtensions).into_refusal();
@@ -1975,7 +1975,7 @@ impl PlanCheckError {
         let skipped = self.skipped("preparation");
         let boundary = self.boundary_class();
         let cause = if boundary == provenant_records::diagnostic::BoundaryClass::None {
-            provenant_records::run::CauseKind::HandoffRefused
+            provenant_records::run::CauseKind::LaunchHandoffRefused
         } else {
             provenant_records::run::CauseKind::AccessPolicyRefused
         };
@@ -5926,7 +5926,7 @@ pub(super) fn prepare_candidates_inner(
             (true, None) => {
                 return Err(PrepareError::Refusal {
                     message: "provider prepared a resumed invocation without its retained session binding".into(),
-                    cause: provenant_records::run::CauseKind::HandoffRefused,
+                    cause: provenant_records::run::CauseKind::LaunchHandoffRefused,
                     note: None,
                     fallback_outcome: None,
                 });

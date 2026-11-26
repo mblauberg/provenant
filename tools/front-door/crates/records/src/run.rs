@@ -1500,11 +1500,11 @@ pub enum CauseKind {
     CloudPlacementRemoved,
     WriteGrantsRefused,
     WorktreeBusy,
-    HandoffRefused,
+    LaunchHandoffRefused,
     /// A local launch preparation step refused the attempt before custody.
     /// The attempt's `preparation_failure` names the step; its note carries the
     /// host's bounded reason and the correction that reason implies. A real
-    /// host handoff refusal keeps [`Self::HandoffRefused`] and its reconcile remedy.
+    /// host handoff refusal keeps [`Self::LaunchHandoffRefused`] and its reconcile remedy.
     PreparationRefused,
     /// A retry's writer head does not match the graph's pinned source commit.
     /// It is a pin problem, not a failed launch handoff.
@@ -1572,7 +1572,7 @@ impl CauseKind {
             Self::CloudPlacementRemoved => "cloud placement removed; provenant output ID",
             Self::WriteGrantsRefused => "write grants refused; provenant output ID",
             Self::WorktreeBusy => "worktree busy; provenant output ID",
-            Self::HandoffRefused => "launch handoff refused; provenant output ID",
+            Self::LaunchHandoffRefused => "launch handoff refused; provenant output ID",
             Self::PreparationRefused => "launch preparation refused; provenant output ID",
             Self::WriterPinMismatch { .. } => "writer source pin mismatch; provenant output ID",
             Self::RetainedWriterImport => "writer import retained; provenant output ID",
@@ -1655,7 +1655,7 @@ impl CauseKind {
             Self::WorktreeBusy => {
                 "the worktree is busy; wait for its writer to finish or run `provenant reconcile`"
             }
-            Self::HandoffRefused => {
+            Self::LaunchHandoffRefused => {
                 "the host refused the launch handoff; run `provenant reconcile` before retrying"
             }
             Self::PreparationRefused => {
@@ -3239,7 +3239,7 @@ mod tests {
         assert!(text.contains(&pinned.to_string()), "{text}");
         assert!(text.contains(&head.to_string()), "{text}");
         assert!(
-            !text.contains(CauseKind::HandoffRefused.detail()),
+            !text.contains(CauseKind::LaunchHandoffRefused.detail()),
             "a pin mismatch must not blame the launch handoff: {text}"
         );
         let detail = cause.detail();

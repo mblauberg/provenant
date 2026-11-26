@@ -4499,7 +4499,7 @@ impl RunStore {
                         terminal_cause: if cancelled {
                             None
                         } else {
-                            Some(CauseKind::HandoffRefused)
+                            Some(CauseKind::LaunchHandoffRefused)
                         },
                         terminal_note: None,
                     },
@@ -4573,7 +4573,7 @@ impl RunStore {
                 terminal_cause: if cancelled {
                     None
                 } else {
-                    Some(CauseKind::HandoffRefused)
+                    Some(CauseKind::LaunchHandoffRefused)
                 },
                 terminal_note: None,
             },

@@ -1296,7 +1296,7 @@ fn terminal_cause_code(value: &Value) -> Option<String> {
 fn project_attempt_failure(row: &mut Value) {
     if let Some(code) = terminal_cause_code(&row["terminal_cause"]) {
         row["cause_code"] = json!(code);
-        if code == "handoff_refused" {
+        if code == "launch_handoff_refused" {
             if let Some(id) = row["id"].as_str() {
                 row["next"] = json!(format!("provenant retry {id}"));
             }

@@ -105,12 +105,12 @@ fn interrupted_writer_preparation_projects_typed_rejection()
         return Err("interrupted preparation did not settle".into());
     };
     assert_eq!(*outcome, Outcome::Rejected);
-    assert_eq!(*terminal_cause, Some(CauseKind::HandoffRefused));
+    assert_eq!(*terminal_cause, Some(CauseKind::LaunchHandoffRefused));
     assert_eq!(*terminal_note, None);
     let projected = provenant_records::wire::lane::LaneRow::project(&terminal, Default::default());
     assert_eq!(
         projected.reason.as_deref(),
-        Some(CauseKind::HandoffRefused.detail())
+        Some(CauseKind::LaunchHandoffRefused.detail())
     );
     Ok(())
 }

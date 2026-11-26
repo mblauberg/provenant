@@ -212,7 +212,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "cloud_placement_removed",
             "write_grants_refused",
             "worktree_busy",
-            "handoff_refused",
+            "launch_handoff_refused",
             "preparation_refused",
             "retained_writer_import",
             "unsupported_platform",

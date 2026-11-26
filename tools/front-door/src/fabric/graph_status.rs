@@ -592,8 +592,8 @@ mod tests {
             }),
             json!({
                 "kind":"attempt","work_key":key,"state":"terminal",
-                "outcome":"rejected","terminal_cause":"handoff_refused",
-                "cause_code":"handoff_refused","result_path":null,
+                "outcome":"rejected","terminal_cause":"launch_handoff_refused",
+                "cause_code":"launch_handoff_refused","result_path":null,
                 "reason":"writer lineage: invalid run record: graph predecessor writer or source"
             }),
         ];
@@ -614,7 +614,7 @@ mod tests {
             digest.line
         );
         assert!(
-            !digest.line.contains("cause=handoff_refused"),
+            !digest.line.contains("cause=launch_handoff_refused"),
             "the refused attempt replaced the successful one: {}",
             digest.line
         );

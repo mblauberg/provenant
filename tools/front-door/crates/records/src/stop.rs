@@ -635,7 +635,7 @@ impl From<crate::run::CauseKind> for StopCause {
             T::CloudPlacementRemoved => Self::CloudPlacementRemoved,
             T::WriteGrantsRefused => Self::WriteGrantsRefused,
             T::WorktreeBusy => Self::WorktreeBusy,
-            T::HandoffRefused => Self::LaunchHandoffRefused,
+            T::LaunchHandoffRefused => Self::LaunchHandoffRefused,
             T::PreparationRefused => Self::PreparationRefused,
             T::WriterPinMismatch { .. } => Self::LaunchHandoffRefused,
             T::RetainedWriterImport => Self::RetainedWriterImport,

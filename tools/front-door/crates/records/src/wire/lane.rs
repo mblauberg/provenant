@@ -712,7 +712,7 @@ impl crate::run::CauseKind {
         Self::CloudPlacementRemoved,
         Self::WriteGrantsRefused,
         Self::WorktreeBusy,
-        Self::HandoffRefused,
+        Self::LaunchHandoffRefused,
         Self::PreparationRefused,
         Self::WriterPinMismatch {
             pinned: provenant_core::GitOid::Sha1([0; 20]),
@@ -763,7 +763,7 @@ mod terminal_cause_tests {
             | CauseKind::CloudPlacementRemoved
             | CauseKind::WriteGrantsRefused
             | CauseKind::WorktreeBusy
-            | CauseKind::HandoffRefused
+            | CauseKind::LaunchHandoffRefused
             | CauseKind::PreparationRefused
             | CauseKind::WriterPinMismatch { .. }
             | CauseKind::RetainedWriterImport

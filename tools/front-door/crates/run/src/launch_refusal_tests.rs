@@ -247,7 +247,7 @@ fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
             .contains("reconcile")
     );
     assert!(
-        CauseKind::HandoffRefused
+        CauseKind::LaunchHandoffRefused
             .detail()
             .contains("provenant reconcile")
     );
@@ -327,7 +327,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
     assert!(!note.contains("provenant reconcile"), "{note}");
     let typed_other = HandOff::TypedLocal {
         message: "some other typed local refusal".into(),
-        cause: CauseKind::HandoffRefused,
+        cause: CauseKind::LaunchHandoffRefused,
     };
     let (failure, _) = crate::launch::handoff_preparation(
         &typed_other,

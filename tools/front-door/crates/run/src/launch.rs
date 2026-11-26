@@ -311,7 +311,7 @@ pub struct PrepareRefusal {
 /// A refusal for test fixtures that do not care about its cause.
 #[cfg(test)]
 pub(crate) fn fixture_refusal(message: impl Into<String>) -> Box<PrepareRefusal> {
-    PrepareRefusal::boxed(CauseKind::HandoffRefused, message)
+    PrepareRefusal::boxed(CauseKind::LaunchHandoffRefused, message)
 }
 
 impl PrepareRefusal {
@@ -1830,7 +1830,7 @@ impl RunStore {
                 reason,
                 finished_at,
                 failure: None,
-                terminal_cause: Some(CauseKind::HandoffRefused),
+                terminal_cause: Some(CauseKind::LaunchHandoffRefused),
                 terminal_note: None,
             },
             call,
@@ -2586,13 +2586,13 @@ impl RunStore {
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
                             HandOff::Boundary { cause, .. } => {
-                                cause.or(Some(CauseKind::HandoffRefused))
+                                cause.or(Some(CauseKind::LaunchHandoffRefused))
                             }
                             HandOff::Busy => Some(CauseKind::WorktreeBusy),
                             HandOff::RetainedImport { .. } => {
                                 Some(CauseKind::RetainedWriterImport)
                             }
-                            _ => Some(CauseKind::HandoffRefused),
+                            _ => Some(CauseKind::LaunchHandoffRefused),
                         };
                         let (reason, kind) = match &error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
