@@ -39,16 +39,16 @@ pub struct Journal {
     pub retry_after_ms: u64,
     #[serde(default)]
     pub recovery_failures: u32,
-    #[serde(default, rename = "blocking_reason") ]
+    #[serde(default, rename = "blocking_reason")]
     pub held_reason: Option<String>,
     /// Wall-clock milliseconds when `held_reason` was recorded; 0 for a
     /// reason recorded before stamping existed. A reason is past evidence:
     /// readers report it with this time, never as a current observation.
-    #[serde(default, rename = "blocking_recorded_ms") ]
+    #[serde(default, rename = "blocking_recorded_ms")]
     pub held_recorded_ms: u64,
     /// Process ID of the settlement worker or reconcile that recorded
     /// `held_reason`; 0 when unknown.
-    #[serde(default, rename = "blocking_recorded_by") ]
+    #[serde(default, rename = "blocking_recorded_by")]
     pub held_by: u32,
     /// When settlement began waiting on a contended writer lock; 0 when it is
     /// not waiting. Bounds how long a lock with no live holder is waited on.

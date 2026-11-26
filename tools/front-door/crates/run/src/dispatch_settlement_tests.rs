@@ -782,7 +782,10 @@ fn provider_stops_are_kept_and_failures_carry_no_flag() -> TestResult {
     )?;
     assert_eq!(
         record.signals,
-        [SettlementSignal::DeclaredStop, SettlementSignal::ProviderStop]
+        [
+            SettlementSignal::DeclaredStop,
+            SettlementSignal::ProviderStop
+        ]
     );
     Ok(())
 }
@@ -854,19 +857,11 @@ fn incomplete_identity_evidence_preserves_settlement_failures() -> TestResult {
                 ..Fake::default()
             };
             let record = store.finish(id, &dir, &observed, &fake, &call)?;
-            let AttemptState::Terminal {
-                outcome,
-                cause,
-                ..
-            } = record.state
-            else {
+            let AttemptState::Terminal { outcome, cause, .. } = record.state else {
                 return Err("not terminal".into());
             };
             assert_eq!(outcome, Outcome::Failed);
-            assert_eq!(
-                cause,
-                route_mismatch.then_some(CauseKind::IdentityMismatch)
-            );
+            assert_eq!(cause, route_mismatch.then_some(CauseKind::IdentityMismatch));
         }
     }
     Ok(())

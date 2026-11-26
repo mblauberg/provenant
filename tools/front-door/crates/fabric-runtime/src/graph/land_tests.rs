@@ -899,10 +899,7 @@ fn an_ask_tier_without_a_session_fails_with_guidance() {
     );
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Failed);
-    assert_eq!(
-        land.advance_code.as_deref(),
-        Some("land_session_missing")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_session_missing"));
     assert!(owner.lands.is_empty() && checkpoint.asks.is_empty());
 }
 
@@ -1014,10 +1011,7 @@ fn a_failed_review_routed_to_land_never_calls_the_host() {
     assert!(owner.lands.is_empty());
     assert_eq!(land.state, NodeState::Failed);
     assert!(land.land.is_none());
-    assert_eq!(
-        land.advance_code.as_deref(),
-        Some("land_review_required")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
 }
 
 #[test]
@@ -1073,10 +1067,7 @@ fn reduced_review_requires_every_counted_member_to_judge_the_land_head() {
         );
         assert_eq!(!owner.lands.is_empty(), allowed);
         if !allowed {
-            assert_eq!(
-                land.advance_code.as_deref(),
-                Some("land_review_required")
-            );
+            assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
         }
     }
 }
@@ -1100,10 +1091,7 @@ fn ci_output_never_substitutes_for_review() {
     );
     assert!(owner.lands.is_empty(), "{:?}", owner.lands);
     assert_eq!(land.state, NodeState::Failed);
-    assert_eq!(
-        land.advance_code.as_deref(),
-        Some("land_review_required")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
 }
 
 #[test]
@@ -1145,10 +1133,7 @@ fn a_carried_over_head_lands_and_a_changed_delta_does_not() {
         } else {
             assert!(owner.lands.is_empty(), "{:?}", owner.lands);
             assert_eq!(land.state, NodeState::Failed);
-            assert_eq!(
-                land.advance_code.as_deref(),
-                Some("land_review_required")
-            );
+            assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
         }
     }
 }
@@ -1176,10 +1161,7 @@ fn a_review_of_an_earlier_head_never_lands_a_continuation() {
     );
     assert!(owner.lands.is_empty());
     assert_eq!(land.state, NodeState::Failed);
-    assert_eq!(
-        land.advance_code.as_deref(),
-        Some("land_review_required")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
 
     // A reviewer pinned to the writer's commit judged H1 even when it ran
     // after the repair.
@@ -1188,10 +1170,7 @@ fn a_review_of_an_earlier_head_never_lands_a_continuation() {
     nodes[3]["depends_on"] = json!(["repair", "write"]);
     let (owner, land) = land_outcome(nodes, "VERDICT: PASS");
     assert!(owner.lands.is_empty());
-    assert_eq!(
-        land.advance_code.as_deref(),
-        Some("land_review_required")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
 }
 
 fn refusal(value: serde_json::Value) -> &'static str {
@@ -1370,10 +1349,7 @@ fn a_composite_verdict_binds_to_the_head_its_producer_reviewed() {
     let (owner, land) = land_outcome(nodes, "VERDICT: PASS");
     assert!(owner.lands.is_empty(), "{:?}", owner.lands);
     assert_eq!(land.state, NodeState::Failed);
-    assert_eq!(
-        land.advance_code.as_deref(),
-        Some("land_review_required")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
 }
 
 #[test]

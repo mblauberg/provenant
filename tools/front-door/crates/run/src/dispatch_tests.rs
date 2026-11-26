@@ -1423,7 +1423,7 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
         );
     }
     let fact = store.attempt(id, &call)?;
-    assert_eq!(fact.terminal_state, Outcome::Lost.into());
+    assert_eq!(fact.terminal_state, Outcome::Lost);
     assert!(fact.output_refs.is_empty());
     let after = store.record(id, &call)?;
     assert_eq!(after.started_at, before.started_at);

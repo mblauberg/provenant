@@ -3398,7 +3398,7 @@ fn seed_composite_output_graph_with_gate(
 ) -> Result {
     use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
     use provenant_fabric_runtime::graph::{
-        AccessMode, AttemptKey, AttemptObservation, GraphAttemptOutcome, AttemptOwner, FileJournal,
+        AccessMode, AttemptKey, AttemptObservation, AttemptOwner, FileJournal, GraphAttemptOutcome,
         GraphDocument, GraphExecution, GraphRoute, NodeInput, Replay,
     };
     use provenant_os::clock::SystemClock;
@@ -6360,7 +6360,9 @@ fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() ->
             assert!(lane["cause"].is_null(), "{lane}");
             let warnings: Vec<provenant_records::run::SettlementSignal> =
                 serde_json::from_value(lane["signals"].clone())?;
-            assert!(warnings.contains(&provenant_records::run::SettlementSignal::IdentityUnobserved));
+            assert!(
+                warnings.contains(&provenant_records::run::SettlementSignal::IdentityUnobserved)
+            );
             assert!(lane["observed_route"].is_null(), "{lane}");
             assert!(
                 lane["transcript"]["session"]

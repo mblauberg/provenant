@@ -12,10 +12,11 @@ use provenant_records::declaration::{
 };
 use provenant_records::handoff::{Handoff, HandoffError, HandoffStatus};
 use provenant_records::provenance::{Layer, Source, Sourced};
-use provenant_records::run::{Outcome, SettlementSignal, SettlementClass, CauseKind};
+use provenant_records::run::{CauseKind, Outcome, SettlementClass, SettlementSignal};
 use provenant_records::settlement::{
-    CustodyFacts, GitEvidence, HandoffSource, HostFacts, IdentityEvidence, IdentityPolicyEffect,
-    LaneRole, PrimaryCheckout, HeadProgress, SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
+    CustodyFacts, GitEvidence, HandoffSource, HeadProgress, HostFacts, IdentityEvidence,
+    IdentityPolicyEffect, LaneRole, PrimaryCheckout, SETTLEMENT_EVIDENCE_SCHEMA,
+    SettlementEvidence,
     classify::budget_completed,
     classify::settle,
     policy::{NoWork, RouteSettlement, SettlementPolicy, SignalAction},

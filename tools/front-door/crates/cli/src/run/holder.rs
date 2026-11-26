@@ -947,10 +947,7 @@ mod tests {
             decoded.reason.as_deref(),
             Some("provider output is partial")
         );
-        assert_ne!(
-            decoded.cause,
-            Some(run::CauseKind::IdentityMismatch)
-        );
+        assert_ne!(decoded.cause, Some(run::CauseKind::IdentityMismatch));
 
         let complete = make_frames()?;
         assert_eq!(

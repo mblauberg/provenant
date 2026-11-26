@@ -1401,10 +1401,7 @@ fn claude_lane_auth_failure_reports_a_lost_lane_token_for_its_account()
             .and_then(|route| route.account_key.as_deref()),
         None
     );
-    assert_eq!(
-        decoded.cause,
-        Some(run::CauseKind::LaneTokenLost)
-    );
+    assert_eq!(decoded.cause, Some(run::CauseKind::LaneTokenLost));
     let reason = decoded.reason.unwrap();
     assert!(reason.contains("pro [claude]"), "{reason}");
     assert!(

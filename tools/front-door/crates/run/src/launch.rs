@@ -548,10 +548,7 @@ fn check_launch_policy(
                 "LAUNCH_RUNSTORE_START_INNER_AUTHORITY"
             }
             provenant_records::diagnostic::BoundaryClass::None
-                if matches!(
-                    refusal.cause,
-                    CauseKind::DiskObservationUnavailable
-                ) =>
+                if matches!(refusal.cause, CauseKind::DiskObservationUnavailable) =>
             {
                 "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
             }
@@ -2589,9 +2586,7 @@ impl RunStore {
                                 cause.or(Some(CauseKind::LaunchHandoffRefused))
                             }
                             HandOff::Busy => Some(CauseKind::WorktreeBusy),
-                            HandOff::RetainedImport { .. } => {
-                                Some(CauseKind::RetainedWriterImport)
-                            }
+                            HandOff::RetainedImport { .. } => Some(CauseKind::RetainedWriterImport),
                             _ => Some(CauseKind::LaunchHandoffRefused),
                         };
                         let (reason, kind) = match &error {

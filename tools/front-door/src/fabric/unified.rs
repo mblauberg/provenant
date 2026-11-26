@@ -309,9 +309,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             } else {
                 (
                     json!(node.state),
-                    node.advance_note
-                        .as_deref()
-                        .or(node.skip_reason.as_deref()),
+                    node.advance_note.as_deref().or(node.skip_reason.as_deref()),
                     Value::Null,
                 )
             };

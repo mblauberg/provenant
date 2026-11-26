@@ -126,10 +126,7 @@ pub(crate) fn selection_evidence(
                     .map_err(|e| e.to_string())?;
                 for lane in page.lanes {
                     if !matches!(lane.state, run::AttemptState::Terminal { .. })
-                        || !matches!(
-                            lane.terminal_basis,
-                            Some(run::TerminalBasis::ProcessExit)
-                        )
+                        || !matches!(lane.terminal_basis, Some(run::TerminalBasis::ProcessExit))
                     {
                         continue;
                     }

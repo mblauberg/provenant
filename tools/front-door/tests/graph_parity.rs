@@ -7,9 +7,9 @@
 use crate::support;
 use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
 use provenant_fabric_runtime::graph::{
-    self, AttemptKey, AttemptObservation, GraphAttemptOutcome, AttemptOwner, AttemptState, FileJournal,
-    GraphCheckpoint, GraphDocument, GraphEvent, GraphEventKind, GraphExecution, GraphJournal,
-    GraphStatus, NodeState,
+    self, AttemptKey, AttemptObservation, AttemptOwner, AttemptState, FileJournal,
+    GraphAttemptOutcome, GraphCheckpoint, GraphDocument, GraphEvent, GraphEventKind,
+    GraphExecution, GraphJournal, GraphStatus, NodeState,
 };
 use provenant_os::clock::SystemClock;
 use serde_json::json;
@@ -332,7 +332,10 @@ fn success() -> Result {
     let node = &checkpoint.nodes[0];
     assert_eq!(node.state, NodeState::Succeeded);
     assert_eq!(node.attempts.len(), 1);
-    assert_eq!(node.attempts[0].outcome, Some(GraphAttemptOutcome::Succeeded));
+    assert_eq!(
+        node.attempts[0].outcome,
+        Some(GraphAttemptOutcome::Succeeded)
+    );
     assert_eq!(node.advance_code, None);
     let events = h.events()?;
     assert_same_story(&events, &checkpoint);
@@ -413,7 +416,10 @@ fn failure() -> Result {
     assert_eq!(node.state, NodeState::Failed);
     // A launched task failure is the task's answer: no second member is tried.
     assert_eq!(node.attempts.len(), 1);
-    assert_eq!(node.attempts[0].outcome, Some(GraphAttemptOutcome::TaskFailed));
+    assert_eq!(
+        node.attempts[0].outcome,
+        Some(GraphAttemptOutcome::TaskFailed)
+    );
     assert_same_story(&h.events()?, &checkpoint);
     Ok(())
 }
@@ -595,7 +601,10 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
                     .previous_attempts
             );
             assert_eq!(node.attempts.len(), 1);
-            assert_eq!(node.attempts[0].outcome, Some(GraphAttemptOutcome::Succeeded));
+            assert_eq!(
+                node.attempts[0].outcome,
+                Some(GraphAttemptOutcome::Succeeded)
+            );
             if writer {
                 let output = node.outputs.as_ref().unwrap();
                 assert_eq!(output.branch.as_deref(), Some("lane/parity"));

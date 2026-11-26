@@ -748,7 +748,7 @@ impl crate::run::CauseKind {
 #[cfg(test)]
 mod terminal_cause_tests {
     use super::*;
-    use crate::run::{AttemptState, Outcome, CauseKind};
+    use crate::run::{AttemptState, CauseKind, Outcome};
 
     fn every_terminal_cause_is_covered(cause: CauseKind) {
         match cause {

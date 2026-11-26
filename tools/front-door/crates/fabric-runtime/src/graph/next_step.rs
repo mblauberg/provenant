@@ -879,9 +879,9 @@ pub(super) fn settlement_fallback_decision(
     let cause = match outcome {
         GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
-            Some(StopCause::SpawnFailure)
-        }
+        GraphAttemptOutcome::PreparationRefused(
+            provenant_records::run::CauseKind::SpawnFailure,
+        ) => Some(StopCause::SpawnFailure),
         GraphAttemptOutcome::PreparationRefused(
             provenant_records::run::CauseKind::PreparationRefused,
         ) => Some(StopCause::PreparationRefused),

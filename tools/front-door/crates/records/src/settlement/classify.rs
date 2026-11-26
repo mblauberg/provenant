@@ -11,12 +11,11 @@ use crate::declaration::DeclarationEvidence;
 use crate::handoff::{HandoffResult, HandoffStatus};
 use crate::provenance::Sourced;
 use crate::run::{
-    Outcome, SettlementSignal, DependantRelease, SettlementClass, CauseKind,
-    TerminalBasis,
+    CauseKind, DependantRelease, Outcome, SettlementClass, SettlementSignal, TerminalBasis,
 };
 use crate::settlement::policy::{AppliedPolicy, NoWork, SettlementPolicy, SignalAction};
 use crate::settlement::{
-    HandoffSource, IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout, HeadProgress,
+    HandoffSource, HeadProgress, IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout,
     SettlementEvidence,
 };
 use crate::stop::{Stop, StopCause};

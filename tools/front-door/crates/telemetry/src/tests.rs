@@ -1691,14 +1691,7 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
             false,
             true,
         ),
-        evidence(
-            5,
-            Outcome::Succeeded,
-            None,
-            Some("review"),
-            false,
-            true,
-        ),
+        evidence(5, Outcome::Succeeded, None, Some("review"), false, true),
         evidence(
             6,
             Outcome::Succeeded,
@@ -1707,14 +1700,7 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
             false,
             true,
         ),
-        evidence(
-            7,
-            Outcome::Succeeded,
-            Some("senior"),
-            None,
-            false,
-            true,
-        ),
+        evidence(7, Outcome::Succeeded, Some("senior"), None, false, true),
         evidence(
             8,
             Outcome::Succeeded,

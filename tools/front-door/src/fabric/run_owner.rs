@@ -136,7 +136,7 @@ mod output_projection_tests {
     // Spec: docs/specs/state.md#config-never-widens-authority
     fn peer_event_output_preserves_binding_diagnostics() {
         use provenant_core::{AttemptId, ProjectId, WallTime};
-        use provenant_records::run::{AttemptState, Outcome, RunEvent, CauseKind};
+        use provenant_records::run::{AttemptState, CauseKind, Outcome, RunEvent};
 
         fn event(sequence: u64, cause: CauseKind, reason: String, note: String) -> RunEvent {
             RunEvent {
@@ -905,16 +905,14 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
         other => run_kind_facade(other),
     }
 }
-fn cause(
-    lane: &provenant_run::AttemptRecord,
-) -> Option<provenant_records::run::CauseKind> {
+fn cause(lane: &provenant_run::AttemptRecord) -> Option<provenant_records::run::CauseKind> {
     lane.state.cause()
 }
 /// Only positive sealed evidence of a pre-launch refusal can reject a replay.
 pub(crate) fn durable_launch_refusal(
     lanes: &[provenant_run::AttemptRecord],
 ) -> Option<provenant_core::AttemptId> {
-    use provenant_records::run::{AttemptState, SettlementClass, CauseKind};
+    use provenant_records::run::{AttemptState, CauseKind, SettlementClass};
     (!lanes.is_empty()
         && lanes.iter().all(|lane| {
             lane.provider_launched == Some(false)

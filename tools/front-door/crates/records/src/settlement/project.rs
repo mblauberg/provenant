@@ -7,7 +7,7 @@
 
 use crate::graph::GraphAttemptOutcome;
 use crate::run::{
-    AttemptRecord, AttemptState, Outcome, SettlementSignal, PreparationFailure, CauseKind,
+    AttemptRecord, AttemptState, CauseKind, Outcome, PreparationFailure, SettlementSignal,
 };
 
 /// The settlement part of a terminal attempt's graph outcome.
@@ -16,12 +16,7 @@ use crate::run::{
 /// queued, starting, running or settling). The caller keeps its own graph
 /// overrides and applies this projection to everything else.
 pub fn graph_outcome(record: &AttemptRecord) -> Option<GraphAttemptOutcome> {
-    let AttemptState::Terminal {
-        outcome,
-        cause,
-        ..
-    } = &record.state
-    else {
+    let AttemptState::Terminal { outcome, cause, .. } = &record.state else {
         return None;
     };
     let outcome = *outcome;
@@ -71,9 +66,7 @@ pub fn graph_outcome(record: &AttemptRecord) -> Option<GraphAttemptOutcome> {
         // A declared stop is one fact whether or not the writer left
         // uncommitted edits; the graph restarts it on the retained worktree.
         Outcome::ReviewRequired | Outcome::Uncommitted
-            if record
-                .signals
-                .contains(&SettlementSignal::DeclaredStop)
+            if record.signals.contains(&SettlementSignal::DeclaredStop)
                 && record.signals.iter().all(|signal| {
                     matches!(
                         signal,

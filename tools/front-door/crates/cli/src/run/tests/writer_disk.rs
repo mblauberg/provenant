@@ -454,10 +454,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
         unobserved.policy_code.as_deref(),
         Some("SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE")
     );
-    assert_eq!(
-        unobserved.cause,
-        CauseKind::DiskObservationUnavailable
-    );
+    assert_eq!(unobserved.cause, CauseKind::DiskObservationUnavailable);
     assert!(unobserved.terminal_note.is_none());
     assert!(
         !CauseKind::DiskObservationUnavailable

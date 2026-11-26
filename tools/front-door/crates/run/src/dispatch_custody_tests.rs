@@ -184,10 +184,7 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
     let AttemptState::Terminal { .. } = &state else {
         return Err("attempt is not terminal".into());
     };
-    assert_eq!(
-        state.cause(),
-        Some(CauseKind::CloudPlacementRemoved)
-    );
+    assert_eq!(state.cause(), Some(CauseKind::CloudPlacementRemoved));
     assert!(
         store
             .start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?

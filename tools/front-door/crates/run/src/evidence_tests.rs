@@ -7,8 +7,8 @@ use provenant_records::{
     declaration::DeclarationEvidence,
     run::Outcome,
     settlement::{
-        CustodyFacts, GitEvidence, HostFacts, IdentityEvidence, IdentityPolicyEffect, LaneRole,
-        PrimaryCheckout, HeadProgress, SETTLEMENT_EVIDENCE_SCHEMA,
+        CustodyFacts, GitEvidence, HeadProgress, HostFacts, IdentityEvidence, IdentityPolicyEffect,
+        LaneRole, PrimaryCheckout, SETTLEMENT_EVIDENCE_SCHEMA,
     },
 };
 

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::declaration::{DeclarationCounts, DeclarationEvidence};
 use crate::handoff::Handoff;
 use crate::run::{
-    CauseSource, Outcome, SettlementSignal, DependantRelease, SettlementClass, CauseKind,
+    CauseKind, CauseSource, DependantRelease, Outcome, SettlementClass, SettlementSignal,
     TerminalBasis,
 };
 use crate::settlement::policy::{AppliedPolicy, SettlementPolicy};

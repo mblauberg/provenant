@@ -339,7 +339,9 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
         let document = document("worktree_write", serde_json::Value::Null);
         let mut failed = terminal(
             "a/1",
-            GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure),
+            GraphAttemptOutcome::PreparationRefused(
+                provenant_records::run::CauseKind::SpawnFailure,
+            ),
             Some(StopCause::SpawnFailure),
             None,
         );
@@ -389,7 +391,11 @@ fn stalled_provider_retry_advances_but_fail_policy_does_not() {
             vec!["first", "second"],
             NodeState::Succeeded,
         ),
-        (GraphAttemptOutcome::TaskFailed, vec!["first"], NodeState::Failed),
+        (
+            GraphAttemptOutcome::TaskFailed,
+            vec!["first"],
+            NodeState::Failed,
+        ),
     ] {
         let document = document("worktree_write", serde_json::Value::Null);
         let mut owner = Owner {
@@ -860,7 +866,12 @@ fn stopped_early_handoff(remaining: &[&str]) -> String {
 /// A writer round that declares `stopped_early` with the given head.
 fn stopped_round(reference: &str, remaining: &[&str], commit: char) -> AttemptObservation {
     let handoff = stopped_early_handoff(remaining);
-    let mut observation = terminal(reference, GraphAttemptOutcome::Succeeded, None, Some(&handoff));
+    let mut observation = terminal(
+        reference,
+        GraphAttemptOutcome::Succeeded,
+        None,
+        Some(&handoff),
+    );
     if let AttemptObservation::Terminal { commit: head, .. } = &mut observation {
         *head = Some(commit.to_string().repeat(40));
     }

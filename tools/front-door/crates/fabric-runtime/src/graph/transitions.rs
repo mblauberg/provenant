@@ -610,8 +610,7 @@ pub(super) fn apply_attempt_observation(
                 let outcome = if matches!(
                     outcome,
                     GraphAttemptOutcome::Succeeded | GraphAttemptOutcome::ReviewRequired
-                ) && release
-                    == provenant_records::run::DependantRelease::Hold
+                ) && release == provenant_records::run::DependantRelease::Hold
                 {
                     GraphAttemptOutcome::OtherFailure
                 } else {
@@ -1440,8 +1439,7 @@ fn attribute_blocker(
         .find(|parent| matches!(parent.state, NodeState::Failed | NodeState::Blocked));
     if let Some(parent) = blocker {
         let reason = format!("blocked by {} ({:?})", parent.id, parent.state);
-        checkpoint.nodes[node_index].advance_note =
-            Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
+        checkpoint.nodes[node_index].advance_note = Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
         checkpoint.nodes[node_index].advance_code = Some("upstream_blocked".into());
         true
     } else {
@@ -2171,10 +2169,7 @@ mod tests {
             assert_eq!(checkpoint.extra["future_graph"], true);
             assert_eq!(progress.extra["future_node"], true);
             if expected_outcome == GraphAttemptOutcome::DeadlineExceeded {
-                assert_eq!(
-                    progress.advance_code.as_deref(),
-                    Some("deadline_exceeded")
-                );
+                assert_eq!(progress.advance_code.as_deref(), Some("deadline_exceeded"));
             }
         }
     }

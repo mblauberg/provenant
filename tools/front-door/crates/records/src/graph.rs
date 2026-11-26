@@ -128,10 +128,13 @@ mod tests {
             .split_whitespace()
             .filter_map(|word| word.strip_prefix('`').and_then(|w| w.strip_suffix('`')))
             .collect();
-        let owned: BTreeSet<&str> = [GraphAttemptOutcome::DeclaredStop, GraphAttemptOutcome::StoppedNoWork]
-            .into_iter()
-            .filter_map(GraphAttemptOutcome::advance_code)
-            .collect();
+        let owned: BTreeSet<&str> = [
+            GraphAttemptOutcome::DeclaredStop,
+            GraphAttemptOutcome::StoppedNoWork,
+        ]
+        .into_iter()
+        .filter_map(GraphAttemptOutcome::advance_code)
+        .collect();
         assert_eq!(documented, owned);
         assert_eq!(GraphAttemptOutcome::Succeeded.advance_code(), None);
     }

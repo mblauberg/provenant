@@ -1,8 +1,8 @@
 use std::io::Cursor;
 
-use provenant_records::{run::Outcome,
-    CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits, RecordHeader,
-    decode, decode_v1,
+use provenant_records::{
+    CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits, RecordHeader, decode, decode_v1,
+    run::Outcome,
 };
 use serde::Deserialize;
 use serde_json::json;

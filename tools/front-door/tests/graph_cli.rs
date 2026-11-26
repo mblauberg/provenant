@@ -3218,7 +3218,7 @@ fn steer_on_a_complete_graph_refuses_even_when_warn_is_configured() -> Result {
         .ok_or("checkpoint")?;
     use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
     use provenant_fabric_runtime::graph::{
-        GraphAttemptOutcome, AttemptState, FileJournal, GraphJournal, NodeState,
+        AttemptState, FileJournal, GraphAttemptOutcome, GraphJournal, NodeState,
     };
     let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
     inputs.state_dir = Some(rig.state());

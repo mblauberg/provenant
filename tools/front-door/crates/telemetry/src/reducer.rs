@@ -1,6 +1,6 @@
 use crate::{BillingKind, Categories, PriceError, PriceIdentity, PriceTable};
 use provenant_core::{AttemptId, ProjectId, WallTime};
-use provenant_records::{run::Outcome,AttemptFact, RouteFact, Usage};
+use provenant_records::{AttemptFact, RouteFact, Usage, run::Outcome};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use thiserror::Error;

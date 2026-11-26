@@ -231,9 +231,7 @@ pub(super) fn stats_inner(
             pool,
             // Missing evidence cannot certify a complete success.
             partial: record.as_ref().is_none_or(|record| {
-                provenant_telemetry::route_outcomes::provider_work_incomplete(
-                    &record.signals,
-                )
+                provenant_telemetry::route_outcomes::provider_work_incomplete(&record.signals)
             }),
         });
     }

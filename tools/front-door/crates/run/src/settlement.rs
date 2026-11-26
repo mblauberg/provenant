@@ -2434,7 +2434,7 @@ mod tests {
         let attempt = store.attempt_dir(id, false)?;
         let scope = crate::RunStore::scope(&store.record(id, &call)?);
         advance_to(&mut clock, 1000)?;
-        blocked(&attempt, scope, "failed after 0 ns", &clock)?;
+        record_recovery_failure(&attempt, scope, "failed after 0 ns", &clock)?;
         let journal = read(&attempt, scope)?;
         assert_eq!(journal.held_recorded_ms, 1000);
         assert_eq!(journal.held_by, std::process::id());
@@ -2861,7 +2861,7 @@ mod tests {
         )?;
         let scope = crate::RunStore::scope(&record);
         let attempt = store.attempt_dir(record.attempt_id, false)?;
-        blocked(&attempt, scope, "custody reattach failed", &clock)?;
+        record_recovery_failure(&attempt, scope, "custody reattach failed", &clock)?;
         let journal = read(&attempt, scope)?;
         assert!(journal.owner.is_none());
         assert_eq!(journal.owner_since_ms, 0);
@@ -2892,7 +2892,7 @@ mod tests {
         assert!(reason.contains("retry stalled"));
         assert!(reason.contains("custody reattach failed"));
         for _ in 1..LIMIT {
-            blocked(&attempt, scope, "custody reattach failed", &clock)?;
+            record_recovery_failure(&attempt, scope, "custody reattach failed", &clock)?;
         }
         assert!(
             diagnostic_for(context.state_root.as_path(), &record, None)
@@ -4213,8 +4213,7 @@ impl crate::RunStore {
                 let mut eligible = !queued
                     && (explicit
                         || (journal.recovery_failures < LIMIT
-                            && !(journal.held_reason.is_some()
-                                && now < journal.retry_after_ms)))
+                            && !(journal.held_reason.is_some() && now < journal.retry_after_ms)))
                     && !owner_active(&directory, &journal, now)?;
                 if eligible
                     && let Ok(handle) =

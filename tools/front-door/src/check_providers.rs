@@ -319,12 +319,12 @@ fn settlement(row: &mut Row, run: &GraphRun) -> bool {
         .and_then(|reference| reference.rsplit('/').next())
         .and_then(|id| id.parse().ok());
     if let Some(attempt) = attempt.filter(|attempt| attempt.outcome.is_some()) {
-        row.status = if attempt.outcome == Some(GraphAttemptOutcome::Succeeded) && attempt.stop.is_none()
-        {
-            Verdict::Pass
-        } else {
-            Verdict::Fail
-        };
+        row.status =
+            if attempt.outcome == Some(GraphAttemptOutcome::Succeeded) && attempt.stop.is_none() {
+                Verdict::Pass
+            } else {
+                Verdict::Fail
+            };
         row.cause = match attempt.stop {
             Some(StopCause::Deadline) => Cause::Check(CheckCause::TimedOut),
             Some(stop) => Cause::Stop(stop),

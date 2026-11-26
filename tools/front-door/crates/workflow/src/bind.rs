@@ -4,7 +4,7 @@
 //! the route tier, which no owner publishes yet, come from the claim.
 use crate::review::{self, ReviewError};
 use provenant_core::{DeliveryId, Digest};
-use provenant_records::{run::Outcome,AttemptFact, ReviewerProvenance, workflow::*};
+use provenant_records::{AttemptFact, ReviewerProvenance, run::Outcome, workflow::*};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

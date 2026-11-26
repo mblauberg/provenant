@@ -472,7 +472,9 @@ impl AttemptOwner for FakeOwner {
             let evidence = match outcome {
                 GraphAttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
                 GraphAttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
-                GraphAttemptOutcome::AdapterUnavailable => Some(PreparationFailure::AdapterUnavailable),
+                GraphAttemptOutcome::AdapterUnavailable => {
+                    Some(PreparationFailure::AdapterUnavailable)
+                }
                 _ => None,
             };
             if let Some(evidence) = evidence

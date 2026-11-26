@@ -170,12 +170,7 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
     store.create(&run, &call)?;
     store.refuse_queued(run.attempt_id, "child proposal is invalid", &call)?;
     let record = store.record(run.attempt_id, &call)?;
-    let AttemptState::Terminal {
-        cause,
-        outcome,
-        ..
-    } = &record.state
-    else {
+    let AttemptState::Terminal { cause, outcome, .. } = &record.state else {
         return Err("not terminal".into());
     };
     assert_eq!(*outcome, Outcome::Rejected);
@@ -241,11 +236,7 @@ fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
         provenant_records::StopCause::from(CauseKind::PreparationRefused),
         provenant_records::StopCause::PreparationRefused
     );
-    assert!(
-        !CauseKind::PreparationRefused
-            .detail()
-            .contains("reconcile")
-    );
+    assert!(!CauseKind::PreparationRefused.detail().contains("reconcile"));
     assert!(
         CauseKind::LaunchHandoffRefused
             .detail()

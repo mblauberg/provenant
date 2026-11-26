@@ -2004,8 +2004,8 @@ impl RunStore {
         // follow-up: creating one after success hides the successful attempt
         // behind a successor that never launches and fails at preparation
         // (#3987). Explicit stops and other terminal failures never continue.
-        let natural_settlement = cause.is_none()
-            && matches!(outcome, Outcome::ReviewRequired | Outcome::Uncommitted);
+        let natural_settlement =
+            cause.is_none() && matches!(outcome, Outcome::ReviewRequired | Outcome::Uncommitted);
         if cause != Some(CauseKind::Steered) && !natural_settlement {
             self.record_steer_not_continued(
                 id,
@@ -2177,8 +2177,7 @@ impl RunStore {
             return Err(RunError::SteerSessionUnavailable);
         }
         let ready = self.steer_session_ready(id, call)?;
-        if cause == Some(CauseKind::Steered) && ready.is_none() && !fresh_with_handoff
-        {
+        if cause == Some(CauseKind::Steered) && ready.is_none() && !fresh_with_handoff {
             return Err(RunError::SteerSessionUnavailable);
         }
         if let Some(ready) = ready {
@@ -3133,7 +3132,7 @@ impl RunStore {
             && handoff_error.is_none()
         {
             decoded.outcome = Outcome::ReviewRequired;
-            let stopped = host_handoff(
+            let stopped = make_host_handoff(
                 handoff.take(),
                 "Token target crossed; a same-session budget wrap-up is pending.",
             );
@@ -3665,7 +3664,7 @@ impl RunStore {
             && task.writer.is_some()
             && !cancelled
         {
-            let stopped = host_handoff(
+            let stopped = make_host_handoff(
                 handoff.take(),
                 "The lane's access token was lost before it recorded a progress handoff; inspect the branch and worktree.",
             );
@@ -4009,7 +4008,7 @@ pub(crate) fn seal_manifest(
 fn context_handoff(
     progress: Option<provenant_records::handoff::Handoff>,
 ) -> provenant_records::handoff::Handoff {
-    host_handoff(
+    make_host_handoff(
         progress,
         "Stopped at the context handoff threshold before the lane recorded a progress handoff; inspect the branch and worktree.",
     )
@@ -4017,7 +4016,7 @@ fn context_handoff(
 
 /// The lane's latest unfinished progress handoff, or a stopped-early one
 /// carrying `missing` when it recorded none.
-fn host_handoff(
+fn make_host_handoff(
     progress: Option<provenant_records::handoff::Handoff>,
     missing: &str,
 ) -> provenant_records::handoff::Handoff {
@@ -5313,7 +5312,7 @@ mod settlement_5a_tests {
         );
         assert_ne!(*cause, Some(CauseKind::StoppedNoWork));
         assert_eq!(
-            finished.progress,
+            finished.head_progress,
             Some(provenant_records::settlement::HeadProgress::Moved)
         );
         Ok(())

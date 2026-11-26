@@ -1397,8 +1397,10 @@ mod tests {
     #[test]
     fn run_receipt_is_bounded_and_ends_in_one_next_command() {
         let nodes: Vec<_> = (0..40)
-            .map(|n| json!({"id":format!("n{n}"), "state":"failed", "advance_code":"preparation_refused",
-                "advance_note":"x".repeat(1000), "attempts":[]}))
+            .map(|n| {
+                json!({"id":format!("n{n}"), "state":"failed", "advance_code":"preparation_refused",
+                "advance_note":"x".repeat(1000), "attempts":[]})
+            })
             .collect();
         for (status, command, why) in [
             (

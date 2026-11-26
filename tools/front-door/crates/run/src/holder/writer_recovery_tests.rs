@@ -1474,12 +1474,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         }
         if blocked {
             // A blocked writer seals one typed stop.
-            let AttemptState::Terminal {
-                cause,
-                stop,
-                ..
-            } = &finished.state
-            else {
+            let AttemptState::Terminal { cause, stop, .. } = &finished.state else {
                 panic!("not terminal")
             };
             assert_eq!(*cause, Some(CauseKind::Blocked));
@@ -1544,15 +1539,9 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             panic!("not terminal")
         };
         assert_eq!(*outcome, Outcome::ReviewRequired);
-        assert_eq!(
-            *cause,
-            (!changed).then_some(CauseKind::StoppedNoWork)
-        );
+        assert_eq!(*cause, (!changed).then_some(CauseKind::StoppedNoWork));
         let row = LaneRow::project(&finished, LaneProjectionFacts::default());
-        assert_eq!(
-            row.cause,
-            (!changed).then_some(CauseKind::StoppedNoWork)
-        );
+        assert_eq!(row.cause, (!changed).then_some(CauseKind::StoppedNoWork));
         assert!(
             !reason
                 .as_deref()
@@ -1779,7 +1768,7 @@ fn empty_committed_writer_requires_review_and_controls_fail()
 fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
-    use provenant_records::run::{SettlementSignal, SettlementClass};
+    use provenant_records::run::{SettlementClass, SettlementSignal};
 
     const DIRTY: &str = "left-uncommitted.txt";
     for (answer, empty) in [("", true), ("Work remains in the renderer.", false)] {
@@ -2838,7 +2827,7 @@ fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std
         }),
     );
     if matches!(case, BudgetStopCase::WrapUpBlocked) {
-        let mut blocked = host_handoff(None, "Owner decision required before continuing.");
+        let mut blocked = make_host_handoff(None, "Owner decision required before continuing.");
         blocked.status = provenant_records::handoff::HandoffStatus::Blocked;
         fake.answer = Some(blocked.fenced());
     }
@@ -3330,10 +3319,7 @@ fn never_spawned_exit_survives_cancel_during_import()
         assert!(
             matches!(record.state, AttemptState::Terminal { outcome, .. } if outcome == expected)
         );
-        assert_eq!(
-            record.terminal_basis,
-            Some(TerminalBasis::ProcessExit)
-        );
+        assert_eq!(record.terminal_basis, Some(TerminalBasis::ProcessExit));
         assert_eq!(record.provider_launched, Some(false));
         assert!(read_sealed(&attempt, "import-cancelled.json", RECORD_LIMIT)?.is_none());
     }

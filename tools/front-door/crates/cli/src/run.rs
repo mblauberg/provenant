@@ -636,9 +636,7 @@ fn disk_policy_refusal(error: DiskCheck) -> Box<run::PrepareRefusal> {
     };
     let cause = match &error {
         DiskCheck::Low { .. } => provenant_records::run::CauseKind::DiskFloor,
-        DiskCheck::Unobserved(_) => {
-            provenant_records::run::CauseKind::DiskObservationUnavailable
-        }
+        DiskCheck::Unobserved(_) => provenant_records::run::CauseKind::DiskObservationUnavailable,
     };
     let policy_code = match &error {
         DiskCheck::Low { .. } => None,
@@ -1316,9 +1314,7 @@ impl Registry<'_> {
                     }
                 }
                 ProviderEvent::EarlyStop { .. } => {
-                    decoded
-                        .signals
-                        .push(run::SettlementSignal::ProviderStop);
+                    decoded.signals.push(run::SettlementSignal::ProviderStop);
                     early_stop = true;
                 }
                 ProviderEvent::Usage(report) => {

@@ -1251,8 +1251,7 @@ impl PrepareError {
                     fallback_outcome,
                 });
                 if refusal.auth_required() {
-                    refusal.cause =
-                        provenant_records::run::CauseKind::AccountLoginRequired;
+                    refusal.cause = provenant_records::run::CauseKind::AccountLoginRequired;
                 }
                 refusal
             }
@@ -1359,8 +1358,7 @@ impl PrepareError {
                 if let Some(policy_code) = policy_code {
                     refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::None;
                     refusal.policy_code = Some(policy_code);
-                    refusal.cause =
-                        provenant_records::run::CauseKind::AccessPolicyRefused;
+                    refusal.cause = provenant_records::run::CauseKind::AccessPolicyRefused;
                 } else {
                     refusal.boundary_class = match &error {
                         LaunchPromptError::TooLarge => {
@@ -1464,10 +1462,7 @@ fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
         },
     ] {
         let refusal = error.into_refusal();
-        assert_eq!(
-            refusal.cause,
-            CauseKind::WriterPinMismatch { pinned, head }
-        );
+        assert_eq!(refusal.cause, CauseKind::WriterPinMismatch { pinned, head });
         let text = refusal.cause.diagnostic(true);
         assert!(text.contains(&pinned.to_string()), "{text}");
         assert!(text.contains(&head.to_string()), "{text}");
@@ -1702,10 +1697,7 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
             EdgeError::AccountProfile {
                 kind: crate::route::AccountProfileError::Unknown,
                 ..
-            } => (
-                CauseKind::UnknownPacingAccount,
-                "unknown_pacing_account",
-            ),
+            } => (CauseKind::UnknownPacingAccount, "unknown_pacing_account"),
             EdgeError::Routing(error) => {
                 let cause = match error {
                     provenant_routing::RoutingError::NoEligiblePoolMember {
@@ -1986,8 +1978,7 @@ impl PlanCheckError {
         refusal.resource = skipped.guard_resource.clone();
         refusal.skipped_routes.push(skipped);
         if let Self::ReadOnly(ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)) = self {
-            refusal.cause =
-                provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe;
+            refusal.cause = provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe;
             refusal.message = diagnostic
                 .detail
                 .unwrap_or_else(|| "project binding state directory is unsafe".into());
@@ -2834,10 +2825,7 @@ mod stale_readiness_tests {
             temp.path(),
             None,
         )?;
-        assert_eq!(
-            prior.cause,
-            Some(run::CauseKind::LaneTokenLost)
-        );
+        assert_eq!(prior.cause, Some(run::CauseKind::LaneTokenLost));
         let stale = provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: "claude".into(),

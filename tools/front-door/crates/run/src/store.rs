@@ -713,12 +713,7 @@ impl RunStore {
                 return Err(RunError::Conflict);
             }
             if pending.schema_version == 2 {
-                let AttemptState::Terminal {
-                    outcome,
-                    cause,
-                    ..
-                } = pending.state
-                else {
+                let AttemptState::Terminal { outcome, cause, .. } = pending.state else {
                     return Err(RunError::Conflict);
                 };
                 let owner_stopped_after_exit = outcome == Outcome::Cancelled
@@ -1212,8 +1207,8 @@ impl RunStore {
         } = withdrawal;
         // A refusal whose producer named no cause is recorded as unrecorded,
         // never as a cause the host did not observe.
-        let cause = cause
-            .or_else(|| (outcome == Outcome::Rejected).then_some(CauseKind::Unrecorded));
+        let cause =
+            cause.or_else(|| (outcome == Outcome::Rejected).then_some(CauseKind::Unrecorded));
         if failure.is_some()
             && !matches!(
                 expected,

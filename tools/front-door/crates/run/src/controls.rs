@@ -772,10 +772,7 @@ impl std::fmt::Display for Reconciled {
             Self::Held => f.write_str("held"),
             Self::DeadlineStop => f.write_str("deadline_stop"),
             Self::StallStop { policy } => write!(f, "stall_stop ({})", policy.as_str()),
-            Self::Settling {
-                phase,
-                held_reason,
-            } => {
+            Self::Settling { phase, held_reason } => {
                 write!(f, "settling ({phase})")?;
                 if let Some(reason) = held_reason {
                     write!(f, ": {reason}")?;
@@ -4350,9 +4347,12 @@ impl RunStore {
                     *holder_live,
                     call.clock,
                 ),
-                Reconciled::Uncertain { reason } => {
-                    crate::settlement::record_recovery_failure(&directory, scope, &reason.to_string(), call.clock)
-                }
+                Reconciled::Uncertain { reason } => crate::settlement::record_recovery_failure(
+                    &directory,
+                    scope,
+                    &reason.to_string(),
+                    call.clock,
+                ),
                 Reconciled::Settling {
                     held_reason: Some(_),
                     ..

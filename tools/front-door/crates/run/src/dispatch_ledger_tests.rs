@@ -100,10 +100,7 @@ fn write_grant_warning_threshold_preserves_a_large_terminal_record() -> TestResu
     let terminal_record = crate::db::decode_attempt(&terminal)?;
     assert_eq!(terminal_record.write_grants, record.write_grants);
     // The explicit fixture handoff error survives; capacity never masks it.
-    assert_eq!(
-        record.state.cause(),
-        Some(CauseKind::LaunchHandoffRefused)
-    );
+    assert_eq!(record.state.cause(), Some(CauseKind::LaunchHandoffRefused));
     let expected_tools: std::collections::BTreeSet<_> = (0..tool_count)
         .map(|index| format!("/fixture/tools/{index}"))
         .collect();

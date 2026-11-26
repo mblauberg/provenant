@@ -8,7 +8,7 @@
 use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, StateRoot, WaitBudget};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
 pub use provenant_records::graph::{
-    AttemptKey, GraphAttemptOutcome, AttemptState, GraphOutcome, GraphStatus, NodeState,
+    AttemptKey, AttemptState, GraphAttemptOutcome, GraphOutcome, GraphStatus, NodeState,
 };
 use provenant_records::pause::PauseCause;
 use provenant_records::{CanonicalError, CanonicalV1, DecodeError, Limits};

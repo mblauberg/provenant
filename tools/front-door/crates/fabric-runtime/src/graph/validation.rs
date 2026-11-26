@@ -1757,8 +1757,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     ) && last.is_some_and(|attempt| {
                         attempt.state != AttemptState::Terminal && attempt.attempt_ref.is_none()
                     }))
-                    || (progress.advance_code.as_deref()
-                        == Some("steer_continuation_refused")
+                    || (progress.advance_code.as_deref() == Some("steer_continuation_refused")
                         && progress.advance_note.is_some()
                         && last.is_some_and(|attempt| {
                             attempt.state == AttemptState::Terminal && attempt.attempt_ref.is_some()
@@ -1802,7 +1801,10 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     attempt.state == AttemptState::Terminal
                         && matches!(
                             attempt.outcome,
-                            Some(GraphAttemptOutcome::Succeeded | GraphAttemptOutcome::ReviewRequired)
+                            Some(
+                                GraphAttemptOutcome::Succeeded
+                                    | GraphAttemptOutcome::ReviewRequired
+                            )
                         )
                 }) || fallback_settled(node, progress, document, checkpoint)
             }

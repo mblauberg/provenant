@@ -1253,17 +1253,16 @@ fn reconcile_progress(
     }
     let (exported, truncation_cause) =
         exported.map_or((None, None), |(output, cause)| (Some(output), cause));
-    let (advance_code, advance_note) =
-        if let Some(reason) = shortfall.filter(|_| hard_shortfall) {
-            (
-                Some("coverage_below_minimum".into()),
-                Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES)),
-            )
-        } else if let Some(reason) = export_error {
-            (Some("composite_findings_exceed_cap".into()), Some(reason))
-        } else {
-            (None, None)
-        };
+    let (advance_code, advance_note) = if let Some(reason) = shortfall.filter(|_| hard_shortfall) {
+        (
+            Some("coverage_below_minimum".into()),
+            Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES)),
+        )
+    } else if let Some(reason) = export_error {
+        (Some("composite_findings_exceed_cap".into()), Some(reason))
+    } else {
+        (None, None)
+    };
     let progress = &mut checkpoint.nodes[index];
     let changed = progress.state != state
         || progress.outputs != exported

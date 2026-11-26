@@ -4,7 +4,7 @@ use crate::{
 };
 use provenant_core::{AttemptId, ProjectId};
 use provenant_os::clock::SystemClock;
-use provenant_records::{run::Outcome, RouteFact, Usage, UsageSource, WorkKey};
+use provenant_records::{RouteFact, Usage, UsageSource, WorkKey, run::Outcome};
 use std::path::PathBuf;
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;

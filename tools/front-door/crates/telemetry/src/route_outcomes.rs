@@ -1,7 +1,7 @@
 //! Attempt outcomes joined to retained access and route-selection evidence.
 use std::collections::BTreeMap;
 
-use provenant_records::{run::Outcome,AttemptFact, Outcome};
+use provenant_records::{AttemptFact, run::Outcome};
 use provenant_routing::{ModelId, OutcomeKey, PriorKey, RoutePrior};
 use serde::Serialize;
 
@@ -105,9 +105,7 @@ pub fn priors(
         };
         let success = match item.fact.terminal_state {
             Outcome::Succeeded => !item.partial,
-            Outcome::Failed | Outcome::Rejected | Outcome::ReviewRequired => {
-                false
-            }
+            Outcome::Failed | Outcome::Rejected | Outcome::ReviewRequired => false,
             _ => continue,
         };
         let counts = groups
@@ -201,9 +199,7 @@ pub fn report(
             let samples = items.len() as u64;
             let successes = items
                 .iter()
-                .filter(|item| {
-                    item.fact.terminal_state == Outcome::Succeeded && !item.partial
-                })
+                .filter(|item| item.fact.terminal_state == Outcome::Succeeded && !item.partial)
                 .count() as u64;
             let mut time = 0u64;
             let mut missing_time = 0;

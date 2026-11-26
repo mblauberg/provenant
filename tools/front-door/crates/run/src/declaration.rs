@@ -10,7 +10,7 @@ use provenant_records::{
     CanonicalV1,
     declaration::{
         DECLARATION_SCHEMA, DeclarationCounts, DeclarationError, DeclarationEvidence,
-        DeclarationInput, DeclarationLimit, DeclarationReceipt, DeclarationLine,
+        DeclarationInput, DeclarationLimit, DeclarationLine, DeclarationReceipt,
         MAX_DECLARATION_JOURNAL_BYTES, SealedDeclaration,
     },
     handoff::{Handoff, HandoffError},

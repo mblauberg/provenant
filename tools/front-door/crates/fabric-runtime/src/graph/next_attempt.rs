@@ -119,9 +119,9 @@ fn expected_preparation_failure(
         GraphAttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
         GraphAttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
         GraphAttemptOutcome::AdapterUnavailable
-        | GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
-            Some(PreparationFailure::AdapterUnavailable)
-        }
+        | GraphAttemptOutcome::PreparationRefused(
+            provenant_records::run::CauseKind::SpawnFailure,
+        ) => Some(PreparationFailure::AdapterUnavailable),
         _ => None,
     }
 }
@@ -462,9 +462,9 @@ fn fallback_cause(outcome: GraphAttemptOutcome) -> Option<provenant_records::Sto
     match outcome {
         GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::SpawnFailure) => {
-            Some(StopCause::SpawnFailure)
-        }
+        GraphAttemptOutcome::PreparationRefused(
+            provenant_records::run::CauseKind::SpawnFailure,
+        ) => Some(StopCause::SpawnFailure),
         GraphAttemptOutcome::PreparationRefused(
             provenant_records::run::CauseKind::PreparationRefused,
         ) => Some(StopCause::PreparationRefused),
@@ -790,7 +790,8 @@ pub(super) fn next_attempt_transition(
         .filter(|attempt| {
             attempt.state == AttemptState::Terminal
                 && (attempt.launched
-                    || (automatic > 0 && attempt.outcome == Some(GraphAttemptOutcome::UsageLimited)))
+                    || (automatic > 0
+                        && attempt.outcome == Some(GraphAttemptOutcome::UsageLimited)))
         })
         .count() as u64;
     let spent = automatic.saturating_add(launched_switches);
@@ -1118,10 +1119,7 @@ mod tests {
         };
         fail_node(&mut withdrawn, code.map(Into::into), message);
         assert_eq!(withdrawn.state, NodeState::Failed);
-        assert_eq!(
-            withdrawn.advance_code.as_deref(),
-            Some("missing_verdict")
-        );
+        assert_eq!(withdrawn.advance_code.as_deref(), Some("missing_verdict"));
         assert_eq!(
             withdrawn.advance_note.as_deref(),
             Some("the review returned no verdict")

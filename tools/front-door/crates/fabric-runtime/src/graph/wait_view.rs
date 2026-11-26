@@ -1,5 +1,5 @@
 //! Read-only projection of the waits recorded in a graph checkpoint.
-use super::{GraphAttemptOutcome, CiState, GraphCheckpoint, NodeState};
+use super::{CiState, GraphAttemptOutcome, GraphCheckpoint, NodeState};
 use serde::Serialize;
 use serde_json::{Value, json};
 
