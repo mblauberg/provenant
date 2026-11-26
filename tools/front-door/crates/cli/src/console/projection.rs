@@ -10,7 +10,7 @@
 //! that the owner reads (timestamps, snapshots, host identities, coverage
 //! decisions) arrive as arguments so the caller keeps that decision visible.
 
-use provenant_core::ProjectId;
+use provenant_core::{AttemptId, ProjectId};
 use provenant_records::CanonicalV1;
 use provenant_records::wire::LanePresence;
 use provenant_run::AttemptState;
@@ -531,6 +531,155 @@ pub fn output_result_evidence(
     data["publication"] = publication.clone();
     data["changed_files"] = changed_files.clone();
     data["changed_files_total"] = changed_files_total.clone();
+}
+
+/// Attach the lane owner row and its typed result claims to an output page.
+/// The local command and fixture generator both pass an already projected
+/// lane, so state, evidence and future fields stay aligned.
+pub fn output_lane_fields(
+    data: &mut Value,
+    lane: &provenant_records::wire::LaneRow,
+    attempt: AttemptId,
+) {
+    let row = json!(lane);
+    if let (Some(data), Some(row)) = (data.as_object_mut(), row.as_object()) {
+        data.remove("settlement_reason");
+        if let Some(grants) = data.get_mut("grants").and_then(Value::as_object_mut) {
+            for field in ["write_grants", "read_only_writable"] {
+                if let Some(value) = row.get(field) {
+                    grants.insert(field.into(), value.clone());
+                }
+            }
+            if let Some(route) = row.get("applied_route") {
+                for field in ["user_skills", "lane_access"] {
+                    grants.insert(
+                        field.into(),
+                        route.get(field).cloned().unwrap_or(Value::Null),
+                    );
+                }
+            }
+        }
+        data.extend(row.clone());
+    }
+    data["result_projection"] =
+        serde_json::to_value(output_result_projection(data, attempt)).unwrap_or(Value::Null);
+}
+
+/// Result evidence from the output owner, with provider claims kept separate.
+pub fn output_result_projection(
+    data: &Value,
+    attempt: AttemptId,
+) -> provenant_records::lane_contract::ResultProjection {
+    use provenant_records::lane_contract::{
+        Coverage, GitFacts, HostFacts, LaneClaims, Observed, ResultProjection,
+    };
+
+    let commands = provenant_run::observed_commands();
+    let git_facts = GitFacts {
+        base: data["writer_base"].as_str().map(str::to_owned),
+        head: data["writer_head"]
+            .as_str()
+            .or_else(|| data["head"].as_str())
+            .map(str::to_owned),
+        commits: data["stop_work"]["ahead"]
+            .as_u64()
+            .into_iter()
+            .map(|ahead| format!("{ahead} commit(s)"))
+            .collect(),
+        diffstat: data["changed_files_total"]
+            .as_u64()
+            .map(|total| format!("{total} changed file(s)")),
+        shared_worktree: false,
+        extra: Default::default(),
+    };
+    let git_complete = git_facts.base.is_some() || git_facts.head.is_some();
+    let git = Observed {
+        source: "host-observation".into(),
+        completeness: if git_complete {
+            Coverage::Partial
+        } else {
+            Coverage::Unknown
+        },
+        value: Some(git_facts),
+        extra: Default::default(),
+    };
+    let ci: Observed<Value> = Observed {
+        source: "unavailable".into(),
+        completeness: Coverage::Unknown,
+        value: None,
+        extra: Default::default(),
+    };
+    let scope: Observed<provenant_records::handoff::WriteScopeReport> = Observed {
+        source: "unavailable".into(),
+        completeness: Coverage::Unknown,
+        value: None,
+        extra: Default::default(),
+    };
+    let handoff = serde_json::from_value::<provenant_records::handoff::Handoff>(
+        data["handoff"]["Ok"].clone(),
+    )
+    .ok();
+    let verify = handoff
+        .as_ref()
+        .map(|handoff| handoff.verify.clone())
+        .or_else(|| {
+            let verify = &data["selected"]["verify"];
+            verify
+                .is_array()
+                .then(|| serde_json::from_value(verify.clone()).ok())
+                .flatten()
+        });
+    ResultProjection::new(
+        provenant_records::RecordHeader::V1,
+        attempt,
+        HostFacts {
+            commands,
+            git,
+            ci,
+            scope,
+            extra: Default::default(),
+        },
+        LaneClaims {
+            handoff,
+            verify,
+            extra: Default::default(),
+        },
+    )
+}
+
+/// The output envelope's next action from its final projected state and the
+/// actual command target. This is shared by local, peer and fixture paths.
+pub fn output_next_step(
+    data: &Value,
+    target: Option<&crate::Target>,
+) -> Option<provenant_records::command_result::NextStep> {
+    use provenant_records::command_result::NextStep;
+    let target = target?;
+    let state = data["state"].as_str().unwrap_or_default();
+    if data["eof"] == json!(false) {
+        let offset = data["next_offset"].as_u64()?;
+        let part = data["part"].as_str().unwrap_or("result");
+        Some(NextStep::from_args(
+            &[
+                "provenant",
+                "output",
+                &target.to_string(),
+                "--part",
+                part,
+                "--offset",
+                &offset.to_string(),
+            ],
+            "read the next page of this output",
+        ))
+    } else if matches!(state, "queued" | "starting" | "running" | "settling") {
+        let handle = target.to_string();
+        Some(NextStep::from_args(
+            &["provenant", "wait", &handle],
+            "wait for this work to settle",
+        ))
+    } else {
+        None
+    }
 }
 
 /// Reviewer receipt object and human text from one settled typed attempt.

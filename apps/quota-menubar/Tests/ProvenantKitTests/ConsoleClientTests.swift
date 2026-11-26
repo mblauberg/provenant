@@ -164,19 +164,21 @@ final class ConsoleClientTests: XCTestCase {
     }
 
     func testOutputMetadataScenariosDecodeTheirSharedProjectionFixtures() async throws {
+        func envelope(_ fixture: String) throws -> [String: Any] {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Replay.fixture(fixture)) as? [String: Any])
+        }
         func data(_ fixture: String) throws -> [String: Any] {
-            let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: Replay.fixture(fixture)) as? [String: Any])
-            return try XCTUnwrap(envelope["data"] as? [String: Any])
+            try XCTUnwrap(envelope(fixture)["data"] as? [String: Any])
         }
 
         let (stoppedConsole, stoppedReplay) = client([(["output"], "output-result-stopped", 0)])
-        let stopped = try await stoppedConsole.output("c1c1")
+        let stopped = try await stoppedConsole.output("c2c2")
         XCTAssertEqual(stopped.state, "cancelled")
         XCTAssertEqual(stopped.text, "")
         let stoppedData = try data("output-result-stopped")
         XCTAssertEqual((stoppedData["budget_usage"] as? [String: Any])?["unit"] as? String, "fresh_tokens")
         XCTAssertNotNil(stoppedData["stop_work"])
-        XCTAssertEqual(stoppedReplay.recorded.first, ["output", "c1c1", "--part", "result", "--max-bytes", "16384", "--json"])
+        XCTAssertEqual(stoppedReplay.recorded.first, ["output", "c2c2", "--part", "result", "--max-bytes", "16384", "--json"])
 
         let (failedConsole, _) = client([(["output"], "output-result-failed", 0)])
         let failed = try await failedConsole.output("c1c1")
@@ -194,9 +196,24 @@ final class ConsoleClientTests: XCTestCase {
         let partial = try data("output-result")
         XCTAssertEqual(partial["status"] as? String, "running")
         XCTAssertEqual(partial["result"] as? String, "partial")
+        XCTAssertNotNil(partial["result_projection"])
+        XCTAssertEqual(partial["project_id"] as? String, "01010101010101010101010101010101")
+        XCTAssertNil(partial["settlement_reason"])
+        let partialNext = try XCTUnwrap(envelope("output-result")["next"] as? [[String: Any]])
+        XCTAssertEqual(
+            partialNext.first?["argv"] as? [String],
+            ["provenant", "wait", "output-result/task#1"]
+        )
         let pending = try data("output-result-pending")
         XCTAssertEqual(pending["status"] as? String, "running")
         XCTAssertEqual(pending["result"] as? String, "pending")
+        let pendingNext = try XCTUnwrap(envelope("output-result-pending")["next"] as? [[String: Any]])
+        XCTAssertEqual(
+            pendingNext.first?["argv"] as? [String],
+            ["provenant", "wait", "output-result-pending/task#1"]
+        )
+        let stoppedNext = try XCTUnwrap(envelope("output-result-stopped")["next"] as? [[String: Any]])
+        XCTAssertTrue(stoppedNext.isEmpty)
 
         let byteTail = try data("output-result-tail-bytes")
         XCTAssertEqual(byteTail["tail"] as? Int, 10)

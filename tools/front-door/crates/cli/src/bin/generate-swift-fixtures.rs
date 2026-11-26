@@ -189,6 +189,71 @@ mod fixtures {
         serde_json::to_value(projected).map_err(|error| format!("lane projection: {error}"))
     }
 
+    fn output_lane(
+        row: &AttemptRecord,
+        payload_evicted: bool,
+    ) -> Result<provenant_records::wire::LaneRow, String> {
+        use provenant_records::wire::{LanePresence, LaneProjectionFacts};
+        let presence = matches!(&row.state, provenant_run::AttemptState::Running { .. })
+            .then_some(LanePresence::Live);
+        let now = provenant_core::WallTime::from_micros(1_800_000_000_000_000)
+            .map_err(|error| format!("synthetic output observation time: {error}"))?;
+        Ok(provenant_cli::run::project_lane_with_loaded_facts(
+            row,
+            None,
+            Path::new("/fixture"),
+            Some(now),
+            true,
+            true,
+            LaneProjectionFacts {
+                presence,
+                payload_evicted,
+                ..Default::default()
+            },
+        ))
+    }
+
+    fn project_output(
+        data: &mut Value,
+        row: &AttemptRecord,
+        payload_evicted: bool,
+    ) -> Result<(), String> {
+        use provenant_cli::console::projection as p;
+        let lane = output_lane(row, payload_evicted)?;
+        p::output_lane_fields(data, &lane, row.attempt_id);
+        Ok(())
+    }
+
+    fn output_envelope(data: Value, row: &AttemptRecord) -> Result<Value, String> {
+        use provenant_cli::console::projection as p;
+        let target = provenant_cli::Target::parse(&row.key.to_string())
+            .map_err(|error| format!("synthetic output target: {error}"))?;
+        let mut envelope = CommandResult::new("output", Outcome::Ok, data);
+        envelope.next = p::output_next_step(&envelope.data, Some(&target))
+            .into_iter()
+            .collect();
+        serde_json::to_value(envelope).map_err(|error| format!("output envelope: {error}"))
+    }
+
+    fn output_result_artifact(
+        record: &mut AttemptRecord,
+        bytes: u64,
+        complete: bool,
+    ) -> Result<(), String> {
+        let id = record.attempt_id;
+        record.result = Some(
+            serde_json::from_value(json!({
+                "path":{"encoding":"utf8","path":format!("attempts/{id}/result.txt")},
+                "digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "bytes":bytes,
+                "complete":complete,
+                "redacted":false
+            }))
+            .map_err(|error| format!("synthetic output artifact: {error}"))?,
+        );
+        Ok(())
+    }
+
     /// An admitted operation stored beside the fixture attempt.
     fn operation(id: &str, parent: Option<&str>) -> Result<Value, String> {
         let record: provenant_run::OperationRecord = serde_json::from_value(json!({
@@ -689,6 +754,13 @@ mod fixtures {
                 )
             )
         };
+        let mut output_result_record = attempt(
+            "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "output-result",
+            json!({"state":"running"}),
+            "Output result fixture",
+        )?;
+        output_result_artifact(&mut output_result_record, 132, false)?;
         let mut output_result = p::output(
             "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
             "running",
@@ -715,6 +787,7 @@ mod fixtures {
             &Value::Null,
             &Value::Null,
         );
+        project_output(&mut output_result, &output_result_record, false)?;
         p::output_render_fields(
             &mut output_result,
             p::OutputRenderFields {
@@ -757,6 +830,25 @@ mod fixtures {
                 .map_err(|error| format!("output cancellation time: {error}"))?,
             reason: Some("writer cancelled before returning a result".into()),
         };
+        let mut output_result_stopped_record = attempt(
+            "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+            "output-result-stopped",
+            serde_json::to_value(cancelled_state.clone())
+                .map_err(|error| format!("synthetic stopped output state: {error}"))?,
+            "Stopped output fixture",
+        )?;
+        output_result_stopped_record.stop_work = Some(
+            serde_json::from_value(stop_work.clone())
+                .map_err(|error| format!("synthetic stopped output stop-work: {error}"))?,
+        );
+        output_result_stopped_record.limits = Some(
+            serde_json::from_value(json!({
+                "token_budget":{"value":1000,"source":"host","strength":"ceiling"}
+            }))
+            .map_err(|error| format!("synthetic stopped output limits: {error}"))?,
+        );
+        output_result_stopped_record.usage.tokens.input = Some(742);
+        output_result_stopped_record.usage.tokens.cache_read = Some(59);
         let (cancelled_label, cancelled_reason) =
             provenant_records::wire::LaneRow::state_and_reason(&cancelled_state);
         let mut output_result_stopped = p::output(
@@ -782,6 +874,11 @@ mod fixtures {
                 ..Default::default()
             },
         );
+        project_output(
+            &mut output_result_stopped,
+            &output_result_stopped_record,
+            false,
+        )?;
         p::output_render_fields(
             &mut output_result_stopped,
             p::OutputRenderFields {
@@ -800,6 +897,14 @@ mod fixtures {
                 .map_err(|error| format!("output failure time: {error}"))?,
             reason: Some("provider exited with an error".into()),
         };
+        let mut output_result_failed_record = attempt(
+            "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+            "output-result-failed",
+            serde_json::to_value(failed_state.clone())
+                .map_err(|error| format!("synthetic failed output state: {error}"))?,
+            "Failed output fixture",
+        )?;
+        output_result_artifact(&mut output_result_failed_record, 29, true)?;
         let (failed_label, failed_reason) =
             provenant_records::wire::LaneRow::state_and_reason(&failed_state);
         let failed_settlement = provenant_records::run::SettlementReason::derive(
@@ -811,6 +916,10 @@ mod fixtures {
         );
         let failed_settlement = serde_json::to_value(failed_settlement)
             .map_err(|error| format!("output failure settlement: {error}"))?;
+        output_result_failed_record.settlement_reason = Some(
+            serde_json::from_value(failed_settlement.clone())
+                .map_err(|error| format!("synthetic output settlement: {error}"))?,
+        );
         let mut output_result_failed = p::output(
             "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
             &failed_label,
@@ -844,6 +953,11 @@ mod fixtures {
                 ..Default::default()
             },
         );
+        project_output(
+            &mut output_result_failed,
+            &output_result_failed_record,
+            true,
+        )?;
         p::output_render_fields(
             &mut output_result_failed,
             p::OutputRenderFields {
@@ -864,6 +978,13 @@ mod fixtures {
         };
         let (succeeded_label, _) =
             provenant_records::wire::LaneRow::state_and_reason(&succeeded_state);
+        let output_transcript_evicted_record = attempt(
+            "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+            "output-transcript-evicted",
+            serde_json::to_value(succeeded_state.clone())
+                .map_err(|error| format!("synthetic evicted transcript state: {error}"))?,
+            "Evicted transcript fixture",
+        )?;
         let mut output_transcript_evicted = p::output(
             "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
             &succeeded_label,
@@ -886,10 +1007,21 @@ mod fixtures {
                 ..Default::default()
             },
         );
+        project_output(
+            &mut output_transcript_evicted,
+            &output_transcript_evicted_record,
+            true,
+        )?;
         p::output_render_fields(
             &mut output_transcript_evicted,
             p::OutputRenderFields::default(),
         );
+        let output_result_pending_record = attempt(
+            "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+            "output-result-pending",
+            json!({"state":"running"}),
+            "Pending output fixture",
+        )?;
         let mut output_result_pending = p::output(
             "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
             "running",
@@ -905,6 +1037,11 @@ mod fixtures {
             &Value::Null,
             &output_bytes(""),
         );
+        project_output(
+            &mut output_result_pending,
+            &output_result_pending_record,
+            false,
+        )?;
         p::output_render_fields(
             &mut output_result_pending,
             p::OutputRenderFields {
@@ -914,6 +1051,13 @@ mod fixtures {
         );
         let tail_bytes = "tail bytes";
         let tail_bytes_len = tail_bytes.len() as u64;
+        let mut output_result_tail_record = attempt(
+            "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+            "output-result-tail-bytes",
+            json!({"state":"running"}),
+            "Tail output fixture",
+        )?;
+        output_result_artifact(&mut output_result_tail_record, 132, false)?;
         let mut output_result_tail_bytes = p::output(
             "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
             "running",
@@ -929,6 +1073,11 @@ mod fixtures {
             &Value::Null,
             &output_bytes(tail_bytes),
         );
+        project_output(
+            &mut output_result_tail_bytes,
+            &output_result_tail_record,
+            false,
+        )?;
         p::output_render_fields(
             &mut output_result_tail_bytes,
             p::OutputRenderFields {
@@ -968,6 +1117,7 @@ mod fixtures {
             p::output_receipt(&receipt_record, false, None)
                 .map_err(|error| format!("synthetic output receipt: {error}"))?;
         let receipt_tail_text = p::output_tail_text(&receipt_text, p::OutputTail::Lines(1));
+        project_output(&mut output_receipt_tail, &receipt_record, false)?;
         p::output_render_fields(
             &mut output_receipt_tail,
             p::OutputRenderFields {
@@ -983,6 +1133,18 @@ mod fixtures {
         let output_path = serde_json::to_value(output_path)
             .map_err(|error| format!("output destination: {error}"))?;
         let result_write = "the result was written";
+        let mut output_result_written_record = attempt(
+            "c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
+            "output-result-written",
+            serde_json::to_value(succeeded_state.clone())
+                .map_err(|error| format!("synthetic written result state: {error}"))?,
+            "Written result fixture",
+        )?;
+        output_result_artifact(
+            &mut output_result_written_record,
+            result_write.len() as u64,
+            true,
+        )?;
         let mut output_result_written = p::output(
             "c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
             &succeeded_label,
@@ -1007,6 +1169,11 @@ mod fixtures {
             &Value::Null,
             &Value::Null,
         );
+        project_output(
+            &mut output_result_written,
+            &output_result_written_record,
+            false,
+        )?;
         p::output_render_fields(
             &mut output_result_written,
             p::OutputRenderFields {
@@ -1019,6 +1186,12 @@ mod fixtures {
             },
         );
         let prompt_write = "the prompt was written";
+        let output_prompt_written_record = attempt(
+            "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
+            "output-prompt-written",
+            json!({"state":"running"}),
+            "Written prompt fixture",
+        )?;
         let mut output_prompt_written = p::output(
             "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
             "running",
@@ -1034,6 +1207,17 @@ mod fixtures {
             &Value::Null,
             &output_bytes(prompt_write),
         );
+        project_output(
+            &mut output_prompt_written,
+            &output_prompt_written_record,
+            false,
+        )?;
+        let output_prompt_record = attempt(
+            "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+            "output-prompt",
+            json!({"state":"running"}),
+            "Prompt fixture",
+        )?;
         p::output_render_fields(
             &mut output_prompt_written,
             p::OutputRenderFields {
@@ -1060,6 +1244,7 @@ mod fixtures {
             &Value::Null,
             &output_bytes("Implement the console overview screen."),
         );
+        project_output(&mut output_prompt, &output_prompt_record, false)?;
         p::output_render_fields(&mut output_prompt, p::OutputRenderFields::default());
         let project_id = provenant_core::ProjectId::parse("47e56ec3dd1b387241e80489127d81e9")
             .map_err(|error| format!("synthetic project ID: {error}"))?;
@@ -1309,39 +1494,45 @@ mod fixtures {
                     ),
                 )?,
             ),
-            ("output-prompt", envelope("output", output_prompt)?),
-            ("output-result", envelope("output", output_result)?),
+            (
+                "output-prompt",
+                output_envelope(output_prompt, &output_prompt_record)?,
+            ),
+            (
+                "output-result",
+                output_envelope(output_result, &output_result_record)?,
+            ),
             (
                 "output-result-pending",
-                envelope("output", output_result_pending)?,
+                output_envelope(output_result_pending, &output_result_pending_record)?,
             ),
             (
                 "output-result-tail-bytes",
-                envelope("output", output_result_tail_bytes)?,
+                output_envelope(output_result_tail_bytes, &output_result_tail_record)?,
             ),
             (
                 "output-receipt-tail",
-                envelope("output", output_receipt_tail)?,
+                output_envelope(output_receipt_tail, &receipt_record)?,
             ),
             (
                 "output-result-written",
-                envelope("output", output_result_written)?,
+                output_envelope(output_result_written, &output_result_written_record)?,
             ),
             (
                 "output-prompt-written",
-                envelope("output", output_prompt_written)?,
+                output_envelope(output_prompt_written, &output_prompt_written_record)?,
             ),
             (
                 "output-result-stopped",
-                envelope("output", output_result_stopped)?,
+                output_envelope(output_result_stopped, &output_result_stopped_record)?,
             ),
             (
                 "output-result-failed",
-                envelope("output", output_result_failed)?,
+                output_envelope(output_result_failed, &output_result_failed_record)?,
             ),
             (
                 "output-transcript-evicted",
-                envelope("output", output_transcript_evicted)?,
+                output_envelope(output_transcript_evicted, &output_transcript_evicted_record)?,
             ),
         ])
     }

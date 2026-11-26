@@ -13,91 +13,6 @@ fn budget_usage(record: &run::AttemptRecord) -> Option<Value> {
     serde_json::to_value(usage).ok()
 }
 
-/// Build the one result projection from a host-owned read. Host facts come
-/// from observed data; the handoff and verify are lane claims, never host
-/// attestations. An unobserved fact stays unknown.
-/// Spec: docs/specs/lane-contracts.md#result-projection
-pub(super) fn result_projection(
-    data: &Value,
-    attempt: AttemptId,
-) -> provenant_records::lane_contract::ResultProjection {
-    use provenant_records::lane_contract::{
-        Coverage, GitFacts, HostFacts, LaneClaims, Observed, ResultProjection,
-    };
-
-    let commands = run::observed_commands();
-    let git_facts = GitFacts {
-        base: data["writer_base"].as_str().map(str::to_owned),
-        head: data["writer_head"]
-            .as_str()
-            .or_else(|| data["head"].as_str())
-            .map(str::to_owned),
-        commits: data["stop_work"]["ahead"]
-            .as_u64()
-            .into_iter()
-            .map(|ahead| format!("{ahead} commit(s)"))
-            .collect(),
-        diffstat: data["changed_files_total"]
-            .as_u64()
-            .map(|total| format!("{total} changed file(s)")),
-        shared_worktree: false,
-        extra: Default::default(),
-    };
-    let git_complete = git_facts.base.is_some() || git_facts.head.is_some();
-    let git = Observed {
-        source: "host-observation".into(),
-        completeness: if git_complete {
-            Coverage::Partial
-        } else {
-            Coverage::Unknown
-        },
-        value: Some(git_facts),
-        extra: Default::default(),
-    };
-    let ci: Observed<Value> = Observed {
-        source: "unavailable".into(),
-        completeness: Coverage::Unknown,
-        value: None,
-        extra: Default::default(),
-    };
-    let scope: Observed<provenant_records::handoff::WriteScopeReport> = Observed {
-        source: "unavailable".into(),
-        completeness: Coverage::Unknown,
-        value: None,
-        extra: Default::default(),
-    };
-    let handoff = serde_json::from_value::<provenant_records::handoff::Handoff>(
-        data["handoff"]["Ok"].clone(),
-    )
-    .ok();
-    let verify = handoff
-        .as_ref()
-        .map(|handoff| handoff.verify.clone())
-        .or_else(|| {
-            let verify = &data["selected"]["verify"];
-            verify
-                .is_array()
-                .then(|| serde_json::from_value(verify.clone()).ok())
-                .flatten()
-        });
-    ResultProjection::new(
-        provenant_records::RecordHeader::V1,
-        attempt,
-        HostFacts {
-            commands,
-            git,
-            ci,
-            scope,
-            extra: Default::default(),
-        },
-        LaneClaims {
-            handoff,
-            verify,
-            extra: Default::default(),
-        },
-    )
-}
-
 /// Render a host-owned read through the same CLI projection.
 pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full: bool) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
@@ -201,9 +116,10 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full:
         } else {
             out.summary = Some(output_summary_default(&out.result.data, &out.human, headed));
         }
-        out.result.next = output_next_step(&out.result.data, Some(&command.target))
-            .into_iter()
-            .collect();
+        out.result.next =
+            crate::console::projection::output_next_step(&out.result.data, Some(&command.target))
+                .into_iter()
+                .collect();
         if warn_human
             && out
                 .result
@@ -653,39 +569,6 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
 
 /// The owner's suggested command travels on the envelope's `next` array, never
 /// as a line inside the compact summary. The edge renders it once from the argv.
-pub(super) fn output_next_step(
-    data: &Value,
-    target: Option<&crate::Target>,
-) -> Option<provenant_records::command_result::NextStep> {
-    use provenant_records::command_result::NextStep;
-    let target = target?;
-    let state = data["state"].as_str().unwrap_or_default();
-    if data["eof"] == json!(false) {
-        let offset = data["next_offset"].as_u64()?;
-        let part = data["part"].as_str().unwrap_or("result");
-        Some(NextStep::from_args(
-            &[
-                "provenant",
-                "output",
-                &target.to_string(),
-                "--part",
-                part,
-                "--offset",
-                &offset.to_string(),
-            ],
-            "read the next page of this output",
-        ))
-    } else if matches!(state, "queued" | "starting" | "running" | "settling") {
-        let handle = target.to_string();
-        Some(NextStep::from_args(
-            &["provenant", "wait", &handle],
-            "wait for this work to settle",
-        ))
-    } else {
-        None
-    }
-}
-
 pub(super) fn reviewer_receipt(
     record: &provenant_records::run::AttemptRecord,
     writer: bool,
@@ -733,27 +616,7 @@ fn output_read(
         call.clock.wall_now().ok(),
         true,
     );
-    if let (Some(data), Some(row)) = (data.as_object_mut(), json!(projected).as_object()) {
-        data.remove("settlement_reason");
-        if let Some(grants) = data.get_mut("grants").and_then(Value::as_object_mut) {
-            for field in ["write_grants", "read_only_writable"] {
-                if let Some(value) = row.get(field) {
-                    grants.insert(field.into(), value.clone());
-                }
-            }
-            if let Some(route) = row.get("applied_route") {
-                for field in ["user_skills", "lane_access"] {
-                    grants.insert(
-                        field.into(),
-                        route.get(field).cloned().unwrap_or(Value::Null),
-                    );
-                }
-            }
-        }
-        data.extend(row.clone());
-    }
-    data["result_projection"] =
-        serde_json::to_value(result_projection(&data, id)).unwrap_or(Value::Null);
+    crate::console::projection::output_lane_fields(&mut data, &projected, id);
     Ok((data, human))
 }
 

@@ -1,27 +1,139 @@
 {
   "command": "output",
   "data": {
+    "account": null,
+    "applied_route": null,
+    "attempt_directory": {
+      "kind": "path",
+      "relative": {
+        "encoding": "utf8",
+        "path": "fixture/attempts/c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
+      },
+      "root": "/"
+    },
     "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+    "attempt_number": 1,
     "bytes": {
       "data": "",
       "encoding": "utf8"
     },
+    "cache_read_share": null,
+    "cause": null,
     "clipped": false,
     "complete": false,
+    "continuation": null,
+    "delivery": null,
+    "delivery_id": null,
     "digest": null,
     "eof": true,
+    "exit_code": null,
+    "finished_at": null,
+    "git_grants_digest": null,
+    "graph": "output-result-pending",
+    "head": null,
+    "lane_class": null,
+    "last_event_at": "2026-11-02T01:57:31.075623Z",
+    "last_event_source": "queued",
+    "last_output_at": null,
     "length": 0,
     "next_offset": 0,
+    "node": "task",
+    "observed_route": null,
     "offset": 0,
+    "overdue": false,
     "part": "result",
+    "partial_signals": [],
+    "presence": "live",
+    "priority": null,
+    "project_id": "01010101010101010101010101010101",
+    "protected_paths": [],
+    "queued_at": "2026-11-02T01:57:31.075623Z",
+    "read_only_writable": [],
     "reason": null,
+    "recorded_state": null,
+    "requested_route": {
+      "effort": "high",
+      "kind": "model",
+      "model": "fixture/model",
+      "provider": "fixture"
+    },
     "result": "pending",
-    "settlement_reason": null,
+    "result_path": null,
+    "result_projection": {
+      "attempt": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+      "header": {
+        "schema_version": 1
+      },
+      "host_facts": {
+        "ci": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        },
+        "commands": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        },
+        "git": {
+          "completeness": "unknown",
+          "source": "host-observation",
+          "value": {
+            "base": null,
+            "commits": [],
+            "diffstat": null,
+            "head": null,
+            "shared_worktree": false
+          }
+        },
+        "scope": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        }
+      },
+      "lane_claims": {
+        "handoff": null,
+        "verify": null
+      }
+    },
+    "retry_of": null,
+    "runtime_deadline": null,
+    "settlement": null,
+    "skipped_routes": [],
+    "stale": false,
+    "started_at": null,
     "state": "running",
-    "status": "running"
+    "status": "running",
+    "superseded_by": null,
+    "title": "Pending output fixture",
+    "transcript": null,
+    "usage": {
+      "context_basis_points": null,
+      "source": "stream",
+      "tokens": {
+        "cache_read": null,
+        "cache_write": null,
+        "cache_write_1h": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
+    },
+    "waiting_for": null,
+    "write_grants": []
   },
   "error": null,
-  "next": [],
+  "next": [
+    {
+      "argv": [
+        "provenant",
+        "wait",
+        "output-result-pending/task#1"
+      ],
+      "why": "wait for this work to settle"
+    }
+  ],
   "schema_version": 2,
   "status": "ok",
   "warnings": []

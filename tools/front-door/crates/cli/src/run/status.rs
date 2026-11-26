@@ -165,7 +165,7 @@ pub fn status_evidence(
 /// claims. An unobserved exit code stays unknown.
 /// Spec: docs/specs/lane-contracts.md#result-projection
 pub fn status_full_summary(row: &Value, attempt: AttemptId) -> String {
-    output::result_projection(row, attempt).render()
+    crate::console::projection::output_result_projection(row, attempt).render()
 }
 
 pub fn project_lane(
