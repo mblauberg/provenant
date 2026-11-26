@@ -175,6 +175,7 @@ fn a_started_same_boot_attempt_releases_only_after_exit_cleanup_completes() -> T
         None,
         &call,
     )?;
+    let scope = RunStore::scope(&store.record(id, &call)?);
     let custody_dir = context
         .state_root
         .as_path()
@@ -192,7 +193,7 @@ fn a_started_same_boot_attempt_releases_only_after_exit_cleanup_completes() -> T
     let attempt = store.attempt_dir(id, false)?;
     let lease = provenant_supervisor::fixture::acquire_writer(
         provenant_os::fs::Directory::open_anchor(&custody_dir)?,
-        RunStore::scope(&store.record(id, &call)?),
+        scope,
         call.lock_budget(),
         &cancel,
         &clock,
@@ -220,7 +221,7 @@ fn a_started_same_boot_attempt_releases_only_after_exit_cleanup_completes() -> T
     )?;
     let observation = serde_json::json!({
         "schema_version": 1,
-        "scope": RunStore::scope(&store.record(id, &call)?),
+        "scope": scope,
         "guardian": guardian,
         "provider": provider,
         "descendants": [],
@@ -260,7 +261,7 @@ fn a_started_same_boot_attempt_releases_only_after_exit_cleanup_completes() -> T
     };
     let observer = DeadSameBoot;
     let mut exit = crate::tests::exit();
-    exit.scope = RunStore::scope(&store.record(id, &call)?);
+    exit.scope = scope;
     exit.unresolved_cleanup = true;
     exit.settlement_evidence = provenant_supervisor::custody::SettlementEvidence::Unresolved;
     seal_exit(&exit)?;
