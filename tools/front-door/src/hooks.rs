@@ -67,6 +67,32 @@ struct AdvisoryInput {
     transcript_path: Option<String>,
 }
 
+/// Whether the host marked this hook as running inside a native subagent. A
+/// subagent has its own task prompt and must not receive the chair's checkpoint,
+/// custody or handoff text. Lanes are excluded earlier by `in_lane`; these
+/// payload markers cover subagents the host launches outside a lane. Present
+/// and non-empty is the claim, so an empty marker is not treated as a subagent.
+pub(crate) fn hook_marks_subagent(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    // Claude Code reports `agent_type` for hooks fired inside a subagent; a
+    // subagent's own transcript may be named in snake_case or camelCase.
+    [
+        "agent_type",
+        "agentType",
+        "agent_transcript_path",
+        "agentTranscriptPath",
+    ]
+    .into_iter()
+    .any(|key| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+    })
+}
+
 // Hook I/O and local work are constrained by real monotonic deadlines.
 #[allow(clippy::disallowed_methods)]
 pub fn run(hook: Hook, globals: &Globals) -> u8 {
@@ -687,6 +713,11 @@ fn advisory(
             return 0;
         }
     };
+    // A native subagent gets no checkpoint or custody text on any advisory
+    // event, including SessionStart after compaction.
+    if hook_marks_subagent(&input) {
+        return 0;
+    }
     let parsed = normalise_advisory_input(&input, moment, event_name, protocol);
     let Some(host) = parsed else {
         failure.note("checkpoint unavailable: invalid hook input");

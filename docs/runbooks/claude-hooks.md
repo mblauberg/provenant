@@ -49,6 +49,14 @@ empty one: inspect the source before acting. The checkpoint points to authority
 but does not create it. Record delivered PRs in the checkpoint so the digest can
 find them.
 
+A native subagent carries its own task prompt. When the hook payload marks an
+agent (`agent_type` or an agent transcript path, present and non-empty), the
+chair lifecycle hooks abstain: `chair-start` neither consumes a handoff nor
+records chair attribution, and the advisory hooks emit no checkpoint or custody
+text. Lanes were already excluded by their lane identity. The guard applies to
+every advisory event, so a subagent's compaction and stop hooks also leave the
+chair's checkpoint alone.
+
 ## Autosave and compaction
 
 - A hook never writes the chair's `checkpoint.md`; "settled since the last chair
