@@ -2678,14 +2678,46 @@ impl RunStore {
         // the attempt recorded; a live guardian keeps the fence and falls
         // through to the normal proof path.
         match recovery.end_recorded_orphans(observer, ORPHAN_PATIENCE) {
-            Ok(report) if !report.survivors.is_empty() => {
-                return Ok(Some(Reconciled::Escaped {
-                    pids: report
-                        .survivors
+            Ok(report) if !report.survivors.is_empty() || !report.reported.is_empty() => {
+                // Proven survivors and processes found only through the
+                // durable group/session tag are both named for the chair;
+                // neither grants authority to signal the reported ones.
+                let mut pids: Vec<i64> = report
+                    .survivors
+                    .iter()
+                    .map(|identity| identity.pid)
+                    .collect();
+                pids.extend(report.reported.iter().copied());
+                pids.sort_unstable();
+                pids.dedup();
+                if !report.reported.is_empty() {
+                    use provenant_records::warning::{self, Warning};
+                    // A report-only process must remain visible in status
+                    // while the attempt stays fenced, just like a stall.
+                    let names = report
+                        .reported
                         .iter()
-                        .map(|identity| identity.pid)
-                        .collect(),
-                }));
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let message = format!(
+                        "ORPHAN_PROCESS_ATTRIBUTED: attributed process(es) {names} still live; reported only, never signalled; run `provenant reconcile` to review"
+                    );
+                    if read_sealed(&attempt, "orphan-warning.json", RECORD_LIMIT)?.is_none() {
+                        crate::artifacts::seal(
+                            &attempt,
+                            "orphan-warning.json",
+                            &crate::db::bytes(&message)?,
+                            RECORD_LIMIT,
+                        )?;
+                    }
+                    warning::warn(
+                        Warning::new(warning::ORPHAN_PROCESS_ATTRIBUTED, message)
+                            .subject(record.attempt_id.to_string())
+                            .once_per_change(),
+                    );
+                }
+                return Ok(Some(Reconciled::Escaped { pids }));
             }
             Ok(_) | Err(CustodyError::Fenced) => {}
             Err(error) => return Ok(Some(Reconciled::custody_unavailable(&error))),

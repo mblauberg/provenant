@@ -185,23 +185,42 @@ open descriptor is reported as ownership unproven. An open path is not proof of
 lock ownership; unknown holders stay explicit uncertainty; a timeout alone
 never authorises settlement or an unrelated signal. This observation covers the
 custody writer-lock path, not arbitrary repository locks, and cannot be persisted
-when the guardian dies before publishing an exit. An unrecorded, unsandboxed
-detached process may therefore be neither reaped nor reported.
+when the guardian dies before publishing an exit. The durable attempt tag
+recorded at spawn narrows this: a detached process is named in status from its
+recorded group/session or its inherited mark, though an OS mark is required to
+reap one that setsid leaves outside the recorded tree.
 - Why: a leftover descendant could still write the worktree, and a chair
   cannot clean up what status no longer names.
 
+The guardian records a durable attempt tag at provider spawn, before exec: the
+boot, the spawned process group and session, and whether an OS containment mark
+is in effect. It also passes the attempt id as an internal, non-secret mark in
+the provider's environment, inherited across fork, exec and setsid. A host with
+no containment warns once per change with the setting source
+(`LAUNCH_PROCESS_ATTRIBUTION_NONE`, default `warn`, configurable off);
+`config show --full` names the setting and its layer. Where an OS mark survives
+a double-fork and setsid, recovery reaps marked escapees. Without one, the
+recorded group/session and the inherited mark still let reconcile name a
+detached process after guardian death: it is reported in status as an escaped
+PID (and named in a settled exit's `unresolved_pids`) but never signalled,
+because attribution alone does not prove ownership. An `ORPHAN_PROCESS_ATTRIBUTED`
+attempt warning keeps the PIDs visible in status while the fence holds.
+
 When a lane is killed before its guardian can publish an exit, `reconcile` ends
 its recorded process tree under writer exclusion once the guardian's published
-identity is proven absent. Candidates are the provider and descendant
+identity is proven absent. Reap candidates are the provider and descendant
 identities the reservation recorded and live processes carrying the attempt's
 sandbox mark; each identity is revalidated before TERM and again before KILL. A live guardian fences the
 reap, a survivor keeps the attempt fenced and is reported with its PID, and no
-exit is invented. Bare PIDs, process groups, sessions and descriptor paths grant
-no signal authority.
+exit is invented. Live processes found only by the durable group/session tag
+join that report, never the signal set. Bare PIDs, process groups, sessions and
+descriptor paths grant no signal authority.
 - Why: an account-limit kill must not leave a detached service holding the
   repository's heavy lock, but a recycled PID or a sibling's process must never
-  be signalled to clear it.
-- Owner: `crates/supervisor/src/custody/orphans.rs`, `crates/run/src/controls.rs`
+  be signalled to clear it; an unsandboxed host must still name what it cannot
+  prove.
+- Owner: `crates/supervisor/src/custody/orphans.rs`, `crates/run/src/controls.rs`,
+  `crates/run/src/launch.rs`
 
 ### Retention is bounded and event-driven
 

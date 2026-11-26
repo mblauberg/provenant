@@ -1301,6 +1301,15 @@ impl Driver<'_> {
         self.reservation.launch_state = LaunchState::Spawned;
         // Without a profile the lane has no sandbox mark for a later scan.
         self.reservation.sandboxed = self.profile_file.is_some();
+        // Persist the attempt tag before exec so a later recovery can name
+        // this lane's processes even if the guardian dies before publishing
+        // an exit. Group and session are report-only without an OS mark.
+        self.reservation.attribution = child.identity().map(|identity| ProcessAttribution {
+            boot: self.reservation.boot.clone(),
+            group_id: identity.group_id,
+            session_id: identity.session_id,
+            contained: self.profile_file.is_some(),
+        });
         self.reservation.provider = child.identity().cloned();
         let mut memory = memory_path
             .as_ref()
@@ -2547,10 +2556,18 @@ impl Driver<'_> {
                 "provider executable path is missing",
             ));
         }
+        // An internal, non-secret mark crosses exec and is inherited by every
+        // descendant, including one that double-forks and calls setsid. It
+        // lets recovery name such a process on hosts with no OS mark.
+        let mut marked_env = env.to_vec();
+        marked_env.push((
+            OsString::from(crate::custody::ATTEMPT_MARK_ENV),
+            OsString::from(self.reservation.scope.attempt.to_string()),
+        ));
         crate::process_os::provider::ProviderGroup::spawn(
             provenant_os::sys::raw_exec::SpawnSpec {
                 argv,
-                env: Some(env),
+                env: Some(&marked_env),
                 cwd,
                 input: !input.is_empty(),
                 secret_input: self.secret_input.as_ref(),

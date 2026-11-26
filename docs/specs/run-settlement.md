@@ -335,6 +335,10 @@ identities, or a spawned tree the guardian never completed a census of, is never
 unless the sandbox mark was in effect: a daemon that double-forks and calls setsid after the last
 census matches no pid, session or group, and only the mark finds it. An unsandboxed lane lost
 before that record is durable is refused, and `reconcile --abandon` is the explicit escape. The
+guardian's durable group/session attempt tag, plus the internal mark inherited in the
+provider's environment, still lets reconcile name a detached process for status even when it
+cannot prove enough to signal it; a host with neither an OS containment mark nor a durable
+tag warns once per change with its setting source. The
 host must also prove worktree non-occupancy under exclusion; unknown or occupied is not free (a
 read-only attempt has no worktree). A writer checkout removed from disk is censused like any
 other root. Nothing that still exists lies under it, so a process in an existing directory is

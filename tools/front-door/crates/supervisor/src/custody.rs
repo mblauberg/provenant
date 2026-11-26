@@ -30,6 +30,10 @@ pub use writer_release::{lock_writer_exclusion, lock_writer_occupancy, release_i
 pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
 pub const HOLDER_LOCK: &str = "holder.lock";
+/// Internal, non-secret mark passed to the provider at spawn. Descendants
+/// inherit it across fork, exec and setsid, so a host without an OS
+/// containment mark can still name a detached process after guardian death.
+pub(crate) const ATTEMPT_MARK_ENV: &str = "PROVENANT_ATTEMPT_MARK";
 use provenant_records::custody::Scope;
 
 /// Run seals this beside the reservation when private Git must be retained.
@@ -413,6 +417,22 @@ struct HolderAdmission {
 
 const HOLDER_GENERATION: &str = "holder-generation.json";
 const HOLDER_ADMISSION: &str = "holder-admission.json";
+
+/// Durable attribution for the processes a lane spawns. The guardian writes it
+/// at provider spawn, before exec, so a later recovery can still name the
+/// lane's processes when the guardian died before publishing an exit.
+///
+/// `contained` says whether an OS mark is in effect that survives a
+/// double-fork and setsid. Without one, group and session identify members of
+/// the recorded tree but grant no signal authority: they can only be reported.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ProcessAttribution {
+    pub boot: String,
+    pub group_id: i64,
+    pub session_id: i64,
+    pub contained: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Reservation {
     pub schema_version: u64,
@@ -439,6 +459,10 @@ pub(crate) struct Reservation {
     /// spawned; absent means no mark was in effect.
     #[serde(default)]
     pub sandboxed: bool,
+    /// Attempt tag recorded at provider spawn. Absent means the guardian died
+    /// before attribution could be published, so no descendant can be named.
+    #[serde(default)]
+    pub attribution: Option<ProcessAttribution>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -525,6 +549,13 @@ impl Reservation {
             if identity.boot != self.boot {
                 return Err(CustodyError::InvalidRecord);
             }
+        }
+        if let Some(attribution) = &self.attribution
+            && (attribution.boot != self.boot
+                || attribution.group_id <= 0
+                || attribution.session_id <= 0)
+        {
+            return Err(CustodyError::InvalidRecord);
         }
         if let Some(guardian) = &self.guardian
             && (guardian.session_id != guardian.pid || guardian.group_id != guardian.pid)
@@ -771,6 +802,7 @@ pub(crate) fn acquire_writer_with_observer(
         census_incomplete: true,
         omitted_descendants: 0,
         sandboxed: false,
+        attribution: None,
         extra: Default::default(),
     };
     reservation.validate()?;
