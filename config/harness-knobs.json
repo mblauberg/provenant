@@ -407,6 +407,14 @@
       "projects.{project}.on_stop.<stop_cause>": {"type": "string", "allowed": "same_route, new_route, chair, or a step object", "default": "the stop table row", "effect": "Project default next step for one stop cause, resolved once at graph admission and sealed in the checkpoint. A node's own on_stop entry wins; a pinned cause ignores it and warns ON_STOP_PINNED_IGNORED."}
     }
   },
+  "host_delivery_queue_settings": {
+    "path": "domains.fabric.queue",
+    "settings": {
+      "max_parallel": {"type": "int", "allowed": "1 to 64", "min": 1, "max": 64, "default": "4", "effect": "Maximum number of active delivery item graphs."},
+      "ci_slots": {"type": "int", "allowed": "0 to 64", "min": 0, "max": 64, "default": "1", "effect": "Admission cap for delivery queue CI observations; zero disables the cap."},
+      "prep_retries": {"type": "int", "allowed": "0 to 64", "min": 0, "max": 64, "default": "2", "effect": "Number of queue item launch preparation retries before parking."}
+    }
+  },
   "host_model_policy_settings": {
     "path": "domains.routing.model_policy",
     "settings": {

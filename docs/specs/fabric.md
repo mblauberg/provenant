@@ -230,7 +230,13 @@ admission. The CLI catalogue exposes those declarations.
 `after_settled` orders a node after its predecessors settle in any state without
 propagating their failure; they stay visible in the graph outcome. Inputs may
 select outputs from either kind of direct dependency; unavailable optional
-outputs stay absent and required outputs still gate admission.
+outputs stay absent and required outputs still gate admission. When loop
+expansion binds a source or gate target that was inherited as an ordering-only
+edge, the source's success requirement replaces that ordering edge; a retry of
+failed hygiene retains its settled-only source edge. Dependencies inherited
+from an enclosing composite are checked against the full expanded graph and
+remain attached to each round under their original graph identities, rather than
+being renamed into the loop namespace.
 
 ### Implementation planning
 
@@ -308,7 +314,8 @@ own `when` condition holds; a composite skipped by its own condition keeps that
 state whatever its members. An explicit `GraphPatch` skip of a composite stays
 authoritative until a later replacement or retry supersedes it, and a patch that
 replaces or skips a member recomputes the affected active composite boundaries in
-the same checkpoint.
+the same checkpoint. A node whose resolved `when` is false remains visible as
+skipped and needs no launch route; active agent nodes still require one.
 - Why: recovery must validate a checkpoint against the topology it records.
 - Owner: `crates/fabric-runtime/src/graph/composites.rs`,
   `crates/fabric-runtime/src/graph/patch.rs`
@@ -489,11 +496,16 @@ explicitly. The `domains.wait.pr_*` settings (conditional requests, intervals)
 change forge-observer request cadence only, never a gate verdict.
 - Why: deterministic decisions need durable evidence without a launch.
 
+The [delivery queue target](delivery-queue.md) extends these graph capabilities
+with bounded conditional cycles, escalation and durable item scheduling.
+
 ### Bounded loops
 
 Admission counts every possible round. A body writer integrates by fast-forward
 only and never merges. Exhaustion pauses the graph without delivery, and an
-extension never adds rounds twice.
+extension never adds rounds twice. Admission treats the edge into a later round
+as a retry on the previous outcome, rather than carrying that round's success
+requirements into its failure path.
 - Why: repeated review and repair needs bounded admission and a human decision at
   the bound.
 
@@ -553,7 +565,9 @@ checkpoint missing launch evidence or its actor is refused.
 
 ### Checkpoint envelope
 
-Admission bounds the worst-case checkpoint before saving the plan. Graph text,
+Admission bounds the worst-case checkpoint before saving the plan. The fixed
+checkpoint envelope is 32 MiB, including the full handoff projections and
+pending-steer reserve for graphs at the default node limit. Graph text,
 identity fields and object keys keep their exact bytes in local state and
 execution context, through captured fragments, retries, template substitutions
 and expansions; heuristic content inspection warns with the field and rule

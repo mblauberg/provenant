@@ -626,6 +626,7 @@ pub(super) fn next_attempt_transition(
     progress: &NodeProgress,
     limits: &crate::config::GraphLimits,
     launch_clock: Option<provenant_core::WallTime>,
+    prep_retries: Option<usize>,
     facts: &NextAttemptFacts,
 ) -> NextAttemptDecision {
     if let Some(retry) = &progress.fallback_evidence_retry {
@@ -711,6 +712,40 @@ pub(super) fn next_attempt_transition(
         None => 0,
         Some(last) if last.state != AttemptState::Terminal => usize::from(last.key.route_index),
         Some(last)
+            if prep_retries.is_some()
+                && last.outcome.is_some_and(|outcome| {
+                    matches!(outcome, GraphAttemptOutcome::PreparationRefused(_))
+                })
+                && !last.launched
+                && last.host_refused_before_acceptance =>
+        {
+            let proved_refusals = progress
+                .attempts
+                .iter()
+                .filter(|attempt| {
+                    attempt.state == AttemptState::Terminal
+                        && !attempt.launched
+                        && attempt.host_refused_before_acceptance
+                        && attempt.outcome.is_some_and(|outcome| {
+                            matches!(outcome, GraphAttemptOutcome::PreparationRefused(_))
+                        })
+                })
+                .count();
+            if prep_retries.is_some_and(|limit| proved_refusals > limit) {
+                return NextAttemptDecision::Ready(NextAttempt::Fail {
+                    code: Some("prep_retries_exhausted"),
+                    message: Some(
+                        "Preparation was refused before launch acceptance after the retry limit."
+                            .into(),
+                    ),
+                });
+            }
+            // A refusal proven to precede owner acceptance does not consume a
+            // route fallback or delivery repair; reconcile and relaunch this
+            // same route with a new durable AttemptKey.
+            usize::from(last.key.route_index)
+        }
+        Some(last)
             if review_substitution(node, last)
                 && progress
                     .attempts
@@ -719,7 +754,7 @@ pub(super) fn next_attempt_transition(
                     .count()
                     < limits.review_substitutions =>
         {
-            progress.attempts.len()
+            usize::from(last.key.route_index).saturating_add(1)
         }
         Some(last) if review_substitution(node, last) => {
             // A lowered limit can withdraw a retry that was saved
@@ -764,7 +799,7 @@ pub(super) fn next_attempt_transition(
                     return NextAttemptDecision::Ready(NextAttempt::Fail { code, message });
                 }
             }
-            progress.attempts.len()
+            usize::from(last.key.route_index).saturating_add(1)
         }
         Some(_) => return NextAttemptDecision::Ready(NextAttempt::None),
     };
@@ -812,12 +847,13 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
     node: &PlannedNode,
     progress: &NodeProgress,
     limits: &crate::config::GraphLimits,
+    prep_retries: Option<usize>,
     owner: &mut R,
     launch_clock: Option<provenant_core::WallTime>,
 ) -> Result<NextAttempt, R::Error> {
     let mut facts = NextAttemptFacts::default();
     loop {
-        match next_attempt_transition(node, progress, limits, launch_clock, &facts) {
+        match next_attempt_transition(node, progress, limits, launch_clock, prep_retries, &facts) {
             NextAttemptDecision::Ready(decision) => return Ok(decision),
             NextAttemptDecision::ObserveLaunchAcceptance => {
                 facts.launch_accepted = Some(match progress.attempts.last() {
@@ -1065,6 +1101,12 @@ mod tests {
         state: &str,
         outcome: Option<&str>,
     ) -> serde_json::Value {
+        let outcome = outcome.map(|outcome| match outcome {
+            "preparation_refused" => serde_json::json!({
+                "preparation_refused": "preparation_refused"
+            }),
+            outcome => serde_json::json!(outcome),
+        });
         serde_json::json!({
             "launched": launched,
             "key": {"graph_id": "g", "node_id": "n", "route_index": route_index, "attempt": route_index + 1},
@@ -1106,7 +1148,8 @@ mod tests {
                 "advance_note": "the review returned no verdict"
             }),
         );
-        let decision = decide_next_attempt(&lens, &withdrawn, &limits, &mut Owner, None).unwrap();
+        let decision =
+            decide_next_attempt(&lens, &withdrawn, &limits, None, &mut Owner, None).unwrap();
         assert_eq!(
             decision,
             NextAttempt::Fail {
@@ -1207,6 +1250,133 @@ mod tests {
         assert_eq!(
             settled.advance_note.as_deref(),
             Some("The lane requires authentication.")
+        );
+    }
+
+    #[test]
+    fn proven_preparation_refusal_retries_the_same_route_with_a_bounded_allowance() {
+        let node = planned(serde_json::json!({
+            "id": "n", "prompt": "p", "access": "worktree_write", "worktree": "/w",
+            "routes": [{"adapter": "a", "model": "a/m"}, {"adapter": "b", "model": "b/m"}]
+        }));
+        let limits = crate::config::GraphLimits::default();
+        let mut first = attempt(0, false, "terminal", Some("preparation_refused"));
+        first["host_refused_before_acceptance"] = serde_json::json!(true);
+        let mut second = first.clone();
+        second["key"]["attempt"] = serde_json::json!(2);
+        let within_budget = progress(vec![first.clone(), second.clone()], serde_json::json!({}));
+
+        assert_eq!(
+            next_attempt_transition(
+                &node,
+                &within_budget,
+                &limits,
+                None,
+                Some(2),
+                &NextAttemptFacts::default(),
+            ),
+            NextAttemptDecision::Ready(NextAttempt::Candidate {
+                route_index: 0,
+                settlement_retries: None,
+            })
+        );
+
+        let mut third = first.clone();
+        third["key"]["attempt"] = serde_json::json!(3);
+        let exhausted = progress(vec![first, second, third], serde_json::json!({}));
+        assert_eq!(
+            next_attempt_transition(
+                &node,
+                &exhausted,
+                &limits,
+                None,
+                Some(2),
+                &NextAttemptFacts::default(),
+            ),
+            NextAttemptDecision::Ready(NextAttempt::Fail {
+                code: Some("prep_retries_exhausted"),
+                message: Some(
+                    "Preparation was refused before launch acceptance after the retry limit."
+                        .into()
+                ),
+            })
+        );
+    }
+
+    #[test]
+    fn later_route_index_ignores_same_route_preparation_rows() {
+        let node = planned(serde_json::json!({
+            "id": "n", "prompt": "p", "access": "worktree_write", "worktree": "/w",
+            "routes": [{"adapter": "a", "model": "a/m"}, {"adapter": "b", "model": "b/m"}]
+        }));
+        let mut first = attempt(0, false, "terminal", Some("preparation_refused"));
+        first["host_refused_before_acceptance"] = serde_json::json!(true);
+        let mut second = first.clone();
+        second["key"]["attempt"] = serde_json::json!(2);
+        let mut route_unavailable = attempt(0, false, "terminal", Some("auth_required"));
+        route_unavailable["key"]["attempt"] = serde_json::json!(3);
+        let progress = progress(
+            vec![first, second, route_unavailable],
+            serde_json::json!({}),
+        );
+        let facts = NextAttemptFacts {
+            fallback: Some(PreparationObservation {
+                evidence: Some(PreparationFallbackEvidence {
+                    failure: PreparationFailure::AuthRequired,
+                    handoff: FallbackHandoff::Local,
+                    custody_released: true,
+                }),
+                unreadable: false,
+                cause: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            next_attempt_transition(
+                &node,
+                &progress,
+                &crate::config::GraphLimits::default(),
+                None,
+                Some(2),
+                &facts
+            ),
+            NextAttemptDecision::Ready(NextAttempt::Candidate {
+                route_index: 1,
+                settlement_retries: None,
+            })
+        );
+    }
+
+    #[test]
+    fn review_substitution_uses_the_next_declared_route_after_preparation_rows() {
+        let node = planned(serde_json::json!({
+            "id": "n", "prompt": "p", "access": "read_only", "role": "lens",
+            "routes": [
+                {"adapter": "a", "model": "a/m"},
+                {"adapter": "b", "model": "b/m"},
+                {"adapter": "c", "model": "c/m"}
+            ]
+        }));
+        let mut first = attempt(0, false, "terminal", Some("preparation_refused"));
+        first["host_refused_before_acceptance"] = serde_json::json!(true);
+        let mut second = first.clone();
+        second["key"]["attempt"] = serde_json::json!(2);
+        let mut failed_review = attempt(0, true, "terminal", Some("task_failed"));
+        failed_review["key"]["attempt"] = serde_json::json!(3);
+        let progress = progress(vec![first, second, failed_review], serde_json::json!({}));
+        assert_eq!(
+            next_attempt_transition(
+                &node,
+                &progress,
+                &crate::config::GraphLimits::default(),
+                None,
+                Some(2),
+                &NextAttemptFacts::default(),
+            ),
+            NextAttemptDecision::Ready(NextAttempt::Candidate {
+                route_index: 1,
+                settlement_retries: None,
+            })
         );
     }
 

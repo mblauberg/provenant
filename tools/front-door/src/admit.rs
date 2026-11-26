@@ -24,6 +24,159 @@ use std::{
     time::Duration,
 };
 
+/// Admit a published queue head through the same fair host-wide `ci` class as
+/// `provenant admit ci`, then persist the exact owner under its acquired slot.
+pub(crate) fn acquire_delivery_ci_lease(
+    state: &Path,
+    owner: provenant_run::build::queue::CiLeaseOwner,
+    ci_slots: &provenant_records::Sourced<usize>,
+    wait_policy: &provenant_records::Sourced<u64>,
+    (allow_overflow, waited_millis): (bool, u64),
+    wait_seconds: u64,
+    cancel: &provenant_core::CancelToken,
+) -> Option<provenant_fabric_runtime::graph::DeliveryCiAdmission> {
+    use provenant_run::build::{Priority, queue};
+    use sha2::{Digest, Sha256};
+
+    let identity = match serde_json::to_vec(&owner) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let reason = format!("cannot encode lease identity: {error}");
+            say(&format!("delivery CI admission unavailable: {reason}"));
+            return Some(
+                provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable { reason },
+            );
+        }
+    };
+    let digest = Sha256::digest(&identity)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let limit = match u64::try_from(ci_slots.value) {
+        Ok(limit) => limit,
+        Err(_) => {
+            let reason = format!(
+                "ci_slots={} from {:?} exceeds the host admission range",
+                ci_slots.value, ci_slots.source.layer
+            );
+            say(&format!("delivery CI admission unavailable: {reason}"));
+            return Some(
+                provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable { reason },
+            );
+        }
+    };
+    let limit_source = delivery_ci_cap_source(ci_slots);
+    let ticket_owner = format!("delivery:{}:{}", owner.graph_id, owner.node_id);
+    let command = "delivery CI observation".to_owned();
+    let request = queue::AdmissionRequest {
+        state,
+        class: "ci",
+        limit,
+        limit_source: limit_source.clone(),
+        job_id: &digest,
+        owner: &ticket_owner,
+        project_key: &owner.project,
+        priority: Priority::Interactive,
+        aging: Duration::from_secs(120),
+        command_digest: digest.clone(),
+        overflow: queue::OverflowPolicy::Local {
+            after: Duration::ZERO,
+        },
+        affinity: Vec::new(),
+        excluded: Vec::new(),
+        cancel,
+        scratch: None,
+        attempt_id: None,
+        command: Some(command),
+        wait_seconds,
+    };
+    match queue::try_admit_ci_lease(&request, owner.clone(), allow_overflow) {
+        Ok(queue::CiLeaseAttempt::Held { lease }) => {
+            let owner = lease.owner;
+            Some(provenant_fabric_runtime::graph::DeliveryCiAdmission::Held {
+                lease: provenant_fabric_runtime::graph::DeliveryCiLease {
+                    id: lease.id,
+                    slot: lease.slot,
+                    project: owner.project,
+                    graph_id: owner.graph_id,
+                    node_id: owner.node_id,
+                    head_sha: owner.head_sha,
+                    ci_slots: ci_slots.clone(),
+                },
+            })
+        }
+        Ok(queue::CiLeaseAttempt::Waiting) => None,
+        Ok(queue::CiLeaseAttempt::Overflow) => {
+            say(&format!(
+                "delivery CI admission overflow after {waited_millis} ms; continuing under cap {limit} from {limit_source} after wait {} seconds from {:?}{}",
+                wait_policy.value,
+                wait_policy.source.layer,
+                wait_policy
+                    .source
+                    .origin
+                    .as_deref()
+                    .map(|origin| format!(" ({origin})"))
+                    .unwrap_or_default()
+            ));
+            Some(
+                provenant_fabric_runtime::graph::DeliveryCiAdmission::Overflow {
+                    waited_millis,
+                    ci_slots: ci_slots.clone(),
+                },
+            )
+        }
+        Err(error) => {
+            let reason = provenant_core::bounded_line(
+                &format!("{error}; cap={limit} from {limit_source}"),
+                512,
+            );
+            say(&format!(
+                "delivery CI admission unavailable; continuing without a class lease: {reason}"
+            ));
+            Some(provenant_fabric_runtime::graph::DeliveryCiAdmission::Unavailable { reason })
+        }
+    }
+}
+
+pub(crate) fn release_delivery_ci_lease(
+    state: &Path,
+    lease: &provenant_fabric_runtime::graph::DeliveryCiLease,
+    wait_seconds: u64,
+    cancel: &provenant_core::CancelToken,
+) -> Result<(), String> {
+    let lease = provenant_run::build::queue::CiAdmissionLease {
+        id: lease.id.clone(),
+        slot: lease.slot,
+        owner: provenant_run::build::queue::CiLeaseOwner {
+            project: lease.project.clone(),
+            graph_id: lease.graph_id.clone(),
+            node_id: lease.node_id.clone(),
+            head_sha: lease.head_sha.clone(),
+        },
+        cap: provenant_os::admission::AdmissionCap {
+            limit: u64::try_from(lease.ci_slots.value).map_err(|error| error.to_string())?,
+            source: delivery_ci_cap_source(&lease.ci_slots),
+        },
+    };
+    provenant_run::build::queue::release_ci_lease(state, &lease, wait_seconds, cancel)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn delivery_ci_cap_source(ci_slots: &provenant_records::Sourced<usize>) -> String {
+    format!(
+        "{} ({:?}{})",
+        provenant_fabric_runtime::graph::QUEUE_CI_SLOTS_KEY,
+        ci_slots.source.layer,
+        ci_slots
+            .source
+            .origin
+            .as_deref()
+            .map(|origin| format!("; {origin}"))
+            .unwrap_or_default()
+    )
+}
+
 fn subcommand(args: &[OsString]) -> Option<&str> {
     let mut args = args.iter().map(OsString::as_os_str);
     while let Some(arg) = args.next() {
@@ -332,6 +485,14 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(resolved.wait_seconds);
+    let limit_source = if class == "build" && get_env(ADMISSION_SLOTS).is_some() {
+        format!("{ADMISSION_SLOTS} (host launch override)")
+    } else {
+        format!(
+            "admission.{}.slots ({:?})",
+            resolved.name, resolved.slots_source
+        )
+    };
     let wait_duration = Duration::from_secs(wait_seconds);
 
     let is_nested = nested_for_class(class, &env, &SystemProcessObserver);
@@ -404,7 +565,7 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
         say(&format!("{slot_desc} unavailable, {proceed_desc}: {err}"));
     };
 
-    if !is_nested && slots_count > 0 {
+    if !is_nested && (slots_count > 0 || class == "ci") {
         let Some(state_ref) = state_buf.as_ref() else {
             warn_slot_unavailable(&"state directory is unavailable");
             return execute_and_forward(program, args, &env);
@@ -441,6 +602,7 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
             state: state_ref,
             class,
             limit: slots_count,
+            limit_source: limit_source.clone(),
             job_id: &id,
             owner: &owner,
             project_key: "",
@@ -465,9 +627,9 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
         };
         match queue::admit(&request) {
             Ok(Admitted::Held { guard, .. }) => held_guard = Some(guard),
-            Ok(Admitted::Overflow { .. }) => warn_slot_unavailable(
-                &"bounded wait ended with every slot busy; proceeding without one",
-            ),
+            Ok(Admitted::Overflow { .. }) => warn_slot_unavailable(&format!(
+                "bounded wait ended with every ci slot busy; cap={slots_count} from {limit_source}; proceeding without one"
+            )),
             Err(BuildError::Cancelled) => return 130,
             Err(BuildError::CancelledSignal(signal)) => return 128 + signal,
             Err(BuildError::Superseded) => {

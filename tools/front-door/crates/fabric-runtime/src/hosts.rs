@@ -2106,6 +2106,7 @@ mod tests {
             plan: Default::default(),
             implement: Default::default(),
             batch: Default::default(),
+            queue: Default::default(),
             steer: Default::default(),
             limits: crate::config::Limits {
                 body_bytes: 65536,

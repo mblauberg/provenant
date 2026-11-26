@@ -73,7 +73,7 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
                         }),
                     };
                     let selected = next_attempt::next_attempt_transition(
-                        node, &progress, &limits, None, &facts,
+                        node, &progress, &limits, None, None, &facts,
                     );
                     let advances = matches!(
                         selected,

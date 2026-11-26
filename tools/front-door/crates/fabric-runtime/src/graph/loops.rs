@@ -2,6 +2,12 @@
 use super::*;
 use std::collections::BTreeMap;
 
+mod settlement;
+pub(super) use settlement::{
+    DecisionExtensionError, pause_invalid_decision, prepare_decision_extension, refresh_pause,
+    reopen_after_delivery, settle, validate_progress,
+};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopSpec {
     #[serde(flatten)]
@@ -9,6 +15,12 @@ pub struct LoopSpec {
     pub body: Vec<GraphNode>,
     pub until: String,
     pub max_rounds: usize,
+    /// Explicit initial nodes for `previous.<body-node>` bindings in round one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub previous_bindings: BTreeMap<String, String>,
+    /// Typed delivery outcome edge; the node id names the loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_edge: Option<provenant_records::graph::LoopOutcomeEdge>,
     #[serde(
         default = "default_extension_rounds",
         skip_serializing_if = "is_default_extension_rounds"
@@ -18,6 +30,16 @@ pub struct LoopSpec {
     pub decision_session: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub review_repair: bool,
+    /// Typed gates and hygiene outcomes whose failure admits the next bounded
+    /// repair round. Selected triggers remain failed for evidence and replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_on: Vec<String>,
+    /// Local publication whose exact receipt is exported by a successful loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_publication: Option<String>,
+    /// Initial publication selected when all entry gates pass without repair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_publication: Option<String>,
 }
 
 fn default_extension_rounds() -> usize {
@@ -25,6 +47,138 @@ fn default_extension_rounds() -> usize {
 }
 fn is_default_extension_rounds(value: &usize) -> bool {
     *value == 5
+}
+
+pub(super) fn tier_route(base: Option<&GraphRoute>, alias: &str) -> GraphRoute {
+    let mut route = base.cloned().unwrap_or_default();
+    route.model = None;
+    route.name = None;
+    route.adapter = None;
+    route.alias = Some(alias.to_owned());
+    route.tier = Some(alias.to_owned());
+    route
+}
+
+/// Nearest writer ancestor through delivery gates, hygiene and publication
+/// nodes. Dependencies are traversed breadth-first; ties use plan order so the
+/// most recently declared upstream writer owns the route.
+pub(super) fn nearest_writer_ancestor(node_index: usize, plan: &PlannedGraph) -> Option<usize> {
+    let node = plan.nodes.get(node_index)?;
+    let mut frontier: Vec<usize> = node
+        .dependencies()
+        .filter_map(|dependency| {
+            plan.nodes
+                .iter()
+                .position(|candidate| candidate.id == *dependency)
+        })
+        .collect();
+    let mut visited = std::collections::BTreeSet::new();
+    while !frontier.is_empty() {
+        frontier.sort_unstable();
+        frontier.dedup();
+        frontier.retain(|index| visited.insert(*index));
+        if let Some(writer) = frontier
+            .iter()
+            .rev()
+            .copied()
+            .find(|index| plans::writer(&plan.nodes[*index]))
+        {
+            return Some(writer);
+        }
+        frontier = frontier
+            .into_iter()
+            .flat_map(|index| {
+                plan.nodes[index]
+                    .dependencies()
+                    .filter_map(|dependency| {
+                        plan.nodes
+                            .iter()
+                            .position(|candidate| candidate.id == *dependency)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    }
+    None
+}
+
+pub(super) fn escalation_owner(
+    node_index: usize,
+    plan: &PlannedGraph,
+) -> Option<(usize, &EscalateSpec)> {
+    let node = plan.nodes.get(node_index)?;
+    if let Some(target) = node.on_fail.as_deref()
+        && let Some((index, owner)) = plan.nodes.iter().enumerate().find(|(_, candidate)| {
+            candidate.id == target
+                && candidate
+                    .loop_body
+                    .as_ref()
+                    .is_some_and(|spec| !spec.retry_on.is_empty())
+        })
+        && let Some(spec) = owner.escalate.as_ref()
+    {
+        return Some((index, spec));
+    }
+    if let Some(round) = &node.round
+        && let Some((index, owner)) = plan
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.id == round.loop_id)
+        && let Some(spec) = owner.escalate.as_ref()
+    {
+        return Some((index, spec));
+    }
+    if plans::writer(node)
+        && let Some(spec) = node.escalate.as_ref()
+    {
+        return Some((node_index, spec));
+    }
+    let writer_index = nearest_writer_ancestor(node_index, plan)?;
+    let writer = &plan.nodes[writer_index];
+    if let Some(round) = &writer.round
+        && let Some((owner_index, owner)) = plan
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.id == round.loop_id)
+        && let Some(spec) = owner.escalate.as_ref()
+    {
+        return Some((owner_index, spec));
+    }
+    writer.escalate.as_ref().map(|spec| (writer_index, spec))
+}
+
+pub(super) fn escalation_rung(
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+) -> Option<usize> {
+    let (owner, spec) = escalation_owner(node_index, plan)?;
+    let rung = checkpoint
+        .nodes
+        .get(owner)?
+        .escalation
+        .as_ref()
+        .map_or(0, |state| state.rung);
+    (rung < spec.ladder.len()).then_some(rung)
+}
+
+pub(super) fn delivery_route(
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+) -> Option<(GraphRoute, usize)> {
+    let node = plan.nodes.get(node_index)?;
+    if node.access != AccessMode::WorktreeWrite
+        || matches!(node.kind, Some(NodeKind::Hygiene | NodeKind::Publish))
+    {
+        return None;
+    }
+    let (_, spec) = escalation_owner(node_index, plan)?;
+    let rung = escalation_rung(node_index, plan, checkpoint)?;
+    let alias = spec.ladder.get(rung)?;
+    Some((tier_route(node.routes.first(), alias), rung))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +189,8 @@ pub struct LoopRound {
     pub round: usize,
     pub node_id: String,
     pub until: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_on: bool,
     pub previous_gate: Option<String>,
 }
 
@@ -84,6 +240,129 @@ impl LoopDecision {
 
 fn id(owner: &str, round: usize, node: &str) -> String {
     format!("{owner}--r{round}--{node}")
+}
+
+fn validate_previous_bindings(
+    node: &GraphNode,
+    spec: &LoopSpec,
+    document: &GraphDocument,
+) -> Result<(), String> {
+    let body_ids: std::collections::BTreeSet<_> =
+        spec.body.iter().map(|member| member.id.clone()).collect();
+    let mut references = std::collections::BTreeSet::new();
+    let mut published_bindings = std::collections::BTreeSet::new();
+    let mut hygiene_bindings = std::collections::BTreeSet::new();
+    for member in &spec.body {
+        for input in &member.inputs {
+            if let Some(previous) = input.node.strip_prefix("previous.") {
+                if spec.previous_bindings.contains_key(previous) {
+                    references.insert(previous.to_owned());
+                }
+                if spec.selected_publication.as_deref() == Some(previous)
+                    && input.outputs.contains(&OutputKind::Branch)
+                    && input.outputs.contains(&OutputKind::Commit)
+                {
+                    published_bindings.insert(previous.to_owned());
+                }
+            }
+        }
+        match member.source.as_ref() {
+            Some(SourceBinding::Head { node: source }) => {
+                if let Some(previous) = source.strip_prefix("previous.") {
+                    references.insert(previous.to_owned());
+                    published_bindings.insert(previous.to_owned());
+                }
+            }
+            Some(SourceBinding::Node { node: source }) => {
+                if let Some(previous) = source.strip_prefix("previous.") {
+                    references.insert(previous.to_owned());
+                    if spec.body.iter().any(|candidate| {
+                        candidate.id == previous && candidate.kind == Some(NodeKind::Hygiene)
+                    }) {
+                        hygiene_bindings.insert(previous.to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(
+            GateCondition::Ci {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            }
+            | GateCondition::Conflict {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            },
+        ) = member.condition.as_ref()
+            && let Some(previous) = target.strip_prefix("previous.")
+        {
+            references.insert(previous.to_owned());
+            published_bindings.insert(previous.to_owned());
+        }
+    }
+    for previous in &references {
+        if !body_ids.contains(previous) {
+            return Err(format!("unknown previous round node {previous}"));
+        }
+        if !spec.previous_bindings.contains_key(previous) {
+            return Err(format!(
+                "previous.{previous} requires an explicit loop.previous_bindings entry"
+            ));
+        }
+    }
+    for (body_node, initial_node) in &spec.previous_bindings {
+        if !body_ids.contains(body_node) || !references.contains(body_node) {
+            return Err(format!(
+                "loop.previous_bindings entry {body_node} must name a referenced body node"
+            ));
+        }
+        let Some(initial) = document
+            .nodes
+            .iter()
+            .find(|candidate| candidate.id == *initial_node)
+        else {
+            return Err(format!(
+                "loop.previous_bindings entry {body_node} names unknown outer node {initial_node}"
+            ));
+        };
+        if body_ids.contains(initial_node) || !node.depends_on.contains(initial_node) {
+            return Err(format!(
+                "loop.previous_bindings entry {body_node} must bind a direct outer dependency"
+            ));
+        }
+        if published_bindings.contains(body_node) && initial.kind != Some(NodeKind::Publish) {
+            return Err(format!(
+                "loop.previous_bindings entry {body_node} must bind a publication node"
+            ));
+        }
+        if hygiene_bindings.contains(body_node)
+            && !matches!(initial.kind, Some(NodeKind::Hygiene | NodeKind::Publish))
+        {
+            return Err(format!(
+                "loop.previous_bindings entry {body_node} must bind hygiene or a publication seed"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn previous_round_node(
+    spec: &LoopSpec,
+    loop_id: &str,
+    round: usize,
+    body_node: &str,
+) -> Result<String, String> {
+    if round > 1 {
+        Ok(id(loop_id, round - 1, body_node))
+    } else {
+        spec.previous_bindings
+            .get(body_node)
+            .cloned()
+            .ok_or_else(|| {
+                format!("previous.{body_node} requires an explicit loop.previous_bindings entry")
+            })
+    }
 }
 
 fn allowance(node: &GraphNode, extensions: &[String]) -> usize {
@@ -284,6 +563,26 @@ pub(super) fn check_expanded_ids(
     Ok(())
 }
 
+// Retry triggers must control the until gate's success edge. Merely waiting
+// for settlement permits a failed trigger to be bypassed by a passing until.
+fn retry_trigger_controls_until(spec: &LoopSpec, retry: &str) -> bool {
+    let mut pending = vec![spec.until.as_str()];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if id == retry {
+            return true;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(node) = spec.body.iter().find(|node| node.id == id) {
+            pending.extend(node.depends_on.iter().map(String::as_str));
+            pending.extend(node.inputs.iter().map(|input| input.node.as_str()));
+        }
+    }
+    false
+}
+
 fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<GraphDocument, String> {
     let declared: std::collections::BTreeSet<_> = document.nodes.iter().map(|n| &n.id).collect();
     if document.nodes.iter().any(|n| {
@@ -294,6 +593,22 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
     }) {
         return Err("dependency".into());
     }
+    let outcome_edges: Vec<_> = document
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.loop_body
+                .as_ref()?
+                .outcome_edge
+                .as_ref()
+                .map(|edge| (node.id.clone(), edge.node.clone()))
+        })
+        .collect();
+    for (loop_id, target) in &outcome_edges {
+        if target == loop_id || !declared.contains(target) {
+            return Err("loop outcome edge target must name a graph node outside its body".into());
+        }
+    }
     expanded_node_count(document, extensions)?;
     let mut expanded = document.clone();
     expanded.nodes.clear();
@@ -302,7 +617,19 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             if node.kind == Some(NodeKind::Loop) {
                 return Err("loop requires a body".into());
             }
-            expanded.nodes.push(node.clone());
+            let mut node = node.clone();
+            if let Some(escalation) = &node.escalate
+                && node.access == AccessMode::WorktreeWrite
+                && let Some(alias) = escalation.ladder.first()
+            {
+                let base = node
+                    .route
+                    .as_ref()
+                    .or_else(|| node.routes.as_ref().and_then(|routes| routes.first()));
+                node.route = Some(tier_route(base, alias));
+                node.routes = None;
+            }
+            expanded.nodes.push(node);
             continue;
         };
         if node.kind != Some(NodeKind::Loop)
@@ -323,8 +650,190 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
         {
             return Err("invalid loop configuration".into());
         }
+        validate_previous_bindings(node, spec, document)?;
         let rounds = allowance(node, extensions);
         let mut body = spec.body.clone();
+        let previous_head_sources: BTreeMap<_, _> = body
+            .iter()
+            .filter_map(|child| {
+                let Some(SourceBinding::Head { node: source }) = &child.source else {
+                    return None;
+                };
+                source
+                    .strip_prefix("previous.")
+                    .map(|source| (child.id.clone(), source.to_owned()))
+            })
+            .collect();
+        let previous_node_sources: BTreeMap<_, _> = body
+            .iter()
+            .filter_map(|child| {
+                let Some(SourceBinding::Node { node: source }) = &child.source else {
+                    return None;
+                };
+                source
+                    .strip_prefix("previous.")
+                    .map(|source| (child.id.clone(), source.to_owned()))
+            })
+            .collect();
+        let previous_gate_targets: BTreeMap<_, _> = body
+            .iter()
+            .filter_map(|child| {
+                let (target, extra) = match child.condition.as_ref()? {
+                    GateCondition::Ci {
+                        target: CiTarget::Node { node, extra },
+                        ..
+                    }
+                    | GateCondition::Conflict {
+                        target: CiTarget::Node { node, extra },
+                        ..
+                    } => (node, extra),
+                    _ => return None,
+                };
+                target
+                    .strip_prefix("previous.")
+                    .map(|target| (child.id.clone(), (target.to_owned(), extra.clone())))
+            })
+            .collect();
+        if let Some(initial) = spec.initial_publication.as_deref() {
+            let valid = !spec.retry_on.is_empty()
+                && spec.selected_publication.as_deref().is_some_and(|local| {
+                    spec.previous_bindings
+                        .get(local)
+                        .is_some_and(|seed| seed == initial)
+                })
+                && node
+                    .depends_on
+                    .iter()
+                    .any(|dependency| dependency == initial)
+                && document.nodes.iter().any(|candidate| {
+                    candidate.id == initial && candidate.kind == Some(NodeKind::Publish)
+                })
+                && node.depends_on.iter().any(|dependency| {
+                    document.nodes.iter().any(|candidate| {
+                        candidate.id == *dependency
+                            && candidate.on_fail.as_deref() == Some(node.id.as_str())
+                    })
+                });
+            if !valid {
+                return Err(format!(
+                    "loop {} initial_publication must be its directly bound publication seed and have an entry failure gate",
+                    node.id
+                ));
+            }
+        }
+        let mut retry_nodes = std::collections::BTreeSet::new();
+        for retry in &spec.retry_on {
+            let Some(gate) = spec.body.iter().find(|member| member.id == *retry) else {
+                return Err(format!("loop {} retry_on must name a body gate", node.id));
+            };
+            let typed_gate = gate.kind == Some(NodeKind::Gate)
+                && matches!(
+                    &gate.condition,
+                    Some(
+                        GateCondition::Ci { .. }
+                            | GateCondition::Conflict { .. }
+                            | GateCondition::Verdict { .. }
+                    )
+                );
+            let typed_hygiene = gate.kind == Some(NodeKind::Hygiene)
+                && matches!(gate.source.as_ref(), Some(SourceBinding::Node { .. }));
+            if !retry_nodes.insert(retry)
+                || !retry_trigger_controls_until(spec, retry)
+                || !(typed_gate || typed_hygiene)
+            {
+                return Err(format!(
+                    "loop {} retry_on must uniquely name typed CI, conflict or verdict gates or sourced hygiene nodes on the until success path",
+                    node.id
+                ));
+            }
+        }
+        if let Some(publication) = spec.selected_publication.as_deref()
+            && !spec
+                .body
+                .iter()
+                .any(|member| member.id == publication && member.kind == Some(NodeKind::Publish))
+        {
+            return Err(format!(
+                "loop {} selected_publication must name a typed publication in its body",
+                node.id
+            ));
+        }
+        let external_head_sources: BTreeMap<_, _> = body
+            .iter()
+            .filter_map(|child| {
+                let Some(SourceBinding::Head { node: source }) = &child.source else {
+                    return None;
+                };
+                (!source.starts_with("previous.")
+                    && !spec.body.iter().any(|member| &member.id == source))
+                .then(|| (child.id.clone(), source.clone()))
+            })
+            .collect();
+        let external_node_sources: BTreeMap<_, _> = body
+            .iter()
+            .filter_map(|child| {
+                let Some(SourceBinding::Node { node: source }) = &child.source else {
+                    return None;
+                };
+                (!source.starts_with("previous.")
+                    && !spec.body.iter().any(|member| &member.id == source))
+                .then(|| (child.id.clone(), source.clone()))
+            })
+            .collect();
+        // Composite expansion can add enclosing dependencies to a loop body.
+        // They are invisible to the isolated body validator, but must be
+        // restored unchanged when its rounds are placed in the full graph.
+        let outer_dependencies: BTreeMap<_, _> = body
+            .iter()
+            .map(|child| {
+                let external = |parent: &&String| {
+                    !spec.body.iter().any(|member| &member.id == *parent)
+                        && document.nodes.iter().any(|node| &node.id == *parent)
+                };
+                (
+                    child.id.clone(),
+                    (
+                        child
+                            .depends_on
+                            .iter()
+                            .filter(external)
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        child
+                            .after_settled
+                            .iter()
+                            .filter(external)
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+            })
+            .collect();
+        for child in &mut body {
+            if let Some((dependencies, settled)) = outer_dependencies.get(&child.id) {
+                child
+                    .depends_on
+                    .retain(|parent| !dependencies.contains(parent));
+                child
+                    .after_settled
+                    .retain(|parent| !settled.contains(parent));
+            }
+        }
+        for child in &mut body {
+            if child.access != AccessMode::WorktreeWrite {
+                continue;
+            }
+            if let Some(escalation) = child.escalate.as_ref().or(node.escalate.as_ref())
+                && let Some(alias) = escalation.ladder.first()
+            {
+                let base = child
+                    .route
+                    .as_ref()
+                    .or_else(|| child.routes.as_ref().and_then(|routes| routes.first()));
+                child.route = Some(tier_route(base, alias));
+                child.routes = None;
+            }
+        }
         let mut writer = None;
         for child in &mut body {
             if child.id.starts_with("previous.") {
@@ -332,7 +841,10 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             }
             let mut selected = std::collections::BTreeSet::new();
             for input in &child.inputs {
-                if input.node.starts_with("previous.") && !input.required_outputs.is_empty() {
+                if let Some(previous) = input.node.strip_prefix("previous.")
+                    && !input.required_outputs.is_empty()
+                    && !spec.previous_bindings.contains_key(previous)
+                {
                     return Err(
                         "required previous-round outputs cannot be enforced in the first round"
                             .into(),
@@ -351,12 +863,20 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             }
             if child.loop_body.is_some()
                 || child.kind == Some(NodeKind::Loop)
-                || child.on_fail.is_some()
                 || child.delivery.as_ref().is_some_and(|mode| {
                     !matches!(mode, provenant_records::run::DeliveryMode::Integrate(_))
                 })
             {
-                return Err("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into());
+                return Err(
+                    "loop body cannot nest loops and may only deliver by integrate:".into(),
+                );
+            }
+            if child
+                .on_fail
+                .as_ref()
+                .is_some_and(|target| !spec.body.iter().any(|member| &member.id == target))
+            {
+                return Err("loop on_fail target must name a node in the same round".into());
             }
             if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &child.delivery
                 && document.integration_branch.as_deref() != Some(target.as_str())
@@ -392,22 +912,50 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             // A head source naming a writer outside the body is checked
             // against the expanded graph, as an external CI subject is.
             if let Some(SourceBinding::Head { node: writer }) = &child.source
-                && !spec.body.iter().any(|node| &node.id == writer)
+                && (writer.starts_with("previous.")
+                    || !spec.body.iter().any(|node| &node.id == writer))
             {
+                child.source = None;
+            }
+            // A node source outside the body is checked against the expanded
+            // graph; the isolated body has only its local namespace.
+            let external_node_source = match &child.source {
+                Some(SourceBinding::Node { node: source })
+                    if source.starts_with("previous.")
+                        || !spec.body.iter().any(|node| &node.id == source) =>
+                {
+                    Some((source.clone(), source.starts_with("previous.")))
+                }
+                _ => None,
+            };
+            if let Some((source, previous_round)) = external_node_source {
+                if !previous_round {
+                    // Composite expansion adds a direct dependency for every
+                    // node source. The isolated loop-body plan cannot see that
+                    // outer node, so remove only this source-derived edge here;
+                    // loop expansion restores it before validating the graph.
+                    child.depends_on.retain(|parent| parent != &source);
+                }
                 child.source = None;
             }
             // External CI subjects are checked against the expanded graph.
             // The isolated body check below has only the local namespace.
-            if let Some(GateCondition::Ci { target, .. }) = &mut child.condition
+            if let Some(GateCondition::Ci { target, .. } | GateCondition::Conflict { target, .. }) =
+                &mut child.condition
                 && let CiTarget::Node {
                     node: target_node, ..
                 } = target
-                && !spec.body.iter().any(|node| &node.id == target_node)
+                && (target_node.starts_with("previous.")
+                    || !spec.body.iter().any(|node| &node.id == target_node))
             {
                 *target = CiTarget::Ref(target_node.clone());
             }
         }
         let body_document = GraphDocument {
+            queue_ci_wait: None,
+            // Outer publication bindings are checked after expansion; the
+            // isolated body has only local names and uses temporary refs.
+            queue: None,
             review: None,
             review_subject_missing: false,
             nodes: body,
@@ -422,8 +970,8 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             routes_per_node: u16::MAX as usize,
             ..Default::default()
         };
-        let (plan, positions) =
-            validate_flat_plan(&body_document, &generous).map_err(|error| error.to_string())?;
+        let (plan, positions) = validation::validate_loop_body(&body_document, &generous)
+            .map_err(|error| error.to_string())?;
         let Some(gate) = positions.get(&spec.until).map(|i| &plan.nodes[*i]) else {
             return Err("loop until must name a body gate".into());
         };
@@ -444,6 +992,28 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             for child in &spec.body {
                 let mut child = child.clone();
                 let local = child.id.clone();
+                if let Some((dependencies, settled)) = outer_dependencies.get(&local) {
+                    child
+                        .depends_on
+                        .retain(|parent| !dependencies.contains(parent));
+                    child
+                        .after_settled
+                        .retain(|parent| !settled.contains(parent));
+                }
+                if child.source.is_none()
+                    && let Some(source) = previous_head_sources.get(&local)
+                {
+                    child.source = Some(SourceBinding::Head {
+                        node: previous_round_node(spec, &node.id, round, source)?,
+                    });
+                }
+                if child.source.is_none()
+                    && let Some(source) = external_head_sources.get(&local)
+                {
+                    child.source = Some(SourceBinding::Head {
+                        node: source.clone(),
+                    });
+                }
                 child.id = id(&node.id, round, &local);
                 child.round = Some(LoopRound {
                     extra: Default::default(),
@@ -451,6 +1021,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     round,
                     node_id: local.clone(),
                     until: local == spec.until,
+                    retry_on: spec.retry_on.iter().any(|retry| retry == &local),
                     previous_gate: (round > 1).then(|| id(&node.id, round - 1, &spec.until)),
                 });
                 child.depends_on = child
@@ -458,6 +1029,10 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     .iter()
                     .map(|name| id(&node.id, round, name))
                     .collect();
+                child.on_fail = child
+                    .on_fail
+                    .as_deref()
+                    .map(|target| id(&node.id, round, target));
                 child.after_settled = child
                     .after_settled
                     .iter()
@@ -478,23 +1053,116 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         export.node = id(&node.id, round, &export.node);
                     }
                 }
-                if let Some(SourceBinding::Node { node: source }) = &mut child.source {
-                    *source = if let Some(previous) = source.strip_prefix("previous.") {
-                        if round == 1 {
-                            return Err("previous source requires an initial commit binding".into());
-                        }
-                        id(&node.id, round - 1, previous)
+                // The first local node inherits the loop's entry gates (or
+                // the prior round's outcome gate) before source and input
+                // edges are added below.
+                if child.depends_on.is_empty() && child.after_settled.is_empty() {
+                    if round == 1 {
+                        child.depends_on.extend(node.depends_on.clone());
+                        child.after_settled.extend(node.after_settled.clone());
                     } else {
-                        id(&node.id, round, source)
-                    };
-                    if !child.depends_on.contains(source) {
-                        child.depends_on.push(source.clone());
+                        let previous = id(&node.id, round - 1, &spec.until);
+                        if spec.retry_on.is_empty() || repair::spec_is_repair(spec) {
+                            child.depends_on.push(previous);
+                        } else {
+                            child.after_settled.push(previous);
+                        }
                     }
                 }
-                if let Some(SourceBinding::Head { node: writer }) = &mut child.source
-                    && spec.body.iter().any(|node| &node.id == writer)
+                if let Some((dependencies, settled)) = outer_dependencies.get(&local) {
+                    for parent in dependencies {
+                        if !child.depends_on.contains(parent) {
+                            child.depends_on.push(parent.clone());
+                        }
+                    }
+                    for parent in settled {
+                        if !child.depends_on.contains(parent)
+                            && !child.after_settled.contains(parent)
+                        {
+                            child.after_settled.push(parent.clone());
+                        }
+                    }
+                }
+                if child.source.is_none()
+                    && let Some(source) = previous_node_sources.get(&local)
                 {
-                    *writer = id(&node.id, round, writer);
+                    child.source = Some(SourceBinding::Node {
+                        node: previous_round_node(spec, &node.id, round, source)?,
+                    });
+                }
+                if child.source.is_none()
+                    && let Some(source) = external_node_sources.get(&local)
+                {
+                    child.source = Some(SourceBinding::Node {
+                        node: source.clone(),
+                    });
+                }
+                if let Some(SourceBinding::Node { node: source }) = &mut child.source {
+                    let previous_source = source.strip_prefix("previous.").map(str::to_owned);
+                    *source = if let Some(previous) = previous_source.as_deref() {
+                        previous_round_node(spec, &node.id, round, previous)?
+                    } else if spec.body.iter().any(|member| &member.id == source) {
+                        id(&node.id, round, source)
+                    } else {
+                        source.clone()
+                    };
+                    if !child.depends_on.contains(source) {
+                        let waits_for_failed_hygiene = round > 1
+                            && previous_source.as_ref().is_some_and(|previous| {
+                                spec.retry_on.contains(previous)
+                                    && spec.body.iter().any(|member| {
+                                        member.id == *previous
+                                            && member.kind == Some(NodeKind::Hygiene)
+                                    })
+                            })
+                            && !repair::spec_is_repair(spec);
+                        if waits_for_failed_hygiene {
+                            if !child.after_settled.contains(source) {
+                                child.after_settled.push(source.clone());
+                            }
+                        } else {
+                            child
+                                .after_settled
+                                .retain(|parent| parent.as_str() != source.as_str());
+                            child.depends_on.push(source.clone());
+                        }
+                    }
+                }
+                if let Some(SourceBinding::Head { node: writer }) = &mut child.source {
+                    *writer = if let Some(previous) = writer.strip_prefix("previous.") {
+                        previous_round_node(spec, &node.id, round, previous)?
+                    } else if spec.body.iter().any(|body_node| &body_node.id == writer) {
+                        id(&node.id, round, writer)
+                    } else {
+                        writer.clone()
+                    };
+                    if !child.depends_on.contains(writer) {
+                        child
+                            .after_settled
+                            .retain(|parent| parent.as_str() != writer.as_str());
+                        child.depends_on.push(writer.clone());
+                    }
+                }
+                if let Some((previous, extra)) = previous_gate_targets.get(&local) {
+                    let target = previous_round_node(spec, &node.id, round, previous)?;
+                    match child.condition.as_mut() {
+                        Some(GateCondition::Ci {
+                            target: binding, ..
+                        })
+                        | Some(GateCondition::Conflict {
+                            target: binding, ..
+                        }) => {
+                            *binding = CiTarget::Node {
+                                node: target,
+                                extra: extra.clone(),
+                            };
+                        }
+                        _ => {
+                            return Err(
+                                "previous gate target requires a CI or conflict gate".into()
+                            );
+                        }
+                    }
                 }
                 if let Some(GateCondition::Ci {
                     target: CiTarget::Node { node: target, .. },
@@ -502,32 +1170,52 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                 }) = &mut child.condition
                 {
                     *target = if let Some(previous) = target.strip_prefix("previous.") {
-                        if round == 1 {
-                            return Err(
-                                "previous CI target requires an initial node binding".into()
-                            );
-                        }
-                        id(&node.id, round - 1, previous)
+                        previous_round_node(spec, &node.id, round, previous)?
                     } else if spec.body.iter().any(|node| &node.id == target) {
                         id(&node.id, round, target)
                     } else {
                         target.clone()
                     };
                 }
-                if child.depends_on.is_empty() && child.after_settled.is_empty() {
-                    if round == 1 {
-                        child.depends_on.extend(node.depends_on.clone());
-                        child.after_settled.extend(node.after_settled.clone());
+                if let Some(GateCondition::Conflict {
+                    target: CiTarget::Node { node: target, .. },
+                    ..
+                }) = &mut child.condition
+                {
+                    *target = if let Some(previous) = target.strip_prefix("previous.") {
+                        previous_round_node(spec, &node.id, round, previous)?
+                    } else if spec.body.iter().any(|node| &node.id == target) {
+                        id(&node.id, round, target)
                     } else {
-                        child.depends_on.push(id(&node.id, round - 1, &spec.until));
-                    }
+                        target.clone()
+                    };
                 }
-                child
-                    .inputs
-                    .retain(|i| round > 1 || !i.node.starts_with("previous."));
+                if let Some(
+                    GateCondition::Ci {
+                        target: CiTarget::Node { node: target, .. },
+                        ..
+                    }
+                    | GateCondition::Conflict {
+                        target: CiTarget::Node { node: target, .. },
+                        ..
+                    },
+                ) = child.condition.as_ref()
+                    && !child.depends_on.contains(target)
+                {
+                    child.after_settled.retain(|parent| parent != target);
+                    child.depends_on.push(target.clone());
+                }
+                child.inputs.retain(|input| {
+                    round > 1
+                        || !input.node.starts_with("previous.")
+                        || spec
+                            .previous_bindings
+                            .contains_key(input.node.trim_start_matches("previous."))
+                });
                 for input in &mut child.inputs {
+                    let previous_round_input = input.node.starts_with("previous.");
                     input.node = if let Some(previous) = input.node.strip_prefix("previous.") {
-                        id(&node.id, round - 1, previous)
+                        previous_round_node(spec, &node.id, round, previous)?
                     } else if spec.body.iter().any(|body| body.id == input.node) {
                         id(&node.id, round, &input.node)
                     } else {
@@ -538,7 +1226,14 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     if !child.depends_on.contains(&input.node)
                         && !child.after_settled.contains(&input.node)
                     {
-                        child.depends_on.push(input.node.clone());
+                        if previous_round_input
+                            && !spec.retry_on.is_empty()
+                            && !repair::spec_is_repair(spec)
+                        {
+                            child.after_settled.push(input.node.clone());
+                        } else {
+                            child.depends_on.push(input.node.clone());
+                        }
                     }
                 }
                 if repair::spec_is_repair(spec) && child.repair_lens.is_some() {
@@ -604,7 +1299,33 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
         boundary.depends_on.push(id(&node.id, rounds, &spec.until));
         expanded.nodes.push(boundary);
     }
+    for (loop_id, target_id) in outcome_edges {
+        let target = expanded
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == target_id)
+            .ok_or_else(|| {
+                "loop outcome edge target must name a graph node outside its body".to_owned()
+            })?;
+        if !target.depends_on.contains(&loop_id) {
+            target.depends_on.push(loop_id);
+        }
+    }
     Ok(expanded)
+}
+
+/// The selected branch, if `parent` is the loop boundary for `child`.
+pub(super) fn outcome_edge_for(
+    child: &PlannedNode,
+    parent: &PlannedNode,
+) -> Option<provenant_records::graph::LoopOutcome> {
+    parent
+        .loop_body
+        .as_ref()?
+        .outcome_edge
+        .as_ref()
+        .filter(|edge| edge.node == child.id)
+        .map(|edge| edge.outcome)
 }
 
 pub(super) fn inactive_round(
@@ -616,15 +1337,135 @@ pub(super) fn inactive_round(
     if repair::inactive_round(node, plan, checkpoint, positions) {
         return true;
     }
-    node.round
+    let Some(previous) = node
+        .round
         .as_ref()
-        .and_then(|r| r.previous_gate.as_ref())
-        .is_some_and(|previous| {
-            matches!(
-                checkpoint.nodes[positions[previous]].state,
-                NodeState::Succeeded | NodeState::Skipped
-            )
+        .and_then(|round| round.previous_gate.as_ref())
+    else {
+        return false;
+    };
+    let index = positions[previous];
+    if let Some(round) = &node.round
+        && let Some(spec) = plan.nodes[positions[&round.loop_id]].loop_body.as_ref()
+        && !spec.retry_on.is_empty()
+        && !repair::spec_is_repair(spec)
+    {
+        return match checkpoint.nodes[index].state {
+            NodeState::Succeeded => true,
+            NodeState::Failed | NodeState::Blocked | NodeState::Skipped => !plan
+                .nodes
+                .iter()
+                .zip(&checkpoint.nodes)
+                .any(|(candidate, progress)| {
+                    candidate.round.as_ref().is_some_and(|member| {
+                        member.loop_id == round.loop_id
+                            && member.round + 1 == round.round
+                            && member.retry_on
+                    }) && progress.state == NodeState::Failed
+                }),
+            NodeState::Pending | NodeState::Running => false,
+        };
+    }
+    match checkpoint.nodes[index].state {
+        NodeState::Succeeded => true,
+        NodeState::Skipped => {
+            match conflict_recovery_round_state(index, plan, checkpoint, positions) {
+                Some(ConflictRecoveryRoundState::Succeeded) | None => true,
+                Some(ConflictRecoveryRoundState::Waiting | ConflictRecoveryRoundState::Retry) => {
+                    false
+                }
+                Some(ConflictRecoveryRoundState::Failed) => true,
+            }
+        }
+        NodeState::Pending | NodeState::Running | NodeState::Failed | NodeState::Blocked => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConflictRecoveryRoundState {
+    Waiting,
+    Succeeded,
+    Retry,
+    Failed,
+}
+
+/// A skipped until gate normally closes the loop. When a failed conflict
+/// selected a validated repair branch, its fresh conflict and CI gates decide
+/// whether that skip was an alternative success or a bounded retry.
+pub(super) fn conflict_recovery_round_state(
+    until_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> Option<ConflictRecoveryRoundState> {
+    let round = plan.nodes[until_index].round.as_ref()?;
+    let routes: Vec<_> = land::bounded_conflict_rechecks(&plan.nodes, positions)
+        .into_iter()
+        .filter(|route| {
+            route.loop_id == positions[&round.loop_id]
+                && route.round == round.round
+                && checkpoint.nodes[route.initial_conflict].state == NodeState::Failed
         })
+        .collect();
+    if routes.is_empty() {
+        return None;
+    }
+    if routes.iter().any(|route| {
+        matches!(
+            checkpoint.nodes[route.fresh_conflict].state,
+            NodeState::Pending | NodeState::Running
+        ) || matches!(
+            checkpoint.nodes[route.fresh_ci].state,
+            NodeState::Pending | NodeState::Running
+        )
+    }) {
+        return Some(ConflictRecoveryRoundState::Waiting);
+    }
+    if routes
+        .iter()
+        .all(|route| checkpoint.nodes[route.fresh_ci].state == NodeState::Succeeded)
+    {
+        Some(ConflictRecoveryRoundState::Succeeded)
+    } else if routes.iter().any(|route| {
+        checkpoint.nodes[route.fresh_conflict].state == NodeState::Succeeded
+            && checkpoint.nodes[route.fresh_ci].state == NodeState::Failed
+    }) {
+        Some(ConflictRecoveryRoundState::Failed)
+    } else {
+        Some(ConflictRecoveryRoundState::Retry)
+    }
+}
+
+pub(super) fn retryable_round_failure_is_terminal(
+    index: usize,
+    loop_id: &str,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    if !land::retryable_conflict_failure(index, &plan.nodes, positions) {
+        return true;
+    }
+    let Some(round) = plan.nodes[index].round.as_ref() else {
+        return true;
+    };
+    let until_index = plan.nodes.iter().position(|node| {
+        node.round.as_ref().is_some_and(|member| {
+            member.loop_id == loop_id && member.round == round.round && member.until
+        })
+    });
+    match until_index
+        .and_then(|until| conflict_recovery_round_state(until, plan, checkpoint, positions))
+    {
+        Some(ConflictRecoveryRoundState::Waiting | ConflictRecoveryRoundState::Succeeded) => false,
+        Some(ConflictRecoveryRoundState::Failed) => true,
+        Some(ConflictRecoveryRoundState::Retry) => !plan.nodes.iter().any(|node| {
+            node.round
+                .as_ref()
+                .is_some_and(|member| member.loop_id == loop_id && member.round > round.round)
+        }),
+        None => true,
+    }
 }
 
 pub(super) fn round_failure_edge(child: &PlannedNode, parent: &PlannedNode) -> bool {
@@ -641,12 +1482,113 @@ pub(super) fn round_failure_edge(child: &PlannedNode, parent: &PlannedNode) -> b
 pub(super) fn handled_gate(checkpoint: &GraphCheckpoint, progress: &NodeProgress) -> bool {
     progress.state == NodeState::Failed
         && progress.round.as_ref().is_some_and(|r| {
-            r.until
+            (r.until || r.retry_on)
                 && checkpoint
                     .nodes
                     .iter()
                     .any(|n| n.id == r.loop_id && checkpoint.node_successful(n))
         })
+}
+
+fn passed(node: &PlannedNode, checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> bool {
+    let positions: BTreeMap<_, _> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    let gate_passed = checkpoint
+        .nodes
+        .iter()
+        .enumerate()
+        .any(|(index, progress)| {
+            progress
+                .round
+                .as_ref()
+                .is_some_and(|round| round.loop_id == node.id && round.until)
+                && (progress.state == NodeState::Succeeded
+                    || conflict_recovery_round_state(index, plan, checkpoint, &positions)
+                        == Some(ConflictRecoveryRoundState::Succeeded))
+        });
+    (gate_passed
+        || node
+            .loop_body
+            .as_ref()
+            .is_some_and(|spec| spec.initial_publication.is_some())
+            && repair::selected_publication(node, checkpoint, plan).is_some())
+        && node
+            .loop_body
+            .as_ref()
+            .and_then(|spec| spec.selected_publication.as_deref())
+            .is_none_or(|_| repair::selected_publication(node, checkpoint, plan).is_some())
+}
+
+fn failed_member(
+    progress: &NodeProgress,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    if !matches!(progress.state, NodeState::Failed | NodeState::Blocked) {
+        return false;
+    }
+    let Some(round) = progress.round.as_ref() else {
+        return true;
+    };
+    if round.until || round.retry_on && progress.state == NodeState::Failed {
+        return false;
+    }
+    let Some(index) = positions.get(&progress.id) else {
+        return true;
+    };
+    if plan.nodes[positions[&round.loop_id]]
+        .loop_body
+        .as_ref()
+        .is_none_or(|spec| spec.retry_on.is_empty())
+    {
+        return retryable_round_failure_is_terminal(
+            *index,
+            &round.loop_id,
+            plan,
+            checkpoint,
+            positions,
+        );
+    }
+    let triggered = plan
+        .nodes
+        .iter()
+        .zip(&checkpoint.nodes)
+        .any(|(gate, evidence)| {
+            gate.round.as_ref().is_some_and(|member| {
+                member.loop_id == round.loop_id && member.round == round.round && member.retry_on
+            }) && evidence.state == NodeState::Failed
+                && (gate.id == progress.id
+                    || progress.state == NodeState::Blocked
+                        && descendant_of(&plan.nodes[*index], &gate.id, plan, positions))
+        });
+    !triggered
+}
+
+pub(super) fn descendant_of(
+    node: &PlannedNode,
+    ancestor: &str,
+    plan: &PlannedGraph,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    let mut pending = node.dependencies().cloned().collect::<Vec<_>>();
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(parent) = pending.pop() {
+        if parent == ancestor {
+            return true;
+        }
+        if !visited.insert(parent.clone()) {
+            continue;
+        }
+        if let Some(index) = positions.get(&parent) {
+            pending.extend(plan.nodes[*index].dependencies().cloned());
+        }
+    }
+    false
 }
 
 pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
@@ -666,6 +1608,14 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 return progress;
             }
             let mut fresh = NodeProgress {
+                delivery_adoption: None,
+                delivery_review_disposition: None,
+                delivery_loop: None,
+                escalation: None,
+                delivery_hygiene: None,
+                delivery_publication: None,
+                delivery_park: None,
+                conflict: None,
                 extra: Default::default(),
                 removed_requirements: n.removed_requirements.clone(),
                 children: n.composite_members.clone(),
@@ -746,415 +1696,4 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
             fresh
         })
         .collect();
-}
-
-pub(super) fn validate_progress(
-    progress: &NodeProgress,
-    node: &PlannedNode,
-    checkpoint: &GraphCheckpoint,
-    positions: &BTreeMap<String, usize>,
-) -> Result<(), ()> {
-    if checkpoint.ask_actor.is_none()
-        || !progress.attempts.is_empty()
-        || progress.gate.is_some() && !repair::is_repair(node)
-        || progress.advance_note.is_some()
-    {
-        return Err(());
-    }
-    let body: Vec<_> = checkpoint
-        .nodes
-        .iter()
-        .filter(|n| n.round.as_ref().is_some_and(|r| r.loop_id == node.id))
-        .collect();
-    let max_round = body
-        .iter()
-        .filter_map(|n| n.round.as_ref().map(|r| r.round))
-        .max()
-        .unwrap_or(0);
-    if checkpoint.asks.iter().any(|ask| {
-        ask.node.as_deref() == Some(node.id.as_str())
-            && ask.rounds.is_none_or(|rounds| rounds > max_round)
-    }) {
-        return Err(());
-    }
-
-    let clean = repair::clean_start(node, checkpoint, positions);
-    let escalated = repair::escalation(node, checkpoint, positions);
-    let passed = body
-        .iter()
-        .any(|n| n.round.as_ref().is_some_and(|r| r.until) && n.state == NodeState::Succeeded);
-    let failed = body.iter().any(|n| {
-        matches!(n.state, NodeState::Failed | NodeState::Blocked)
-            && !n.round.as_ref().is_some_and(|r| r.until)
-    });
-    let settled = body.iter().all(|n| n.state.settled());
-    let accepted = checkpoint
-        .extensions
-        .contains(&format!("loop.{}.decision=accept", node.id));
-    let stopped = checkpoint
-        .extensions
-        .contains(&format!("loop.{}.decision=stop", node.id));
-    let matches_output = |passed| {
-        let expected = repair::terminal_outputs(node, checkpoint, positions, passed);
-        progress.outputs == Some(expected)
-    };
-    let valid = match progress.state {
-        NodeState::Succeeded => {
-            !failed && settled && (passed || accepted || clean) && matches_output(true)
-        }
-        NodeState::Failed => {
-            (failed || stopped || escalated.is_some() || repair::is_repair(node) && settled)
-                && matches_output(false)
-        }
-        NodeState::Pending => progress.outputs.is_none(),
-        NodeState::Blocked | NodeState::Skipped => {
-            progress.outputs.is_none()
-                && node.depends_on.iter().any(|parent| {
-                    matches!(
-                        checkpoint.nodes[positions[parent]].state,
-                        NodeState::Failed | NodeState::Blocked | NodeState::Skipped
-                    )
-                })
-        }
-        NodeState::Running => false,
-    };
-    let valid = valid
-        && (!repair::is_repair(node)
-            || match (&progress.gate, progress.state) {
-                (Some(gate), NodeState::Succeeded | NodeState::Failed) => {
-                    gate.passed == (progress.state == NodeState::Succeeded)
-                        && gate.on_fail == node.on_fail
-                        && gate.reason.is_none() == gate.passed
-                }
-                (None, NodeState::Pending | NodeState::Skipped | NodeState::Blocked) => true,
-                _ => false,
-            });
-    if valid { Ok(()) } else { Err(()) }
-}
-
-pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
-    index: usize,
-    spec: &LoopSpec,
-    plan: &PlannedGraph,
-    positions: &BTreeMap<String, usize>,
-    checkpoint: &mut GraphCheckpoint,
-    owner: &mut R,
-    journal: &mut J,
-) -> Result<Option<String>, GraphError<R::Error, J::Error>> {
-    let node = &plan.nodes[index];
-    let mut external = node.clone();
-    external
-        .depends_on
-        .retain(|parent| plan.nodes[positions[parent]].round.is_none());
-    if let Some(state) = dependency_state(&external, plan, checkpoint, positions) {
-        if checkpoint.nodes[index].state != state {
-            checkpoint.nodes[index].state = state;
-            journal.save(checkpoint).map_err(GraphError::Journal)?;
-        }
-        return Ok(None);
-    }
-    let body: Vec<_> = checkpoint
-        .nodes
-        .iter()
-        .filter(|n| n.round.as_ref().is_some_and(|r| r.loop_id == node.id))
-        .collect();
-    let failed = body.iter().any(|n| {
-        matches!(n.state, NodeState::Failed | NodeState::Blocked)
-            && !n.round.as_ref().is_some_and(|r| r.until)
-    });
-    let clean = repair::clean_start(node, checkpoint, positions);
-    let escalation = repair::escalation(node, checkpoint, positions);
-    let passed = body
-        .iter()
-        .any(|n| n.round.as_ref().is_some_and(|r| r.until) && n.state == NodeState::Succeeded);
-    let settled = body.iter().all(|n| n.state.settled());
-    let rounds = body
-        .iter()
-        .filter_map(|n| n.round.as_ref().map(|r| r.round))
-        .max()
-        .unwrap_or(0);
-    let decision = checkpoint
-        .extensions
-        .iter()
-        .rev()
-        .find_map(|e| e.strip_prefix(&format!("loop.{}.decision=", node.id)))
-        .map(str::to_owned);
-    let state = if failed
-        || decision.as_deref() == Some("stop")
-        || repair::is_repair(node) && settled && !passed && !clean
-    {
-        Some(NodeState::Failed)
-    } else if passed || clean && settled || decision.as_deref() == Some("accept") && settled {
-        Some(NodeState::Succeeded)
-    } else {
-        None
-    };
-    if let Some(state) = state {
-        let outputs =
-            repair::terminal_outputs(node, checkpoint, positions, state == NodeState::Succeeded);
-        let progress = &mut checkpoint.nodes[index];
-        progress.state = state;
-        progress.outputs = Some(outputs);
-        if repair::is_repair(node) {
-            let passed = state == NodeState::Succeeded;
-            progress.gate = Some(GateResult {
-                extra: Default::default(),
-                passed,
-                reason: (!passed).then(|| {
-                    escalation
-                        .unwrap_or("repair cycle limit reached")
-                        .to_owned()
-                }),
-                on_fail: node.on_fail.clone(),
-            });
-        }
-        checkpoint.nodes[index].loop_pause = None;
-        checkpoint.nodes[index].loop_pause_code = None;
-        checkpoint.nodes[index].loop_cause = None;
-        refresh_pause(checkpoint);
-        journal.save(checkpoint).map_err(GraphError::Journal)?;
-    } else if settled && dependency_state(node, plan, checkpoint, positions).is_none() {
-        if checkpoint.nodes[index].loop_pause.is_none() {
-            checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
-            checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
-            checkpoint.nodes[index].loop_pause = Some(format!(
-                "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
-                node.id
-            ));
-        }
-        refresh_pause(checkpoint);
-        let Some(session) = &spec.decision_session else {
-            journal.save(checkpoint).map_err(GraphError::Journal)?;
-            return Ok(None);
-        };
-        let ask_id = format!(
-            "{}.rounds-{rounds}{}",
-            node.id,
-            asks::retry_suffix(&checkpoint.nodes[index])
-        );
-        let paused = format!(
-            "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
-            node.id
-        );
-        if asks::withdrawn(checkpoint, &node.id) {
-            return ask_closed(index, &node.id, rounds, checkpoint, journal);
-        }
-        let position = match checkpoint.asks.iter().position(|ask| ask.ask_id == ask_id) {
-            Some(position) => position,
-            None => {
-                let mut request = asks::loop_ask(&checkpoint.graph_id, &node.id, rounds, session);
-                request.ask_id = ask_id.clone();
-                match asks::file(checkpoint, owner, journal, &request) {
-                    Ok((_, true)) => {
-                        // The request was closed with no answer. Another
-                        // decision comes through graph resume.
-                        return ask_closed(index, &node.id, rounds, checkpoint, journal);
-                    }
-                    Ok((link, false)) => {
-                        checkpoint.asks.push(link);
-                        checkpoint.asks.len() - 1
-                    }
-                    Err(GraphError::Run(error)) => {
-                        pause_invalid_decision(
-                            checkpoint,
-                            &node.id,
-                            &format!("inbox unavailable: {error}"),
-                            journal,
-                        )?;
-                        return Ok(None);
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        };
-        journal.save(checkpoint).map_err(GraphError::Journal)?;
-        match asks::poll(checkpoint, position, owner) {
-            Ok(reply) => {
-                checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
-                checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
-                checkpoint.nodes[index].loop_pause = Some(paused);
-                refresh_pause(checkpoint);
-                let Some(reply) = reply else {
-                    journal.save(checkpoint).map_err(GraphError::Journal)?;
-                    return Ok(None);
-                };
-                // The inbox keeps the answer, so a crash replays this read.
-                let answer = asks::answered(reply);
-                return apply(&node.id, rounds, &answer, checkpoint, journal);
-            }
-            Err(error) => {
-                pause_invalid_decision(
-                    checkpoint,
-                    &node.id,
-                    &format!("inbox unavailable: {error}"),
-                    journal,
-                )?;
-                return Ok(None);
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// The ask for an exhausted loop was closed without an answer.
-fn ask_closed<R: Error + 'static, J: GraphJournal>(
-    index: usize,
-    node: &str,
-    rounds: usize,
-    checkpoint: &mut GraphCheckpoint,
-    journal: &mut J,
-) -> Result<Option<String>, GraphError<R, J::Error>> {
-    if checkpoint.nodes[index].loop_cause != Some(NodeDecisionCause::LoopAskClosed) {
-        checkpoint.nodes[index].loop_pause_code = Some("loop_ask_closed".into());
-        checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopAskClosed);
-        checkpoint.nodes[index].loop_pause = Some(format!(
-            "loop {node} exhausted after {rounds} rounds; ask closed; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept"
-        ));
-        refresh_pause(checkpoint);
-        journal.save(checkpoint).map_err(GraphError::Journal)?;
-    }
-    Ok(None)
-}
-
-/// Turn a recorded loop answer into its extension, or pause on a bad one.
-fn apply<R: Error + 'static, J: GraphJournal>(
-    node: &str,
-    rounds: usize,
-    answer: &asks::Answer,
-    checkpoint: &mut GraphCheckpoint,
-    journal: &mut J,
-) -> Result<Option<String>, GraphError<R, J::Error>> {
-    let extension = match &answer.rejected {
-        Some(reason) => Err(reason.clone()),
-        None => LoopDecision::parse(answer.option.as_deref(), answer.text.as_deref())
-            .map_err(|error| error.to_string())
-            .and_then(|decision| match decision {
-                LoopDecision::Stop => Ok(format!("loop.{node}.decision=stop")),
-                LoopDecision::Accept => Ok(format!("loop.{node}.decision=accept")),
-                LoopDecision::Extend { rounds: extra } => rounds
-                    .checked_add(extra)
-                    .map(|total| format!("loop.{node}.rounds={total}"))
-                    .ok_or_else(|| "loop extension cannot overflow".to_owned()),
-            }),
-    };
-    match extension {
-        Ok(extension) => Ok(Some(extension)),
-        Err(reason) => {
-            pause_invalid_decision(checkpoint, node, &reason, journal)?;
-            Ok(None)
-        }
-    }
-}
-
-/// A rejected immutable answer remains inspectable; explicit resume can resolve it.
-pub(super) fn pause_invalid_decision<R: Error + 'static, J: GraphJournal>(
-    checkpoint: &mut GraphCheckpoint,
-    node: &str,
-    reason: &str,
-    journal: &mut J,
-) -> Result<(), GraphError<R, J::Error>> {
-    if let Some(progress) = checkpoint.nodes.iter_mut().find(|n| n.id == node) {
-        progress.loop_pause_code = Some("invalid_loop_decision".into());
-        progress.loop_cause = Some(NodeDecisionCause::InvalidLoopDecision);
-        progress.loop_pause = Some(format!(
-            "loop {node} exhausted; decision cannot be applied: {}; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept",
-            bounded(reason, MAX_ADVANCE_NOTE_BYTES)
-        ));
-    }
-    refresh_pause(checkpoint);
-    journal.save(checkpoint).map_err(GraphError::Journal)
-}
-
-pub(super) enum DecisionExtensionError {
-    Invalid(String),
-    Structural(GraphStructuralLimit),
-}
-
-pub(super) fn prepare_decision_extension(
-    document: &GraphDocument,
-    checkpoint: &GraphCheckpoint,
-    extension: &str,
-    limits: &crate::config::GraphLimits,
-) -> Result<(), DecisionExtensionError> {
-    let generous = crate::config::GraphLimits {
-        nodes: usize::MAX,
-        edges: usize::MAX,
-        routes_per_node: u16::MAX as usize,
-        node_prompt_bytes: usize::MAX,
-        graph_prompt_bytes: usize::MAX,
-        fan_out_width: usize::MAX,
-        expansion_depth: usize::MAX,
-        ..limits.clone()
-    };
-    validate_resume_extension(document, checkpoint, extension, &generous).map_err(|rule| {
-        DecisionExtensionError::Invalid(
-            refusal::ExtensionCause::loop_rule(extension, rule).to_string(),
-        )
-    })?;
-    if extension
-        .split_once('=')
-        .is_some_and(|(key, _)| key.ends_with(".decision"))
-    {
-        return Ok(());
-    }
-    let mut extensions = checkpoint.extensions.clone();
-    extensions.push(extension.to_owned());
-    let expanded = plans::expand(document, &extensions, &checkpoint.expansions, &generous)
-        .map_err(DecisionExtensionError::Invalid)?;
-    let (plan, _) = validate_flat_plan(&expanded, &generous)
-        .map_err(|error| DecisionExtensionError::Invalid(error.to_string()))?;
-    if let Some(limit) = structural_limit(&expanded, &plan, limits) {
-        return Err(DecisionExtensionError::Structural(limit));
-    }
-    if let Some(reason) =
-        graph_envelope_reason(document, &checkpoint.expansions, &extensions, &plan)
-    {
-        return Err(DecisionExtensionError::Invalid(reason));
-    }
-    Ok(())
-}
-
-pub(super) fn reopen_after_delivery(
-    checkpoint: &mut GraphCheckpoint,
-    loops: &std::collections::BTreeSet<String>,
-) {
-    for node in &mut checkpoint.nodes {
-        if loops.contains(&node.id)
-            && node.state == NodeState::Failed
-            && !checkpoint
-                .extensions
-                .contains(&format!("loop.{}.decision=stop", node.id))
-        {
-            node.state = NodeState::Pending;
-            node.outputs = None;
-        }
-    }
-}
-
-pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
-    let reasons: Vec<_> = checkpoint
-        .nodes
-        .iter()
-        .filter_map(|n| n.loop_pause.as_deref())
-        .collect();
-    if checkpoint.pause.is_none() || asks::loop_pause(checkpoint) {
-        let cause = checkpoint
-            .nodes
-            .iter()
-            .filter_map(|node| node.loop_cause.as_ref())
-            .find_map(|cause| match cause {
-                NodeDecisionCause::LoopAskClosed => Some(PauseCause::LoopAskClosed),
-                NodeDecisionCause::InvalidLoopDecision => Some(PauseCause::InvalidLoopDecision),
-                NodeDecisionCause::LoopPaused
-                | NodeDecisionCause::PlanExpansionPaused { .. }
-                | NodeDecisionCause::CompositeFindingsTruncated { .. } => None,
-            })
-            .unwrap_or(PauseCause::LoopPaused);
-        if reasons.is_empty() {
-            checkpoint.pause = None;
-        } else {
-            let reason = format!("loops paused: {}", reasons.join("; "));
-            checkpoint.set_pause(cause, &reason);
-        }
-    }
 }

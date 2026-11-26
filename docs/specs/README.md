@@ -38,6 +38,7 @@ renders them as Markdown under the untracked `<repository>/docs/reference/`.
   - [Attribution](run-attribution.md): PR contributions and work correlation
 - [Retry owner](retry-owner.md): lineage, budgets, admission and recovery
 - [Fabric](fabric.md): coordination store, lane relay, graphs and peer hosts
+- [Delivery queue](delivery-queue.md): target graph and queue contract for durable delivery
 - [Telemetry](telemetry.md): usage ledger, cost and outcomes
 - [CI](ci.md): the required check, suite tiers and green evidence
 - [Workflow](workflow.md): review coverage, receipts and sessions

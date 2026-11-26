@@ -12,6 +12,11 @@ User rulings, authority pointers, one-way doors and unresolved gates.
 ## Intent
 Per live ruling, as the continuity contract describes.
 
+## Now
+Current focus in a few lines: what is being worked on right now and what the
+next turn resumes. The session-start hook keeps this section intact beside
+Intent when its output is bounded.
+
 ## Process
 Governing skills, retained evidence locations and verification responsibility.
 

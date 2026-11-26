@@ -1017,7 +1017,7 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         &Default::default(),
     );
     assert!(
-        matches!(result, Err(GraphError::Admission(AdmissionError::Composite(ref actual))) if actual == &reason)
+        matches!(result, Err(GraphError::Admission(AdmissionError::Plan(ref actual))) if actual == &reason)
     );
     assert!(owner.calls.is_empty());
 }
@@ -1053,8 +1053,18 @@ fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
     let mut owner = FakeOwner::default();
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     let mut journal = MemoryJournal::default();
-    let error = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap_err();
-    assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+    let error = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        GraphError::Candidate(CandidateError::Structural(_))
+    ));
     assert!(journal.0.is_none());
     assert!(owner.calls.is_empty());
 }
@@ -1226,12 +1236,34 @@ fn batch_cap_counts_nested_slice_attempts() {
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    let first = run.checkpoint.nodes.iter().find(|n| n.id == "slices--first--plan").unwrap();
-    let second = run.checkpoint.nodes.iter().find(|n| n.id == "slices--second--plan").unwrap();
+    let first = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "slices--first--plan")
+        .unwrap();
+    let second = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "slices--second--plan")
+        .unwrap();
     assert_eq!(first.state, NodeState::Running);
     assert_eq!(second.state, NodeState::Pending);
     assert_eq!(second.wait_reason.as_deref(), Some("cap"));
-    assert_eq!(journal.load("nested-cap-test").unwrap().unwrap().nodes.iter().find(|n| n.id == second.id).unwrap().wait_reason.as_deref(), Some("cap"));
+    assert_eq!(
+        journal
+            .load("nested-cap-test")
+            .unwrap()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.id == second.id)
+            .unwrap()
+            .wait_reason
+            .as_deref(),
+        Some("cap")
+    );
 }
 
 #[test]

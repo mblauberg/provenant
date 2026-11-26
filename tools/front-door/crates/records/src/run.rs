@@ -173,6 +173,11 @@ pub struct WorkContext {
     /// Graph retry lineage remains independent of run-policy `retry_of`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer_predecessor: Option<AttemptId>,
+    /// Host-stamped permission to adopt a retained writer owned by a prior
+    /// graph while running the delivery queue. The owner still verifies the
+    /// prior attempt, exact writer identity and released custody at launch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delivery_queue_writer_adoption: bool,
 }
 impl WorkContext {
     /// A new request names only the fixed fields; stored records keep unknown ones for forward compatibility.
@@ -180,6 +185,7 @@ impl WorkContext {
         self.extra.is_empty()
             && self.valid()
             && (!self.graph_template_launch || (self.graph_id.is_some() && self.node_id.is_some()))
+            && (!self.delivery_queue_writer_adoption || self.graph_template_launch)
     }
     pub fn valid(&self) -> bool {
         [
@@ -3658,6 +3664,12 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<WorkContext>(serde_json::to_value(&context)?)?,
             context
+        );
+        context.delivery_queue_writer_adoption = true;
+        assert!(context.accepted());
+        assert_eq!(
+            serde_json::to_value(&context)?["delivery_queue_writer_adoption"],
+            true
         );
         for missing in ["graph_id", "node_id"] {
             let mut value = serde_json::to_value(&context)?;

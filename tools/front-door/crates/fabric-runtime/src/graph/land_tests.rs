@@ -1,4 +1,8 @@
 use super::*;
+
+fn publication_branch() -> String {
+    format!("provenant/graph/{}", "a".repeat(64))
+}
 use crate::config::{LandChoice, LandPolicy};
 use serde_json::json;
 use std::collections::VecDeque;
@@ -6,6 +10,8 @@ use std::convert::Infallible;
 
 const WRITE_HEAD: &str = "1111111111111111111111111111111111111111";
 const REPAIR_HEAD: &str = "2222222222222222222222222222222222222222";
+const REBASE_HEAD: &str = "5555555555555555555555555555555555555555";
+const REPUBLISHED_HEAD: &str = "6666666666666666666666666666666666666666";
 /// The commit the review read the writer's head against.
 const REVIEW_BASE: &str = "3333333333333333333333333333333333333333";
 /// The fetched land target, one commit past `REVIEW_BASE`.
@@ -24,7 +30,7 @@ impl GraphJournal for Journal {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Launch {
     node: String,
     worktree: Option<String>,
@@ -36,6 +42,7 @@ struct Launch {
 struct Owner {
     launches: Vec<Launch>,
     lands: Vec<(String, String, LandAuthority)>,
+    land_requests: Vec<(String, String, Option<u64>)>,
     /// Observe-only requests while a tier asks: branch and head.
     observed: Vec<(String, String)>,
     /// Whether the chair has merged by hand, which observation reports.
@@ -49,6 +56,8 @@ struct Owner {
     asked: usize,
     /// Every request filed, in order.
     filed: Vec<AskRequest>,
+    /// Writer attempt references excluded from each launched node.
+    distinctions: Vec<(String, Vec<String>)>,
     writer_branch: Option<String>,
     /// The newest commit a writer delivered, which CI reports as the head.
     head: Option<String>,
@@ -66,6 +75,17 @@ struct Owner {
     repair_alternative: bool,
     /// The repository history that proves review carry-over against `TARGET`.
     history: Option<provenant_core::review_cover::history::History>,
+    integration_base: Option<provenant_core::GitOid>,
+    conflict_state: Option<ConflictState>,
+    conflict_head: Option<String>,
+    conflict_states: VecDeque<ConflictState>,
+    conflict_heads: VecDeque<Option<String>>,
+    ci_head: Option<String>,
+    ci_states: VecDeque<CiState>,
+    hygiene_after_heads: VecDeque<String>,
+    hygiene_observations: Vec<(String, String, String, String)>,
+    publication_heads: Vec<String>,
+    gate_observations: Vec<(String, String)>,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -75,15 +95,40 @@ impl CiStatus for Owner {
             host_monotonic_micros: 1,
         })
     }
-    fn observe_ci(&mut self, _: &str, _: &[String], _: usize, _: usize) -> CiObservation {
+    fn observe_ci(
+        &mut self,
+        target: &str,
+        _: &[String],
+        _: bool,
+        _: usize,
+        _: usize,
+    ) -> CiObservation {
+        self.gate_observations.push(("ci".into(), target.into()));
         CiObservation {
+            quota_reset_at: None,
             extra: Default::default(),
-            state: CiState::Passed,
+            state: self.ci_states.pop_front().unwrap_or(CiState::Passed),
             summary: "checks passed".into(),
-            head_sha: self.head.clone(),
+            head_sha: self.ci_head.clone().or_else(|| self.head.clone()),
             failed_checks: Vec::new(),
-            check_names: Vec::new(),
+            check_names: vec!["build".into()],
             truncated: false,
+        }
+    }
+    fn observe_conflict(&mut self, target: &str) -> ConflictObservation {
+        self.gate_observations
+            .push(("conflict".into(), target.into()));
+        ConflictObservation {
+            state: self
+                .conflict_states
+                .pop_front()
+                .or(self.conflict_state)
+                .unwrap_or(ConflictState::Clear),
+            head_sha: self
+                .conflict_heads
+                .pop_front()
+                .unwrap_or_else(|| self.conflict_head.clone().or_else(|| self.head.clone())),
+            summary: "published PR conflict state".into(),
         }
     }
 }
@@ -103,6 +148,9 @@ impl AttemptOwner for Owner {
             }
         }
         Ok(families)
+    }
+    fn detect_repair_growth(&mut self, _: &str, _: &str) -> Result<bool, String> {
+        Ok(false)
     }
     fn review_range(&mut self, _: &str, _: bool) -> Result<ReviewRange, Self::Error> {
         Ok(if self.equal_review_range {
@@ -124,7 +172,58 @@ impl AttemptOwner for Owner {
         Option<provenant_core::GitOid>,
     ) {
         let base = self.history.as_ref().map(|_| REVIEW_BASE.parse().unwrap());
-        (base, None)
+        (base, self.integration_base)
+    }
+    fn bind_writer_worktree(
+        &mut self,
+        worktree: &str,
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        Ok(Some(WriterWorktreeBinding {
+            extra: Default::default(),
+            source_directory_identity: None,
+            shared_worktree: None,
+            worktree: worktree.to_owned(),
+            head: self.head.clone().unwrap_or_else(|| WRITE_HEAD.into()),
+        }))
+    }
+    fn run_hygiene(
+        &mut self,
+        request: HygieneRequest<'_>,
+    ) -> Result<HygieneExecution, Self::Error> {
+        let after_head = self
+            .hygiene_after_heads
+            .pop_front()
+            .unwrap_or_else(|| REPAIR_HEAD.into());
+        self.hygiene_observations.push((
+            request.node_id.to_owned(),
+            request.input_head.to_owned(),
+            request.expected_head.to_owned(),
+            after_head.clone(),
+        ));
+        Ok(HygieneExecution {
+            outcome: provenant_records::graph::HygieneOutcome {
+                kind: provenant_records::graph::HygieneOutcomeKind::Clean,
+                before_head: Some(request.input_head.to_owned()),
+                after_head: Some(after_head),
+                handoff: Some("formatter completed".into()),
+            },
+            branch: self.writer_branch.clone(),
+            formatter_source: Some("fixture".into()),
+            diagnostic: None,
+        })
+    }
+    fn publish_delivery(
+        &mut self,
+        request: PublicationRequest<'_>,
+    ) -> Result<Option<DeliveryPublication>, Self::Error> {
+        self.head = Some(request.expected_head.to_owned());
+        self.publication_heads
+            .push(request.expected_head.to_owned());
+        Ok(Some(DeliveryPublication {
+            branch: publication_branch(),
+            head: request.expected_head.to_owned(),
+            pull_request: "https://example.invalid/pr/7".into(),
+        }))
     }
     fn review_coverage(
         &mut self,
@@ -178,6 +277,11 @@ impl AttemptOwner for Owner {
             .unwrap_or_else(|| crate::config::GraphLand::default().choose(None, tier))
     }
     fn land(&mut self, request: LandRequest<'_>) -> Result<LandObservation, Self::Error> {
+        self.land_requests.push((
+            request.branch.to_owned(),
+            request.head.to_owned(),
+            request.pull_request,
+        ));
         if request.pull_request.is_none() {
             return Ok(LandObservation::Identified { pull_request: 7 });
         }
@@ -232,6 +336,8 @@ impl AttemptOwner for Owner {
         if self.repair_fixture {
             self.repair_prompts.push(input.prompt.to_owned());
         }
+        self.distinctions
+            .push((key.node_id.clone(), input.distinct_from_attempts.to_vec()));
         if self.pending_writer && key.node_id == "write" {
             return Ok(AttemptObservation::Pending {
                 attempt_ref: Some("pending-writer".into()),
@@ -245,11 +351,8 @@ impl AttemptOwner for Owner {
         });
         let (result, branch, commit) = match key.node_id.as_str() {
             "write" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
-            _ if self.repair_fixture
-                && access == AccessMode::WorktreeWrite
-                && replay.branch.is_none() =>
-            {
-                (None, self.writer_branch.clone(), Some(WRITE_HEAD))
+            "rebase" | "rebase--r1--fix" => {
+                (None, replay.branch.map(str::to_owned), Some(REBASE_HEAD))
             }
             "repair" => (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD)),
             id if self.repair_fixture && id.ends_with("--fix") => {
@@ -261,17 +364,27 @@ impl AttemptOwner for Owner {
                     Some(REPAIR_HEAD),
                 )
             }
+            _ if self.repair_fixture
+                && access == AccessMode::WorktreeWrite
+                && replay.branch.is_none() =>
+            {
+                (None, self.writer_branch.clone(), Some(WRITE_HEAD))
+            }
             _ => {
                 let verdict = if self.repair_fixture
-                    && (key.node_id == "initial--lens"
-                        || key.node_id == "delivery--initial-review--lenses--correctness")
+                    && (key.node_id == "initial--lens" || key.node_id == "delivery--review")
                 {
                     "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"defect\",\"status\":\"open\",\"evidence\":\"counterexample\",\"proposed_fix\":\"repair\",\"trigger\":{\"sequence\":\"Default invocation\",\"reach\":\"default_path\",\"observed\":true},\"triage\":{\"decision\":\"confirmed\",\"reason\":\"Observed at the checked caller\",\"worth_fixing\":true,\"root_cause\":\"input handling\",\"blocking_class\":\"default_path_defect\"}}]}\n```\nVERDICT: FAIL"
                 } else if self.repair_fixture
                     && (key.node_id == "initial--synthesis"
-                        || key.node_id == "delivery--initial-review--synthesis")
+                        || key.node_id == "delivery--review--synthesis")
                 {
                     "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"disposition\":\"accepted\",\"reason\":\"confirmed\"}]}\n```\nVERDICT: FAIL"
+                } else if self.repair_fixture
+                    && key.node_id.starts_with("cycles--r")
+                    && key.node_id.ends_with("--synthesis")
+                {
+                    "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"defect\",\"status\":\"fixed\",\"evidence\":\"counterexample\",\"proposed_fix\":\"repair\",\"trigger\":{\"sequence\":\"Default invocation\",\"reach\":\"default_path\",\"observed\":true},\"disposition\":\"rejected\",\"reason\":\"The accepted repair removes the reported defect from the reviewed code\",\"triage\":{\"decision\":\"confirmed\",\"reason\":\"The original defect was real and the checked repair closes it\",\"worth_fixing\":false,\"root_cause\":\"input handling\",\"blocking_class\":\"none\",\"shared_flaw\":false},\"design_defect\":false}]}\n```\nVERDICT: PASS"
                 } else if self.repair_fixture {
                     "```findings\n{\"schema_version\":1,\"risk_tier\":\"substantial\",\"findings\":[]}\n```\nVERDICT: PASS"
                 } else {
@@ -458,7 +571,7 @@ fn bundled_deliver_repairs_findings_before_landing() {
             "with":{"worktree":"/wt/feature","write_scope":["src"]}}))
     .unwrap();
     let mut document: GraphDocument =
-        serde_json::from_value(json!({"schema_version":1,"graph_id":"bundled-deliver",
+        serde_json::from_value(json!({"schema_version":2,"graph_id":"bundled-deliver",
         "context":{"risk_tier":"substantial"},"nodes":[]}))
         .unwrap();
     document.nodes.push(delivery);
@@ -506,6 +619,17 @@ fn bundled_deliver_repairs_findings_before_landing() {
             .iter()
             .any(|launch| launch.node.contains("--check--correctness"))
     );
+    let ci = node(&run.checkpoint, "delivery--outcome--recovery--ci");
+    assert_eq!(
+        ci.ci.as_ref().unwrap().head_sha.as_deref(),
+        Some(REPAIR_HEAD)
+    );
+    assert_eq!(
+        node(&run.checkpoint, "delivery--outcome--recovery--fresh-review")
+            .source_commit
+            .as_deref(),
+        Some(REPAIR_HEAD)
+    );
     assert_eq!(owner.lands[0].1, REPAIR_HEAD);
 }
 
@@ -535,6 +659,100 @@ fn document(tier: &str, session: Option<&str>) -> GraphDocument {
     serde_json::from_value(value).unwrap()
 }
 
+fn queue_publish_document(tier: &str) -> GraphDocument {
+    // The recovery loop is the join for the clean publication path and its
+    // retry path. Landing waits on that settled result, not the entry verdict,
+    // which may fail to activate the loop.
+    let recovery_body = json!([
+       {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+        "prompt":"merge the base into the published branch", "route":{"alias":"senior"},
+        "source":{"type":"node","node":"previous.verified_clean"},
+        "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}]},
+       {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
+        "worktree":"/wt/feature", "depends_on":["fix"],
+        "source":{"type":"node","node":"fix"}},
+       {"id":"refresh", "kind":"publish", "access":"worktree_write",
+        "worktree":"/wt/feature", "depends_on":["verified_clean"],
+        "source":{"type":"node","node":"verified_clean"}},
+       {"id":"fresh_conflict", "kind":"gate", "access":"read_only",
+        "depends_on":["refresh"],
+        "condition":{"type":"conflict","target":{"node":"refresh"}}},
+       {"id":"fresh_ci", "kind":"gate", "access":"read_only",
+        "depends_on":["fresh_conflict"],
+        "condition":{"type":"ci","target":{"node":"refresh"}}},
+       {"id":"fresh_review", "access":"read_only",
+        "prompt":"review the recovery publication",
+        "source":{"type":"head","node":"refresh"},
+        "depends_on":["refresh","fresh_conflict","fresh_ci"],
+        "route":{"alias":"senior"}},
+       {"id":"accepted", "kind":"gate", "access":"read_only",
+        "depends_on":["fresh_review","fresh_ci"],
+        "inputs":[{"node":"fresh_review","outputs":["verdict"]}],
+        "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+    ]);
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2, "graph_id":"g-land", "integration_branch":"delivery/item",
+        "delivery":"pr", "nodes":[
+            {"id":"write", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"write it", "route":{"alias":"senior"}},
+            {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["write"],
+             "source":{"type":"node","node":"write"}},
+            {"id":"publish", "kind":"publish", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["hygiene"],
+             "source":{"type":"node","node":"hygiene"}},
+            {"id":"conflict", "kind":"gate", "access":"read_only",
+             "depends_on":["publish"], "on_fail":"rebase",
+             "condition":{"type":"conflict","target":{"node":"publish"}}},
+            {"id":"ci", "kind":"gate", "access":"read_only",
+             "depends_on":["conflict"], "on_fail":"rebase",
+             "condition":{"type":"ci","target":{"node":"publish"}}},
+            {"id":"rebase", "kind":"loop", "access":"read_only",
+             "depends_on":["conflict","ci","publish","hygiene","accepted"],
+             "loop":{"max_rounds":2,"until":"accepted",
+              "retry_on":["verified_clean","fresh_conflict","fresh_ci","accepted"],
+              "selected_publication":"refresh","initial_publication":"publish",
+              "previous_bindings":{"refresh":"publish","verified_clean":"hygiene"},
+              "body":recovery_body}},
+            {"id":"review", "access":"read_only", "prompt":"review the published head",
+             "review_base":REVIEW_BASE, "source":{"type":"head","node":"publish"},
+             "distinct_from":"writer",
+             "depends_on":["ci","publish"], "route":{"alias":"senior"}},
+            {"id":"accepted", "kind":"gate", "access":"read_only",
+             "depends_on":["review"], "on_fail":"rebase", "inputs":[{"node":"review","outputs":["verdict"]}],
+             "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}},
+            {"id":"land", "kind":"land", "access":"read_only",
+             "depends_on":["rebase"], "land":{"node":"rebase","tier":tier}}
+        ]
+    }))
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+    document
+}
+
+fn queue_conflict_recovery_document(recovery: serde_json::Value) -> GraphDocument {
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2, "graph_id":"g-conflict-recovery",
+        "integration_branch":"delivery/item", "nodes":[
+            {"id":"write", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"write it", "write_scope":["src"], "route":{"alias":"senior"}},
+            {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["write"],
+             "source":{"type":"node","node":"write"}},
+            {"id":"publish", "kind":"publish", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["hygiene"],
+             "source":{"type":"node","node":"hygiene"}},
+            {"id":"conflict", "kind":"gate", "access":"read_only",
+             "depends_on":["publish"], "on_fail":"rebase",
+             "condition":{"type":"conflict","target":{"node":"publish"}}},
+            recovery
+        ]
+    }))
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+    document
+}
+
 fn run(document: &GraphDocument, owner: &mut Owner, journal: &mut Journal) -> GraphCheckpoint {
     let mut last = None;
     for _ in 0..12 {
@@ -549,6 +767,446 @@ fn run(document: &GraphDocument, owner: &mut Owner, journal: &mut Journal) -> Gr
 
 fn node<'a>(checkpoint: &'a GraphCheckpoint, id: &str) -> &'a NodeProgress {
     checkpoint.nodes.iter().find(|node| node.id == id).unwrap()
+}
+
+#[test]
+fn queue_publication_without_writer_delivery_supports_head_review_and_landing() {
+    let mut document = queue_publish_document("routine");
+    document.delivery = None;
+    assert!(
+        document
+            .nodes
+            .iter()
+            .find(|node| node.id == "write")
+            .unwrap()
+            .delivery
+            .is_none()
+    );
+    assert!(validate_plan(&document).is_ok());
+    let mut owner = owner();
+    owner.repair_fixture = true;
+    owner.policy = Some(LandChoice {
+        policy: LandPolicy::Auto,
+        source: Layer::Default,
+    });
+    owner.integration_base = Some(TARGET.parse().unwrap());
+    let checkpoint = run(&document, &mut owner, &mut Journal::default());
+
+    assert!(checkpoint.successful(), "{:?}", checkpoint.nodes);
+    assert!(checkpoint.delivered);
+    assert_eq!(
+        checkpoint.pull_request.as_deref(),
+        Some("https://example.invalid/pr/7")
+    );
+    let publication = node(&checkpoint, "publish");
+    let receipt = publication
+        .outputs
+        .as_ref()
+        .unwrap()
+        .publication
+        .as_ref()
+        .unwrap();
+    assert_eq!(receipt.branch, publication_branch());
+    assert_eq!(receipt.head, REPAIR_HEAD);
+    let conflict = node(&checkpoint, "conflict").conflict.as_ref().unwrap();
+    assert_eq!(conflict.state, ConflictState::Clear);
+    assert_eq!(conflict.head_sha.as_deref(), Some(REPAIR_HEAD));
+    let ci = node(&checkpoint, "ci");
+    assert_eq!(
+        ci.ci.as_ref().unwrap().head_sha.as_deref(),
+        Some(REPAIR_HEAD)
+    );
+    assert_eq!(
+        ci.outputs.as_ref().unwrap().commit.as_deref(),
+        Some(REPAIR_HEAD)
+    );
+    assert_eq!(
+        node(&checkpoint, "review").source_commit.as_deref(),
+        Some(REPAIR_HEAD)
+    );
+    let review = node(&checkpoint, "review");
+    assert_eq!(
+        review.attempts[0]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .source_producer
+            .as_ref()
+            .unwrap()
+            .node_id,
+        "write"
+    );
+    assert_eq!(
+        review.attempts[0]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .source_producer
+            .as_ref(),
+        node(&checkpoint, "publish")
+            .delivery_publication
+            .as_ref()
+            .map(|publication| &publication.source_key)
+    );
+    assert_eq!(
+        owner
+            .launches
+            .iter()
+            .find(|launch| launch.node == "review")
+            .unwrap()
+            .worktree
+            .as_deref(),
+        Some("/wt/feature")
+    );
+    assert_eq!(
+        owner
+            .distinctions
+            .iter()
+            .find(|(node, _)| node == "review")
+            .unwrap()
+            .1,
+        vec!["fixture/1".to_owned()]
+    );
+
+    let land = node(&checkpoint, "land");
+    assert_eq!(land.state, NodeState::Succeeded);
+    let record = land.land.as_ref().unwrap();
+    assert_eq!(record.branch, receipt.branch);
+    assert_eq!(record.head, receipt.head);
+    assert_eq!(record.pull_request, Some(7));
+    assert_eq!(
+        owner.land_requests[0],
+        (receipt.branch.clone(), receipt.head.clone(), None)
+    );
+    assert_eq!(
+        owner.land_requests[1],
+        (receipt.branch.clone(), receipt.head.clone(), Some(7))
+    );
+    assert_eq!(owner.lands[0].1, REPAIR_HEAD);
+}
+
+#[test]
+fn queue_repair_writer_may_bind_the_published_head() {
+    let mut document = queue_publish_document("routine");
+    document.delivery = None;
+    assert!(validate_plan(&document).is_ok());
+    let mut head_bound = document.clone();
+    head_bound
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "rebase")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body[0]
+        .source = Some(SourceBinding::Head {
+        node: "previous.refresh".into(),
+    });
+    head_bound
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "rebase")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .previous_bindings
+        .remove("verified_clean");
+    assert!(validate_plan(&head_bound).is_ok());
+
+    let mut wrong_worktree = document.clone();
+    wrong_worktree
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "rebase")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body[0]
+        .worktree = Some("/wt/unretained".into());
+    assert!(validate_plan(&wrong_worktree).is_err());
+
+    let mut legacy_writer_source = document;
+    legacy_writer_source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "review")
+        .unwrap()
+        .source = Some(SourceBinding::Head {
+        node: "write".into(),
+    });
+    assert!(validate_plan(&legacy_writer_source).is_err());
+}
+
+#[test]
+fn queue_conflict_recovery_requires_the_published_head_and_retained_worktree() {
+    let recovery_loop = |worktree: &str| {
+        json!({
+            "id":"rebase", "kind":"loop", "access":"read_only",
+            "depends_on":["conflict","publish","hygiene"],
+            "loop":{"max_rounds":2,"until":"accepted",
+              "retry_on":["verified_clean","refresh_conflict","refresh_ci","accepted"],
+              "selected_publication":"refresh","initial_publication":"publish",
+              "previous_bindings":{"refresh":"publish","verified_clean":"hygiene"},
+              "body":[
+                {"id":"fix", "access":"worktree_write", "worktree":worktree,
+                 "prompt":"merge the base into the retained published branch", "write_scope":["src"],
+                 "route":{"alias":"senior"},
+                 "source":{"type":"node","node":"previous.verified_clean"},
+                 "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}]},
+                {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
+                 "worktree":worktree, "depends_on":["fix"],
+                 "source":{"type":"node","node":"fix"}},
+                {"id":"refresh", "kind":"publish", "access":"worktree_write",
+                 "worktree":worktree, "depends_on":["verified_clean"],
+                 "source":{"type":"node","node":"verified_clean"}},
+                {"id":"refresh_conflict", "kind":"gate", "access":"read_only",
+                 "depends_on":["refresh"],
+                 "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                {"id":"refresh_ci", "kind":"gate", "access":"read_only",
+                 "depends_on":["refresh_conflict"],
+                 "condition":{"type":"ci","target":{"node":"refresh"}}},
+                {"id":"fresh_review", "access":"read_only", "prompt":"review recovery head",
+                 "source":{"type":"head","node":"refresh"},
+                 "depends_on":["refresh","refresh_conflict","refresh_ci"],
+                 "route":{"alias":"senior"}},
+                {"id":"accepted", "kind":"gate", "access":"read_only",
+                 "depends_on":["fresh_review","refresh_ci"],
+                 "inputs":[{"node":"fresh_review","outputs":["verdict"]}],
+                 "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+              ]}
+        })
+    };
+
+    let valid = queue_conflict_recovery_document(recovery_loop("/wt/feature"));
+    assert!(validate_plan(&valid).is_ok());
+    let expanded = loops::expand(&valid, &[], &crate::config::GraphLimits::default()).unwrap();
+    let (plan, positions) =
+        validate_flat_plan(&expanded, &crate::config::GraphLimits::default()).unwrap();
+    let rebase_writer = &plan.nodes[positions["rebase--r1--fix"]];
+    assert!(matches!(
+        &rebase_writer.source,
+        Some(SourceBinding::Node { node }) if node == "hygiene"
+    ));
+    assert!(rebase_writer.inputs.iter().any(|input| {
+        input.node == "publish"
+            && input.outputs.contains(&OutputKind::Branch)
+            && input.outputs.contains(&OutputKind::Commit)
+    }));
+
+    let different_worktree = queue_conflict_recovery_document(recovery_loop("/wt/unretained"));
+    assert!(validate_plan(&different_worktree).is_err());
+
+    let composite = queue_conflict_recovery_document(json!({
+        "id":"rebase", "kind":"loop", "access":"read_only",
+        "depends_on":["conflict","publish","hygiene"],
+        "loop":{"max_rounds":2,"until":"accepted",
+          "retry_on":["verified_clean","refresh_conflict","refresh_ci","accepted"],
+          "selected_publication":"refresh","initial_publication":"publish",
+          "previous_bindings":{"refresh":"publish","verified_clean":"hygiene"},
+          "body":[
+            {"id":"writer_bundle", "kind":"composite", "access":"read_only",
+             "composite":{"nodes":[
+                {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+                 "prompt":"merge the base into the retained published branch", "write_scope":["src"],
+                 "route":{"alias":"senior"},
+                 "source":{"type":"node","node":"previous.verified_clean"},
+                 "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}]},
+                {"id":"followup", "access":"worktree_write", "worktree":"/wt/feature",
+                 "prompt":"finish the merge", "write_scope":["src"],
+                 "route":{"alias":"senior"}, "depends_on":["fix"],
+                 "source":{"type":"node","node":"fix"}}
+             ], "exports":[{"node":"followup","outputs":["branch","commit","result"]}]}},
+            {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["writer_bundle"],
+             "source":{"type":"node","node":"writer_bundle"}},
+            {"id":"refresh", "kind":"publish", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["verified_clean"],
+             "source":{"type":"node","node":"verified_clean"}},
+            {"id":"refresh_conflict", "kind":"gate", "access":"read_only",
+             "depends_on":["refresh"],
+             "condition":{"type":"conflict","target":{"node":"refresh"}}},
+            {"id":"refresh_ci", "kind":"gate", "access":"read_only",
+             "depends_on":["refresh_conflict"],
+             "condition":{"type":"ci","target":{"node":"refresh"}}},
+            {"id":"fresh_review", "access":"read_only", "prompt":"review recovery head",
+             "source":{"type":"head","node":"refresh"},
+             "depends_on":["refresh","refresh_conflict","refresh_ci"],
+             "route":{"alias":"senior"}},
+            {"id":"accepted", "kind":"gate", "access":"read_only",
+             "depends_on":["fresh_review","refresh_ci"],
+             "inputs":[{"node":"fresh_review","outputs":["verdict"]}],
+             "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+          ]}
+    }));
+    assert!(validate_plan(&composite).is_ok());
+
+    let unrelated_writer = queue_conflict_recovery_document(json!({
+        "id":"rebase", "kind":"composite", "access":"read_only",
+        "depends_on":["conflict"], "composite":{"nodes":[
+            {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"merge the base into the retained published branch", "write_scope":["src"],
+             "route":{"alias":"senior"}, "source":{"type":"head","node":"publish"}},
+            {"id":"unbound", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"write without the published head", "write_scope":["src"],
+             "route":{"alias":"senior"}, "depends_on":["fix"]}
+        ], "exports":[{"node":"unbound","outputs":["result"]}]}
+    }));
+    assert!(validate_plan(&unrelated_writer).is_err());
+
+    let mut missing_recovery = valid;
+    missing_recovery
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "conflict")
+        .unwrap()
+        .on_fail = None;
+    // Loop admission catches the missing initial conflict entry before the
+    // later queue-repair relation check runs.
+    assert_eq!(
+        validate_plan(&missing_recovery).unwrap_err(),
+        "loop rebase initial_publication must be its directly bound publication seed and have an entry failure gate"
+    );
+}
+
+#[test]
+fn queue_ci_repair_must_republish_and_recheck_the_repaired_head() {
+    let ci_repair_document = |reenter: bool| {
+        let mut document = queue_publish_document("routine");
+        document.nodes.retain(|node| node.id != "land");
+        document
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "ci")
+            .unwrap()
+            .on_fail = Some("ci_repair".into());
+        let recovery = if reenter {
+            json!({
+                "id":"ci_repair", "kind":"loop", "access":"read_only",
+                "depends_on":["ci","publish","hygiene"],
+                "loop":{"max_rounds":2,"until":"accepted",
+                  "retry_on":["verified_clean","fresh_conflict","fresh_ci","accepted"],
+                  "selected_publication":"refresh","initial_publication":"publish",
+                  "previous_bindings":{"refresh":"publish","verified_clean":"hygiene"},
+                  "body":[
+                    {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+                     "prompt":"repair the published CI findings", "write_scope":["src"],
+                     "source":{"type":"node","node":"previous.verified_clean"},
+                     "inputs":[{"node":"previous.refresh","outputs":["branch","commit"]}],
+                     "route":{"alias":"senior"}},
+                    {"id":"verified_clean", "kind":"hygiene", "access":"worktree_write",
+                     "worktree":"/wt/feature", "depends_on":["fix"],
+                     "source":{"type":"node","node":"fix"}},
+                    {"id":"refresh", "kind":"publish", "access":"worktree_write",
+                     "worktree":"/wt/feature", "depends_on":["verified_clean"],
+                     "source":{"type":"node","node":"verified_clean"}},
+                    {"id":"fresh_conflict", "kind":"gate", "access":"read_only",
+                     "depends_on":["refresh"],
+                     "condition":{"type":"conflict","target":{"node":"refresh"}}},
+                    {"id":"fresh_ci", "kind":"gate", "access":"read_only",
+                     "depends_on":["fresh_conflict"],
+                     "condition":{"type":"ci","target":{"node":"refresh"}}},
+                    {"id":"fresh_review", "access":"read_only", "prompt":"review recovery head",
+                     "source":{"type":"head","node":"refresh"},
+                     "depends_on":["refresh","fresh_conflict","fresh_ci"],
+                     "route":{"alias":"senior"}},
+                    {"id":"accepted", "kind":"gate", "access":"read_only",
+                     "depends_on":["fresh_review","fresh_ci"],
+                     "inputs":[{"node":"fresh_review","outputs":["verdict"]}],
+                     "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                  ]}
+            })
+        } else {
+            json!({
+                "id":"ci_repair", "kind":"loop", "access":"read_only",
+                "depends_on":["ci","publish"],
+                "loop":{"max_rounds":1,"until":"accepted","body":[
+                    {"id":"fix", "access":"worktree_write", "worktree":"/wt/feature",
+                     "prompt":"repair the published CI findings", "write_scope":["src"],
+                     "source":{"type":"head","node":"publish"},
+                     "route":{"alias":"senior"}}
+                ]}
+            })
+        };
+        document
+            .nodes
+            .push(serde_json::from_value(recovery).unwrap());
+        document
+    };
+
+    assert!(validate_plan(&ci_repair_document(true)).is_ok());
+    assert!(validate_plan(&ci_repair_document(false)).is_err());
+}
+
+#[test]
+fn queue_land_does_not_run_without_clear_conflict_and_green_ci_on_publish_head() {
+    for mismatch_conflict in [true, false] {
+        let document = queue_publish_document("routine");
+        let mut owner = owner();
+        owner.repair_fixture = true;
+        owner.integration_base = Some(TARGET.parse().unwrap());
+        if mismatch_conflict {
+            owner.conflict_head = Some(WRITE_HEAD.into());
+        } else {
+            owner.ci_head = Some(WRITE_HEAD.into());
+        }
+        let checkpoint = run(&document, &mut owner, &mut Journal::default());
+
+        assert!(owner.land_requests.is_empty());
+        assert!(node(&checkpoint, "land").land.is_none());
+        if mismatch_conflict {
+            assert_eq!(
+                node(&checkpoint, "conflict")
+                    .conflict
+                    .as_ref()
+                    .unwrap()
+                    .state,
+                ConflictState::Pending
+            );
+        } else {
+            assert_eq!(
+                node(&checkpoint, "conflict")
+                    .conflict
+                    .as_ref()
+                    .unwrap()
+                    .state,
+                ConflictState::Clear
+            );
+            assert_eq!(
+                node(&checkpoint, "ci").ci.as_ref().unwrap().state,
+                CiState::Pending
+            );
+        }
+    }
+}
+
+#[test]
+fn queue_land_admission_requires_conflict_ci_and_verdict_after_publish() {
+    let mut document = queue_publish_document("routine");
+    assert!(validate_plan(&document).is_ok());
+
+    document.nodes.retain(|node| node.id != "conflict");
+    document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "ci")
+        .unwrap()
+        .depends_on = vec!["publish".into()];
+    document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "rebase")
+        .unwrap()
+        .depends_on
+        .retain(|dependency| dependency != "conflict");
+
+    assert!(
+        validate_plan(&document)
+            .err()
+            .is_some_and(|error| error.contains("conflict, CI and verdict gates"))
+    );
 }
 
 #[test]
@@ -602,6 +1260,13 @@ fn a_repair_without_a_delivered_branch_fails_before_launch() {
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Blocked);
     assert_eq!(land.advance_note, None);
+}
+
+#[test]
+fn land_scheduler_resolves_land_execution_with_graph_advance_in_scope() {
+    // The graph-level advance is also in scope during tests; the land entry
+    // point must still resolve to the scheduler's eight-argument operation.
+    let _land_advance = land::advance::<Owner, Journal>;
 }
 
 #[test]
@@ -1413,4 +2078,211 @@ fn a_land_ask_id_carries_the_sequence_and_the_retry_generation() {
     assert_eq!(land::parse("land.ask-1.retry-0", "land"), None);
     assert_eq!(land::parse("land.ask-0", "land"), None);
     assert_eq!(land::parse("other.ask-1", "land"), None);
+}
+
+#[derive(Default)]
+struct ReplayJournal {
+    checkpoint: Option<GraphCheckpoint>,
+    saves: Vec<GraphCheckpoint>,
+    failed_after_conflict_reset: bool,
+}
+impl GraphJournal for ReplayJournal {
+    type Error = std::io::Error;
+    fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+        Ok(self.checkpoint.clone())
+    }
+    fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+        self.checkpoint = Some(checkpoint.clone());
+        self.saves.push(checkpoint.clone());
+        let conflict = checkpoint.nodes.iter().find(|node| node.id == "conflict");
+        let ci = checkpoint.nodes.iter().find(|node| node.id == "ci");
+        let reset_checkpoint = conflict.is_some_and(|node| {
+            node.state == NodeState::Running
+                && node.gate.is_none()
+                && node.conflict.as_ref().is_some_and(|evidence| {
+                    evidence.state == ConflictState::Pending && evidence.ci_rechecks == 1
+                })
+        }) && ci.is_some_and(|node| {
+            node.state == NodeState::Pending && node.gate.is_none() && node.ci.is_none()
+        }) && checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "publish")
+            .and_then(|node| node.outputs.as_ref())
+            .and_then(|outputs| outputs.commit.as_deref())
+            == Some(REPAIR_HEAD)
+            && checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "rebase")
+                .is_some_and(|node| node.state == NodeState::Pending);
+        if reset_checkpoint && !self.failed_after_conflict_reset {
+            self.failed_after_conflict_reset = true;
+            return Err(std::io::Error::other(
+                "simulated lost acknowledgement after durable conflict reset",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay() {
+    let mut document = queue_publish_document("routine");
+    document.nodes.retain(|node| node.id != "land");
+    assert!(validate_plan(&document).is_ok());
+
+    let mut first_owner = owner();
+    first_owner.repair_fixture = true;
+    first_owner.integration_base = Some(TARGET.parse().unwrap());
+    first_owner.hygiene_after_heads = VecDeque::from([REPAIR_HEAD.into(), REPUBLISHED_HEAD.into()]);
+    first_owner.conflict_states = VecDeque::from([
+        ConflictState::Clear,
+        ConflictState::Conflicting,
+        ConflictState::Clear,
+    ]);
+    first_owner.ci_states = VecDeque::from([CiState::Conflict, CiState::Passed]);
+    let mut first_journal = ReplayJournal::default();
+    assert!(matches!(
+        advance(&document, &mut first_owner, &mut first_journal),
+        Err(GraphError::Journal(_))
+    ));
+    assert_eq!(first_owner.launches.len(), 1);
+    assert_eq!(first_owner.launches[0].node, "write");
+    assert_eq!(first_owner.hygiene_observations.len(), 1);
+    assert_eq!(first_owner.publication_heads, vec![REPAIR_HEAD.to_owned()]);
+    assert_eq!(first_owner.gate_observations.len(), 2);
+
+    let reset = first_journal
+        .saves
+        .iter()
+        .find(|checkpoint| {
+            let conflict = node(checkpoint, "conflict");
+            let ci = node(checkpoint, "ci");
+            conflict.state == NodeState::Running
+                && conflict.gate.is_none()
+                && conflict.conflict.as_ref().is_some_and(|evidence| {
+                    evidence.state == ConflictState::Pending
+                        && evidence.ci_rechecks == 1
+                        && evidence.head_sha.as_deref() == Some(REPAIR_HEAD)
+                })
+                && ci.state == NodeState::Pending
+                && ci.gate.is_none()
+                && ci.ci.is_none()
+                && node(checkpoint, "publish")
+                    .outputs
+                    .as_ref()
+                    .and_then(|outputs| outputs.commit.as_deref())
+                    == Some(REPAIR_HEAD)
+                && node(checkpoint, "rebase").state == NodeState::Pending
+                && node(checkpoint, "rebase--r1--fix").state == NodeState::Pending
+                && node(checkpoint, "rebase--r1--verified_clean").state == NodeState::Pending
+        })
+        .expect("CI conflict reset must be durable before retrying conflict observation");
+    let mut replay_checkpoint: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(reset).unwrap()).unwrap();
+    // GraphJournal hydrates this runtime projection from GraphExecution.bases.
+    replay_checkpoint.bases = reset.bases;
+    assert_eq!(replay_checkpoint.bases, reset.bases);
+
+    let mut replay_owner = owner();
+    replay_owner.repair_fixture = true;
+    replay_owner.integration_base = Some(TARGET.parse().unwrap());
+    replay_owner.hygiene_after_heads = VecDeque::from([REPUBLISHED_HEAD.into()]);
+    replay_owner.conflict_states =
+        VecDeque::from([ConflictState::Conflicting, ConflictState::Clear]);
+    replay_owner.conflict_heads =
+        VecDeque::from([Some(REPAIR_HEAD.into()), Some(REPUBLISHED_HEAD.into())]);
+    replay_owner.ci_states = VecDeque::from([CiState::Passed]);
+    let mut replay_journal = ReplayJournal {
+        checkpoint: Some(replay_checkpoint),
+        failed_after_conflict_reset: true,
+        ..Default::default()
+    };
+    let replayed =
+        advance(&document, &mut replay_owner, &mut replay_journal).unwrap_or_else(|error| {
+            let saved = replay_journal.checkpoint.as_ref().unwrap();
+            panic!(
+                "replay failed: {error:?}; publish={:#?}; hygiene={:#?}",
+                node(saved, "publish"),
+                node(saved, "hygiene")
+            );
+        });
+
+    assert_eq!(
+        node(&replayed.checkpoint, "conflict").state,
+        NodeState::Failed
+    );
+    assert_eq!(
+        node(&replayed.checkpoint, "rebase").state,
+        NodeState::Succeeded
+    );
+    assert!(node(&replayed.checkpoint, "ci").gate.is_none());
+    assert_ne!(node(&replayed.checkpoint, "ci").state, NodeState::Failed);
+    assert!(
+        !replay_owner
+            .launches
+            .iter()
+            .any(|launch| launch.node == "rebase--r1--ci_repair")
+    );
+    assert_eq!(
+        node(&replayed.checkpoint, "rebase--r1--verified_clean").state,
+        NodeState::Succeeded
+    );
+    assert_eq!(
+        node(&replayed.checkpoint, "rebase--r1--refresh").state,
+        NodeState::Succeeded
+    );
+    let receipt = node(&replayed.checkpoint, "rebase--r1--refresh")
+        .outputs
+        .as_ref()
+        .unwrap()
+        .publication
+        .as_ref()
+        .unwrap();
+    assert_eq!(receipt.head, REPUBLISHED_HEAD);
+    let conflict = node(&replayed.checkpoint, "rebase--r1--fresh_conflict")
+        .conflict
+        .as_ref()
+        .unwrap();
+    assert_eq!(conflict.state, ConflictState::Clear);
+    assert_eq!(conflict.head_sha.as_deref(), Some(REPUBLISHED_HEAD));
+    let ci = node(&replayed.checkpoint, "rebase--r1--fresh_ci");
+    assert_eq!(ci.ci.as_ref().unwrap().state, CiState::Passed);
+    assert_eq!(
+        ci.ci.as_ref().unwrap().head_sha.as_deref(),
+        Some(REPUBLISHED_HEAD)
+    );
+    assert_eq!(
+        replay_owner
+            .launches
+            .iter()
+            .filter(|launch| launch.node == "rebase--r1--fix")
+            .count(),
+        1
+    );
+    assert_eq!(
+        replay_owner.hygiene_observations,
+        vec![(
+            "rebase--r1--verified_clean".into(),
+            REPAIR_HEAD.into(),
+            REBASE_HEAD.into(),
+            REPUBLISHED_HEAD.into()
+        )]
+    );
+    assert_eq!(
+        replay_owner.publication_heads,
+        vec![REPUBLISHED_HEAD.to_owned()]
+    );
+
+    let launches = replay_owner.launches.clone();
+    let hygiene = replay_owner.hygiene_observations.clone();
+    let publications = replay_owner.publication_heads.clone();
+    let gate_observations = replay_owner.gate_observations.clone();
+    let replayed_again = advance(&document, &mut replay_owner, &mut replay_journal).unwrap();
+    assert_eq!(replayed_again.checkpoint, replayed.checkpoint);
+    assert_eq!(replay_owner.launches, launches);
+    assert_eq!(replay_owner.hygiene_observations, hygiene);
+    assert_eq!(replay_owner.publication_heads, publications);
+    assert_eq!(replay_owner.gate_observations, gate_observations);
 }

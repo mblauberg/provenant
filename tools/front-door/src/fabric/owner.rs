@@ -25,6 +25,14 @@ pub(crate) struct BoundGraphOwner<'a> {
     pub(crate) tick: bool,
 }
 
+struct QueueWriterPredecessor {
+    attempt: provenant_core::AttemptId,
+    source_head: Option<String>,
+    head: Option<String>,
+    warning: Option<String>,
+    pr: Option<u64>,
+}
+
 /// Frozen intent for a launch refused before it has a canonical run request.
 /// Only the digest is retained; prompts and host paths stay out of the record.
 struct GraphRefusalScope {
@@ -191,6 +199,251 @@ fn selected_writer_project(
     let context = Context::open(factory.context.roots.clone(), &factory.home, &directory)
         .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("worktree".into())))?;
     Ok((directory, context.identity.project))
+}
+
+/// Formatter transaction held under a fresh lease on the retained writer
+/// checkout. The operation trailer reconciles a commit that reached Git before
+/// the graph checkpoint recorded its result.
+struct DeliveryHygieneTransaction {
+    _lease: provenant_supervisor::custody::CustodyLease,
+    worktree: PathBuf,
+    branch: String,
+    format_cwd: PathBuf,
+    format_argv: Vec<String>,
+    git: String,
+    operation_id: String,
+    expected_head: String,
+}
+
+fn delivery_git_command(
+    worktree: &Path,
+    args: &[&str],
+) -> Result<provenant_os::exec::ExecOutcome, String> {
+    let git = provenant_os::git::git_executable()
+        .ok_or_else(|| "Git executable is unavailable".to_owned())?;
+    let git = git
+        .to_str()
+        .ok_or_else(|| "Git executable path is not UTF-8".to_owned())?;
+    let worktree = worktree
+        .to_str()
+        .ok_or_else(|| "writer worktree path is not UTF-8".to_owned())?;
+    let mut argv = vec![git.to_owned(), "-C".into(), worktree.into()];
+    argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    crate::pr::execute_for(
+        Path::new(worktree),
+        &refs,
+        std::time::Duration::from_secs(60),
+        false,
+    )
+    .map_err(|error| {
+        let safe = provenant_records::diagnostic::safe_text(&error.to_string());
+        format!(
+            "Git operation failed: {}",
+            delivery_hygiene_text(&safe, 512)
+        )
+    })
+}
+
+impl DeliveryHygieneTransaction {
+    fn command(&self, args: &[&str]) -> Result<provenant_os::exec::ExecOutcome, String> {
+        delivery_git_command(&self.worktree, args)
+    }
+
+    fn checked_git(&self, args: &[&str]) -> Result<Vec<u8>, String> {
+        let output = self.command(args)?;
+        if output.termination != provenant_os::exec::Termination::Exit(0) {
+            let safe = provenant_records::diagnostic::safe_text(&String::from_utf8_lossy(
+                &output.stderr.bytes,
+            ));
+            return Err(format!(
+                "Git operation failed: {}",
+                delivery_hygiene_text(&safe, 512)
+            ));
+        }
+        Ok(output.stdout.bytes)
+    }
+
+    fn reconcile(&mut self) -> Result<Option<String>, String> {
+        let head = self.head()?;
+        if head == self.expected_head {
+            return Ok(None);
+        }
+        let receipt = self.checked_git(&["show", "-s", "--format=%H%x00%B", "HEAD"])?;
+        let receipt = String::from_utf8(receipt)
+            .map_err(|_| "Git formatter receipt is not UTF-8".to_owned())?;
+        let lineage = self.checked_git(&["rev-list", "--parents", "-n", "1", "HEAD"])?;
+        let lineage = String::from_utf8(lineage)
+            .map_err(|_| "Git formatter lineage is not UTF-8".to_owned())?;
+        if !delivery_hygiene_receipt_matches(
+            &head,
+            &self.expected_head,
+            &self.operation_id,
+            &receipt,
+            &lineage,
+        ) {
+            return Err("retained writer head moved without this hygiene operation receipt".into());
+        }
+        if self.has_edits()? {
+            return Err("formatter commit was observed with additional worktree edits".into());
+        }
+        Ok(Some(head))
+    }
+}
+
+fn delivery_hygiene_receipt_matches(
+    head: &str,
+    expected_head: &str,
+    operation_id: &str,
+    receipt: &str,
+    lineage: &str,
+) -> bool {
+    let Some((commit, body)) = receipt.split_once('\0') else {
+        return false;
+    };
+    let marker = format!("Delivery-Queue-Operation: {operation_id}");
+    let has_marker = body.lines().any(|line| line.trim_end() == marker);
+    let mut parents = lineage.split_whitespace();
+    commit.trim() == head
+        && has_marker
+        && parents.next() == Some(head)
+        && parents.next() == Some(expected_head)
+        && parents.next().is_none()
+}
+
+fn delivery_git_output(worktree: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = delivery_git_command(worktree, args)?;
+    if output.termination != provenant_os::exec::Termination::Exit(0) {
+        let safe = provenant_records::diagnostic::safe_text(&String::from_utf8_lossy(
+            &output.stderr.bytes,
+        ));
+        return Err(format!(
+            "Git operation failed: {}",
+            delivery_hygiene_text(&safe, 512)
+        ));
+    }
+    Ok(output.stdout.bytes)
+}
+
+fn delivery_hygiene_text(value: &str, max_bytes: usize) -> String {
+    let safe = provenant_records::diagnostic::safe_text(value);
+    let mut end = safe.len().min(max_bytes);
+    while !safe.is_char_boundary(end) {
+        end -= 1;
+    }
+    safe[..end].to_owned()
+}
+
+impl super::graph_execution::HygieneTransaction for DeliveryHygieneTransaction {
+    fn reconcile_commit(&mut self) -> Result<Option<String>, String> {
+        self.reconcile()
+    }
+
+    fn head(&mut self) -> Result<String, String> {
+        let bytes = self.checked_git(&["rev-parse", "--verify", "HEAD"])?;
+        let head = String::from_utf8(bytes)
+            .map_err(|_| "Git returned a non-UTF-8 writer head".to_owned())?
+            .trim()
+            .to_owned();
+        head.parse::<provenant_core::GitOid>()
+            .map_err(|_| "Git returned an invalid writer head".to_owned())?;
+        Ok(head)
+    }
+
+    fn has_edits(&mut self) -> Result<bool, String> {
+        Ok(!self
+            .checked_git(&["status", "--porcelain=v1", "-z", "--untracked-files=all"])?
+            .is_empty())
+    }
+
+    fn format(&mut self) -> Result<(), String> {
+        if self.format_argv.is_empty() {
+            return Ok(());
+        }
+        let refs: Vec<&str> = self.format_argv.iter().map(String::as_str).collect();
+        let output = crate::pr::execute_for(
+            &self.format_cwd,
+            &refs,
+            std::time::Duration::from_secs(300),
+            false,
+        )
+        .map_err(|error| {
+            let safe = provenant_records::diagnostic::safe_text(&error.to_string());
+            format!(
+                "configured formatter failed: {}",
+                delivery_hygiene_text(&safe, 512)
+            )
+        })?;
+        if output.termination != provenant_os::exec::Termination::Exit(0) {
+            let safe = provenant_records::diagnostic::safe_text(&String::from_utf8_lossy(
+                &output.stderr.bytes,
+            ));
+            return Err(format!(
+                "configured formatter failed: {}",
+                delivery_hygiene_text(&safe, 512)
+            ));
+        }
+        Ok(())
+    }
+
+    fn commit_format(&mut self, expected_head: &str) -> Result<(), String> {
+        if self.head()? != expected_head || expected_head != self.expected_head {
+            return Err("writer head changed before formatter commit".into());
+        }
+        if !self.has_edits()? {
+            return Err("formatter reported edits but left the worktree clean".into());
+        }
+        self.checked_git(&["add", "--all"])?;
+        if self.head()? != expected_head {
+            return Err("writer head changed while staging formatter output".into());
+        }
+        let marker = format!("Delivery-Queue-Operation: {}", self.operation_id);
+        let message = [
+            self.git.clone(),
+            "-C".into(),
+            self.worktree
+                .to_str()
+                .ok_or_else(|| "writer worktree path is not UTF-8".to_owned())?
+                .into(),
+            "commit".into(),
+            "-m".into(),
+            "Apply configured formatter".into(),
+            "-m".into(),
+            marker,
+        ];
+        let refs: Vec<&str> = message.iter().map(String::as_str).collect();
+        let output = crate::pr::execute_for(
+            &self.worktree,
+            &refs,
+            std::time::Duration::from_secs(60),
+            false,
+        );
+        match output {
+            Ok(output) if output.termination == provenant_os::exec::Termination::Exit(0) => Ok(()),
+            Ok(output) => {
+                if self.reconcile()?.is_some() {
+                    return Ok(());
+                }
+                let safe = provenant_records::diagnostic::safe_text(&String::from_utf8_lossy(
+                    &output.stderr.bytes,
+                ));
+                Err(format!(
+                    "formatter commit failed: {}",
+                    delivery_hygiene_text(&safe, 512)
+                ))
+            }
+            Err(error) => {
+                if self.reconcile()?.is_some() {
+                    return Ok(());
+                }
+                let safe = provenant_records::diagnostic::safe_text(&error.to_string());
+                Err(format!(
+                    "formatter commit failed: {}",
+                    delivery_hygiene_text(&safe, 512)
+                ))
+            }
+        }
+    }
 }
 
 fn stored_graph_refusal(
@@ -664,6 +917,37 @@ fn graph_ask_item(
     Ok(Some(*item))
 }
 
+/// Check whether a linked ask has an answer without acknowledging or applying
+/// it. Queue admission uses this read-only probe to wake answered parked graphs
+/// without reserving capacity for unanswered owner waits.
+pub(crate) fn graph_asks_have_answer(
+    factory: &Factory,
+    actor: &str,
+    asks: &[provenant_fabric_runtime::graph::AskLink],
+    cancel: &CancelToken,
+) -> Result<bool, FacadeError> {
+    let Some(first) = asks.first() else {
+        return Ok(false);
+    };
+    graph_ask_with(factory, cancel, actor, &first.ask_id, |service| {
+        use provenant_records::inbox::RequestState;
+        for ask in asks {
+            let scope = provenant_fabric_runtime::graph::AskScope { actor, ask };
+            let Some(item) = graph_ask_item(service, &scope, cancel)? else {
+                continue;
+            };
+            if !matches!(
+                item.request.state,
+                RequestState::Withdrawn | RequestState::Superseded | RequestState::Expired
+            ) && item.answer.is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+}
+
 /// Read the answer to the linked request, whichever channel gave it.
 pub(crate) fn graph_ask_poll(
     service: &provenant_fabric_runtime::inbox::InboxService<'_>,
@@ -1100,10 +1384,21 @@ impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
             host_monotonic_micros: self.factory.clock.host_monotonic_micros().ok()?,
         })
     }
+    fn observe_conflict(
+        &mut self,
+        target: &str,
+    ) -> provenant_fabric_runtime::graph::ConflictObservation {
+        crate::pr::status::observe_conflict(
+            self.factory.context.roots.state.as_path(),
+            &self.factory.cwd,
+            target,
+        )
+    }
     fn observe_ci(
         &mut self,
         target: &str,
         checks: &[String],
+        delivery_queue: bool,
         failed_checks_max_bytes: usize,
         max_failed_checks: usize,
     ) -> provenant_fabric_runtime::graph::CiObservation {
@@ -1112,6 +1407,7 @@ impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
             &self.factory.cwd,
             target,
             checks,
+            delivery_queue,
             failed_checks_max_bytes,
             max_failed_checks,
         )
@@ -2232,6 +2528,169 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn actor(&self) -> String {
         self.factory.context.identity.inbox.actor.to_string()
     }
+    fn run_hygiene(
+        &mut self,
+        request: provenant_fabric_runtime::graph::HygieneRequest<'_>,
+    ) -> Result<provenant_fabric_runtime::graph::HygieneExecution, Self::Error> {
+        use provenant_fabric_runtime::graph::HygieneExecution;
+        match self.execute_delivery_hygiene_inner(&request) {
+            Ok(execution) => Ok(execution),
+            Err(error) => Ok(HygieneExecution {
+                outcome: provenant_records::graph::HygieneOutcome {
+                    kind: provenant_records::graph::HygieneOutcomeKind::Error,
+                    before_head: None,
+                    after_head: None,
+                    handoff: request.handoff.map(str::to_owned),
+                },
+                branch: None,
+                formatter_source: None,
+                diagnostic: Some(delivery_hygiene_text(&error.to_string(), 1024)),
+            }),
+        }
+    }
+    fn publish_delivery(
+        &mut self,
+        request: provenant_fabric_runtime::graph::PublicationRequest<'_>,
+    ) -> Result<Option<provenant_fabric_runtime::graph::DeliveryPublication>, Self::Error> {
+        self.execute_delivery_publication_inner(&request).map(Some)
+    }
+    fn seed_delivery_adoption(
+        &mut self,
+        request: provenant_fabric_runtime::graph::DeliveryAdoptionRequest<'_>,
+    ) -> Result<Option<provenant_fabric_runtime::graph::DeliveryPublication>, Self::Error> {
+        super::queue_adoption::revalidate(self.factory, &request, self.budget, self.cancel)
+            .map(Some)
+            .map_err(|reason| FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: format!("cannot adopt pull request into queue item: {reason}"),
+            })
+    }
+    fn admit_delivery_ci(
+        &mut self,
+        request: provenant_fabric_runtime::graph::DeliveryCiRequest<'_>,
+    ) -> Result<Option<provenant_fabric_runtime::graph::DeliveryCiAdmission>, Self::Error> {
+        let provenant_fabric_runtime::graph::DeliveryCiRequest {
+            graph_id,
+            node_id,
+            head_sha,
+            ci_slots,
+            wait_policy,
+            allow_overflow,
+            waited_millis,
+        } = request;
+        let owner = provenant_run::build::queue::CiLeaseOwner {
+            project: self.factory.context.identity.project.to_string(),
+            graph_id: graph_id.to_owned(),
+            node_id: node_id.to_owned(),
+            head_sha: head_sha.to_owned(),
+        };
+        Ok(crate::admit::acquire_delivery_ci_lease(
+            self.factory.context.roots.state.as_path(),
+            owner,
+            ci_slots,
+            wait_policy,
+            (allow_overflow, waited_millis),
+            self.factory.context.config.graph.launch_wait_seconds,
+            self.cancel,
+        ))
+    }
+    fn release_delivery_ci(
+        &mut self,
+        lease: &provenant_fabric_runtime::graph::DeliveryCiLease,
+    ) -> Result<(), Self::Error> {
+        crate::admit::release_delivery_ci_lease(
+            self.factory.context.roots.state.as_path(),
+            lease,
+            self.factory.context.config.graph.launch_wait_seconds,
+            self.cancel,
+        )
+        .map_err(|error| FacadeError::io(format!("release delivery CI lease: {error}")))
+    }
+    fn park_delivery(
+        &mut self,
+        request: provenant_fabric_runtime::graph::DeliveryParkRequest<'_>,
+    ) -> Result<Option<provenant_core::HumanRequestId>, Self::Error> {
+        use provenant_fabric_runtime::inbox::{InboxResult, delivery_park};
+        use provenant_records::inbox::RequestWork;
+
+        let attempt_id = request
+            .attempt_ref
+            .map(|reference| {
+                reference
+                    .split_once('/')
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .1
+                    .parse::<provenant_core::AttemptId>()
+                    .map_err(|_| FacadeError::StateCorrupt)
+            })
+            .transpose()?;
+        let repository = if let Some(repository) = request.repository {
+            PathBuf::from(repository)
+        } else {
+            provenant_os::git::repository_path(
+                &self.factory.context.project_root,
+                provenant_os::git::RepositoryPath::CommonDir,
+            )
+            .map_err(|_| FacadeError::io("locate delivery park repository"))?
+        };
+        let repository = provenant_records::AbsolutePath::new(&repository)
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let session = request
+            .session
+            .map(str::to_owned)
+            .or_else(|| {
+                provenant_workflow::session::chair_session_for(
+                    &self.factory.context.roots.state,
+                    self.factory.context.identity.project,
+                    self.factory.context.identity.inbox.actor,
+                )
+                .map(|session| session.as_str().to_owned())
+            })
+            .ok_or(FacadeError::StateCorrupt)?;
+        let work = RequestWork {
+            extra: Default::default(),
+            graph: request.graph_id.to_owned(),
+            node: Some(request.node_id.to_owned()),
+            attempt_id,
+            repository: Some(repository),
+            head: request
+                .head
+                .map(str::parse::<provenant_core::GitOid>)
+                .transpose()
+                .map_err(|_| FacadeError::StateCorrupt)?,
+        };
+        let input = delivery_park(
+            session,
+            request
+                .operation_id
+                .parse()
+                .map_err(|_| FacadeError::StateCorrupt)?,
+            work,
+            request.item,
+            request.attempt_key,
+            request.reason,
+            request.handoff,
+            request.evidence,
+        )
+        .map_err(|error| graph_ask_refused(request.transition_id, &error))?;
+        let cancel = self.cancel;
+        graph_ask_with(
+            self.factory,
+            cancel,
+            &self.actor(),
+            request.transition_id,
+            |service| {
+                let InboxResult::Saved { receipt } = service
+                    .execute(input, cancel)
+                    .map_err(|error| graph_ask_refused(request.transition_id, &error))?
+                else {
+                    return Err(FacadeError::StateCorrupt);
+                };
+                Ok(Some(receipt.request_id))
+            },
+        )
+    }
     fn validate_expansion(
         &mut self,
         document: &provenant_fabric_runtime::graph::GraphDocument,
@@ -2354,11 +2813,35 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         request: provenant_fabric_runtime::graph::LandRequest<'_>,
     ) -> Result<provenant_fabric_runtime::graph::LandObservation, Self::Error> {
+        let execution = match provenant_fabric_runtime::graph::FileJournal::execution(
+            &self.factory.context.roots.state,
+            self.factory.context.identity.project,
+            request.graph_id,
+        ) {
+            Ok(Some(execution)) => execution,
+            Ok(None) => {
+                return Ok(provenant_fabric_runtime::graph::LandObservation::Pending {
+                    reason: format!(
+                        "cannot verify delivery queue policy for graph {}: saved execution is missing",
+                        request.graph_id
+                    ),
+                });
+            }
+            Err(error) => {
+                return Ok(provenant_fabric_runtime::graph::LandObservation::Pending {
+                    reason: format!(
+                        "cannot verify delivery queue policy for graph {}: {error}",
+                        request.graph_id
+                    ),
+                });
+            }
+        };
         // Graph landing submits through the one landing owner.
         Ok(crate::pr::land::graph_land(
             &self.factory.cwd,
             self.factory.context.roots.state.as_path(),
             &request,
+            execution.document.queue.is_some(),
             self.factory.workers,
         ))
     }
@@ -2796,6 +3279,521 @@ pub(crate) fn recovered_attempt_spec(
 }
 
 impl BoundGraphOwner<'_> {
+    fn execute_delivery_hygiene_inner(
+        &mut self,
+        request: &provenant_fabric_runtime::graph::HygieneRequest<'_>,
+    ) -> Result<provenant_fabric_runtime::graph::HygieneExecution, FacadeError> {
+        use provenant_fabric_runtime::graph::HygieneExecution;
+
+        let (host, attempt) = request
+            .source_attempt
+            .split_once('/')
+            .ok_or(FacadeError::StateCorrupt)?;
+        if host
+            .parse::<provenant_core::HostId>()
+            .map_err(|_| FacadeError::StateCorrupt)?
+            != self.factory.context.identity.host
+        {
+            return Err(FacadeError::OwnerUnavailable);
+        }
+        let attempt_id = attempt
+            .parse::<provenant_core::AttemptId>()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        let record = store.record(attempt_id, &call).map_err(run_error)?;
+        let operation = store
+            .attempt_operation(record.attempt_id, &call)
+            .map_err(run_error)?;
+        let expected_work = request
+            .source_key
+            .work_key(self.factory.context.identity.project)
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        if record.key != expected_work
+            || operation.operation_id
+                != graph_operation("graph-attempt-operation", request.source_key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(request.graph_id)
+                    || context.node_id.as_deref() != Some(request.source_node)
+            })
+            || !matches!(
+                record.state,
+                provenant_records::run::AttemptState::Terminal { .. }
+            )
+            || !store.custody_released(&record, &call).map_err(run_error)?
+        {
+            return Err(FacadeError::Conflict);
+        }
+
+        let worktree = PathBuf::from(request.worktree);
+        if !worktree.is_absolute() {
+            return Err(FacadeError::StateCorrupt);
+        }
+        let expected_identity = request.worktree_identity.ok_or(FacadeError::StateCorrupt)?;
+        let (project_directory, _) = selected_writer_project(self.factory, request.worktree)?;
+        let ports = provenant_config::PortTable::read_for(
+            Some(&project_directory),
+            self.factory.context.roots.state.as_path(),
+        )
+        .map_err(|error| {
+            FacadeError::io_failure("read delivery formatter configuration", None, Some(&error))
+        })?;
+        let sourced_format = ports.verify_format();
+        let formatter_source = format!(
+            "{}{}",
+            sourced_format.source.layer,
+            sourced_format
+                .source
+                .origin
+                .as_ref()
+                .map_or_else(String::new, |origin| format!(" ({origin})"))
+        );
+        let (format_argv, format_cwd) = match &sourced_format.value {
+            provenant_config::VerifyFormat::None => (Vec::new(), project_directory.clone()),
+            provenant_config::VerifyFormat::Command(command) => {
+                if command.argv.first().is_none_or(String::is_empty) {
+                    return Err(FacadeError::field("verify.format"));
+                }
+                let cwd = project_directory
+                    .join(&ports.verify.workspace)
+                    .join(&command.cwd);
+                let root = std::fs::canonicalize(&project_directory)
+                    .map_err(|_| FacadeError::field("verify.workspace"))?;
+                let cwd = std::fs::canonicalize(&cwd)
+                    .map_err(|_| FacadeError::field("verify.workspace"))?;
+                if !cwd.starts_with(&root) || !cwd.is_dir() {
+                    return Err(FacadeError::field("verify.workspace"));
+                }
+                (command.argv.clone(), cwd)
+            }
+        };
+        let git = provenant_os::git::git_executable()
+            .and_then(|git| git.to_str().map(str::to_owned))
+            .ok_or_else(|| FacadeError::io("locate git for delivery hygiene"))?;
+        let scope_attempt = provenant_core::AttemptId::from_bytes(
+            provenant_os::fs::entropy_128().map_err(|_| FacadeError::StateCorrupt)?,
+        );
+
+        let prepared = provenant_confinement::worktrees::with_context_using_workers_and_facts(
+            &self.factory.context.roots,
+            &self.factory.home,
+            &project_directory,
+            &self.factory.clock,
+            self.cancel,
+            self.factory.workers,
+            &self.repo_facts,
+            |context| {
+                let prepared = (|| -> Result<DeliveryHygieneTransaction, String> {
+                    let verified =
+                        provenant_confinement::repo::verify_worktree(context.repo, &worktree)
+                            .map_err(|error| error.to_string())?;
+                    let metadata = std::fs::metadata(&worktree)
+                        .map_err(|error| format!("inspect retained worktree: {error}"))?;
+                    use std::os::unix::fs::MetadataExt;
+                    if metadata.dev() != expected_identity.device
+                        || metadata.ino() != expected_identity.inode
+                    {
+                        return Err("retained writer worktree identity changed".into());
+                    }
+                    let branch = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["symbolic-ref", "--short", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer branch is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    if branch.is_empty() || branch == "HEAD" {
+                        return Err("retained writer worktree has no branch".into());
+                    }
+                    let branch_ref = provenant_confinement::repo::GitRefName::branch(&branch)
+                        .map_err(|error| error.to_string())?;
+                    let head = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["rev-parse", "--verify", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer head is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    let base = head
+                        .parse::<provenant_core::GitOid>()
+                        .map_err(|_| "retained writer head is invalid".to_owned())?;
+                    let inventory = context
+                        .facts
+                        .writer_inventory(
+                            context.repo,
+                            context.executor,
+                            context.utility,
+                            context.utility_budget,
+                            self.cancel,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let (slot, binding) = provenant_confinement::worktrees::writer_custody(
+                        context.project_state,
+                        &verified,
+                        &worktree,
+                        &branch_ref,
+                        base,
+                        || Ok(inventory),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let lease = provenant_supervisor::custody::acquire_writer(
+                        slot,
+                        provenant_records::custody::Scope {
+                            attempt: scope_attempt,
+                            generation: 1,
+                        },
+                        binding,
+                        self.budget,
+                        self.cancel,
+                        &self.factory.clock,
+                    )
+                    .map_err(|error| format!("writer custody unavailable: {error}"))?;
+                    let metadata = std::fs::metadata(&worktree)
+                        .map_err(|error| format!("recheck retained worktree: {error}"))?;
+                    if metadata.dev() != expected_identity.device
+                        || metadata.ino() != expected_identity.inode
+                    {
+                        return Err(
+                            "retained writer worktree identity changed under custody".into()
+                        );
+                    }
+                    let branch_after = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["symbolic-ref", "--short", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer branch is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    let head_after = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["rev-parse", "--verify", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer head is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    if branch_after != branch || head_after != head {
+                        return Err("retained writer moved while custody was acquired".into());
+                    }
+                    Ok(DeliveryHygieneTransaction {
+                        _lease: lease,
+                        worktree: worktree.clone(),
+                        branch,
+                        format_cwd: format_cwd.clone(),
+                        format_argv: format_argv.clone(),
+                        git: git.clone(),
+                        operation_id: request.operation_id.to_owned(),
+                        expected_head: request.expected_head.to_owned(),
+                    })
+                })();
+                Ok(prepared)
+            },
+        )
+        .map_err(|error| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: format!("retained writer could not be verified: {error}"),
+        })?;
+        let mut transaction = prepared.map_err(|reason| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason,
+        })?;
+        let (outcome, diagnostic) = super::graph_execution::run_hygiene(
+            &mut transaction,
+            request.input_head,
+            request.expected_head,
+            request.handoff.map(str::to_owned),
+        );
+        Ok(HygieneExecution {
+            outcome,
+            branch: Some(transaction.branch.clone()),
+            formatter_source: Some(formatter_source),
+            diagnostic,
+        })
+    }
+
+    fn execute_delivery_publication_inner(
+        &mut self,
+        request: &provenant_fabric_runtime::graph::PublicationRequest<'_>,
+    ) -> Result<provenant_fabric_runtime::graph::DeliveryPublication, FacadeError> {
+        let (host, attempt) = request
+            .source_attempt
+            .split_once('/')
+            .ok_or(FacadeError::StateCorrupt)?;
+        if host
+            .parse::<provenant_core::HostId>()
+            .map_err(|_| FacadeError::StateCorrupt)?
+            != self.factory.context.identity.host
+        {
+            return Err(FacadeError::OwnerUnavailable);
+        }
+        let attempt_id = attempt
+            .parse::<provenant_core::AttemptId>()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        let record = store.record(attempt_id, &call).map_err(run_error)?;
+        let operation = store
+            .attempt_operation(record.attempt_id, &call)
+            .map_err(run_error)?;
+        let expected_work = request
+            .source_key
+            .work_key(self.factory.context.identity.project)
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        if record.key != expected_work
+            || operation.operation_id
+                != graph_operation("graph-attempt-operation", request.source_key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(request.graph_id)
+                    || context.node_id.as_deref() != Some(request.source_node)
+            })
+            || !matches!(
+                record.state,
+                provenant_records::run::AttemptState::Terminal { .. }
+            )
+            || !store.custody_released(&record, &call).map_err(run_error)?
+        {
+            return Err(FacadeError::Conflict);
+        }
+
+        let worktree = PathBuf::from(request.worktree);
+        if !worktree.is_absolute() {
+            return Err(FacadeError::StateCorrupt);
+        }
+        let expected_identity = request.worktree_identity.ok_or(FacadeError::StateCorrupt)?;
+        let (project_directory, _) = selected_writer_project(self.factory, request.worktree)?;
+        let expected_head = request
+            .expected_head
+            .parse::<provenant_core::GitOid>()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let integration_base = request
+            .integration_base
+            .parse::<provenant_core::GitOid>()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let expected_remote_head = request
+            .expected_remote_head
+            .map(|head| head.parse::<provenant_core::GitOid>())
+            .transpose()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let adoption_target = if let Some(adoption) = request.adoption {
+            if adoption.branch != request.writer_branch
+                || adoption.branch != request.source_branch
+                || adoption.worktree != request.worktree
+                || request.worktree_identity != Some(&adoption.source_directory_identity)
+                || adoption.head != request.integration_base
+                || expected_remote_head.is_none()
+            {
+                return Err(FacadeError::Conflict);
+            }
+            Some(provenant_run::GraphAdoptionTarget {
+                repository: &adoption.repository,
+                pull_request: adoption.pull_request,
+                pull_request_url: &adoption.pull_request_url,
+                branch: &adoption.branch,
+                base_repository: &adoption.base_repository,
+                base_branch: &adoption.base_branch,
+            })
+        } else {
+            None
+        };
+        let scope_attempt = provenant_core::AttemptId::from_bytes(
+            provenant_os::fs::entropy_128().map_err(|_| FacadeError::StateCorrupt)?,
+        );
+        let forge = provenant_run::resolve_forge(
+            self.factory.context.roots.state.as_path(),
+            self.factory.cwd.as_path(),
+            &self.factory.context.port_table,
+        )
+        .map_err(run_error)?;
+        let body = format!(
+            "Delivery queue graph {}\n\nNode {} published clean head {}.",
+            request.graph_id, request.node_id, request.expected_head
+        );
+        let host_delivery =
+            provenant_run::HostDeliveryContext::capture().with_repo_facts(&self.repo_facts);
+        let receipt = provenant_confinement::worktrees::with_context_using_workers_and_facts(
+            &self.factory.context.roots,
+            &self.factory.home,
+            &project_directory,
+            &self.factory.clock,
+            self.cancel,
+            self.factory.workers,
+            &self.repo_facts,
+            |context| {
+                let prepared = (|| -> Result<provenant_run::GraphPublicationReceipt, String> {
+                    let verified =
+                        provenant_confinement::repo::verify_worktree(context.repo, &worktree)
+                            .map_err(|error| error.to_string())?;
+                    let metadata = std::fs::metadata(&worktree)
+                        .map_err(|error| format!("inspect retained worktree: {error}"))?;
+                    use std::os::unix::fs::MetadataExt;
+                    if metadata.dev() != expected_identity.device
+                        || metadata.ino() != expected_identity.inode
+                    {
+                        return Err("retained writer worktree identity changed".into());
+                    }
+                    let branch = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["symbolic-ref", "--short", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer branch is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    if branch != request.writer_branch || branch.is_empty() {
+                        return Err("retained writer branch differs from hygiene receipt".into());
+                    }
+                    let branch_ref = provenant_confinement::repo::GitRefName::branch(&branch)
+                        .map_err(|error| error.to_string())?;
+                    let head = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["rev-parse", "--verify", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer head is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    let observed_head = head
+                        .parse::<provenant_core::GitOid>()
+                        .map_err(|_| "retained writer head is invalid".to_owned())?;
+                    if observed_head != expected_head {
+                        return Err("retained writer head differs from hygiene receipt".into());
+                    }
+                    let status = delivery_git_output(
+                        &worktree,
+                        &["status", "--porcelain=2", "--untracked-files=all"],
+                    )?;
+                    if !status.is_empty() {
+                        return Err("retained writer worktree changed after hygiene".into());
+                    }
+                    let inventory = context
+                        .facts
+                        .writer_inventory(
+                            context.repo,
+                            context.executor,
+                            context.utility,
+                            context.utility_budget,
+                            self.cancel,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let (slot, binding) = provenant_confinement::worktrees::writer_custody(
+                        context.project_state,
+                        &verified,
+                        &worktree,
+                        &branch_ref,
+                        observed_head,
+                        || Ok(inventory),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let _lease = provenant_supervisor::custody::acquire_writer(
+                        slot,
+                        provenant_records::custody::Scope {
+                            attempt: scope_attempt,
+                            generation: 1,
+                        },
+                        binding,
+                        self.budget,
+                        self.cancel,
+                        &self.factory.clock,
+                    )
+                    .map_err(|error| format!("writer custody unavailable: {error}"))?;
+                    let metadata = std::fs::metadata(&worktree)
+                        .map_err(|error| format!("recheck retained worktree: {error}"))?;
+                    if metadata.dev() != expected_identity.device
+                        || metadata.ino() != expected_identity.inode
+                    {
+                        return Err(
+                            "retained writer worktree identity changed under custody".into()
+                        );
+                    }
+                    let branch_after = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["symbolic-ref", "--short", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer branch is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    let head_after = String::from_utf8(delivery_git_output(
+                        &worktree,
+                        &["rev-parse", "--verify", "HEAD"],
+                    )?)
+                    .map_err(|_| "retained writer head is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                    let status_after = delivery_git_output(
+                        &worktree,
+                        &["status", "--porcelain=2", "--untracked-files=all"],
+                    )?;
+                    if branch_after != branch
+                        || head_after != request.expected_head
+                        || !status_after.is_empty()
+                    {
+                        return Err(
+                            "retained writer changed while publication custody was acquired".into(),
+                        );
+                    }
+                    let delivery = host_delivery.clone();
+                    match adoption_target {
+                        Some(target) => delivery.update_adopted_graph_pr_at_head(
+                            &project_directory,
+                            expected_head,
+                            expected_remote_head.ok_or_else(|| {
+                                "adopted publication has no persisted expected remote head"
+                                    .to_owned()
+                            })?,
+                            &target,
+                            &forge,
+                        ),
+                        None => delivery.deliver_graph_pr_at_head(
+                            &project_directory,
+                            request.writer_branch,
+                            integration_base,
+                            expected_head,
+                            request.publication_identity,
+                            expected_remote_head,
+                            &body,
+                            &forge,
+                        ),
+                    }
+                    .map_err(|error| error.to_string())
+                })();
+                Ok(prepared)
+            },
+        )
+        .map_err(|error| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: format!("retained worktree could not be verified for publication: {error}"),
+        })?;
+        let receipt = receipt.map_err(|reason| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: delivery_hygiene_text(&reason, 1024),
+        })?;
+        if request.adoption.is_some_and(|adoption| {
+            receipt.branch != adoption.branch
+                || receipt.pull_request != adoption.pull_request_url
+                || receipt.head != expected_head
+        }) {
+            return Err(FacadeError::Conflict);
+        }
+        Ok(provenant_fabric_runtime::graph::DeliveryPublication {
+            branch: receipt.branch,
+            head: receipt.head.to_string(),
+            pull_request: receipt.pull_request,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)] // Launch facts stay outside the kernel's public input shape.
     fn observe_or_start_inner(
         &mut self,
@@ -2883,6 +3881,176 @@ impl BoundGraphOwner<'_> {
                 access,
             },
         )
+    }
+
+    fn reconcile_queue_writer_predecessor(
+        &self,
+        owner: &BinaryRunOwner<'_>,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        node: &provenant_fabric_runtime::graph::NodeInput<'_>,
+        worktree: &str,
+        writer_directory: &Path,
+    ) -> Result<Option<QueueWriterPredecessor>, FacadeError> {
+        use provenant_confinement::worktrees::{WorktreeOrigin, load_owner};
+
+        if !node.context.delivery_queue_writer_adoption {
+            return Ok(None);
+        }
+        let state = self.factory.context.roots.state.as_path();
+        let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+            &self.factory.context.roots.state,
+            self.factory.context.identity.project,
+            &key.graph_id,
+        )
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::StateCorrupt)?;
+        let binding = checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == key.node_id)
+            .and_then(|progress| progress.writer_binding.as_ref())
+            .ok_or(FacadeError::StateCorrupt)?;
+        if binding.worktree != worktree {
+            return Err(FacadeError::Conflict);
+        }
+        let expected_identity = binding
+            .source_directory_identity
+            .as_ref()
+            .ok_or(FacadeError::StateCorrupt)?;
+        let metadata = std::fs::metadata(worktree).map_err(|source| {
+            FacadeError::io_failure(
+                "inspect queue writer worktree",
+                Some(Path::new(worktree)),
+                Some(&source),
+            )
+        })?;
+        use std::os::unix::fs::MetadataExt;
+        if metadata.dev() != expected_identity.device || metadata.ino() != expected_identity.inode {
+            return Err(FacadeError::Conflict);
+        }
+
+        let request = provenant_run::resolve_writer(state, writer_directory, Path::new(worktree))
+            .map_err(run_error)?;
+        let launch = provenant_run::prepare_writer_with_facts(
+            &request,
+            state,
+            self.factory.context.identity.project,
+            &self.repo_facts,
+        )
+        .map_err(run_error)?;
+        let identity = launch.worktree.identity();
+        if identity.device != expected_identity.device || identity.inode != expected_identity.inode
+        {
+            return Err(FacadeError::Conflict);
+        }
+        let Some(worktree_owner) = load_owner(&launch.worktree)
+            .map_err(|error| run_error(provenant_run::RunError::Writer(error)))?
+        else {
+            return Ok(None);
+        };
+        if worktree_owner.origin != WorktreeOrigin::Lane {
+            return Ok(None);
+        }
+        let predecessor = worktree_owner.attempt_id.ok_or(FacadeError::StateCorrupt)?;
+        if worktree_owner.host != self.factory.context.identity.host {
+            return Err(FacadeError::OwnerUnavailable);
+        }
+        let call = owner.call(self.cancel);
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let record = store.record(predecessor, &call).map_err(run_error)?;
+        if !matches!(
+            record.state,
+            provenant_records::run::AttemptState::Terminal { .. }
+        ) || !store.custody_released(&record, &call).map_err(run_error)?
+        {
+            return Err(FacadeError::Conflict);
+        }
+        let operation = store
+            .attempt_operation(predecessor, &call)
+            .map_err(run_error)?;
+        if worktree_owner.operation_id.as_ref() != Some(&operation.operation_id) {
+            return Err(FacadeError::Conflict);
+        }
+        let previous_task = store.request(predecessor, &call).map_err(run_error)?.task;
+        if !previous_task
+            .writer
+            .as_ref()
+            .is_some_and(|previous| provenant_run::equivalent_writer(previous, &request))
+            || request.custody_project
+                != previous_task
+                    .writer
+                    .as_ref()
+                    .and_then(|writer| writer.custody_project)
+        {
+            return Err(FacadeError::Conflict);
+        }
+        store
+            .check_continuation_writer(predecessor, &call)
+            .map_err(run_error)?;
+
+        let branch = launch.branch.as_str().trim_start_matches("refs/heads/");
+        if worktree_owner.branch != branch
+            || previous_task
+                .deliver
+                .as_ref()
+                .is_some_and(|delivery| delivery.branch != branch)
+        {
+            return Err(FacadeError::Conflict);
+        }
+        let previous_context = previous_task.context.as_ref();
+        let pr = previous_context.and_then(|context| context.pr);
+        if pr.is_some_and(|previous| node.context.pr.is_some_and(|current| current != previous)) {
+            return Err(FacadeError::Conflict);
+        }
+        let source_head = previous_task
+            .source_head
+            .as_ref()
+            .or(previous_task.head.as_ref())
+            .cloned()
+            .or_else(|| node.source_commit.map(str::to_owned));
+        let mut head = record
+            .head
+            .map(|head| head.to_string())
+            .or_else(|| previous_task.head.clone())
+            .ok_or(FacadeError::Conflict)?;
+        let pinned = head
+            .parse::<provenant_core::GitOid>()
+            .map_err(|_| FacadeError::Conflict)?;
+        let mut warning = None;
+        let git = provenant_os::git::git_executable()
+            .ok_or_else(|| FacadeError::io("git for queue writer reconciliation"))?;
+        match launch.repin_head(&git, pinned).map_err(run_error)? {
+            provenant_run::RepinOutcome::Unchanged { .. } => {}
+            outcome @ provenant_run::RepinOutcome::Repinned { head: current, .. } => {
+                warning = outcome.warning();
+                head = current.to_string();
+            }
+            outcome @ provenant_run::RepinOutcome::NotDescendant { .. } => {
+                return Err(FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason: outcome.refusal().unwrap_or_else(|| {
+                        "retained queue writer does not descend from its prior head".into()
+                    }),
+                });
+            }
+        }
+        // Re-entry may retain uncommitted edits, but the committed checkout
+        // must still be the exact head selected by the graph's source binding.
+        if node.source_commit.is_some_and(|expected| expected != head) {
+            return Err(FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: "retained queue writer head differs from the graph source".into(),
+            });
+        }
+        Ok(Some(QueueWriterPredecessor {
+            attempt: predecessor,
+            source_head,
+            head: Some(head),
+            warning,
+            pr,
+        }))
     }
 
     /// Submit a new graph attempt, or report the pre-launch refusal that
@@ -3008,6 +4176,7 @@ impl BoundGraphOwner<'_> {
         let mut submission_prompt = node.prompt.to_owned();
         let mut writer_predecessor = None;
         let mut repin_warning = None;
+        let mut reconciled_pr = None;
         let (mut source_head, mut successor_head) = if !accepted
             && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
             && let Some(previous) = key.previous_attempt_ref.as_deref()
@@ -3112,6 +4281,25 @@ impl BoundGraphOwner<'_> {
             } else {
                 (original, current)
             }
+        } else if !accepted
+            && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+            && node.context.delivery_queue_writer_adoption
+            && let Some(worktree) = worktree
+        {
+            if let Some(predecessor) = self.reconcile_queue_writer_predecessor(
+                owner,
+                key,
+                &node,
+                worktree,
+                writer_directory,
+            )? {
+                writer_predecessor = Some(predecessor.attempt);
+                repin_warning = predecessor.warning;
+                reconciled_pr = predecessor.pr;
+                (predecessor.source_head, predecessor.head)
+            } else {
+                (None, None)
+            }
         } else {
             (None, None)
         };
@@ -3198,6 +4386,11 @@ impl BoundGraphOwner<'_> {
         };
         if !accepted && let Some(context) = &mut context {
             context.writer_predecessor = writer_predecessor;
+            context.delivery_queue_writer_adoption =
+                node.context.delivery_queue_writer_adoption && writer_predecessor.is_some();
+            if context.pr.is_none() {
+                context.pr = reconciled_pr;
+            }
             if let Some(spec) = node.attempt {
                 for (field, configured) in [
                     ("token_budget", spec.token_budget.is_some()),
@@ -4530,799 +5723,8 @@ pub(crate) fn restore_scratch_source(
 }
 
 #[cfg(test)]
-mod journal_error_tests {
-    #[test]
-    fn graph_review_uses_merge_base_of_advanced_named_ref() -> Result<(), Box<dyn std::error::Error>>
-    {
-        if super::super::peer_tests::host_test(
-            "fabric::owner::journal_error_tests::graph_review_uses_merge_base_of_advanced_named_ref",
-        )? {
-            return Ok(());
-        }
-        for scenario in ["node-base", "graph-base", "behaviour", "parent-missing"] {
-            review_launch_fixture(scenario)?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn empty_graph_review_range_does_not_launch_a_lens() -> Result<(), Box<dyn std::error::Error>> {
-        if super::super::peer_tests::host_test(
-            "fabric::owner::journal_error_tests::empty_graph_review_range_does_not_launch_a_lens",
-        )? {
-            return Ok(());
-        }
-        for scenario in ["same-head", "ancestor", "no-base"] {
-            review_launch_fixture(scenario)?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn repaired_subject_review_launches_with_integration_base()
-    -> Result<(), Box<dyn std::error::Error>> {
-        if super::super::peer_tests::host_test(
-            "fabric::owner::journal_error_tests::repaired_subject_review_launches_with_integration_base",
-        )? {
-            return Ok(());
-        }
-        review_launch_fixture("repair")
-    }
-
-    #[test]
-    fn repair_loop_composite_review_uses_merge_base_and_refuses_empty_range()
-    -> Result<(), Box<dyn std::error::Error>> {
-        if super::super::peer_tests::host_test(
-            "fabric::owner::journal_error_tests::repair_loop_composite_review_uses_merge_base_and_refuses_empty_range",
-        )? {
-            return Ok(());
-        }
-        for scenario in ["expanded", "expanded-empty"] {
-            review_launch_fixture(scenario)?;
-        }
-        Ok(())
-    }
-
-    #[allow(dead_code)] // The custom worktree driver includes this module without libtest.
-    fn review_launch_fixture(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
-        use super::*;
-        use provenant_fabric_runtime::graph::{self, GraphJournal};
-        struct Free;
-        impl WorkerObserver for Free {
-            fn observe_roots(
-                &self,
-                roots: &[PathBuf],
-            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
-            {
-                roots
-                    .iter()
-                    .cloned()
-                    .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
-                    .collect()
-            }
-        }
-        let rig = crate::worktree_tests::repository()?;
-        let fork = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-        crate::worktree_tests::git(&rig, &["checkout", "-b", "review-subject"])?;
-        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "subject"])?;
-        if scenario == "repair" {
-            crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "repair subject"])?;
-        }
-        let subject = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-        let target_start = if matches!(scenario, "ancestor" | "expanded-empty") {
-            &subject
-        } else {
-            &fork
-        };
-        crate::worktree_tests::git(&rig, &["checkout", "-b", "review-target", target_start])?;
-        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "advanced target"])?;
-        let tip = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
-        let factory = Factory {
-            context: Context::open(roots, &rig.home, &rig.project)?,
-            project_attribution: false,
-            clock: SystemClock,
-            backoff: ThreadPause,
-            executor: SystemExecutor::new(1)?,
-            home: rig.home.clone(),
-            cwd: rig.project.clone(),
-            assets: rig.project.clone(),
-            host_launch: None,
-            workers: &Free,
-        };
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut document = serde_json::json!({
-            "schema_version":2,"graph_id":format!("review-launch-{scenario}"),
-            "nodes":[{"id":"review","role":"lens.correctness-spec","prompt":"Review subject",
-                "access":"read_only","route":{"alias":"senior"},"attempt":{"preset":"light"},
-                "source":{"type":"commit","commit":subject}}]
-        });
-        if scenario == "parent-missing" {
-            document["review_subject_missing"] = serde_json::json!(true);
-        }
-        let graph_base = scenario == "graph-base" || scenario == "behaviour";
-        if graph_base {
-            document["review_base"] = serde_json::json!("review-target");
-        } else if !matches!(scenario, "repair" | "no-base") {
-            document["nodes"][0]["review_base"] = serde_json::json!(if scenario == "same-head" {
-                subject.as_str()
-            } else {
-                "review-target"
-            });
-        }
-        if scenario == "behaviour" {
-            document["nodes"][0]
-                .as_object_mut()
-                .ok_or("node")?
-                .remove("role");
-            document["nodes"][0]["review_behaviour"] = serde_json::json!("lens");
-        }
-        if scenario.starts_with("expanded") {
-            let review = document["nodes"][0].clone();
-            document["nodes"] = serde_json::json!([{
-                "id":"repair", "kind":"loop", "access":"read_only",
-                "loop":{"review_repair":true,"max_rounds":1,"until":"accepted","body":[
-                    {"id":"panel","kind":"composite","access":"read_only",
-                        "composite":{"nodes":[review],
-                            "exports":[{"node":"review","outputs":["verdict"]}]}},
-                    {"id":"accepted","kind":"gate","access":"read_only",
-                        "depends_on":["panel"],"inputs":[{"node":"panel","outputs":["verdict"]}],
-                        "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
-                ]}
-            }]);
-        }
-        let document: graph::GraphDocument = serde_json::from_value(document)?;
-        let integration = (scenario == "repair").then(|| fork.parse()).transpose()?;
-        let bound =
-            GraphBaseBinding::new(graph_base.then(|| tip.parse()).transpose()?, integration);
-        let mut journal = graph::FileJournal::open(
-            &factory.context.roots.state,
-            factory.context.identity.project,
-            &document.graph_id,
-            budget,
-            &cancel,
-            &factory.clock,
-        )?;
-        journal.bind(graph::GraphExecution {
-            peer_origin_context: None,
-            peer_submission_digest: None,
-            requester_path: None,
-            bases: bound,
-            directory: factory.cwd.clone(),
-            extra: Default::default(),
-            document: document.clone(),
-        })?;
-        let mut owner = BoundGraphOwner {
-            writer_launch_budget: None,
-            admission_timeout: None,
-            factory: &factory,
-            repo_facts: Default::default(),
-            launch_warnings: Vec::new(),
-            integration_base: bound,
-            integration_branch: None,
-            network: None,
-            capability_overrides: Default::default(),
-            exclude: Vec::new(),
-            budget,
-            cancel: &cancel,
-            prices: None,
-            tick: false,
-        };
-        let result = provenant_cli::run::with_deferred_provider_launch(|| {
-            graph::advance_with_budget(
-                &document,
-                &mut owner,
-                &mut journal,
-                &factory.context.config.graph.limits,
-                &factory.context.config.graph.budget,
-            )
-        });
-        let checkpoint = journal.load(&document.graph_id)?.ok_or("checkpoint")?;
-        let review = checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "review" || node.id == "repair--r1--panel--review")
-            .ok_or("review checkpoint")?;
-        if matches!(
-            scenario,
-            "same-head" | "ancestor" | "no-base" | "expanded-empty"
-        ) {
-            // Equal bound inputs fail in the scheduler; derived empty ranges are
-            // invalid-input refusals from the launch owner.
-            if scenario == "same-head" {
-                assert_eq!(
-                    review.advance_code.as_deref(),
-                    Some("review_empty_range"),
-                    "{scenario}: {result:?} {checkpoint:?}"
-                );
-            } else {
-                assert_eq!(
-                    review.advance_code.as_deref(),
-                    Some("launch_refused"),
-                    "{scenario}: {result:?} {checkpoint:?}"
-                );
-                assert_eq!(
-                    review.advance_owner_code.as_deref(),
-                    Some("invalid_input"),
-                    "{scenario}: {result:?} {checkpoint:?}"
-                );
-            }
-            assert!(
-                review
-                    .attempts
-                    .iter()
-                    .all(|attempt| attempt.attempt_ref.is_none()),
-                "{scenario}: lens launched"
-            );
-            return Ok(());
-        }
-        let run = result?;
-        let reference = review
-            .attempts
-            .iter()
-            .find_map(|attempt| attempt.attempt_ref.as_deref())
-            .ok_or_else(|| format!("no sealed review: {run:?}"))?;
-        let (_, id) = reference.split_once('/').ok_or("attempt reference")?;
-        let binary = BinaryRunOwner {
-            factory: &factory,
-            allow_remote: false,
-            actor: None,
-            chair: None,
-        };
-        let store = binary.store(&cancel)?;
-        let call = binary.call(&cancel);
-        let record = store.record(id.parse()?, &call)?;
-        let request = store.request(record.attempt_id, &call)?;
-        let task = &request.task;
-        assert_eq!(task.base_ref.as_deref(), Some(fork.as_str()), "{scenario}");
-        assert_eq!(task.head.as_deref(), Some(subject.as_str()), "{scenario}");
-        // The checkpoint keeps the bound ref tip, never the derived comparison base.
-        if !graph_base && scenario != "repair" {
-            assert_eq!(review.review_base.as_deref(), Some(tip.as_str()));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn child_directory_preserves_scratch_defers_credentials_and_refuses_state()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use super::*;
-        let root = tempfile::tempdir()?;
-        let home = root.path().join("home");
-        let state = root.path().join("state");
-        let scratch = root.path().join("scratch");
-        let credentials = home.join(".codex");
-        for path in [&home, &state, &scratch, &credentials] {
-            std::fs::create_dir_all(path)?;
-        }
-        let mut grants = provenant_records::run::LaneAccessRequest::default();
-        bind_child_directory(
-            &mut grants,
-            scratch.to_str().ok_or("scratch")?,
-            &state,
-            None,
-        )?;
-        assert_eq!(
-            grants.source_root,
-            Some(provenant_os::fs::canonicalize(&scratch)?)
-        );
-        assert!(grants.source_live);
-        assert!(
-            bind_child_directory(&mut grants, state.to_str().ok_or("root")?, &state, None).is_err()
-        );
-        bind_child_directory(
-            &mut grants,
-            credentials.to_str().ok_or("credential root")?,
-            &state,
-            None,
-        )?;
-        assert_eq!(
-            grants.source_root,
-            Some(provenant_os::fs::canonicalize(&credentials)?)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn pinned_reader_uses_project_when_cwd_contains_credentials()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use super::*;
-        use provenant_fabric_runtime::graph::{self, AccessMode};
-        let rig = crate::worktree_tests::repository()?;
-        std::fs::create_dir_all(rig.home.join(".ssh"))?;
-        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
-        let factory = Factory {
-            context: Context::open(roots, &rig.home, &rig.project)?,
-            project_attribution: false,
-            clock: SystemClock,
-            backoff: ThreadPause,
-            executor: SystemExecutor::new(1)?,
-            home: rig.home.clone(),
-            cwd: rig.home.clone(),
-            assets: rig.project.clone(),
-            host_launch: None,
-            workers: &provenant_confinement::worktrees::SystemWorkerObserver,
-        };
-        let cancel = CancelToken::new();
-        let owner = BoundGraphOwner {
-            writer_launch_budget: None,
-            admission_timeout: None,
-            factory: &factory,
-            repo_facts: Default::default(),
-            launch_warnings: Vec::new(),
-            integration_base: None,
-            integration_branch: None,
-            network: None,
-            capability_overrides: Default::default(),
-            exclude: Vec::new(),
-            budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
-            cancel: &cancel,
-            prices: None,
-            tick: false,
-        };
-        let key = graph::AttemptKey {
-            extra: Default::default(),
-            retry_generation: None,
-            previous_attempt_ref: None,
-            graph_id: "reader-project".into(),
-            node_id: "read".into(),
-            route_index: 0,
-            attempt: 1,
-        };
-        let node = graph::NodeInput {
-            writer_dirty_preflight: false,
-            review_launch: false,
-            require_skill_location: false,
-            settlement_retries: None,
-            prior_attempts: &[],
-            family_peers: &[],
-            context: Default::default(),
-            read_roots: &[],
-            attachments: &[],
-            worktree: None,
-            fixture: None,
-            fixture_bytes: None,
-            capabilities: None,
-            capability_sources: None,
-            attempt: None,
-            distinct_from_attempts: &[],
-            require_distinct: false,
-            source_commit: None,
-            review_base: None,
-            title: "reader",
-            prompt: "read",
-            required_verdict: None,
-            deadline_seconds: None,
-            inputs_dir: None,
-        };
-        let grants = owner.launch_grants(
-            &node,
-            &key,
-            AccessMode::ReadOnly,
-            None,
-            false,
-            None,
-            Some("HEAD"),
-        )?;
-        assert_eq!(
-            grants.source_root,
-            Some(provenant_os::fs::canonicalize(&rig.project)?)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn provisioned_writer_fast_forward_preserves_launch_budget()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use super::*;
-        if super::super::peer_tests::host_test(
-            "fabric::owner::journal_error_tests::provisioned_writer_fast_forward_preserves_launch_budget",
-        )? {
-            return Ok(());
-        }
-        use provenant_fabric_runtime::graph::{AccessMode, AttemptOwner};
-        let rig = crate::worktree_tests::repository()?;
-        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "base"])?;
-        let source = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
-        let mut factory = Factory {
-            context: Context::open(roots, &rig.home, &rig.project)?,
-            project_attribution: false,
-            clock: SystemClock,
-            backoff: ThreadPause,
-            executor: SystemExecutor::new(1)?,
-            home: rig.home.clone(),
-            cwd: rig.project.clone(),
-            assets: rig.project.clone(),
-            host_launch: None,
-            workers: &provenant_confinement::worktrees::SystemWorkerObserver,
-        };
-        factory.context.config.graph.writer_provision_seconds = 12;
-        let cancel = CancelToken::new();
-        let settlement = WaitBudget::cli(factory.clock.mono_now(), 1)?;
-        let mut owner = BoundGraphOwner {
-            writer_launch_budget: None,
-            admission_timeout: Some(settlement),
-            factory: &factory,
-            repo_facts: Default::default(),
-            launch_warnings: Vec::new(),
-            integration_base: None,
-            integration_branch: None,
-            network: None,
-            capability_overrides: Default::default(),
-            exclude: Vec::new(),
-            budget: settlement,
-            cancel: &cancel,
-            prices: None,
-            tick: false,
-        };
-        let deadline = owner
-            .begin_launch(AccessMode::WorktreeWrite, None)?
-            .ok_or("deadline")?;
-        // Writer admission must derive its wait from writer_provision_seconds,
-        // not from the reader/settlement allowance passed in above.
-        let remaining = deadline
-            .as_micros()
-            .saturating_sub(factory.clock.wall_now()?.as_micros());
-        assert!(
-            remaining > 10_000_000,
-            "writer launch wait must outlast the 1 s reader budget: {remaining}us"
-        );
-        owner.provision_writer_worktree(".worktrees/later", "later", source.trim(), None)?;
-        let budget = owner.writer_launch_budget.ok_or("budget")?;
-        owner.fast_forward_writer(
-            &rig.project,
-            &rig.project.join(".worktrees/later"),
-            source.trim().parse()?,
-            false,
-        )?;
-        assert_eq!(
-            owner.writer_launch_budget.ok_or("budget")?.deadline(),
-            budget.deadline()
-        );
-        assert_eq!(
-            owner.begin_launch(AccessMode::WorktreeWrite, Some(deadline))?,
-            Some(deadline)
-        );
-        assert_eq!(
-            crate::worktree_tests::git(&rig, &["-C", ".worktrees/later", "rev-parse", "HEAD"])?
-                .trim(),
-            source.trim()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn graph_refusal_replays_before_preparation_and_rejects_changed_intent()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use super::*;
-        if super::super::peer_tests::host_test(
-            "fabric::owner::journal_error_tests::graph_refusal_replays_before_preparation_and_rejects_changed_intent",
-        )? {
-            return Ok(());
-        }
-        use provenant_fabric_runtime::graph::{self, AttemptOwner};
-        let rig = crate::worktree_tests::repository()?;
-        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
-        let factory = Factory {
-            context: Context::open(roots, &rig.home, &rig.project)?,
-            project_attribution: false,
-            clock: SystemClock,
-            backoff: ThreadPause,
-            executor: SystemExecutor::new(1)?,
-            home: rig.home.clone(),
-            cwd: rig.project.clone(),
-            assets: rig.project.clone(),
-            host_launch: None,
-            workers: &provenant_confinement::worktrees::SystemWorkerObserver,
-        };
-        let cancel = CancelToken::new();
-        let mut owner = BoundGraphOwner {
-            writer_launch_budget: None,
-            admission_timeout: None,
-            factory: &factory,
-            repo_facts: Default::default(),
-            launch_warnings: Vec::new(),
-            integration_base: None,
-            integration_branch: None,
-            network: None,
-            capability_overrides: Default::default(),
-            exclude: Vec::new(),
-            budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
-            cancel: &cancel,
-            prices: None,
-            tick: false,
-        };
-        let key = graph::AttemptKey {
-            extra: Default::default(),
-            retry_generation: None,
-            previous_attempt_ref: None,
-            graph_id: "preflight-replay".into(),
-            node_id: "writer".into(),
-            route_index: 0,
-            attempt: 1,
-        };
-        let node = |prompt| graph::NodeInput {
-            writer_dirty_preflight: false,
-            review_launch: false,
-            require_skill_location: false,
-            settlement_retries: Some(1),
-            prior_attempts: &[],
-            family_peers: &[],
-            context: provenant_records::run::WorkContext {
-                graph_id: Some(key.graph_id.clone()),
-                node_id: Some(key.node_id.clone()),
-                attempt: Some(1),
-                ..Default::default()
-            },
-            read_roots: &[],
-            attachments: &[],
-            worktree: None,
-            fixture: None,
-            fixture_bytes: None,
-            capabilities: None,
-            capability_sources: None,
-            attempt: None,
-            distinct_from_attempts: &[],
-            require_distinct: false,
-            source_commit: None,
-            review_base: None,
-            title: "writer",
-            prompt,
-            required_verdict: None,
-            deadline_seconds: None,
-            inputs_dir: None,
-        };
-        let route: graph::GraphRoute =
-            serde_json::from_value(serde_json::json!({"alias":"senior"}))?;
-        let actor = owner.actor();
-        let replay = graph::Replay {
-            delivery: None,
-            branch: None,
-            fast_forward_only: false,
-            stored_ref: None,
-            launch_actor: &actor,
-        };
-        let access = graph::AccessMode::WorktreeWrite;
-        let scope = GraphRefusalScope::new(
-            &owner,
-            &key,
-            &node("PROMPT_SENTINEL"),
-            &route,
-            access,
-            Some("/HOST_PATH_SENTINEL/missing"),
-            replay,
-        )?;
-        let original = FacadeError::DispatchRefused {
-            fact: None,
-            disk: None,
-            reason: "/HOST_PATH_SENTINEL uncommitted edits".into(),
-        };
-        owner.retain_graph_refusal(
-            &scope,
-            &original,
-            provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
-                .detail("the writer worktree has uncommitted edits")
-                .next("preserve the edits"),
-        )?;
-        let store = owner.refusal_store(&scope)?;
-        let call = provenant_run::Request {
-            clock: &factory.clock,
-            cancel: &cancel,
-        };
-        let first = store.operation(&scope.operation, &call)?.ok_or("refusal")?;
-        let serialised = serde_json::to_string(&first)?;
-        assert!(!serialised.contains("HOST_PATH_SENTINEL"));
-        assert!(!serialised.contains("PROMPT_SENTINEL"));
-        assert!(serialised.contains("the writer worktree has uncommitted edits"));
-        // This worktree cannot be prepared. The stored dispatch refusal must
-        // win without consulting the filesystem or looking for an admitted run.
-        let repeated = owner
-            .observe_or_start(
-                &key,
-                node("PROMPT_SENTINEL"),
-                &route,
-                access,
-                Some("/HOST_PATH_SENTINEL/missing"),
-                replay,
-            )
-            .unwrap_err();
-        assert_eq!(repeated.code(), original.code());
-        assert!(
-            repeated
-                .to_string()
-                .contains("the writer worktree has uncommitted edits")
-        );
-        assert_eq!(
-            store.operation(&scope.operation, &call)?.ok_or("refusal")?,
-            first
-        );
-        let changed = owner
-            .observe_or_start(
-                &key,
-                node("changed"),
-                &route,
-                access,
-                Some("/HOST_PATH_SENTINEL/missing"),
-                replay,
-            )
-            .unwrap_err();
-        assert_eq!(changed.code(), "operation_conflict");
-        let missing_key = graph::AttemptKey {
-            route_index: 2,
-            attempt: 3,
-            ..key.clone()
-        };
-        let mut missing = first.clone();
-        missing.operation_id = graph_operation("graph-attempt-operation", &missing_key)?;
-        missing.origin_intent_digest = None;
-        store.insert_refusal(missing, &call)?;
-        let missing = owner
-            .observe_or_start(
-                &missing_key,
-                node("PROMPT_SENTINEL"),
-                &route,
-                access,
-                Some("/HOST_PATH_SENTINEL/missing"),
-                replay,
-            )
-            .unwrap_err();
-        assert_eq!(missing.code(), "state_corrupt");
-        // Exercise RunService's saved preflight result too. Cursor accepts
-        // model and effort at this boundary, so an unknown Cursor model reaches
-        // route resolution instead. The command adapter declares no model
-        // support, which must be refused before a provider launch.
-        let service_key = graph::AttemptKey {
-            route_index: 1,
-            attempt: 2,
-            ..key.clone()
-        };
-        let unsupported: graph::GraphRoute = serde_json::from_value(serde_json::json!({
-            "adapter":"command", "model":"command/m", "effort":"high"
-        }))?;
-        // A distinct attempt of the node takes the next work-key number.
-        let service_node = |prompt| {
-            let mut input = node(prompt);
-            input.context.attempt = Some(2);
-            input
-        };
-        let service_scope = GraphRefusalScope::new(
-            &owner,
-            &service_key,
-            &service_node("service preflight"),
-            &unsupported,
-            graph::AccessMode::ReadOnly,
-            None,
-            replay,
-        )?;
-        let service_refusal = owner
-            .observe_or_start(
-                &service_key,
-                service_node("service preflight"),
-                &unsupported,
-                graph::AccessMode::ReadOnly,
-                None,
-                replay,
-            )
-            .unwrap_err();
-        assert!(
-            matches!(&service_refusal, FacadeError::RunKind { .. }),
-            "{service_refusal:?}"
-        );
-        let operation = graph_operation("graph-attempt-operation", &service_key)?;
-        let saved = store
-            .operation(&operation, &call)?
-            .ok_or("service refusal")?;
-        assert_eq!(saved.state, provenant_run::OperationState::Refused);
-        assert_eq!(saved.preflight_digest_version, Some(1));
-        assert_eq!(saved.origin_intent_digest, Some(service_scope.digest));
-        let repeated = owner
-            .observe_or_start(
-                &service_key,
-                service_node("service preflight"),
-                &unsupported,
-                graph::AccessMode::ReadOnly,
-                None,
-                replay,
-            )
-            .unwrap_err();
-        assert_eq!(repeated.code(), service_refusal.code());
-        assert_eq!(repeated.to_string(), service_refusal.to_string());
-        let changed = owner
-            .observe_or_start(
-                &service_key,
-                service_node("changed service input"),
-                &unsupported,
-                graph::AccessMode::ReadOnly,
-                None,
-                replay,
-            )
-            .unwrap_err();
-        assert_eq!(changed.code(), "operation_conflict");
-        let attempt: graph::GraphAttempt = serde_json::from_value(serde_json::json!({
-            "launched":false,"key":key,"route":route,"state":"starting","attempt_ref":null,
-            "outcome":null,"launch_actor":actor,"settled":0
-        }))?;
-        assert!(!owner.launch_accepted(&attempt)?);
-        assert!(owner.launch_refused_before_acceptance(&attempt)?);
-        assert!(owner.cancelled_attempt_settled(&attempt)?);
-        assert!(!store.has_runs(&call)?);
-        Ok(())
-    }
-
-    #[test]
-    fn repair_scope_comparison_detects_new_paths() {
-        let review = provenant_routing::ReviewConfig::default();
-        let original = vec!["src/a.rs".to_owned()];
-        assert!(!super::repair_scope_grew(&review, &original, &original));
-        assert!(super::repair_scope_grew(
-            &review,
-            &original,
-            &["src/a.rs".into(), "src/b.rs".into()]
-        ));
-        assert!(super::repair_scope_grew(
-            &review,
-            &original,
-            &["src/b.rs".into()]
-        ));
-        assert!(!super::repair_scope_grew(&review, &original, &[]));
-    }
-
-    #[test]
-    fn repair_detects_risk_inside_already_reviewed_paths() {
-        let review = provenant_routing::ReviewConfig::default();
-        let paths = vec!["src/credentials.rs".to_owned()];
-        assert!(!super::repair_scope_grew(&review, &paths, &paths));
-        assert!(super::repair_touches_risk(&review, &paths));
-        assert!(!super::repair_touches_risk(&review, &[]));
-        assert!(!super::repair_touches_risk(&review, &["README.md".into()]));
-    }
-
-    #[test]
-    fn graph_journal_future_context_requires_upgrade() {
-        let source = provenant_records::DecodeError::UnsupportedVersion {
-            found: 2,
-            line: 1,
-            column: 1,
-        }
-        .with_context("/fixture/checkpoint.json", "GraphRecord");
-        let error = provenant_fabric_runtime::graph::JournalError::Decode(source);
-        assert!(matches!(
-            super::graph_journal_error(error),
-            super::FacadeError::UpgradeRequired { version: 2, .. }
-        ));
-    }
-
-    #[test]
-    fn unreadable_graph_journal_preserves_the_cause() {
-        use super::{FacadeError, graph_journal_error};
-        use provenant_fabric_runtime::graph::JournalError;
-        for error in [
-            JournalError::BadEnvelope,
-            JournalError::BadDigest,
-            JournalError::InvalidTopology,
-        ] {
-            let reason = error.to_string();
-            assert_eq!(
-                graph_journal_error(error),
-                FacadeError::DispatchRefused {
-                    fact: None,
-                    disk: None,
-                    reason
-                },
-            );
-        }
-        assert_eq!(
-            graph_journal_error(JournalError::GraphMismatch),
-            FacadeError::StateCorrupt
-        );
-        assert_eq!(
-            graph_journal_error(JournalError::NameReserved),
-            FacadeError::Conflict
-        );
-    }
-}
+#[path = "owner_journal_error_tests.rs"]
+mod journal_error_tests;
 
 /// Stream the result through the existing authenticated, bounded output API.
 /// The serving host verifies each artifact read; capture remains on the chair.
@@ -5421,427 +5823,17 @@ fn capture_graph_output(
 }
 
 #[cfg(test)]
-mod peer_handoff_tests {
-    #[allow(
-        unused_imports,
-        reason = "the custom worktree driver includes this module without libtest"
-    )]
-    use super::*;
-    #[test]
-    fn peer_handoff_is_validated_and_retained_losslessly() {
-        let sealed = |note: &str| {
-            serde_json::json!({"Ok":{"schema_version":2,"status":"done","note":note,
-                "remaining":[],"decisions":[],"verify":[]}})
-        };
-        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-        let decode = |value: serde_json::Value| -> provenant_records::handoff::HandoffResult {
-            serde_json::from_value(value).unwrap()
-        };
-        let clean = peer_handoff(Some(&decode(sealed(&format!("key {token}")))));
-        let note = clean.unwrap().unwrap().note;
-        assert_eq!(note, format!("key {token}"));
-        // A malformed outcome stays explicit evidence; absence stays absence.
-        let error = provenant_records::handoff::HandoffError::new("schema_version", "expected 2");
-        assert_eq!(peer_handoff(Some(&Err(error.clone()))), Err(error));
-        assert_eq!(peer_handoff(Some(&Ok(None))), Ok(None));
-        assert_eq!(peer_handoff(None), Ok(None));
-    }
-}
-
+#[path = "owner_delivery_hygiene_receipt_tests.rs"]
+mod delivery_hygiene_receipt_tests;
 #[cfg(test)]
-mod peer_capture_tests {
-    #[allow(
-        unused_imports,
-        reason = "the custom worktree driver includes this module without libtest"
-    )]
-    use super::*;
-    #[test]
-    fn peer_result_capture_pages_the_complete_stream_and_checks_each_chunk()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let target = AttemptTarget {
-            extra: Default::default(),
-            host: Some(provenant_core::HostId::from_bytes([1; 16])),
-            attempt: provenant_core::AttemptId::from_bytes([2; 16]),
-        };
-        let text = "x".repeat(130_000) + "\nVERDICT: PASS\n";
-        let origin = provenant_records::WorkKey::new(
-            provenant_core::ProjectId::from_bytes([7; 16]),
-            "origin",
-            "review",
-            1,
-        )?;
-        let digest = provenant_core::Digest::from_bytes(
-            *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes(),
-        );
-        let chunk = |offset: u64| {
-            let end = (offset + provenant_records::run::OUTPUT_LIMIT).min(text.len() as u64);
-            OutputResult::Chunk {
-                peer: provenant_records::run::PeerGraphFields {
-                    peer_origin_work_key: Some(origin.clone()),
-                    ..Default::default()
-                },
-                length: Some(text.len() as u64),
-                planner_fallback: None,
-                extra: Default::default(),
-                target: target.clone(),
-                part: OutputPart::Result,
-                state: "succeeded".into(),
-                reason: None,
-                offset,
-                next_offset: end,
-                eof: end == text.len() as u64,
-                digest,
-                bytes: OutputBytes::Utf8(text[offset as usize..end as usize].into()),
-            }
-        };
-        let mut pages = 0;
-        let result = capture_graph_output(&target, &origin, Some("VERDICT: PASS"), |offset| {
-            pages += 1;
-            Ok(chunk(offset))
-        })?;
-        assert_eq!(pages, 2);
-        assert!(result.matched_required);
-        assert_eq!(result.verdict.as_deref(), Some("VERDICT: PASS"));
-        assert_eq!(result.digest, digest.to_string());
-        for malformed in [0, 1, 2, 3, 4, 5] {
-            assert!(matches!(
-                capture_graph_output(&target, &origin, None, |offset| {
-                    let mut response = chunk(offset);
-                    if let OutputResult::Chunk {
-                        target,
-                        offset: start,
-                        next_offset,
-                        digest,
-                        peer,
-                        ..
-                    } = &mut response
-                    {
-                        match malformed {
-                            0 => target.attempt = provenant_core::AttemptId::from_bytes([9; 16]),
-                            1 => *start += 1,
-                            2 => *next_offset = offset,
-                            3 => *digest = provenant_core::Digest::from_bytes([9; 32]),
-                            4 => {
-                                peer.peer_origin_work_key = Some(origin.next_attempt().unwrap());
-                            }
-                            _ => {
-                                peer.peer_origin_work_key = None;
-                            }
-                        }
-                    }
-                    Ok(response)
-                }),
-                Err(FacadeError::StateCorrupt)
-            ));
-        }
-        Ok(())
-    }
-
-    #[test]
-    // Spec: docs/specs/run-launch.md#writer-binding — a remote writer is
-    // provisioned from a branch and a base ref in the peer's own clone; a caller
-    // worktree path is refused before it can cross the host boundary.
-    fn peer_bound_writer_refuses_a_caller_path_but_carries_branch_intent()
-    -> Result<(), Box<dyn std::error::Error>> {
-        if super::super::peer_tests::host_test(
-            "fabric::owner::peer_capture_tests::peer_bound_writer_refuses_a_caller_path_but_carries_branch_intent",
-        )? {
-            return Ok(());
-        }
-        use provenant_fabric_runtime::graph::{self, AttemptOwner};
-        struct FreeWorkers;
-        impl WorkerObserver for FreeWorkers {
-            fn observe_roots(
-                &self,
-                roots: &[PathBuf],
-            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
-            {
-                roots
-                    .iter()
-                    .cloned()
-                    .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
-                    .collect()
-            }
-        }
-        let rig = crate::worktree_tests::repository()?;
-        let host = provenant_core::HostId::from_bytes([2; 16]);
-        std::fs::write(
-            rig.state.join("config.toml"),
-            format!(
-                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.peers.peer]\nhost='{host}'\ndestination='fixture'\n"
-            ),
-        )?;
-        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
-        let factory = Factory {
-            context: Context::open(roots, &rig.home, &rig.project)?,
-            project_attribution: false,
-            clock: SystemClock,
-            backoff: ThreadPause,
-            executor: SystemExecutor::new(1)?,
-            home: rig.home.clone(),
-            cwd: rig.project.clone(),
-            assets: rig.project.clone(),
-            host_launch: None,
-            workers: &FreeWorkers,
-        };
-        let cancel = CancelToken::new();
-        let mut owner = BoundGraphOwner {
-            writer_launch_budget: None,
-            admission_timeout: None,
-            launch_warnings: Vec::new(),
-            repo_facts: Default::default(),
-            factory: &factory,
-            integration_base: None,
-            integration_branch: None,
-            network: None,
-            capability_overrides: Default::default(),
-            exclude: Vec::new(),
-            budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
-            cancel: &cancel,
-            prices: None,
-            tick: false,
-        };
-        let actor = owner.actor();
-        let route: graph::GraphRoute =
-            serde_json::from_value(serde_json::json!({"alias":"junior"}))?;
-        let new_worktree: provenant_fabric_runtime::coordination::facade::NewWorktree =
-            serde_json::from_value(serde_json::json!({"branch":"peer-writer","base":"HEAD"}))?;
-        let spec = graph::AttemptSpec {
-            host: Some("peer".into()),
-            new_worktree: Some(new_worktree),
-            ..Default::default()
-        };
-        let key = |attempt: u32| graph::AttemptKey {
-            extra: Default::default(),
-            retry_generation: None,
-            previous_attempt_ref: None,
-            graph_id: "peer-writer-boundary".into(),
-            node_id: "write".into(),
-            route_index: 0,
-            attempt,
-        };
-        fn node<'a>(
-            worktree: Option<&'a str>,
-            spec: &'a graph::AttemptSpec,
-        ) -> graph::NodeInput<'a> {
-            graph::NodeInput {
-                writer_dirty_preflight: false,
-                review_launch: false,
-                require_skill_location: false,
-                settlement_retries: None,
-                prior_attempts: &[],
-                family_peers: &[],
-                context: provenant_records::run::WorkContext {
-                    graph_id: Some("peer-writer-boundary".into()),
-                    node_id: Some("write".into()),
-                    attempt: Some(1),
-                    ..Default::default()
-                },
-                read_roots: &[],
-                attachments: &[],
-                worktree,
-                fixture: None,
-                fixture_bytes: None,
-                capabilities: None,
-                capability_sources: None,
-                attempt: Some(spec),
-                distinct_from_attempts: &[],
-                require_distinct: false,
-                source_commit: None,
-                review_base: None,
-                title: "write",
-                prompt: "write",
-                required_verdict: None,
-                deadline_seconds: None,
-                inputs_dir: None,
-            }
-        }
-        fn replay(actor: &str) -> graph::Replay<'_> {
-            graph::Replay {
-                delivery: None,
-                branch: None,
-                fast_forward_only: false,
-                stored_ref: None,
-                launch_actor: actor,
-            }
-        }
-        // A caller path is sender-local and never crosses to the peer.
-        let caller = owner
-            .observe_or_start(
-                &key(1),
-                node(Some("/caller/checkout"), &spec),
-                &route,
-                graph::AccessMode::WorktreeWrite,
-                None,
-                replay(&actor),
-            )
-            .unwrap_err();
-        assert_eq!(caller.code(), "WORKTREE_NOT_APPLICABLE", "{caller:?}");
-        // Branch and base intent carry no path, so the peer provisions the
-        // writer in its own clone instead of refusing the boundary. The launch
-        // may fail downstream without a live provider, but never at this gate.
-        match owner.observe_or_start(
-            &key(2),
-            node(None, &spec),
-            &route,
-            graph::AccessMode::WorktreeWrite,
-            None,
-            replay(&actor),
-        ) {
-            Ok(_) => {}
-            Err(error) => assert_ne!(
-                error.code(),
-                "WORKTREE_NOT_APPLICABLE",
-                "branch intent must reach the peer: {error:?}"
-            ),
-        }
-        Ok(())
-    }
-}
-
+#[path = "owner_peer_capture_tests.rs"]
+mod peer_capture_tests;
 #[cfg(test)]
-mod recovery_rebuild_tests {
-    #[allow(
-        unused_imports,
-        reason = "the custom worktree driver includes this module without libtest"
-    )]
-    use super::*;
-
-    #[test]
-    fn recovery_rebuild_preserves_request_digest_for_any_submitted_spec()
-    -> Result<(), Box<dyn std::error::Error>> {
-        for parent_sandboxed in [false, true] {
-            for confidential in [false, true] {
-                for build_heavy in [false, true] {
-                    for account in [None, Some("special-account".to_owned())] {
-                        for provider_timeout in [None, Some(1800)] {
-                            for admitted_by in [None, Some("parent-admitter".to_owned())] {
-                                let spec = provenant_fabric_runtime::graph::AttemptSpec {
-                                    account: account.clone(),
-                                    build_heavy,
-                                    confidential,
-                                    parent_sandboxed,
-                                    admitted_by: admitted_by.clone(),
-                                    provider_timeout,
-                                    launch_policy: Some(provenant_records::run::LaunchPolicy {
-                                        confidential,
-                                        sources: vec!["repository declaration".into()],
-                                        repository_config: Some(
-                                            provenant_config::REPOSITORY_CONFIG.into(),
-                                        ),
-                                    }),
-                                    ..Default::default()
-                                };
-
-                                let mut profile = provenant_records::run::HarnessProfile::default();
-                                profile
-                                    .knobs
-                                    .insert("lanes.sandbox_floor".into(), "strict".into());
-                                profile.knob_sources.insert(
-                                    "lanes.sandbox_floor".into(),
-                                    provenant_records::Layer::Host,
-                                );
-                                if spec.confidential {
-                                    profile.confidential = true;
-                                }
-                                if spec.parent_sandboxed {
-                                    profile.parent_sandboxed = true;
-                                }
-
-                                profile.repository_policy = spec.launch_policy.clone();
-                                if let Some(admitter) = &spec.admitted_by {
-                                    profile.admitted_by = Some(admitter.clone());
-                                }
-                                let original_task = provenant_records::run::TaskRequest {
-                                    context: None,
-                                    extra: Default::default(),
-                                    limit_extensions: Default::default(),
-                                    build_heavy: spec.build_heavy,
-                                    title: None,
-                                    profile,
-                                    prompt_digest: provenant_records::CanonicalV1::file_digest(
-                                        b"prompt",
-                                    ),
-                                    head: None,
-                                    source_head: None,
-                                    base: None,
-                                    fixture: None,
-                                    base_ref: None,
-                                    route: provenant_records::run::RequestedRoute::Named {
-                                        required_family: None,
-                                        extra: Default::default(),
-                                        name: "junior".into(),
-                                        effort: None,
-                                    },
-                                    account: spec.account.clone(),
-                                    authority_digest: provenant_core::Digest::from_bytes([0; 32]),
-                                    writer: None,
-                                    deliver: None,
-                                    provider_timeout_seconds: spec.provider_timeout.unwrap_or(3600),
-                                    delivery_id: None,
-                                    access: Default::default(),
-                                };
-
-                                let original_request = provenant_records::run::CanonicalRequest {
-                                    extra: Default::default(),
-                                    chair: None,
-                                    fresh_continuation: None,
-                                    schema_version: 1,
-                                    task: original_task.clone(),
-                                    parent: None,
-                                    lane_depth: None,
-                                    parent_attempt: None,
-                                };
-
-                                let rebuilt_spec =
-                                    recovered_attempt_spec(&original_task, Some(&spec))?;
-
-                                assert_eq!(rebuilt_spec.parent_sandboxed, spec.parent_sandboxed);
-                                assert_eq!(rebuilt_spec.admitted_by, spec.admitted_by);
-                                assert_eq!(rebuilt_spec.confidential, spec.confidential);
-                                assert_eq!(rebuilt_spec.build_heavy, spec.build_heavy);
-                                assert_eq!(rebuilt_spec.account, spec.account);
-                                assert_eq!(
-                                    rebuilt_spec.provider_timeout,
-                                    Some(original_task.provider_timeout_seconds)
-                                );
-
-                                let rebuilt_profile = rebuilt_spec
-                                    .sealed_profile
-                                    .clone()
-                                    .ok_or("sealed profile")?;
-                                assert!(rebuilt_spec.policy_sealed);
-                                assert_eq!(rebuilt_spec.launch_policy, spec.launch_policy);
-                                let rebuilt_task = provenant_records::run::TaskRequest {
-                                    fixture: None,
-                                    profile: rebuilt_profile,
-                                    build_heavy: rebuilt_spec.build_heavy,
-                                    account: rebuilt_spec.account.clone(),
-                                    provider_timeout_seconds: rebuilt_spec
-                                        .provider_timeout
-                                        .unwrap_or(original_task.provider_timeout_seconds),
-                                    ..original_task.clone()
-                                };
-
-                                let rebuilt_request = provenant_records::run::CanonicalRequest {
-                                    task: rebuilt_task,
-                                    ..original_request.clone()
-                                };
-
-                                assert_eq!(
-                                    original_request.digest()?,
-                                    rebuilt_request.digest()?,
-                                    "request digest must match after recovery rebuild"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
+#[path = "owner_peer_handoff_tests.rs"]
+mod peer_handoff_tests;
+#[cfg(test)]
+#[path = "owner_recovery_rebuild_tests.rs"]
+mod recovery_rebuild_tests;
 
 #[cfg(test)]
 mod on_stop_defaults_tests {

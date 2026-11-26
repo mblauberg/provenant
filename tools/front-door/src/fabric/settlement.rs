@@ -350,11 +350,17 @@ fn advance_attempt_graph(
         backoff: ThreadPause,
         executor: SystemExecutor::new(4)?,
         home: settled.roots.home.clone(),
-        cwd: execution.directory,
+        cwd: execution.directory.clone(),
         assets: settled.roots.checkout.clone(),
         host_launch: Some(host),
         workers,
     };
+    let (admitted, _warnings, _waiting) =
+        super::queue_scheduler::admit_graph_tick(&factory, id, &execution, &checkpoint)
+            .map_err(std::io::Error::other)?;
+    if !admitted {
+        return Ok(());
+    }
     let mut owner = BoundGraphOwner {
         writer_launch_budget: None,
         admission_timeout: None,

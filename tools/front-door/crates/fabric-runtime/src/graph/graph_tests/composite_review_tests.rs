@@ -715,6 +715,134 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
 }
 
 #[test]
+fn minimum_successful_composite_joins_exported_gate_recovery_alternatives() {
+    for (
+        graph_id,
+        verdict,
+        review_outcome,
+        recovery_outcome,
+        extra_non_export,
+        check_state,
+        recovery_state,
+        composite_state,
+        outcome,
+    ) in [
+        (
+            "ci-pass",
+            "VERDICT: PASS",
+            GraphAttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
+            false,
+            NodeState::Succeeded,
+            NodeState::Skipped,
+            NodeState::Succeeded,
+            GraphOutcome::Succeeded,
+        ),
+        (
+            "ci-repaired",
+            "VERDICT: FAIL",
+            GraphAttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
+            false,
+            NodeState::Failed,
+            NodeState::Succeeded,
+            NodeState::Succeeded,
+            GraphOutcome::Succeeded,
+        ),
+        (
+            "ci-exhausted",
+            "VERDICT: FAIL",
+            GraphAttemptOutcome::Succeeded,
+            GraphAttemptOutcome::TaskFailed,
+            false,
+            NodeState::Failed,
+            NodeState::Failed,
+            NodeState::Failed,
+            GraphOutcome::Failed,
+        ),
+        (
+            "ci-blocked-non-export",
+            "VERDICT: PASS",
+            GraphAttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
+            true,
+            NodeState::Succeeded,
+            NodeState::Skipped,
+            NodeState::Blocked,
+            GraphOutcome::Failed,
+        ),
+        (
+            "ci-blocked-export",
+            "VERDICT: PASS",
+            GraphAttemptOutcome::TaskFailed,
+            GraphAttemptOutcome::Succeeded,
+            false,
+            NodeState::Blocked,
+            NodeState::Blocked,
+            NodeState::Blocked,
+            GraphOutcome::Failed,
+        ),
+    ] {
+        let mut members = vec![
+            serde_json::json!({
+                "id":"review", "access":"read_only", "prompt":"review",
+                "route":{"alias":"fixture"}
+            }),
+            serde_json::json!({
+                "id":"check", "kind":"gate", "access":"read_only",
+                "depends_on":["review"], "on_fail":"repair",
+                "inputs":[{"node":"review", "outputs":["verdict"]}],
+                "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}
+            }),
+            serde_json::json!({
+                "id":"repair", "access":"read_only", "prompt":"repair",
+                "route":{"alias":"fixture"}, "depends_on":["check"]
+            }),
+        ];
+        if extra_non_export {
+            members.push(serde_json::json!({
+                "id":"follow-up", "access":"read_only", "prompt":"follow up",
+                "route":{"alias":"fixture"}, "depends_on":["repair"]
+            }));
+        }
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2, "graph_id":graph_id, "nodes":[{
+                "id":"ci-outcome", "kind":"composite", "access":"read_only",
+                "composite":{
+                    "min_successful":1,
+                    "nodes":members,
+                    "exports":[
+                        {"node":"check", "outputs":["result"]},
+                        {"node":"repair", "outputs":["result"]}
+                    ]
+                }
+            }]
+        }))
+        .unwrap();
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(review_outcome, verdict),
+                terminal(recovery_outcome),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let progress = |id: &str| {
+            run.checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == id || node.id == format!("ci-outcome--{id}"))
+                .unwrap()
+        };
+        assert_eq!(progress("check").state, check_state, "{graph_id}");
+        assert_eq!(progress("repair").state, recovery_state, "{graph_id}");
+        assert_eq!(progress("ci-outcome").state, composite_state, "{graph_id}");
+        assert_eq!(run.outcome, Some(outcome), "{graph_id}");
+    }
+}
+
+#[test]
 fn partial_composite_replay_preserves_checkpoint_and_launches_nothing() {
     let (document, mut owner) = partial_review(1);
     let mut journal = MemoryJournal::default();
