@@ -145,6 +145,7 @@ pub(super) fn trace_run(
                 head: None,
                 source_head: None,
                 base_ref: None,
+                subject: None,
                 prompt_digest: CanonicalV1::file_digest(b"p"),
                 route: run::RequestedRoute::Model {
                     required_family: None,

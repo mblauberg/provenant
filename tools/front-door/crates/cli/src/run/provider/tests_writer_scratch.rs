@@ -262,6 +262,7 @@ fn writer_preparation_steps(
         head: Some(review_oid.clone()),
         source_head: None,
         base_ref: None,
+        subject: None,
         profile: provenant_records::run::HarnessProfile {
             knobs: [
                 ("lanes.publish".into(), serde_json::json!(false)),

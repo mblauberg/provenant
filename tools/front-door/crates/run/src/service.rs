@@ -318,6 +318,7 @@ impl<'a> Service<'a> {
                 base_ref,
                 base,
                 fixture: task.fixture.filter(|fixture| fixture.is_valid()),
+                subject: task.subject,
                 head: task.head,
                 source_head: task.source_head,
                 route: task.route,

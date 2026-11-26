@@ -260,6 +260,10 @@ impl Factory {
         };
         let subject = setting("subject")?;
         let base = setting("review_base")?;
+        // Capability provenance for the review: the credential-free forge id
+        // and the ref the comparison base came from, when the route had them.
+        let mut forge_repository: Option<String> = None;
+        let mut subject_base_ref: Option<String> = None;
         let git = provenant_os::git::git_executable()
             .ok_or_else(|| graph_subject_error("Git unavailable"))?;
         let resolve = |reference: &str| {
@@ -312,6 +316,8 @@ impl Factory {
                 .url
                 .rsplit_once("/pull/")
                 .ok_or_else(|| graph_subject_error("PR URL has no repository"))?;
+            forge_repository = Some(repository.to_owned());
+            subject_base_ref = Some(pull_subject.base_ref_name.clone());
             let base_ref =
                 provenant_confinement::repo::GitRefName::branch(&pull_subject.base_ref_name)
                     .map_err(|_| graph_subject_error("invalid PR base branch"))?;
@@ -360,6 +366,7 @@ impl Factory {
             };
             (base, head, warning, origin)
         } else if let (Some(subject), Some(base)) = (subject, base) {
+            subject_base_ref = Some(base.to_owned());
             (resolve(base)?, resolve(subject)?, None, ref_origin(subject))
         } else if subject.is_some() || base.is_some() {
             return Err(graph_subject_error(
@@ -433,6 +440,10 @@ impl Factory {
                 origin,
                 pinned_at,
                 policy: SubjectPolicy::Pinned,
+                repository: forge_repository,
+                base_ref: subject_base_ref,
+                policy_source: Some("graph admission (always pinned)".into()),
+                followed_from: Vec::new(),
             },
             warning,
         )))
@@ -521,6 +532,10 @@ impl Factory {
                     origin: ref_origin(&selected.reference),
                     pinned_at,
                     policy: SubjectPolicy::Pinned,
+                    repository: None,
+                    base_ref: None,
+                    policy_source: Some(read_source.description()),
+                    followed_from: Vec::new(),
                 },
                 ReadPlan::Pinned,
             )
@@ -551,6 +566,10 @@ impl Factory {
                     origin: SubjectOrigin::LocalRef { name },
                     pinned_at,
                     policy: SubjectPolicy::FollowLatest,
+                    repository: None,
+                    base_ref: None,
+                    policy_source: Some(read_source.description()),
+                    followed_from: Vec::new(),
                 },
                 if remote {
                     ReadPlan::Pinned
@@ -774,6 +793,12 @@ mod tests {
                 .ok_or("no subject")?;
             assert_eq!(result.0.head.to_string(), fx.forge_new);
             assert_eq!(result.0.base.unwrap().to_string(), fx.base);
+            assert_eq!(result.0.repository.as_deref(), Some("owner/repo"));
+            assert_eq!(result.0.base_ref.as_deref(), Some("main"));
+            assert_eq!(
+                result.0.policy_source.as_deref(),
+                Some("graph admission (always pinned)")
+            );
             assert!(result.1.is_none());
         }
 

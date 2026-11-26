@@ -485,6 +485,7 @@ fn raw_input() -> PreparedRun {
                 head: None,
                 source_head: None,
                 base_ref: None,
+                subject: None,
                 writer: None,
                 profile: HarnessProfile::default(),
                 prompt_digest: CanonicalV1::file_digest(b"exact prompt"),

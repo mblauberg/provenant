@@ -3753,6 +3753,7 @@ impl RunStore {
                     head,
                     source_head,
                     base_ref: task.base_ref.clone(),
+                    subject: None,
                     profile: {
                         let mut profile = task.profile.clone();
                         if let Some(remaining) = budget_remaining {
