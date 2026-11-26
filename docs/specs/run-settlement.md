@@ -391,6 +391,9 @@ through `settle`; no other path writes a settlement class. A lane appends only
 to its own socket's attempt. Sequences and `request_id` idempotency are invariants. Prose is never
 read: the command guidance is the protocol text and lane rules sit in `lanes.brief_preamble`.
 `declared_stop` is the lane's own statement and its follow-up is `on_stop`.
+Registry families in host and project configuration resolve concrete non-empty
+segments such as `<stop_cause>` and `{project}`; the effective record retains
+the concrete key and the layer that supplied it.
 
 Four auditable values accompany the decider. `GitEvidence.pushed_head` is the remote-tracking tip of
 the bound branch at the cut, sealed in `writer-terminal.json`: the full `output` result view prints

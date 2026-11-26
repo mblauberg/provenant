@@ -4268,7 +4268,7 @@ fn base_14_settlement_fields_migrate_once_without_extra_fields() -> TestResult {
         .db
         .execute_batch("DROP TRIGGER immutable_terminal_update")?;
     store.db.execute(
-        "UPDATE attempts SET record=?1 WHERE id=?2",
+        "UPDATE attempts SET record=?1, terminal=1 WHERE id=?2",
         rusqlite::params![serde_json::to_vec(&value)?, input.attempt_id.to_string()],
     )?;
     store.db.pragma_update(None, "user_version", 14)?;

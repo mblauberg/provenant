@@ -3034,7 +3034,7 @@ impl RunStore {
             // result the host retained, so seal the substitution complete.
             // A non-empty but truncated answer never enters here: its decoded
             // completeness stands, and the later gate rejects it as success.
-            decoded.cause = None;
+            decoded.cause = Some(CauseKind::TokenBudget);
             if let Some(handoff) = &handoff {
                 decoded.result = handoff.fenced();
             }

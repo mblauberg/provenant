@@ -218,8 +218,8 @@ fn admission_recovery_capability() {
         }))
     ));
 
-    let mut bad_digest = seed();
-    bad_digest.digest = "sha256:bad".into();
+    let mut bad_digest: Value = serde_json::from_slice(&sealed(seed())).unwrap();
+    bad_digest["digest"] = json!("sha256:bad");
     assert!(matches!(
         decode_checkpoint(&serde_json::to_vec(&bad_digest).unwrap(), "g-test"),
         Err(JournalError::BadDigest)

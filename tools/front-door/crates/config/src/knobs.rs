@@ -166,9 +166,7 @@ impl<D> crate::ResolvedConfig<D> {
                 .map(|(name, knob)| {
                     let value = match knob.value {
                         Value::Number(number)
-                            if registry
-                                .knobs
-                                .get(&name)
+                            if matching_spec(registry, &name)
                                 .is_some_and(|spec| spec.kind == Kind::Fraction) =>
                         {
                             Value::String(number.to_string())
@@ -244,10 +242,38 @@ fn invalid(name: &str, rule: &'static str) -> ConfigError {
     }
 }
 fn spec<'a>(registry: &'a Registry, name: &str) -> Result<&'a Spec, ConfigError> {
-    registry
-        .knobs
-        .get(name)
-        .ok_or_else(|| unknown(registry, name))
+    matching_spec(registry, name).ok_or_else(|| unknown(registry, name))
+}
+
+fn is_placeholder_segment(segment: &str) -> bool {
+    segment.len() > 2
+        && ((segment.starts_with('<') && segment.ends_with('>'))
+            || (segment.starts_with('{') && segment.ends_with('}')))
+}
+
+/// Resolve concrete keys covered by a registry family such as
+/// `domains.fabric.graph.on_stop.<stop_cause>`.
+fn matching_spec<'a>(registry: &'a Registry, name: &str) -> Option<&'a Spec> {
+    fn matches(pattern: &str, name: &str) -> bool {
+        let mut pattern = pattern.split('.');
+        let mut name = name.split('.');
+        loop {
+            match (pattern.next(), name.next()) {
+                (None, None) => return true,
+                (Some(pattern), Some(value))
+                    if pattern == value
+                        || (is_placeholder_segment(pattern) && !value.is_empty()) => {}
+                _ => return false,
+            }
+        }
+    }
+
+    registry.knobs.get(name).or_else(|| {
+        registry
+            .knobs
+            .iter()
+            .find_map(|(pattern, spec)| matches(pattern, name).then_some(spec))
+    })
 }
 fn unknown(registry: &Registry, name: &str) -> ConfigError {
     // The refusal carries the close matches, so callers never compute them.
@@ -414,17 +440,14 @@ fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
 
 /// The restrictive value an invalid entry for the strict knob `name` takes.
 pub(crate) fn safe_value(name: &str) -> Option<Value> {
-    let spec = registry().ok()?.knobs.get(name)?;
+    let spec = matching_spec(registry().ok()?, name)?;
     spec.strict.then(|| spec.safe.clone()).flatten()
 }
 /// Whether an invalid entry for `name` refuses the file: a strict knob with
 /// no restrictive value, where any fallback could drop what the user set.
 pub(crate) fn refuses_when_invalid(name: &str) -> bool {
     registry().is_ok_and(|registry| {
-        registry
-            .knobs
-            .get(name)
-            .is_some_and(|spec| spec.strict && spec.safe.is_none())
+        matching_spec(registry, name).is_some_and(|spec| spec.strict && spec.safe.is_none())
     })
 }
 /// Whether some strict knob has no restrictive value, so a malformed `[knobs]`
@@ -476,6 +499,9 @@ pub(crate) fn resolve(
     let preset = registry.presets.get(profile_name(profile));
     let mut by_name: BTreeMap<String, Vec<Sourced<Value>>> = BTreeMap::new();
     for (name, spec) in &registry.knobs {
+        if name.split('.').any(is_placeholder_segment) {
+            continue;
+        }
         let mut candidates = Vec::new();
         let safe = safe_value(name);
         if malformed_table {
@@ -503,7 +529,7 @@ pub(crate) fn resolve(
     }
     for (name, item) in entries {
         let name = name.as_str();
-        let Some(spec) = registry.knobs.get(name) else {
+        let Some(spec) = matching_spec(&registry, name) else {
             problems.push(KnobProblem {
                 name: name.into(),
                 rule: "unknown_key",
@@ -668,6 +694,33 @@ mod chair_tests {
 #[allow(clippy::unwrap_used)]
 mod ceiling_tests {
     use super::*;
+
+    #[test]
+    fn registry_families_accept_concrete_stop_default_keys() {
+        let config = "schema_version = 1\n[knobs]\n\
+            \"domains.fabric.graph.on_stop.stopped_no_work\" = \"chair\"\n\
+            \"domains.fabric.graph.projects.project-a.on_stop.blocked\" = \"new_route\"\n"
+            .parse::<DocumentMut>()
+            .unwrap();
+        let (resolved, problems) = resolve(
+            Profile::Balanced,
+            config.get("knobs").and_then(Item::as_table),
+            false,
+        )
+        .unwrap();
+
+        assert!(problems.is_empty());
+        assert_eq!(
+            resolved["domains.fabric.graph.on_stop.stopped_no_work"].value,
+            serde_json::json!("chair")
+        );
+        assert_eq!(
+            resolved["domains.fabric.graph.projects.project-a.on_stop.blocked"].value,
+            serde_json::json!("new_route")
+        );
+        assert!(!resolved.contains_key("domains.fabric.graph.on_stop.<stop_cause>"));
+    }
+
     #[test]
     fn lane_access_is_documented_and_defaults_to_host() {
         let registry = registry().unwrap();

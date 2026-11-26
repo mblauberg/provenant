@@ -333,12 +333,12 @@ fn path_denial_keeps_the_answer_and_settlement_outcome() -> TestResult {
         (
             DenialStream::Stdout,
             DenialAnswer::Plain,
-            Outcome::Succeeded,
+            Outcome::ReviewRequired,
         ),
         (
             DenialStream::None,
             DenialAnswer::CompletedHandoff,
-            Outcome::Succeeded,
+            Outcome::ReviewRequired,
         ),
         (DenialStream::Stdout, DenialAnswer::Empty, Outcome::Failed),
     ] {
