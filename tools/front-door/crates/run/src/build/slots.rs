@@ -1151,7 +1151,8 @@ fn resolve_target(job: &Job, context: &RunContext, paths: &SlotPaths) -> TargetR
             .first()
             .map(|step| step.argv.as_slice())
             .unwrap_or(&[]);
-        super::rust::probe_job_toolchain(&env, &paths.repo, argv)
+        let cwd = target_probe_cwd(job, &paths.repo);
+        super::rust::probe_job_toolchain(&env, &cwd, argv)
     } else {
         None
     };
@@ -1191,6 +1192,27 @@ fn resolve_target(job: &Job, context: &RunContext, paths: &SlotPaths) -> TargetR
         toolchain,
         warnings,
     }
+}
+
+/// Resolve the first build step's working directory in the slot snapshot,
+/// matching the path mapping used when the command itself is executed.
+fn target_probe_cwd(job: &Job, slot_repo: &Path) -> PathBuf {
+    let cwd_rel = job
+        .steps
+        .first()
+        .map(|step| step.cwd_rel.as_path())
+        .unwrap_or_else(|| Path::new(""));
+    let source_root = super::job_root(job);
+    let original = if cwd_rel.is_absolute() {
+        cwd_rel.to_path_buf()
+    } else {
+        source_root.join(cwd_rel)
+    };
+    super::rust::rewrite_argv(&[original.into_os_string()], source_root, slot_repo)
+        .into_iter()
+        .next()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| slot_repo.join(cwd_rel))
 }
 
 #[cfg(unix)]
@@ -1729,6 +1751,87 @@ mod tests {
         assert_eq!(first, other_worktree);
         assert_ne!(first, other_toolchain);
         assert!(!first.to_string_lossy().contains(".."));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_target_resolution_uses_cargo_selector_and_step_working_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let nested = source.join("nested");
+        let slot_repo = tmp.path().join("slot-repo");
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(slot_repo.join("nested")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let rustc = bin.join("rustc");
+        fs::write(
+            &rustc,
+            "#!/bin/sh\nprintf 'release: %s\\nhost: %s\\ncommit: fixture\\n' \"$RUSTUP_TOOLCHAIN\" \"${PWD##*/}\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&rustc, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut port = provenant_config::PortTable::builtin().build;
+        port.target = "toolchain".into();
+        let context = RunContext {
+            state: tmp.path().join("state"),
+            home: tmp.path().join("home"),
+            strategy: super::super::strategy(&port).value,
+            cancel: provenant_core::CancelToken::new(),
+        };
+        let job = Job {
+            id: "fixture".into(),
+            project_key: "project".into(),
+            project: source.clone(),
+            origin: super::super::Origin::Chair,
+            owner: "chair".into(),
+            kind: super::super::JobKind::Intercepted {
+                stack: super::super::Stack::Rust,
+                subcommand: "check".into(),
+            },
+            priority: super::super::Priority::Interactive,
+            source: super::super::SnapshotSource::WorkingTree {
+                worktree: source,
+                git: super::super::GitBinding {
+                    git: "git".into(),
+                    git_dir: tmp.path().join("git"),
+                    common_dir: tmp.path().join("common"),
+                    object_dir: None,
+                    index_file: tmp.path().join("index"),
+                    config_global: None,
+                },
+            },
+            verify_base: None,
+            steps: vec![super::super::Step {
+                cwd_rel: PathBuf::from("nested"),
+                argv: ["cargo", "+1.99.1", "check"]
+                    .map(std::ffi::OsString::from)
+                    .to_vec(),
+            }],
+            stop_on_failure: true,
+            env: vec![
+                ("PATH".into(), bin.as_os_str().into()),
+                ("RUSTUP_TOOLCHAIN".into(), "1.100.0".into()),
+            ],
+            output: super::super::Output::Capture { limit_bytes: 1024 },
+            timeout: None,
+            sandboxed: false,
+            prelude: None,
+        };
+        let paths = SlotPaths::new(&context.home, "project", 0);
+        let paths = SlotPaths {
+            repo: slot_repo,
+            ..paths
+        };
+
+        let resolved = resolve_target(&job, &context, &paths);
+        let toolchain = resolved.toolchain.unwrap();
+        assert_eq!(toolchain.release, "1.99.1");
+        assert_eq!(toolchain.host, "nested");
+        assert!(resolved.key.contains(&toolchain.key()));
     }
 
     #[test]
