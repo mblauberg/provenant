@@ -604,7 +604,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         cause,
         settlement_class,
         stop,
-        source,
+        cause_source: source,
         release,
         terminal_basis,
         signals,

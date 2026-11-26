@@ -146,7 +146,7 @@ pub struct OutcomeFact {
     pub cause: Option<CauseKind>,
     pub settlement_class: SettlementClass,
     pub stop: Option<Stop>,
-    pub source: CauseSource,
+    pub cause_source: CauseSource,
     pub release: DependantRelease,
     pub terminal_basis: TerminalBasis,
     pub signals: Vec<SettlementSignal>,
