@@ -96,7 +96,7 @@ unverified lifecycle fields to classify a corrupt record as settled.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`
 
 `GraphDocument.subject` is additive: the host writes the admitted `PinnedSubject`
-at admission and overwrites any caller-supplied value, and its serialization is
+at admission and overwrites any caller-supplied value, and its serialisation is
 skipped when absent so older execution digests stay byte-identical. There is no
 `CHECKPOINT_SCHEMA_VERSION` bump. `GraphCheckpoint.subject` is a serde-skipped
 projection hydrated from the execution on reload and shown under

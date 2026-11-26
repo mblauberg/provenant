@@ -108,6 +108,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     fixture: None,
                     pinned_base: None,
                     head: None,
+                    subject: None,
                     source_head: None,
                     route: provenant_run::RequestedRoute::Named {
                         required_family: None,
@@ -497,6 +498,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     fixture: None,
                     pinned_base: None,
                     head: None,
+                    subject: None,
                     source_head: None,
                     route: provenant_run::RequestedRoute::Named {
                         required_family: None,

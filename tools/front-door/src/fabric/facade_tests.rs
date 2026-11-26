@@ -1281,6 +1281,7 @@ pub(crate) mod peer_tests {
                         fixture: None,
                         pinned_base: None,
                         head: None,
+                        subject: None,
                         profile: Default::default(),
                         route: provenant_run::RequestedRoute::Model {
                             required_family: None,
@@ -1392,6 +1393,7 @@ pub(crate) mod peer_tests {
                         fixture: None,
                         pinned_base: None,
                         head: None,
+                        subject: None,
                         profile: Default::default(),
                         route: provenant_run::RequestedRoute::Model {
                             required_family: None,
@@ -1668,6 +1670,7 @@ pub(crate) mod peer_tests {
                     fixture: None,
                     pinned_base: None,
                     head: Some(node_source.to_string()),
+                    subject: None,
                     profile: Default::default(),
                     route: provenant_run::RequestedRoute::Model {
                         required_family: None,

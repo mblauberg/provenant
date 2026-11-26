@@ -634,6 +634,8 @@ selects the checkout that owns project configuration, and a bare common director
 stays its own host-only layout root.
 - Why: a remote guess or resent mutation could free a live lane or apply twice.
 
+### Hermetic smoke
+
 Peer feature actions declare their own wire protocol so an old peer is detected
 before its action is decoded. `SMOKE_FIXTURE_PROTOCOL = 16` adds `smoke_fixture`:
 `Create { nonce, recipe, root }` builds the deterministic fixture under the

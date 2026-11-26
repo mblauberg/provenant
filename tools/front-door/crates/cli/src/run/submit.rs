@@ -253,6 +253,8 @@ pub struct Submitted {
     pub fixture: Option<run::StagedFixture>,
     pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
+    /// Admitted subject provenance carried beside `head` onto the run request.
+    pub subject: Option<provenant_records::subject::PinnedSubject>,
     /// Original source of a predecessor whose committed head is being retained.
     pub source_head: Option<String>,
     pub route: run::RequestedRoute,
@@ -687,6 +689,7 @@ fn submit_with_launcher(
                 fixture: task.fixture,
                 pinned_base: task.pinned_base,
                 head: task.head,
+                subject: task.subject,
                 source_head: task.source_head,
                 route: task.route,
                 account: attempt.account,

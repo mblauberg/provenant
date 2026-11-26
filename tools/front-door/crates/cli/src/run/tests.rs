@@ -675,6 +675,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
             fixture: None,
             pinned_base: None,
             head: None,
+            subject: None,
             source_head: None,
             route: run::RequestedRoute::Model {
                 required_family: None,
