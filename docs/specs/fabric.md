@@ -508,7 +508,8 @@ and the test that pins the invariant. Round two reviews only the repair delta
 against those named invariants, never a fresh full panel; a lens may raise a new
 invariant, which then follows the same contract. Two distinct findings with the
 same invariant are one shared flaw and route to the principal design continuation.
-A split verdict on one head goes to one adjudication node that returns a single
+Distinct member verdicts on one head, including approval and inconclusive, are a
+split and go to one adjudication node that returns a single
 verdict; the read-only adjudicator runs as an agent on the configured `senior`
 route on the panel members' pinned head when one is recorded. Each gate consumes only the adjudicator
 associated with its own panel and head; later panels receive their own adjudicator.

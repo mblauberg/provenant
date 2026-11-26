@@ -1408,6 +1408,112 @@ fn fix_round_without_sweep_sites_and_pin_is_flagged() {
     assert!(review::repair_return_warnings(&node, &complete_outputs).is_empty());
 }
 
+#[test]
+// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+fn round_two_missing_invariant_is_refused_at_graph_settlement() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1, "graph_id": "delta-contract", "nodes": [{
+            "id": "repair", "kind": "loop", "access": "read_only",
+            "loop": {"max_rounds": 2, "until": "accepted", "body": [
+                review("review.tests", "check"),
+                {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["check"],
+                 "inputs":[{"node":"check","outputs":["verdict"]}],
+                 "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+            ]}
+        }]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &answer(json!([]), "VERDICT: FAIL"),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &answer(json!([finding()]), "VERDICT: FAIL"),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let checkpoint = journal.0.as_ref().unwrap();
+    assert_eq!(checkpoint, &run.checkpoint);
+    let check = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "repair--r2--check")
+        .unwrap();
+    assert_eq!(check.state, NodeState::Failed);
+    assert_eq!(
+        check.advance_error_code.as_deref(),
+        Some("review_invariant_missing")
+    );
+    assert!(
+        check
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("finding_invariant_missing:"))
+    );
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+fn fix_round_missing_sweep_sites_and_pin_is_flagged_at_graph_settlement() {
+    let mut writer = node("fix", route("fixture"));
+    writer.repair_writer = true;
+    writer.depends_on = vec!["source".into()];
+    writer.inputs = vec![GraphInput {
+        extra: Default::default(),
+        required_outputs: vec![],
+        node: "source".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    let document = graph(vec![node("source", route("fixture")), writer]);
+    let report = format!(
+        "```findings\n{}\n```",
+        json!({
+            "schema_version": 1, "findings": [], "repair_items": [{
+                "id":"unchecked input x", "status":"fixed", "reason":"removed the case"
+            }]
+        })
+    );
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &answer(json!([finding()]), "VERDICT: FAIL"),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &report),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let checkpoint = journal.0.as_ref().unwrap();
+    assert_eq!(checkpoint, &run.checkpoint);
+    let fix = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "fix")
+        .unwrap();
+    assert_eq!(fix.state, NodeState::Succeeded);
+    let warnings = &fix.outputs.as_ref().unwrap().warnings;
+    let warning = warnings
+        .iter()
+        .find(|warning| warning.starts_with("repair_invariant_return_missing:"))
+        .unwrap();
+    for part in ["sweep", "sites", "pin"] {
+        assert!(warning.contains(part), "{warnings:?}");
+    }
+}
+
 fn delivery_review_panel() -> GraphDocument {
     let panel = json!({
         "id":"panel",

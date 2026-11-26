@@ -140,27 +140,64 @@ fn split_verdict_patch_runs_one_adjudicator_and_supplies_the_gate_verdict() {
              "inputs":[{"node":"panel","outputs":["verdict"]}],
              "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
         ]
-    })).unwrap();
-    let mut owner = FakeOwner {
-        observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &answer("VERDICT: FAIL")),
-            terminal_with_result(AttemptOutcome::Succeeded, &answer("VERDICT: PASS")),
-            terminal_with_result(AttemptOutcome::Succeeded, &answer("VERDICT: PASS")),
-        ].into(),
-        ..Default::default()
-    };
-    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    }))
+    .unwrap();
+    for first in [
+        "VERDICT: FAIL",
+        "VERDICT: INCONCLUSIVE",
+    ] {
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &answer(first)),
+                terminal_with_result(AttemptOutcome::Succeeded, &answer("VERDICT: PASS")),
+                terminal_with_result(AttemptOutcome::Succeeded, &answer("VERDICT: PASS")),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
 
-    let adjudicators: Vec<_> = run.checkpoint.nodes.iter()
-        .filter(|node| node.id.ends_with("adjudicate"))
-        .collect();
-    assert_eq!(adjudicators.len(), 1, "a split is resolved by exactly one adjudicator");
-    assert_eq!(adjudicators[0].state, NodeState::Succeeded);
-    assert_eq!(adjudicators[0].outputs.as_ref().and_then(|outputs| outputs.verdict.as_deref()), Some("VERDICT: PASS"));
-    assert_eq!(owner.calls.len(), 3, "only the two lenses and one adjudicator run");
-    assert!(owner.prompts.last().is_some_and(|prompt| prompt.contains("Resolve the split once")));
-    let gate = run.checkpoint.nodes.iter().find(|node| node.id == "gate").unwrap();
-    assert!(gate.gate.as_ref().is_some_and(|gate| gate.passed), "the gate uses the adjudicator verdict");
+        let adjudicators: Vec<_> = run
+            .checkpoint
+            .nodes
+            .iter()
+            .filter(|node| node.id.ends_with("adjudicate"))
+            .collect();
+        assert_eq!(
+            adjudicators.len(),
+            1,
+            "a split is resolved by exactly one adjudicator"
+        );
+        assert_eq!(adjudicators[0].state, NodeState::Succeeded);
+        assert_eq!(
+            adjudicators[0]
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.verdict.as_deref()),
+            Some("VERDICT: PASS")
+        );
+        assert_eq!(
+            owner.calls.len(),
+            3,
+            "only the two lenses and one adjudicator run"
+        );
+        assert!(
+            owner
+                .prompts
+                .last()
+                .is_some_and(|prompt| prompt.contains("Resolve the split once"))
+        );
+        let gate = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "gate")
+            .unwrap();
+        assert!(
+            gate.gate.as_ref().is_some_and(|gate| gate.passed),
+            "the gate uses the adjudicator verdict"
+        );
+    }
 }
 
 // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
