@@ -134,12 +134,14 @@ fn a_started_same_boot_attempt_releases_only_after_exit_cleanup_completes() -> T
         Census, ProcessIdentity, ProcessObservation, ProcessObserver,
     };
 
+    const BOOT: &str = "fixture-recorded-boot-v1";
+
     struct DeadSameBoot;
     impl ProcessObserver for DeadSameBoot {
         fn boot_identity(
             &self,
         ) -> std::result::Result<String, provenant_supervisor::census::CensusError> {
-            Ok("test-boot".into())
+            Ok(BOOT.into())
         }
         fn observe(&self, _: i64) -> ProcessObservation {
             ProcessObservation::Absent
@@ -200,14 +202,14 @@ fn a_started_same_boot_attempt_releases_only_after_exit_cleanup_completes() -> T
     )?;
     let mut lease = lease;
     let guardian = ProcessIdentity {
-        boot: "test-boot".into(),
+        boot: BOOT.into(),
         pid: 910_001,
         native_start: 1,
         group_id: 910_001,
         session_id: 910_001,
     };
     let provider = ProcessIdentity {
-        boot: "test-boot".into(),
+        boot: BOOT.into(),
         pid: 910_002,
         native_start: 2,
         group_id: 910_002,
