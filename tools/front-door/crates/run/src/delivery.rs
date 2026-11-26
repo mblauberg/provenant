@@ -3265,10 +3265,6 @@ impl HostDeliveryContext {
                 "writer head moved during delivery",
             ));
         }
-        // Local destinations are integrated above; every push path is remote.
-        let remote_name = request.remote.remote_name().ok_or(RunError::Validation(
-            "delivery needs a configured remote name",
-        ))?;
         // The destination was built from the owner's forge context and carries
         // its remote; reuse that context rather than resolving a second one
         // that could disagree with the one already sealed at launch. A holder
@@ -3293,6 +3289,10 @@ impl HostDeliveryContext {
                 integration: Some(self.integrate(writer, request, head, forge.as_ref())?),
             });
         }
+        // Local destinations were integrated above; every push path is remote.
+        let remote_name = request.remote.remote_name().ok_or(RunError::Validation(
+            "delivery needs a configured remote name",
+        ))?;
         let bound = self.bound.as_ref().ok_or_else(|| {
             delivery_refusal(Stage::Prepare, "delivery launch binding was not sealed")
         })?;

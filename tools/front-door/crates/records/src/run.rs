@@ -483,9 +483,10 @@ pub struct WriterRequest {
 /// form is `null` for `Local` and a name string for `Remote`; an empty string
 /// is malformed and fails decoding rather than spelling a third, nameless
 /// destination.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Option<String>", into = "Option<String>")]
 pub enum Destination {
+    #[default]
     Local,
     Remote(provenant_core::RemoteName),
 }
@@ -522,12 +523,6 @@ impl Destination {
     /// Whether this destination names no remote.
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Local)
-    }
-}
-
-impl Default for Destination {
-    fn default() -> Self {
-        Self::Local
     }
 }
 
