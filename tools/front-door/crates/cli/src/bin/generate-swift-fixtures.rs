@@ -321,7 +321,7 @@ mod fixtures {
         ];
 
         let summary = json!({"now":"Implementing console","next":"Review","needs_you":[],"risk":"none","revision":1,"schema_version":1,"updated_at":"2026-11-02T01:58:26.745295Z"});
-        let later = json!({"now":"Implementing the console","next":"Review","needs_you":[],"risk":"none","revision":1,"schema_version":1,"updated_at":"2026-11-02T02:18:00Z"});
+        let later = json!({"now":"Implementing the console","next":"Review","needs_you":[],"risk":"none","revision":1,"schema_version":1,"updated_at":"2026-11-02T02:18:00.000000Z"});
         let session_record = |summary: Value,
                               revision,
                               parent: Option<u64>,
@@ -360,7 +360,7 @@ mod fixtures {
             )?,
             session_row(
                 &later,
-                session_record(later.clone(), 3, Some(2), "2026-11-02T02:18:00Z")?,
+                session_record(later.clone(), 3, Some(2), "2026-11-02T02:18:00.000000Z")?,
             )?,
         ];
         let without_summary_rows = vec![session_row(
@@ -1458,5 +1458,30 @@ mod fixtures {
                 )?,
             ),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures;
+
+    #[test]
+    fn synthetic_session_fixture_uses_canonical_utc_wall_times() {
+        let generated = fixtures::console().expect("synthetic console fixtures");
+        let (_, sessions) = generated
+            .iter()
+            .find(|(name, _)| *name == "console-sessions")
+            .expect("sessions fixture");
+        let record = &sessions["data"]["sessions"][1]["record"];
+
+        assert_eq!(
+            record["checkpoint"]["saved_at"],
+            "2026-11-02T02:18:00.000000Z"
+        );
+        assert_eq!(record["last_saved_at"], "2026-11-02T02:18:00.000000Z");
+        assert_eq!(
+            record["summary"]["updated_at"],
+            "2026-11-02T02:18:00.000000Z"
+        );
     }
 }
