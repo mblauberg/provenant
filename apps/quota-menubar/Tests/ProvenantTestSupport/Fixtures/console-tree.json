@@ -19,15 +19,15 @@
       {
         "child_attempt": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
         "kind": "dispatch",
-        "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
-        "parent_status": "missing",
+        "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "parent_status": "present",
         "project_id": "01010101010101010101010101010101"
       },
       {
         "child_attempt": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
         "kind": "continuation",
-        "parent_attempt": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
-        "parent_status": "missing",
+        "parent_attempt": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+        "parent_status": "present",
         "project_id": "01010101010101010101010101010101"
       }
     ],
@@ -41,6 +41,10 @@
         "children": [
           {
             "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+            "kind": "dispatch"
+          },
+          {
+            "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
             "kind": "dispatch"
           }
         ],
@@ -152,7 +156,12 @@
         }
       },
       {
-        "children": [],
+        "children": [
+          {
+            "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+            "kind": "continuation"
+          }
+        ],
         "depth": 1,
         "lane_id": {
           "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
@@ -351,7 +360,7 @@
         },
         "parents": {
           "continuation": null,
-          "dispatch": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+          "dispatch": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
         },
         "status": "unknown",
         "store_parent_attempt": null,
@@ -459,7 +468,7 @@
           }
         },
         "parents": {
-          "continuation": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+          "continuation": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
           "dispatch": null
         },
         "status": "unknown",

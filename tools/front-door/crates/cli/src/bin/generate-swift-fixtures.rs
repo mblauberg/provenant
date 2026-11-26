@@ -451,7 +451,7 @@ mod fixtures {
                 let row = lane(&record)?;
                 let parents = match *graph {
                     "review-the-change-set" => json!({"dispatch":"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1","continuation":null}),
-                    "write-the-migration-notes" => json!({"dispatch":"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1","continuation":null}),
+                    "write-the-migration-notes" => json!({"dispatch":"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1","continuation":null}),
                     "settle-quota-fixtures" => json!({"dispatch":null,"continuation":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}),
                     _ => json!({"dispatch":null,"continuation":null}),
                 };
@@ -1464,6 +1464,35 @@ mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::fixtures;
+
+    #[test]
+    fn synthetic_tree_edges_reference_valid_present_parents_and_children() {
+        let generated = fixtures::console().expect("synthetic console fixtures");
+        let (_, tree) = generated
+            .iter()
+            .find(|(name, _)| *name == "console-tree")
+            .expect("tree fixture");
+        let nodes = tree["data"]["nodes"].as_array().expect("tree nodes");
+        let edges = tree["data"]["edges"].as_array().expect("tree edges");
+        assert!(!edges.is_empty());
+        for edge in edges {
+            let parent = edge["parent_attempt"].as_str().expect("parent ID");
+            provenant_core::AttemptId::parse(parent).expect("valid parent ID");
+            assert_eq!(edge["parent_status"], "present");
+            let node = nodes
+                .iter()
+                .find(|node| node["lane_id"]["attempt_id"] == parent)
+                .expect("parent node");
+            assert!(
+                node["children"]
+                    .as_array()
+                    .expect("children")
+                    .iter()
+                    .any(|child| child["attempt_id"] == edge["child_attempt"]
+                        && child["kind"] == edge["kind"])
+            );
+        }
+    }
 
     #[test]
     fn synthetic_session_fixture_uses_canonical_utc_wall_times() {
