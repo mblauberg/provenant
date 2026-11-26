@@ -32,6 +32,7 @@ pub(crate) fn exact_directory_credential_paths(
     }
     let mut paths = Vec::new();
     for relative in spec
+        .login
         .credential_files
         .iter()
         .chain(spec.login.credential_auxiliary_files)
@@ -326,7 +327,7 @@ fn resolve_entry(
         })
 }
 /// Account configuration directories, in entry order. Only adapters whose
-/// accounts are separate configuration directories (`account_config_dir`:
+/// accounts are separate configuration directories (`accounts.config_dir`:
 /// Claude and Codex) qualify. For the others the registered directory is an
 /// identity, ledger or keychain location, not where the client reads skills and
 /// settings.
@@ -339,7 +340,7 @@ pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
         .values()
         .filter_map(|entry| {
             let spec = provenant_records::AdapterSpec::get(&entry.adapter)?;
-            if !spec.accounts.account_config_dir {
+            if !spec.accounts.config_dir {
                 return None;
             }
             let home = provenant_config::shared_settings::canonical(&entry.directory);
@@ -473,7 +474,7 @@ fn execute_inner(
             return Err(finding.message);
         }
         if provenant_records::AdapterSpec::get(adapter)
-            .and_then(|spec| spec.accounts.account_directory_prefix)
+            .and_then(|spec| spec.accounts.directory_prefix)
             .is_some_and(|prefix| directory != home.join(format!("{prefix}{label}")))
         {
             return Err(
@@ -512,7 +513,7 @@ fn execute_inner(
         let (key, org_fingerprint) = match detected {
             Err(provenant_providers::ProviderError::UnknownIdentity)
                 if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                    spec.accounts.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                    spec.quota.probe == provenant_records::QuotaProbeKind::LocalLedger
                 }) =>
             {
                 (format!("{adapter}-{label}"), None)

@@ -652,9 +652,9 @@ mod tests {
                 continue;
             };
             for support in [
-                install.instructions,
-                install.answer_delivery,
-                install.precompact_context,
+                install.native.instructions,
+                install.native.answer_delivery,
+                install.native.precompact_context,
             ] {
                 if support.value {
                     continue;

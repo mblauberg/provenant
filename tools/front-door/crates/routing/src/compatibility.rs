@@ -2,7 +2,7 @@
 //! project `[[harness_compatibility]]` entries; an assessment is data that the
 //! launch path turns into a typed policy warning or configured stop.
 use provenant_config::overlays::{OverlayWarning, read_layers};
-use provenant_records::Layer;
+use provenant_records::{Layer, Source};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, path::Path};
 
@@ -12,18 +12,19 @@ pub enum CompatibilityStatus {
     Supported,
     Unsupported,
     Broken,
-    Unknown,
+    VersionUnread,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Assessment {
+pub struct CompatibilityAssessment {
     pub adapter: String,
     pub version: Option<String>,
     pub status: CompatibilityStatus,
     pub reason: Option<String>,
     pub issue: Option<u64>,
-    pub recommended: Option<String>,
-    pub source: Layer,
+    pub recommended_range: Option<String>,
+    #[serde(flatten)]
+    pub source: Source,
 }
 
 /// A three-part version. Missing minor and patch parts are zero.
@@ -137,8 +138,8 @@ struct RangeRow {
 struct Entry {
     adapter: String,
     ranges: Vec<RangeRow>,
-    recommended: Option<String>,
-    source: Layer,
+    recommended_range: Option<String>,
+    source: Source,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,9 +152,9 @@ struct Asset {
 struct EntryAsset {
     adapter: String,
     #[serde(default)]
-    provenant: Option<String>,
+    provenant_range: Option<String>,
     #[serde(default)]
-    recommended: Option<String>,
+    recommended_range: Option<String>,
     #[serde(default)]
     ranges: Vec<RangeAsset>,
 }
@@ -170,14 +171,14 @@ struct RangeAsset {
 
 fn decode_entry(
     row: EntryAsset,
-    source: Layer,
+    source: Source,
     warnings: &mut Vec<OverlayWarning>,
 ) -> Option<Entry> {
     let key = format!("harness_compatibility[{}]", row.adapter);
-    if let Some(constraint) = row.provenant.as_deref() {
+    if let Some(constraint) = row.provenant_range.as_deref() {
         let Some(range) = Range::parse(constraint) else {
             warnings.push(OverlayWarning::new(
-                source,
+                source.layer,
                 key,
                 format!("invalid provenant constraint: {constraint}"),
             ));
@@ -193,7 +194,7 @@ fn decode_entry(
     for item in row.ranges {
         let Some(range) = Range::parse(&item.range) else {
             warnings.push(OverlayWarning::new(
-                source,
+                source.layer,
                 key,
                 format!("invalid version range: {}", item.range),
             ));
@@ -209,17 +210,17 @@ fn decode_entry(
     Some(Entry {
         adapter: row.adapter,
         ranges,
-        recommended: row.recommended,
+        recommended_range: row.recommended_range,
         source,
     })
 }
 
 #[derive(Debug, Default)]
-pub struct Table {
+pub struct CompatibilityTable {
     entries: Vec<Entry>,
 }
 
-impl Table {
+impl CompatibilityTable {
     /// The shipped table. It currently has no entries: compatibility facts
     /// arrive through owner overlays or a later bundled revision.
     pub fn bundled() -> Self {
@@ -229,7 +230,7 @@ impl Table {
             toml_edit::de::from_str::<Asset>(include_str!("../assets/harness-compatibility.toml"))
         {
             for row in asset.harness_compatibility {
-                if let Some(entry) = decode_entry(row, Layer::Default, &mut warnings) {
+                if let Some(entry) = decode_entry(row, Source { layer: Layer::Default, origin: Some("crates/routing/assets/harness-compatibility.toml#harness_compatibility".into()) }, &mut warnings) {
                     table.insert(entry);
                 }
             }
@@ -268,7 +269,17 @@ impl Table {
                 let decoded = toml_edit::de::from_str::<EntryAsset>(&row.to_string());
                 match decoded {
                     Ok(row) => {
-                        if let Some(entry) = decode_entry(row, layer.source, &mut warnings) {
+                        if let Some(entry) = decode_entry(
+                            row,
+                            Source {
+                                layer: layer.source,
+                                origin: Some(format!(
+                                    "{}#harness_compatibility",
+                                    layer.path.display()
+                                )),
+                            },
+                            &mut warnings,
+                        ) {
                             table.insert(entry);
                         }
                     }
@@ -296,22 +307,28 @@ impl Table {
     }
 
     /// Resolve one adapter's version against the first matching range. An
-    /// unreadable version is Unknown; a row with no matching range is Supported.
-    pub fn assess(&self, adapter: &str, version: Option<&str>) -> Assessment {
+    /// unreadable version is VersionUnread; a row with no matching range is Supported.
+    pub fn assess(&self, adapter: &str, version: Option<&str>) -> CompatibilityAssessment {
         let parsed = version.and_then(HarnessVersion::extract);
         let recorded = parsed
             .as_ref()
             .map(|(_, token)| token.clone())
             .or_else(|| version.map(str::to_owned));
         let entry = self.entries.iter().find(|row| row.adapter == adapter);
-        let mut assessment = Assessment {
+        let mut assessment = CompatibilityAssessment {
             adapter: adapter.to_owned(),
             version: recorded,
-            status: CompatibilityStatus::Unknown,
+            status: CompatibilityStatus::VersionUnread,
             reason: None,
             issue: None,
-            recommended: entry.and_then(|row| row.recommended.clone()),
-            source: entry.map_or(Layer::Default, |row| row.source),
+            recommended_range: entry.and_then(|row| row.recommended_range.clone()),
+            source: entry.map_or(
+                Source {
+                    layer: Layer::Default,
+                    origin: None,
+                },
+                |row| row.source.clone(),
+            ),
         };
         let Some((actual, _)) = parsed else {
             return assessment;
@@ -333,12 +350,12 @@ impl Table {
     }
 }
 
-/// The policy code for a status; None for Supported and Unknown.
+/// The policy code for a status; None for Supported and VersionUnread.
 pub fn policy_code(status: CompatibilityStatus) -> Option<&'static str> {
     match status {
         CompatibilityStatus::Unsupported => Some("HARNESS_VERSION_UNSUPPORTED"),
         CompatibilityStatus::Broken => Some("HARNESS_VERSION_BROKEN"),
-        CompatibilityStatus::Supported | CompatibilityStatus::Unknown => None,
+        CompatibilityStatus::Supported | CompatibilityStatus::VersionUnread => None,
     }
 }
 
@@ -413,14 +430,14 @@ ranges = [
 ]
 "#;
         let (_temp, state) = state_with(text);
-        let (table, warnings) = Table::effective(&state, None);
+        let (table, warnings) = CompatibilityTable::effective(&state, None);
         assert!(warnings.is_empty(), "{warnings:?}");
         let assessment = table.assess("codex", Some("codex 0.61.0"));
         assert_eq!(assessment.status, CompatibilityStatus::Unsupported);
         assert_eq!(assessment.reason.as_deref(), Some("first"));
         assert_eq!(assessment.issue, Some(1));
         assert_eq!(assessment.version.as_deref(), Some("0.61.0"));
-        assert_eq!(assessment.source, Layer::Host);
+        assert_eq!(assessment.source.layer, Layer::Host);
     }
 
     #[test]
@@ -431,12 +448,12 @@ adapter = "claude"
 ranges = [{ range = "about 0.5", status = "broken" }]
 "#;
         let (_temp, state) = state_with(text);
-        let (table, warnings) = Table::effective(&state, None);
+        let (table, warnings) = CompatibilityTable::effective(&state, None);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(warnings[0].source, Layer::Host);
         let assessment = table.assess("claude", Some("1.2.3"));
         assert_eq!(assessment.status, CompatibilityStatus::Supported);
-        assert_eq!(assessment.source, Layer::Default);
+        assert_eq!(assessment.source.layer, Layer::Default);
     }
 
     #[test]
@@ -455,32 +472,32 @@ ranges = [{ range = ">=0.1", status = "unsupported", reason = "host" }]
             r#"
 [[harness_compatibility]]
 adapter = "codex"
-provenant = ">=2.9"
-recommended = ">=0.60"
+provenant_range = ">=2.9"
+recommended_range = ">=0.60"
 ranges = [{ range = ">=0.1", status = "broken", reason = "project", issue = 42 }]
 "#,
         )
         .unwrap();
-        let (table, warnings) = Table::effective(&state, Some(&project));
+        let (table, warnings) = CompatibilityTable::effective(&state, Some(&project));
         assert!(warnings.is_empty(), "{warnings:?}");
         let assessment = table.assess("codex", Some("codex-cli 0.61.0"));
         assert_eq!(assessment.status, CompatibilityStatus::Broken);
         assert_eq!(assessment.reason.as_deref(), Some("project"));
         assert_eq!(assessment.issue, Some(42));
-        assert_eq!(assessment.recommended.as_deref(), Some(">=0.60"));
-        assert_eq!(assessment.source, Layer::Project);
+        assert_eq!(assessment.recommended_range.as_deref(), Some(">=0.60"));
+        assert_eq!(assessment.source.layer, Layer::Project);
     }
 
     #[test]
     fn unreadable_version_assesses_unknown() {
-        let table = Table::bundled();
+        let table = CompatibilityTable::bundled();
         assert_eq!(
             table.assess("codex", None).status,
-            CompatibilityStatus::Unknown
+            CompatibilityStatus::VersionUnread
         );
         assert_eq!(
             table.assess("codex", Some("no digits here")).status,
-            CompatibilityStatus::Unknown
+            CompatibilityStatus::VersionUnread
         );
         assert_eq!(
             table.assess("codex", Some("codex 0.61.0")).status,
@@ -493,11 +510,11 @@ ranges = [{ range = ">=0.1", status = "broken", reason = "project", issue = 42 }
         let text = r#"
 [[harness_compatibility]]
 adapter = "codex"
-provenant = ">=99.0"
+provenant_range = ">=99.0"
 ranges = [{ range = ">=0.1", status = "broken" }]
 "#;
         let (_temp, state) = state_with(text);
-        let (table, warnings) = Table::effective(&state, None);
+        let (table, warnings) = CompatibilityTable::effective(&state, None);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
             table.assess("codex", Some("0.61.0")).status,
@@ -508,7 +525,7 @@ ranges = [{ range = ">=0.1", status = "broken" }]
     #[test]
     fn status_maps_to_a_policy_code() {
         assert_eq!(policy_code(CompatibilityStatus::Supported), None);
-        assert_eq!(policy_code(CompatibilityStatus::Unknown), None);
+        assert_eq!(policy_code(CompatibilityStatus::VersionUnread), None);
         assert_eq!(
             policy_code(CompatibilityStatus::Unsupported),
             Some("HARNESS_VERSION_UNSUPPORTED")

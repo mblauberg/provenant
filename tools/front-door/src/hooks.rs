@@ -402,9 +402,9 @@ fn answer_delivery_reply(
         diagnostic("answer delivery unavailable: provider has no native install declaration");
         return Ok(None);
     };
-    if !install.answer_delivery.value {
-        let reason = install.answer_delivery.reason;
-        let source = install.answer_delivery.source;
+    if !install.native.answer_delivery.value {
+        let reason = install.native.answer_delivery.reason;
+        let source = install.native.answer_delivery.source;
         diagnostic(&format!(
             "answer delivery unavailable: {reason} (source: {source})"
         ));
@@ -755,7 +755,7 @@ fn provider_advisory_output(
             client
                 .spec()
                 .install
-                .map(|install| install.precompact_context)
+                .map(|install| install.native.precompact_context)
         });
         return match support {
             Some(declaration)
@@ -2033,7 +2033,7 @@ mod answer_delivery_tests {
         let Some(declaration) = Harness::Codex
             .spec()
             .install
-            .map(|install| install.precompact_context)
+            .map(|install| install.native.precompact_context)
         else {
             return Err("Codex precompact context capability must be declared unsupported".into());
         };
@@ -2059,7 +2059,7 @@ mod answer_delivery_tests {
         let Some(declaration) = Harness::Cursor
             .spec()
             .install
-            .map(|install| install.precompact_context)
+            .map(|install| install.native.precompact_context)
         else {
             return Err("Cursor precompact context capability must be declared unsupported".into());
         };

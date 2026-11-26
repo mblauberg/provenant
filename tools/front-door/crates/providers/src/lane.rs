@@ -76,7 +76,7 @@ impl crate::LaunchSpec {
     }
     /// Restore selected environment before the provider starts a shell command.
     pub fn configure_shell(&mut self, scratch: &Path, adapter: &provenant_records::AdapterSpec) {
-        let Some((relative, selector)) = adapter.shell_prefix else {
+        let Some((relative, selector)) = adapter.launch.shell_prefix else {
             return;
         };
         let path = scratch.join(relative);

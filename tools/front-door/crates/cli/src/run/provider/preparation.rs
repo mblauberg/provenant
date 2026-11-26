@@ -22,10 +22,10 @@ fn include_local_login(
     selected_adapter: Option<&str>,
     retained_identity: Option<RetainedIdentity<'_>>,
 ) -> bool {
-    if !spec.login.local_login
+    if !spec.login.local
         || selected_adapter.is_some_and(|adapter| adapter != spec.identity.name)
         || retained_identity
-            .is_some_and(|identity| identity.account_key != Some(spec.accounts.local_account.1))
+            .is_some_and(|identity| identity.account_key != Some(spec.accounts.local_entry.1))
     {
         return false;
     }
@@ -38,12 +38,12 @@ fn include_local_login(
 
     // A registered-account adapter's local identity participates in the same
     // per-account observation and quota scheduling as its other accounts.
-    if !spec.is_unregistered_local(spec.accounts.local_account.1) {
+    if !spec.is_unregistered_local(spec.accounts.local_entry.1) {
         return false;
     }
     selected.is_none_or(|selector| {
-        selector == spec.accounts.local_account.1
-            || (selector == spec.accounts.local_account.0
+        selector == spec.accounts.local_entry.1
+            || (selector == spec.accounts.local_entry.0
                 && !entries.iter().any(|entry| {
                     entry.adapter == spec.identity.name
                         && (entry.label == selector || entry.key == selector)
@@ -988,7 +988,7 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     Prompt(#[from] LaunchPromptError),
     #[error(transparent)]
-    Unsupported(#[from] provenant_records::LaunchDecision),
+    Unsupported(#[from] provenant_records::LaunchGap),
     #[error(transparent)]
     Permission(#[from] provenant_confinement::permissions::PermissionError),
     #[error(transparent)]
@@ -1592,12 +1592,12 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         PrepareError::SourceCwd(SourceCwdError::Operational("cwd unavailable".into()))
             .into_refusal();
     assert_eq!(unavailable.boundary_class, BoundaryClass::None);
-    let unsupported = PrepareError::Unsupported(provenant_records::LaunchDecision {
+    let unsupported = PrepareError::Unsupported(provenant_records::LaunchGap {
         adapter: "fixture",
         field: provenant_records::LaunchField::Write,
         action: provenant_records::LaunchAction::Refuse,
         reason: "fixture limitation",
-        source: provenant_records::ROW_SOURCE,
+        source: provenant_records::ADAPTER_ROW_SOURCE,
     })
     .into_refusal();
     assert_eq!(unsupported.boundary_class, BoundaryClass::None);
@@ -2237,7 +2237,7 @@ fn prepare_inner(
 /// A mismatch is about which account is signed in, so only a check that names
 /// the account may clear it; a plain "logged in" answer must not.
 pub(super) fn login_check_can_clear(adapter: &str, mismatch: bool) -> bool {
-    !mismatch || AdapterSpec::get(adapter).is_some_and(|spec| spec.login.login_check_names_account)
+    !mismatch || AdapterSpec::get(adapter).is_some_and(|spec| spec.login.check_names_account)
 }
 
 /// Spec: docs/specs/routing.md#launch-login-recovery
@@ -2264,7 +2264,7 @@ fn login_recovery_can_clear(
         return false;
     }
     AdapterSpec::get(adapter).is_none_or(|spec| {
-        spec.login.account_identity_probe != provenant_records::AccountIdentityProbe::CliAuthStatus
+        spec.login.identity_probe != provenant_records::AccountIdentityProbe::CliAuthStatus
     })
 }
 
@@ -3487,7 +3487,7 @@ pub(super) fn prepare_candidates_inner(
         .iter()
         .filter(|spec| eligible(spec.identity.name))
     {
-        let Some((environment, fallback)) = spec.accounts.default_account_directory else {
+        let Some((environment, fallback)) = spec.accounts.default_directory else {
             continue;
         };
         if entries
@@ -3562,7 +3562,7 @@ pub(super) fn prepare_candidates_inner(
     // These adapters use the CLI's existing local login and configuration.
     for spec in ADAPTER_SPECS
         .iter()
-        .filter(|spec| spec.login.local_login && eligible(spec.identity.name))
+        .filter(|spec| spec.login.local && eligible(spec.identity.name))
     {
         let adapter = spec.identity.name;
         if include_local_login(
@@ -3574,13 +3574,13 @@ pub(super) fn prepare_candidates_inner(
         ) && locate(adapter).is_ok()
             && !entries.iter().any(|entry| {
                 entry.adapter == adapter
-                    && (entry.key == spec.accounts.local_account.1 || entry.directory == home)
+                    && (entry.key == spec.accounts.local_entry.1 || entry.directory == home)
             })
         {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
-                label: spec.accounts.local_account.0.into(),
-                key: spec.accounts.local_account.1.into(),
+                label: spec.accounts.local_entry.0.into(),
+                key: spec.accounts.local_entry.1.into(),
                 org_fingerprint: None,
                 directory: home.clone(),
                 plan: None,
@@ -3653,7 +3653,7 @@ pub(super) fn prepare_candidates_inner(
             Ok(mut record) => {
                 let strategy = AdapterSpec::get(&entry.adapter)
                     .map_or(provenant_records::LoginReprobe::None, |spec| {
-                        spec.login.login_reprobe
+                        spec.login.reprobe
                     });
                 if strategy != provenant_records::LoginReprobe::None {
                     let scope = provenant_quota::ReadinessScope {
@@ -4586,7 +4586,7 @@ pub(super) fn prepare_candidates_inner(
         let account = match entry
             .filter(|entry| {
                 AdapterSpec::get(&entry.adapter).is_none_or(|spec| {
-                    spec.accounts.registered_account && !spec.is_unregistered_local(&entry.key)
+                    spec.accounts.registered && !spec.is_unregistered_local(&entry.key)
                 })
             })
             .map(|entry| entry.registered())
@@ -4600,7 +4600,7 @@ pub(super) fn prepare_candidates_inner(
         };
         // An unregistered local login runs without a pinned account.
         if AdapterSpec::get(adapter.id()).is_some_and(|spec| {
-            spec.accounts.registered_account
+            spec.accounts.registered
                 && !route
                     .account_key
                     .as_deref()
@@ -4657,7 +4657,7 @@ pub(super) fn prepare_candidates_inner(
         }
         let opencode_host = adapter_spec.is_some_and(|spec| {
             spec.capabilities.answering_model.value
-                == provenant_records::ModelObservation::SessionDatabase
+                == provenant_records::AnsweringModelSource::SessionDatabase
         }) && !lane_access.access.is_isolated();
         let opencode_homes = provenant_providers::opencode::host_xdg_homes(&home, &|key| {
             host_provider_var(registry, key)
@@ -5086,10 +5086,11 @@ pub(super) fn prepare_candidates_inner(
         // Harness version compatibility is declared data: the bundled table is
         // overlaid by host and project config, and the policy decides whether a
         // status warns or blocks. No network fetch; probes are cached by file.
-        let (compatible, overlay_warnings) = provenant_routing::compatibility::Table::effective(
-            roots.state.as_path(),
-            Some(&source),
-        );
+        let (compatible, overlay_warnings) =
+            provenant_routing::compatibility::CompatibilityTable::effective(
+                roots.state.as_path(),
+                Some(&source),
+            );
         for warning in overlay_warnings {
             push_launch_warning(&mut route, warning.to_string());
         }
@@ -5102,7 +5103,7 @@ pub(super) fn prepare_candidates_inner(
                 Status::Supported => "supported",
                 Status::Unsupported => "unsupported",
                 Status::Broken => "broken",
-                Status::Unknown => "unknown",
+                Status::VersionUnread => "version_unread",
             };
             let mut detail = format!(
                 "{} {} is {}",
@@ -5116,7 +5117,7 @@ pub(super) fn prepare_candidates_inner(
             if let Some(issue) = assessment.issue {
                 detail.push_str(&format!("; issue #{issue}"));
             }
-            detail.push_str(&format!("; source={}", assessment.source));
+            detail.push_str(&format!("; source={}", assessment.source.layer));
             match launch_policy.check(code, provenant_records::policy::Facts::violation(detail)) {
                 provenant_records::policy::Effect::Warn(warning) => {
                     push_launch_warning(&mut route, warning.message);
@@ -5692,7 +5693,7 @@ pub(super) fn prepare_candidates_inner(
             continue;
         }
         if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
-            spec.login.login_observation == provenant_records::LoginObservation::ExecutableOnly
+            spec.login.observation == provenant_records::LoginObservation::ExecutableOnly
         }) {
             let warning = format!(
                 "{} login status is unverified; the selected launch will check authentication",
@@ -5860,7 +5861,7 @@ pub(super) fn prepare_candidates_inner(
         ))?);
         if adapter_spec.is_some_and(|spec| {
             spec.capabilities.answering_model.value
-                == provenant_records::ModelObservation::SessionDatabase
+                == provenant_records::AnsweringModelSource::SessionDatabase
         }) {
             let message = opencode_access_message(&lane_access);
             warn(Warning::new(
@@ -7830,21 +7831,21 @@ mod route_launch_boundary_regressions {
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.accounts.local_account.1),
+            Some(spec.accounts.local_entry.1),
             Some("agy"),
             None
         ));
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.accounts.local_account.0),
+            Some(spec.accounts.local_entry.0),
             Some("agy"),
             None
         ));
         assert!(!include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.accounts.local_account.1),
+            Some(spec.accounts.local_entry.1),
             Some("cursor"),
             None
         ));
@@ -7852,23 +7853,23 @@ mod route_launch_boundary_regressions {
         assert!(include_local_login(
             cursor,
             &[],
-            Some(cursor.local_account.1),
+            Some(cursor.accounts.local_entry.1),
             Some("cursor"),
             None
         ));
         assert!(!include_local_login(
             cursor,
             &[],
-            Some(cursor.local_account.1),
+            Some(cursor.accounts.local_entry.1),
             Some("agy"),
             None
         ));
         let resumed_local = effective_account_selector(
             Some("agy-registered"),
-            Some(spec.accounts.local_account.1),
+            Some(spec.accounts.local_entry.1),
             true,
         );
-        assert_eq!(resumed_local, Some(spec.accounts.local_account.1));
+        assert_eq!(resumed_local, Some(spec.accounts.local_entry.1));
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
@@ -7876,7 +7877,7 @@ mod route_launch_boundary_regressions {
             Some("agy"),
             Some(RetainedIdentity {
                 provider: "agy",
-                account_key: Some(spec.accounts.local_account.1),
+                account_key: Some(spec.accounts.local_entry.1),
             })
         ));
         assert!(!include_local_login(
@@ -7892,7 +7893,7 @@ mod route_launch_boundary_regressions {
         assert_eq!(
             effective_account_selector(
                 Some("agy-registered"),
-                Some(spec.accounts.local_account.1),
+                Some(spec.accounts.local_entry.1),
                 false
             ),
             Some("agy-registered")
@@ -7966,21 +7967,21 @@ mod route_launch_boundary_regressions {
 
         let mut candidates = vec![registered.clone()];
         candidates.push(agy_entry(
-            spec.accounts.local_account.0,
-            spec.accounts.local_account.1,
+            spec.accounts.local_entry.0,
+            spec.accounts.local_entry.1,
             &home,
         ));
         assert_eq!(
-            select_account(&candidates, spec.accounts.local_account.1, Some("agy"))
+            select_account(&candidates, spec.accounts.local_entry.1, Some("agy"))
                 .map_err(|error| error.to_string())?
                 .key,
-            spec.accounts.local_account.1
+            spec.accounts.local_entry.1
         );
         assert_eq!(
-            select_account(&candidates, spec.accounts.local_account.0, Some("agy"))
+            select_account(&candidates, spec.accounts.local_entry.0, Some("agy"))
                 .map_err(|error| error.to_string())?
                 .key,
-            spec.accounts.local_account.1
+            spec.accounts.local_entry.1
         );
         assert_eq!(
             select_account(&candidates, "agy-registered", Some("agy"))
@@ -7992,8 +7993,8 @@ mod route_launch_boundary_regressions {
         let labelled_collision = agy_entry("local", "agy-other", &home.join(".agy-other"));
         let mut colliding_candidates = vec![labelled_collision];
         colliding_candidates.push(agy_entry(
-            spec.accounts.local_account.0,
-            spec.accounts.local_account.1,
+            spec.accounts.local_entry.0,
+            spec.accounts.local_entry.1,
             &home,
         ));
         // Spec: docs/specs/routing.md#account-references
@@ -8001,7 +8002,7 @@ mod route_launch_boundary_regressions {
         assert!(matches!(
             select_account(
                 &colliding_candidates,
-                spec.accounts.local_account.1,
+                spec.accounts.local_entry.1,
                 Some("agy")
             ),
             Err(PrepareError::Other(_))

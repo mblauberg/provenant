@@ -11,7 +11,7 @@ use provenant_os::exec::SystemExecutor;
 use provenant_providers::host::LocalSignin;
 use provenant_quota::{QuotaStatus, ReadinessReason};
 use provenant_records::{
-    CommandResult, Layer, Outcome, StopCause,
+    CommandResult, Outcome, StopCause,
     policy::{Facts, Policy},
 };
 use provenant_routing::{
@@ -217,7 +217,8 @@ fn inventory(roots: &provenant_core::Roots) -> Result<Vec<Row>, Box<dyn std::err
             // Namespaced free accounts and subscription pools have only partial
             // allowance coverage today. Never promote a login's quota to Zen.
             let governed = spec
-                .quota_model_prefix
+                .quota
+                .model_prefix
                 .is_none_or(|prefix| model.model().starts_with(prefix));
             let snapshot = snapshot.filter(|_| governed);
             let known = snapshot.is_some_and(|snapshot| {
@@ -233,7 +234,7 @@ fn inventory(roots: &provenant_core::Roots) -> Result<Vec<Row>, Box<dyn std::err
             let quota = Quota {
                 coverage: if !known {
                     Coverage::Unknown
-                } else if spec.accounts.quota_model_prefix.is_some()
+                } else if spec.quota.model_prefix.is_some()
                     || snapshot
                         .and_then(|snapshot| snapshot.details.as_ref())
                         .and_then(|details| details.coverage.as_deref())
@@ -551,8 +552,9 @@ struct Finding {
     status: CompatibilityStatus,
     reason: Option<String>,
     issue: Option<u64>,
-    recommended: Option<String>,
-    source: Layer,
+    recommended_range: Option<String>,
+    #[serde(flatten)]
+    source: provenant_records::Source,
     policy: Option<String>,
     blocks: bool,
 }
@@ -567,7 +569,7 @@ impl Finding {
             self.reason.as_deref().unwrap_or("-"),
             self.issue
                 .map_or_else(|| "-".into(), |issue| issue.to_string()),
-            self.source.as_str(),
+            self.source.layer.as_str(),
             self.policy.as_deref().unwrap_or("-")
         )
     }
@@ -578,7 +580,7 @@ fn status_text(status: CompatibilityStatus) -> &'static str {
         CompatibilityStatus::Supported => "supported",
         CompatibilityStatus::Unsupported => "unsupported",
         CompatibilityStatus::Broken => "broken",
-        CompatibilityStatus::Unknown => "unknown",
+        CompatibilityStatus::VersionUnread => "version_unread",
     }
 }
 
@@ -588,7 +590,7 @@ fn compatibility_findings(
     state: &Path,
     project: &Path,
 ) -> Result<Vec<Finding>, Box<dyn std::error::Error>> {
-    let (table, _warnings) = compatibility::Table::effective(state, Some(project));
+    let (table, _warnings) = compatibility::CompatibilityTable::effective(state, Some(project));
     let project_key = provenant_config::ports::project_key_for(project).unwrap_or_default();
     let policy: Policy = provenant_config::policy::read(state, &project_key, &BTreeMap::new());
     let Ok(executor) = SystemExecutor::new(1) else {
@@ -621,7 +623,7 @@ fn compatibility_findings(
         if let Some(issue) = assessment.issue {
             detail.push_str(&format!("; issue #{issue}"));
         }
-        detail.push_str(&format!("; source={}", assessment.source.as_str()));
+        detail.push_str(&format!("; source={}", assessment.source.layer.as_str()));
         let effect = policy.check(code, Facts::violation(detail));
         let blocks = effect.blocks();
         let policy = effect.message().map(str::to_owned);
@@ -631,7 +633,7 @@ fn compatibility_findings(
             status: assessment.status,
             reason: assessment.reason,
             issue: assessment.issue,
-            recommended: assessment.recommended,
+            recommended_range: assessment.recommended_range,
             source: assessment.source,
             policy,
             blocks,

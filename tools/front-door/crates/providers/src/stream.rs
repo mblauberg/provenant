@@ -127,7 +127,7 @@ pub struct ProviderOutcome {
     session: Option<String>,
     model: Option<String>,
     status: OutcomeStatus,
-    terminal: bool,
+    terminal_event_seen: bool,
     exit: ExitObservation,
     final_events: Vec<ProviderEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,8 +161,8 @@ impl ProviderOutcome {
     pub fn status(&self) -> OutcomeStatus {
         self.status
     }
-    pub fn terminal(&self) -> bool {
-        self.terminal
+    pub fn terminal_event_seen(&self) -> bool {
+        self.terminal_event_seen
     }
     pub fn exit(&self) -> ExitObservation {
         self.exit
@@ -285,7 +285,7 @@ impl StreamState {
     }
     fn raw_stream(&self) -> bool {
         provenant_records::AdapterSpec::get(self.adapter)
-            .is_some_and(|spec| spec.launch.stream == provenant_records::StreamContract::Raw)
+            .is_some_and(|spec| spec.launch.framing == provenant_records::StreamFraming::Raw)
     }
     pub(crate) fn observe(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
         if self.raw_stream() {
@@ -580,10 +580,10 @@ impl StreamState {
             }
         }
         // An unknown adapter is treated strictly: success still requires a
-        // provider terminal event. A declared `None` adapter (raw command
+        // provider terminal event. A declared `Absent` adapter (raw command
         // output) settles a clean exit on the process contract alone.
         let terminal_event = provenant_records::AdapterSpec::get(self.adapter)
-            .map_or(provenant_records::TerminalEvent::Weak, |spec| {
+            .map_or(provenant_records::TerminalEventStrength::Weak, |spec| {
                 spec.capabilities.terminal_event.value
             });
         let status = if self.malformed {
@@ -596,7 +596,9 @@ impl StreamState {
             OutcomeStatus::Partial
         } else if exit.code != Some(0) {
             OutcomeStatus::Failed
-        } else if self.terminal || terminal_event == provenant_records::TerminalEvent::None {
+        } else if self.terminal
+            || terminal_event == provenant_records::TerminalEventStrength::Absent
+        {
             OutcomeStatus::Success
         } else {
             OutcomeStatus::Partial
@@ -636,7 +638,7 @@ impl StreamState {
                 self.model
             },
             status,
-            terminal: self.terminal,
+            terminal_event_seen: self.terminal,
             exit,
             final_events,
             protocol_error,

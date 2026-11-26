@@ -809,7 +809,8 @@ fn opencode_effort_normalisation_is_visible_in_exact_pool_and_launch_routes()
         .filter(|entry| entry.model.adapter() == spec.identity.name)
     {
         let plan = spec
-            .account_model_plans
+            .accounts
+            .model_plans
             .iter()
             .find(|plan| entry.model.model().starts_with(plan.model_prefix))
             .ok_or("registered plan")?;

@@ -7,12 +7,12 @@
 use provenant_core::WallTime;
 use provenant_os::exec::SystemExecutor;
 use provenant_records::{
-    ADAPTER_SPECS, AdapterSpec, Declaration, HarnessInstall, ModelObservation, TerminalEvent,
-    UsageAttribution,
+    ADAPTER_SPECS, AdapterFact, AdapterSpec, AnsweringModelSource, HarnessInstall,
+    TerminalEventStrength, UsageAttribution,
     control::ControlSupport,
     run::{AttemptState, NetworkAccess},
 };
-use provenant_routing::compatibility::{CompatibilityStatus, Table};
+use provenant_routing::compatibility::{CompatibilityStatus, CompatibilityTable};
 use provenant_run::{LaneQuery, RunStore};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path};
@@ -27,30 +27,31 @@ fn declaration(value: Value, reason: &'static str, source: &'static str) -> Valu
     json!({ "value": value, "reason": reason, "source": source })
 }
 
-fn bool_declaration(value: Declaration<bool>) -> Value {
+fn bool_declaration(value: AdapterFact<bool>) -> Value {
     declaration(json!(value.value), value.reason, value.source)
 }
 
-fn terminal_declaration(value: Declaration<TerminalEvent>) -> Value {
+fn terminal_declaration(value: AdapterFact<TerminalEventStrength>) -> Value {
     let name = match value.value {
-        TerminalEvent::Weak => "weak",
-        TerminalEvent::None => "none",
+        TerminalEventStrength::Strong => "strong",
+        TerminalEventStrength::Weak => "weak",
+        TerminalEventStrength::Absent => "absent",
     };
     declaration(json!(name), value.reason, value.source)
 }
 
-fn answering_declaration(value: Declaration<ModelObservation>) -> Value {
+fn answering_declaration(value: AdapterFact<AnsweringModelSource>) -> Value {
     let name = match value.value {
-        ModelObservation::Stream => "stream",
-        ModelObservation::Rollout => "rollout",
-        ModelObservation::SessionDatabase => "session_database",
+        AnsweringModelSource::Stream => "stream",
+        AnsweringModelSource::Rollout => "rollout",
+        AnsweringModelSource::SessionDatabase => "session_database",
     };
     declaration(json!(name), value.reason, value.source)
 }
 
-fn usage_declaration(value: Declaration<UsageAttribution>) -> Value {
+fn usage_declaration(value: AdapterFact<UsageAttribution>) -> Value {
     let name = match value.value {
-        UsageAttribution::Turn => "turn",
+        UsageAttribution::Attempt => "attempt",
         UsageAttribution::Session => "session",
     };
     declaration(json!(name), value.reason, value.source)
@@ -78,16 +79,16 @@ fn status_name(value: CompatibilityStatus) -> &'static str {
         CompatibilityStatus::Supported => "supported",
         CompatibilityStatus::Unsupported => "unsupported",
         CompatibilityStatus::Broken => "broken",
-        CompatibilityStatus::Unknown => "unknown",
+        CompatibilityStatus::VersionUnread => "version_unread",
     }
 }
 
 fn native(install: HarnessInstall) -> Value {
     json!({
-        "hooks": bool_declaration(install.hooks),
-        "answer_delivery": bool_declaration(install.answer_delivery),
-        "precompact_context": bool_declaration(install.precompact_context),
-        "instructions": bool_declaration(install.instructions),
+        "hooks": bool_declaration(install.native.hooks),
+        "answer_delivery": bool_declaration(install.native.answer_delivery),
+        "precompact_context": bool_declaration(install.native.precompact_context),
+        "instructions": bool_declaration(install.native.instructions),
     })
 }
 
@@ -220,7 +221,7 @@ fn which(name: &str) -> Option<std::path::PathBuf> {
 
 /// The `data` of result envelope v2 for `provenant adapter capabilities --json`.
 pub fn matrix(state: &Path, project: Option<&Path>, store: Option<&RunStore>) -> Value {
-    let (table, _) = Table::effective(state, project);
+    let (table, _) = CompatibilityTable::effective(state, project);
     let executor = SystemExecutor::new(1).ok();
     let cwd = project.unwrap_or(state);
     let measured = measurements(store);
@@ -243,8 +244,9 @@ pub fn matrix(state: &Path, project: Option<&Path>, store: Option<&RunStore>) ->
                     "status": status_name(assessment.status),
                     "reason": assessment.reason,
                     "issue": assessment.issue,
-                    "recommended": assessment.recommended,
-                    "source": assessment.source.as_str(),
+                    "recommended_range": assessment.recommended_range,
+                    "layer": assessment.source.layer.as_str(),
+                    "origin": assessment.source.origin,
                 },
                 "measurements": measured.get(spec.identity.name).cloned().unwrap_or(Value::Null),
             })
@@ -267,7 +269,7 @@ fn cell(
     }
 }
 
-fn bool_cell(value: Declaration<bool>, label: &str, notes: &mut Vec<String>) -> String {
+fn bool_cell(value: AdapterFact<bool>, label: &str, notes: &mut Vec<String>) -> String {
     if value.value {
         "yes".to_owned()
     } else {
@@ -286,10 +288,11 @@ pub fn markdown() -> String {
         let control = &spec.capabilities.control;
         let terminal = spec.capabilities.terminal_event;
         let terminal_text = match terminal.value {
-            TerminalEvent::Weak => "weak",
-            TerminalEvent::None => "none",
+            TerminalEventStrength::Strong => "strong",
+            TerminalEventStrength::Weak => "weak",
+            TerminalEventStrength::Absent => "absent",
         };
-        let terminal_cell = if terminal.value == TerminalEvent::None {
+        let terminal_cell = if terminal.value == TerminalEventStrength::Absent {
             cell(
                 terminal_text,
                 Some((terminal.reason, terminal.source)),
@@ -309,10 +312,18 @@ pub fn markdown() -> String {
             },
             |install| {
                 [
-                    bool_cell(install.hooks, "hooks", &mut notes),
-                    bool_cell(install.answer_delivery, "answer delivery", &mut notes),
-                    bool_cell(install.precompact_context, "precompact context", &mut notes),
-                    bool_cell(install.instructions, "instructions", &mut notes),
+                    bool_cell(install.native.hooks, "hooks", &mut notes),
+                    bool_cell(
+                        install.native.answer_delivery,
+                        "answer delivery",
+                        &mut notes,
+                    ),
+                    bool_cell(
+                        install.native.precompact_context,
+                        "precompact context",
+                        &mut notes,
+                    ),
+                    bool_cell(install.native.instructions, "instructions", &mut notes),
                 ]
             },
         );
@@ -330,12 +341,12 @@ pub fn markdown() -> String {
             control_name(control.chair),
             terminal_cell,
             match spec.capabilities.answering_model.value {
-                ModelObservation::Stream => "stream",
-                ModelObservation::Rollout => "rollout",
-                ModelObservation::SessionDatabase => "session_database",
+                AnsweringModelSource::Stream => "stream",
+                AnsweringModelSource::Rollout => "rollout",
+                AnsweringModelSource::SessionDatabase => "session_database",
             },
             match spec.capabilities.usage_attribution.value {
-                UsageAttribution::Turn => "turn",
+                UsageAttribution::Attempt => "attempt",
                 UsageAttribution::Session => "session",
             },
             bool_cell(spec.capabilities.live_input, "live input", &mut notes),

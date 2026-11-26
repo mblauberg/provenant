@@ -410,7 +410,7 @@ pub fn plan_tick_with_settings(
     for record in records {
         // Keep past Google accounts so returning to a sign-in restores its cooldown.
         let retaining = provenant_records::AdapterSpec::get(&record.account.adapter)
-            .is_some_and(|spec| spec.accounts.retain_quota_accounts);
+            .is_some_and(|spec| spec.quota.retain_accounts);
         let absent_from_detection = detections.iter().any(|d| {
             d.adapter == record.account.adapter
                 && d.accounts
@@ -426,8 +426,7 @@ pub fn plan_tick_with_settings(
             // Provider discovery owns observations, not independently booked allowance debt.
             let local_login = provenant_records::AdapterSpec::get(&record.account.adapter)
                 .is_some_and(|spec| {
-                    spec.login.local_login
-                        && spec.accounts.local_account.1 == record.account.account_key
+                    spec.login.local && spec.accounts.local_entry.1 == record.account.account_key
                 });
             let replacement =
                 if local_login && record.allowance != crate::AllowanceLedger::default() {
@@ -963,8 +962,8 @@ mod tests {
         let spec = provenant_records::ADAPTER_SPECS
             .iter()
             .find(|spec| {
-                spec.accounts.free_pool.is_some()
-                    && spec.accounts.quota_probe != provenant_records::QuotaProbeKind::None
+                spec.quota.free_pool.is_some()
+                    && spec.quota.probe != provenant_records::QuotaProbeKind::None
             })
             .expect("free pool adapter with a quota probe");
         let account = AccountScope {
@@ -979,7 +978,7 @@ mod tests {
             extra: Default::default(),
             account: account.clone(),
             model: "free-model".into(),
-            pool: spec.accounts.free_pool.map(str::to_owned),
+            pool: spec.quota.free_pool.map(str::to_owned),
             observed_unix_seconds: 100,
             resets_unix_seconds: Some(100 + 50_000),
         });
@@ -1044,8 +1043,8 @@ mod tests {
         let spec = provenant_records::ADAPTER_SPECS
             .iter()
             .find(|spec| {
-                spec.accounts.free_pool.is_some()
-                    && spec.accounts.quota_probe != provenant_records::QuotaProbeKind::None
+                spec.quota.free_pool.is_some()
+                    && spec.quota.probe != provenant_records::QuotaProbeKind::None
             })
             .expect("free pool adapter with a quota probe");
         let account = AccountScope {
@@ -1060,7 +1059,7 @@ mod tests {
             extra: Default::default(),
             account: account.clone(),
             model: "free-model".into(),
-            pool: spec.accounts.free_pool.map(str::to_owned),
+            pool: spec.quota.free_pool.map(str::to_owned),
             observed_unix_seconds: 100,
             resets_unix_seconds: Some(100 + 50_000),
         });
@@ -2555,7 +2554,7 @@ mod zen_tests {
                 label: "fixture".into(),
             },
             model: "opencode/beam-free".into(),
-            pool: spec.accounts.free_pool.map(str::to_owned),
+            pool: spec.quota.free_pool.map(str::to_owned),
             observed_unix_seconds: 100,
             resets_unix_seconds: None,
         };
@@ -2565,7 +2564,8 @@ mod zen_tests {
         for now in [expiry - 1, expiry] {
             for error in [None, Some(ProbeFailure::Auth)] {
                 let records: Vec<_> = spec
-                    .account_model_plans
+                    .accounts
+                    .model_plans
                     .iter()
                     .enumerate()
                     .map(|(index, plan)| {

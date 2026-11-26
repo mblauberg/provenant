@@ -334,9 +334,9 @@ fn account_identities(settings: &Settings) -> Vec<AccountIdentity> {
         .collect();
     for spec in provenant_records::ADAPTER_SPECS
         .iter()
-        .filter(|spec| spec.login.local_login)
+        .filter(|spec| spec.login.local)
     {
-        let key = spec.accounts.local_account.1;
+        let key = spec.accounts.local_entry.1;
         let qualified = format!("{}/{}", spec.identity.name, key);
         if identities
             .iter()
@@ -348,7 +348,7 @@ fn account_identities(settings: &Settings) -> Vec<AccountIdentity> {
             adapter: spec.identity.name.to_owned(),
             key: key.to_owned(),
             entry_id: qualified,
-            label: spec.accounts.local_account.0.to_owned(),
+            label: spec.accounts.local_entry.0.to_owned(),
             local_login: true,
         });
     }
@@ -700,9 +700,7 @@ fn detect_with_org_inner(
     let cwd = Path::new(crate::claude::PROBE_CWD);
     let spec = provenant_records::AdapterSpec::get(adapter);
     use provenant_records::AccountIdentityProbe;
-    let probe = spec.map_or(AccountIdentityProbe::None, |spec| {
-        spec.login.account_identity_probe
-    });
+    let probe = spec.map_or(AccountIdentityProbe::None, |spec| spec.login.identity_probe);
     if probe == AccountIdentityProbe::KeychainLog {
         // An isolated account is signed in under its own directory as `HOME`.
         // The mode comes from the directory, so a missing keychain is refused
@@ -1303,7 +1301,7 @@ mod account_pool_tests {
     fn registered_plans_enumerate_once_without_inventing_identities() {
         let spec = provenant_records::AdapterSpec::get("opencode").unwrap();
         let mut settings = Settings::default();
-        for (index, plan) in spec.accounts.account_model_plans.iter().enumerate() {
+        for (index, plan) in spec.accounts.model_plans.iter().enumerate() {
             let entry: Registration = serde_json::from_value(serde_json::json!({
                 "adapter":spec.identity.name, "label":plan.plan, "key":format!("identity-{index}"),
                 "directory":format!("/fixture/{index}"), "plan":plan.plan
@@ -1322,7 +1320,8 @@ mod account_pool_tests {
             assert_eq!(effective.entries.len(), identities.len());
             for account in effective.entries.values() {
                 let plan = spec
-                    .account_model_plans
+                    .accounts
+                    .model_plans
                     .iter()
                     .find(|plan| Some(plan.plan) == account.plan.as_deref())
                     .unwrap();

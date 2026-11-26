@@ -657,7 +657,7 @@ fn receipt_fields_are_sourced_for_opencode_and_codex_lanes()
             "effort_warning": {
                 "requested": "high", "applied": null,
                 "model": "opencode/opencode-go/hy4-flash-free",
-                "source": "adapter:drop_unsupported_effort",
+                "source": "adapter:drop_unrecorded_effort",
                 "reason": "unsupported model effort dropped"
             }
         }),
@@ -669,7 +669,7 @@ fn receipt_fields_are_sourced_for_opencode_and_codex_lanes()
     assert_eq!(data["effort"], "none");
     assert_eq!(
         data["effort_source"],
-        "effort_warning:adapter:drop_unsupported_effort"
+        "effort_warning:adapter:drop_unrecorded_effort"
     );
     assert_eq!(data["resolved_from"], "route utility");
     assert_eq!(data["role"], "reviewer");
@@ -677,7 +677,7 @@ fn receipt_fields_are_sourced_for_opencode_and_codex_lanes()
         "opencode/opencode-go/hy4-flash-free@none",
         "tencent",
         "route utility",
-        "effort source effort_warning:adapter:drop_unsupported_effort",
+        "effort source effort_warning:adapter:drop_unrecorded_effort",
     ] {
         assert!(
             data["receipt"].as_str().is_some_and(|s| s.contains(part)),

@@ -319,7 +319,7 @@ fn no_reported_windows_remain_unknown() {
 fn quota_effects_follow_specs_and_require_successful_commands() {
     for spec in provenant_records::ADAPTER_SPECS {
         use provenant_records::QuotaProbeKind;
-        let expected = match spec.accounts.quota_probe {
+        let expected = match spec.quota.probe {
             QuotaProbeKind::HttpGet => QuotaEffectKind::HttpGet,
             QuotaProbeKind::Command => QuotaEffectKind::Command,
             QuotaProbeKind::LocalLedger => QuotaEffectKind::LocalLedger,

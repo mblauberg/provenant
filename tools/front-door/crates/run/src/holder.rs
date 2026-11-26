@@ -663,7 +663,7 @@ fn account_directories(
     specs
         .iter()
         .filter_map(|spec| {
-            let (environment, _) = spec.accounts.default_account_directory?;
+            let (environment, _) = spec.accounts.default_directory?;
             lookup(environment).map(|path| (spec.identity.name.to_owned(), PathBuf::from(path)))
         })
         .collect()
@@ -4941,7 +4941,7 @@ mod host_clock_tests {
     fn account_directory_overrides_follow_registry_entries() {
         let mut fixture = provenant_records::ADAPTER_SPECS[0];
         fixture.name = "fixture";
-        fixture.default_account_directory = Some(("FIXTURE_HOME", ".fixture"));
+        fixture.accounts.default_directory = Some(("FIXTURE_HOME", ".fixture"));
         let actual = account_directories(&[fixture], |key| {
             (key == "FIXTURE_HOME").then(|| "/fixture/home".into())
         });

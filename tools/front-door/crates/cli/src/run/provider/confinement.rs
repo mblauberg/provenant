@@ -780,6 +780,7 @@ fn credential_declarations(
                 });
                 if let Some(spec) = AdapterSpec::get(&entry.adapter) {
                     for relative in spec
+                        .login
                         .credential_files
                         .iter()
                         .chain(spec.login.credential_auxiliary_files)
@@ -814,7 +815,7 @@ fn credential_declarations(
         .map(|host| host.default_account_directories.clone())
         .unwrap_or_else(run::HostLaunchContext::default_account_directories);
     for spec in ADAPTER_SPECS {
-        let Some((environment, fallback)) = spec.accounts.default_account_directory else {
+        let Some((environment, fallback)) = spec.accounts.default_directory else {
             continue;
         };
         let host_override = default_directories
@@ -834,7 +835,7 @@ fn credential_declarations(
                     "provider declaration: {} default account directory",
                     spec.identity.name
                 ),
-                (*spec.accounts.default_account_root_kind).clone(),
+                (*spec.accounts.default_root_kind).clone(),
             )
         };
         if spec.login.credential_profile_sibling {

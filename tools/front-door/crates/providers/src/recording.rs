@@ -152,7 +152,7 @@ pub fn answering_model(
     codex_home: &Path,
 ) -> Option<String> {
     if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-        spec.capabilities.answering_model.value == provenant_records::ModelObservation::Rollout
+        spec.capabilities.answering_model.value == provenant_records::AnsweringModelSource::Rollout
     }) {
         session
             .and_then(|thread| crate::codex_rollout::observe(codex_home, thread).ok())

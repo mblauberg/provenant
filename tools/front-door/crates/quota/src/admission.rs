@@ -442,11 +442,11 @@ pub fn partial_headroom(
 ) -> PartialHeadroom {
     let allowance_windows = provenant_records::AdapterSpec::get(adapter)
         .filter(|spec| {
-            spec.accounts
+            spec.quota
                 .allowance_prefix
                 .is_some_and(|prefix| model.starts_with(prefix))
         })
-        .map_or(&[][..], |spec| spec.accounts.allowance_windows);
+        .map_or(&[][..], |spec| spec.quota.allowance_windows);
     let relevant = |w: &&QuotaWindow| {
         pools
             .iter()
@@ -518,7 +518,7 @@ pub fn route_exhausted(
     }
     let mapped = !pools.is_empty()
         || spec.is_some_and(|spec| {
-            spec.accounts
+            spec.quota
                 .allowance_prefix
                 .is_some_and(|prefix| model.starts_with(prefix))
         });
@@ -671,13 +671,13 @@ pub fn clear_refusals(
 
 /// The keyless free pool an adapter draws on, if it has one.
 fn free_pool(adapter: &str) -> Option<&'static str> {
-    provenant_records::AdapterSpec::get(adapter).and_then(|spec| spec.accounts.free_pool)
+    provenant_records::AdapterSpec::get(adapter).and_then(|spec| spec.quota.free_pool)
 }
 
 fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
     window == pool
         || provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-            spec.accounts.grouped_quota_pools && spec.window_serves_pool(window, Some(pool))
+            spec.quota.grouped_pools && spec.window_serves_pool(window, Some(pool))
         })
 }
 
@@ -693,8 +693,7 @@ pub fn free_pool_recheck_due(
     let Some(spec) = provenant_records::AdapterSpec::get(&record.account.adapter) else {
         return Ok(None);
     };
-    if spec.accounts.free_pool.is_none()
-        || spec.accounts.quota_probe == provenant_records::QuotaProbeKind::None
+    if spec.quota.free_pool.is_none() || spec.quota.probe == provenant_records::QuotaProbeKind::None
     {
         return Ok(None);
     }
@@ -1521,11 +1520,11 @@ mod admission_tests {
         let spec = provenant_records::ADAPTER_SPECS
             .iter()
             .find(|spec| {
-                spec.accounts.free_pool.is_some()
-                    && spec.accounts.quota_probe != provenant_records::QuotaProbeKind::None
+                spec.quota.free_pool.is_some()
+                    && spec.quota.probe != provenant_records::QuotaProbeKind::None
             })
             .expect("free pool adapter with a quota probe");
-        let pool = spec.accounts.free_pool.expect("free pool").to_owned();
+        let pool = spec.quota.free_pool.expect("free pool").to_owned();
         let account = AccountScope {
             extra: Default::default(),
             adapter: spec.identity.name.into(),
@@ -1565,7 +1564,7 @@ mod admission_tests {
         // An adapter with no registered free pool cannot re-check cheaply.
         let plain = provenant_records::ADAPTER_SPECS
             .iter()
-            .find(|spec| spec.accounts.free_pool.is_none())
+            .find(|spec| spec.quota.free_pool.is_none())
             .expect("adapter without a free pool");
         let mut no_pool = record.clone();
         no_pool.account.adapter = plain.name.into();

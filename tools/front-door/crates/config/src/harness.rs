@@ -2,7 +2,7 @@
 use crate::managed::{self, InstallError, SelectorChange, Snapshot, Targets, Value};
 use crate::{Harness, Release};
 use provenant_records::{
-    AbsolutePath, Declaration, InstallReceipt, Limits, OwnedEntry, OwnedValue,
+    AbsolutePath, AdapterFact, InstallReceipt, Limits, OwnedEntry, OwnedValue,
     ResolvedHarnessTarget,
 };
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ pub(crate) fn default_config(h: Harness, home: &Path, base: &Path) -> PathBuf {
 pub(crate) fn default_hooks(h: Harness, base: &Path) -> Option<PathBuf> {
     let install = h.spec().install?;
     install
+        .native
         .hooks
         .value
         .then_some(install.hook_file)
@@ -400,7 +401,7 @@ pub(crate) fn capture(
             }
         }
         if let Some(settings) = &targets.shared_settings
-            && target.harness.spec().accounts.shared_account_settings
+            && target.harness.spec().accounts.shared_settings
             && let Some(hook) = &target.hook_file
             && !same_file(hook, &settings.source_file)
         {
@@ -539,7 +540,7 @@ pub(crate) fn permitted_selector(
         return Ok(target.hook_file.as_ref() == Some(&entry.path)
             && crate::hooks::belongs_to(&entry.selector, target.harness)?
             && target.harness.spec().install.is_some_and(|install| {
-                install.hooks.value
+                install.native.hooks.value
                     && !matches!(
                         install.hook_protocol,
                         Some(provenant_records::HookProtocol::OpenCodePlugin)
@@ -547,7 +548,7 @@ pub(crate) fn permitted_selector(
             }));
     }
     if let Some(key) = entry.selector.strip_prefix(crate::shared_settings::PREFIX) {
-        return Ok(target.harness.spec().accounts.shared_account_settings
+        return Ok(target.harness.spec().accounts.shared_settings
             && target.hook_file.as_ref() == Some(&entry.path)
             && crate::shared_settings::check_key(key).is_ok());
     }
@@ -848,7 +849,7 @@ fn add_finding(
 pub(crate) fn capability_findings(
     targets: &Targets,
 ) -> Result<Vec<managed::InstallFinding>, InstallError> {
-    fn unsupported(capability: Declaration<bool>) -> Option<(&'static str, &'static str)> {
+    fn unsupported(capability: AdapterFact<bool>) -> Option<(&'static str, &'static str)> {
         (!capability.value).then_some((capability.reason, capability.source))
     }
 
@@ -859,8 +860,8 @@ pub(crate) fn capability_findings(
         };
         let path = target.hook_file.as_deref().unwrap_or(&target.config_file);
         for (name, support) in [
-            ("instructions", install.instructions),
-            ("answer delivery", install.answer_delivery),
+            ("instructions", install.native.instructions),
+            ("answer delivery", install.native.answer_delivery),
         ] {
             if let Some((reason, source)) = unsupported(support) {
                 findings.push(managed::InstallFinding {
@@ -880,7 +881,7 @@ pub(crate) fn capability_findings(
             )
         });
         if has_precompact_event
-            && let Some((reason, source)) = unsupported(install.precompact_context)
+            && let Some((reason, source)) = unsupported(install.native.precompact_context)
         {
             findings.push(managed::InstallFinding {
                 rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),
@@ -890,8 +891,8 @@ pub(crate) fn capability_findings(
                 )),
             });
         }
-        if !install.hooks.value {
-            if let Some((reason, source)) = unsupported(install.hooks) {
+        if !install.native.hooks.value {
+            if let Some((reason, source)) = unsupported(install.native.hooks) {
                 findings.push(managed::InstallFinding {
                     rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),
                     path: AbsolutePath::new(path)?,

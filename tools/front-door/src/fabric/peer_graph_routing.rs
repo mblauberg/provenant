@@ -1181,7 +1181,7 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
                 // A plan partitions an adapter's model namespace; take the one
                 // the declaration says serves this model.
                 plan: provenant_records::AdapterSpec::get(adapter).and_then(|spec| {
-                    spec.accounts.account_model_plans
+                    spec.accounts.model_plans
                         .iter()
                         .find(|row| model.starts_with(row.model_prefix))
                         .map(|row| row.plan.to_owned())

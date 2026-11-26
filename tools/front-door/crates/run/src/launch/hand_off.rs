@@ -612,10 +612,16 @@ impl RunStore {
             // An adapter declares the environment variables its guardian needs;
             // the guardian otherwise starts with an empty environment and no
             // Registry home. Retain the absolute path selected at launch.
-            config_environment: provenant_records::AdapterSpec::get(provider)
-                .map_or_else(Vec::new, |s| {
-                    s.guardian_environment.iter().map(|v| (*v).into()).collect()
-                }),
+            config_environment: provenant_records::AdapterSpec::get(provider).map_or_else(
+                Vec::new,
+                |s| {
+                    s.launch
+                        .config_environment
+                        .iter()
+                        .map(|v| (*v).into())
+                        .collect()
+                },
+            ),
             argv: plan.argv,
             environment: plan.environment,
             cwd: plan.cwd,

@@ -960,9 +960,9 @@ mod tests {
             capabilities: provenant_records::Capabilities {
                 launch: LaunchCapabilities {
                     network: &[NetworkAccess::Provider],
-                    write: provenant_records::Declaration::unsupported(
+                    write: provenant_records::AdapterFact::unsupported(
                         "fixture has no write",
-                        provenant_records::ROW_SOURCE,
+                        provenant_records::ADAPTER_ROW_SOURCE,
                     ),
                     ..ADAPTER_SPECS[0].capabilities.launch
                 },

@@ -472,7 +472,7 @@ fn model_adapters_follow_declared_prompt_transport_without_exposing_tokens()
             cargo_home_path(&prepared),
             Path::new("/fixture/home/.cargo")
         );
-        if declaration.argv_prompt {
+        if declaration.launch.argv_prompt {
             assert!(prepared.argv.iter().any(|arg| arg == prompt.text()));
         } else {
             assert_eq!(

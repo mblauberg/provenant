@@ -1710,7 +1710,7 @@ fn usage_identity(
     let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
         return AccountIdentity::unknown();
     };
-    if !spec.accounts.registered_account || spec.is_unregistered_local(account_key) {
+    if !spec.accounts.registered || spec.is_unregistered_local(account_key) {
         return AccountIdentity::unknown();
     }
     AccountIdentity::provider_observation(provider, account_key)

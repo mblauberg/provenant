@@ -155,14 +155,14 @@ pub(crate) fn spawn(
     for fd in &descriptors {
         command.arg(fd.as_raw_fd().to_string());
     }
-    let mut guardian_environment: Vec<_> = environment
+    let mut config_environment: Vec<_> = environment
         .iter()
         .filter(|(name, _)| config_environment.contains(name))
         .cloned()
         .collect();
     // The guardian settles lanes, so it keeps this process's durability setting.
     if provenant_os::fs::durability_relaxed() {
-        guardian_environment.push((provenant_os::fs::DURABILITY_ENV.into(), "relaxed".into()));
+        config_environment.push((provenant_os::fs::DURABILITY_ENV.into(), "relaxed".into()));
     }
     // Fixture guardians belong to the test process, not the short-lived CLI.
     // Capture its native identity before detaching so PID reuse cannot extend
@@ -175,11 +175,11 @@ pub(crate) fn spawn(
             crate::census::SystemProcessObserver.observe(owner_pid)
         && let Ok(identity) = serde_json::to_string(&owner.identity)
     {
-        guardian_environment.push((crate::FIXTURE_OWNER_ENV.into(), identity.into()));
+        config_environment.push((crate::FIXTURE_OWNER_ENV.into(), identity.into()));
     }
     command
         .env_clear()
-        .envs(guardian_environment.iter().cloned())
+        .envs(config_environment.iter().cloned())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -199,7 +199,7 @@ pub(crate) fn spawn(
     provenant_os::sys::child::configure_command(
         &mut command,
         &descriptors,
-        Some(&guardian_environment),
+        Some(&config_environment),
         true,
     )?;
     let child = command.spawn().map_err(|error| {
