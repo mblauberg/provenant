@@ -149,6 +149,7 @@ fn repair_loop_continues_the_authored_upstream_writer_after_expansion() {
     document.validate(&limits).unwrap();
     let mut expanded = loops::expand(&document, &[], &limits).unwrap();
     composites::resolve_writer_targets(&mut expanded);
+    validate_flat_plan(&expanded, &limits).unwrap();
     let repair = expanded
         .nodes
         .iter()
