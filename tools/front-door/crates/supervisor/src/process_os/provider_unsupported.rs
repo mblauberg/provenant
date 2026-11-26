@@ -102,6 +102,7 @@ impl ProviderGroup {
         _lease: &provenant_os::fs::LockGuard,
         _boot: &str,
         _priority: u8,
+        _before_exec: impl FnOnce(&ProcessIdentity) -> io::Result<()> + Send + 'static,
     ) -> io::Result<Self> {
         Err(unsupported())
     }
