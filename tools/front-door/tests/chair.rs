@@ -543,7 +543,7 @@ fn native_subagent_session_start_receives_no_checkpoint_or_custody() -> Result {
     };
 
     for marker in [
-        ("agent_type", "general-purpose"),
+        ("agent_id", "agent-abc123"),
         ("agent_transcript_path", "/tmp/agent-transcript.jsonl"),
     ] {
         let chair = hook_with_marker(&rig, true, "subagent-target", Some(marker))?;
@@ -572,20 +572,23 @@ fn native_subagent_session_start_receives_no_checkpoint_or_custody() -> Result {
         "a subagent SessionStart recorded chair attribution"
     );
 
-    // Control: the setup really would inject chair text, and the subagent
-    // hooks did not consume the handoff on their way out.
-    let chair = hook(&rig, true, "subagent-target")?;
+    // `agent_type` is also present for a top-level `claude --agent` session.
+    // It must retain chair context and consume the handoff.
+    let top_level_agent = ("agent_type", "custom-chair");
+    let chair = hook_with_marker(&rig, true, "subagent-target", Some(top_level_agent))?;
     let value: serde_json::Value = serde_json::from_slice(&chair.stdout.bytes)?;
     let context = value["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .ok_or("chair context")?;
-    assert!(context.contains("custody-source") && context.contains(checkpoint));
-    let advisory = session_start(None)?;
+    assert!(context.contains("subagents must not see this.") && context.contains(checkpoint));
+    let advisory = session_start(Some(top_level_agent))?;
     let value: serde_json::Value = serde_json::from_slice(&advisory.stdout.bytes)?;
     let text = value["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .ok_or("checkpoint context")?;
     assert!(text.contains("subagents must not see this."), "{text}");
+    let consumed = hook(&rig, true, "subagent-target")?;
+    assert!(consumed.stdout.bytes.is_empty(), "handoff was not consumed");
     Ok(())
 }
 #[test]

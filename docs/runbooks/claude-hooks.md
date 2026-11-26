@@ -49,13 +49,14 @@ empty one: inspect the source before acting. The checkpoint points to authority
 but does not create it. Record delivered PRs in the checkpoint so the digest can
 find them.
 
-A native subagent carries its own task prompt. When the hook payload marks an
-agent (`agent_type` or an agent transcript path, present and non-empty), the
-chair lifecycle hooks abstain: `chair-start` neither consumes a handoff nor
-records chair attribution, and the advisory hooks emit no checkpoint or custody
-text. Lanes were already excluded by their lane identity. The guard applies to
-every advisory event, so a subagent's compaction and stop hooks also leave the
-chair's checkpoint alone.
+A native subagent carries its own task prompt. When the hook payload includes a
+non-empty `agent_id` or agent transcript path, the chair lifecycle hooks abstain:
+`chair-start` neither consumes a handoff nor records chair attribution, and the
+advisory hooks emit no checkpoint or custody text. `agent_type` alone does not
+mark a subagent because Claude Code also sets it for top-level `--agent` sessions.
+Lanes were already excluded by their lane identity. The guard applies to every
+advisory event, so a subagent's compaction and stop hooks also leave the chair's
+checkpoint alone.
 
 ## Autosave and compaction
 
