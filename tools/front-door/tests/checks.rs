@@ -8,6 +8,42 @@ fn check_rig() -> Result<TestRig> {
 }
 
 #[test]
+fn check_warns_when_attempt_scratch_exceeds_the_configured_share() -> Result {
+    use std::{fs, os::unix::fs::DirBuilderExt};
+
+    let rig = check_rig()?;
+    let scratch = rig.state.join("attempt-scratch/attempt-1/tmp/candidate-0");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&scratch)?;
+    fs::write(scratch.join("payload"), vec![1_u8; 65536])?;
+    for (share, expected) in [("0.000000000000001", true), ("0.0", false)] {
+        fs::write(
+            rig.state.join("config.toml"),
+            format!("schema_version=1\n[gc]\nscratch_warning_share={share}\n"),
+        )?;
+        let output = rig.command(&["check", "config", "--json"])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+        let value = json(&output)?;
+        let warnings = value["warnings"].as_array().ok_or("missing warnings")?;
+        assert_eq!(
+            warnings
+                .iter()
+                .any(|warning| warning["code"] == "ATTEMPT_SCRATCH_HIGH"),
+            expected,
+            "{value}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn check_install_uses_tmpdir_and_cleans_private_home() -> Result {
     use std::{collections::BTreeSet, fs};
 
@@ -93,6 +129,49 @@ fn config_and_install_defects_are_findings_but_escape_is_an_error() -> Result {
     assert_eq!(code(&escaped), 3);
     assert!(!String::from_utf8_lossy(&escaped.stdout.bytes).contains("must never be read"));
     rig.assert_v1_root_untouched()
+}
+
+#[test]
+fn check_config_warns_when_warm_cache_toolchain_differs_from_pin() -> Result {
+    use std::{fs, os::unix::fs::DirBuilderExt};
+
+    let rig = check_rig()?;
+    fs::write(
+        rig.project.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.100.0\"\n",
+    )?;
+    // Slots are keyed by the checkout's canonical Git common dir, so derive
+    // the key exactly as the build store does; hashing the project path puts
+    // the fixture in a directory production never reads.
+    let key = provenant_config::project_key_for(rig.project.as_path())
+        .unwrap_or_else(|| provenant_config::project_key(rig.project.as_path()));
+    let slot = provenant_run::build::paths::slot_root(&rig.home, &key, 0);
+    // Slot caches are private run stores; the fixture must use the same mode.
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700).create(&slot)?;
+    provenant_run::build::slots::SlotRecord {
+        schema: 1,
+        project_key: key,
+        index: 0,
+        warm_toolchain: Some("1.99.1".into()),
+        ..Default::default()
+    }
+    .write(&slot.join("slot.json"))?;
+
+    let output = rig.command(&["check", "config", "--json"])?;
+    let findings = json(&output)?["data"]["findings"].clone();
+    assert!(
+        findings
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| {
+                row["rule"] == "build.toolchain_drift"
+                    && row["message"].as_str().is_some_and(|message| {
+                        message.contains("1.99.1") && message.contains("1.100.0")
+                    })
+            })),
+        "findings: {findings:?}"
+    );
+    Ok(())
 }
 
 /// Install a staged release through the real installer, recording roots under

@@ -37,8 +37,8 @@ fn terminal_replay_keeps_typed_stream_identity_mismatch() -> Result<(), Box<dyn 
             Registry::default().decode_captures(&route, stdout, &[], &exit, temp.path(), None)?;
         assert_eq!(decoded.outcome, run::Outcome::Failed, "{provider}");
         assert_eq!(
-            decoded.terminal_cause,
-            Some(run::TerminalCause::IdentityMismatch),
+            decoded.cause,
+            Some(run::CauseKind::IdentityMismatch),
             "{provider}"
         );
     }
@@ -75,8 +75,8 @@ fn terminal_replay_never_classifies_a_prefix_before_an_unread_final_answer()
             &route, stream.as_bytes(), &[], &clean_exit(), temp.path(), None,
         )?;
         assert_eq!(decoded.outcome, run::Outcome::Unsettled);
-        assert_eq!(decoded.terminal_cause,
-            Some(run::TerminalCause::ProviderCaptureDefect { line }));
+        assert_eq!(decoded.cause,
+            Some(run::CauseKind::ProviderCaptureDefect { line }));
         assert!(!decoded.complete);
         assert!(decoded.result.is_empty(), "progress is not a result");
         let reason = decoded.reason.ok_or("evidence diagnostic")?;
@@ -795,33 +795,25 @@ fn agy_repeated_answer_is_captured_once() {
         let mut capture = provenant_records::result_capture::ResultCapture::new(None);
         capture.push(decoded.result.as_bytes());
         let captured = capture.finish();
-        assert!(
-            provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
-                .unwrap()
-                .is_some()
-        );
+        assert_eq!(captured.handoff, Ok(None));
         assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"));
         assert_eq!(captured.declarations, 1);
         assert_eq!(decoded.result.matches("```findings").count(), 1);
     }
-    // Redesigned for #3928: plain prose after one handoff is accepted with a
-    // diagnostic tolerance rather than making the declaration malformed.
+    // Fenced text is retained as result content; only the declaration tool
+    // channel can settle the lane.
     let response = format!("{answer}\nextra");
     let decoded = decode("", &response);
     assert_eq!(decoded.result, response);
-    let parsed = provenant_records::handoff::Handoff::from_result_report(&decoded.result);
-    assert!(parsed.handoff.as_ref().is_ok_and(Option::is_some));
-    assert!(parsed.trailing_prose_tolerated);
-    // Since #3910 a later handoff that ends the answer wins; prose after a
-    // repeated final handoff is not the single-block tolerance and stays
-    // malformed.
+    let mut capture = provenant_records::result_capture::ResultCapture::new(None);
+    capture.push(decoded.result.as_bytes());
+    assert_eq!(capture.finish().handoff, Ok(None));
     let response = format!(
         "{answer}\n{}\nextra",
         answer.replace("\"note\":\"done\"", "\"note\":\"different\"")
     );
     let decoded = decode("", &response);
     assert_eq!(decoded.result, response);
-    assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
 }
 #[test]
 fn repeated_answer_from_non_agy_adapter_is_unchanged() {
@@ -844,7 +836,7 @@ fn repeated_answer_from_non_agy_adapter_is_unchanged() {
     assert_eq!(decoded.result, "answer\nanswer");
 }
 #[test]
-fn a_claude_reply_to_a_late_notification_keeps_the_final_handoff() {
+fn a_claude_reply_to_a_late_notification_keeps_the_complete_final_result() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),
         ..Default::default()
@@ -880,15 +872,13 @@ fn a_claude_reply_to_a_late_notification_keeps_the_final_handoff() {
         decoded.result,
         format!("{handoff}\nThe wait was redundant.")
     );
-    // Redesigned for #3928: without boundaries the trailing acknowledgement
-    // is tolerated, while the turn-aware decode still settles the handoff.
-    let parsed = provenant_records::handoff::Handoff::from_result_report(&decoded.result);
-    assert!(parsed.handoff.as_ref().is_ok_and(Option::is_some));
-    assert!(parsed.trailing_prose_tolerated);
-    assert_eq!(decoded.handoff().unwrap().unwrap().note, "finished");
-    // A tool run after the declaration leaves the lane without one.
+    // The provider decoder preserves final text. Declaration state is supplied
+    // independently by the lane tool channel.
+    let mut capture = provenant_records::result_capture::ResultCapture::new(None);
+    capture.push(decoded.result.as_bytes());
+    assert_eq!(capture.finish().handoff, Ok(None));
     let decoded = decode(&[&notification, &tool_use]);
-    assert_eq!(decoded.handoff(), Ok(None));
+    assert!(decoded.result.contains("The wait was redundant."));
 }
 #[test]
 fn claude_usage_records_cache_read_and_cache_write() {
@@ -986,7 +976,7 @@ fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
             Path::new("/unused"),
         )
         .unwrap();
-    assert_eq!(decoded.partial_signals, [run::PartialSignal::ProviderStop]);
+    assert_eq!(decoded.signals, [run::SettlementSignal::ProviderStop]);
     assert_eq!(
         decoded.reason.as_deref(),
         Some("provider stopped early; inspect the result and resume if needed")
@@ -1021,7 +1011,7 @@ fn streamed_deltas_stay_joined_without_a_message_boundary() {
     assert_eq!(decoded.result, "VERDICT: PASS");
 }
 #[test]
-fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
+fn a_handoff_fence_in_its_own_codex_message_stays_result_text_after_prose() {
     let route = run::RouteRecord {
         provider: Some("codex".into()),
         model: Some("codex/gpt-6.1-terra".into()),
@@ -1051,10 +1041,7 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
     let mut capture = provenant_records::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
     capture.push(decoded.result.as_bytes());
     let captured = capture.finish();
-    let declared = provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
-        .expect("handoff parses")
-        .expect("handoff found");
-    assert_eq!(declared.note, "n");
+    assert_eq!(captured.handoff, Ok(None));
     assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"));
     assert!(
         decoded
@@ -1065,7 +1052,7 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
 
 // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
 #[test]
-fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done_handoff() {
+fn credential_shaped_assignment_preserves_jsonl_frame_without_parsing_handoff_text() {
     let temp = tempfile::tempdir().unwrap();
     let thread = "01234567-89ab-cdef-0123-456789abcdef";
     let day = temp.path().join("candidate-0/sessions/2026/10/24");
@@ -1113,14 +1100,9 @@ fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done
 
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
     assert_eq!(decoded.reason, None);
-    let declared = provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
-        .expect("handoff parses")
-        .expect("handoff found");
-    assert_eq!(
-        declared.status,
-        provenant_records::handoff::HandoffStatus::Done
-    );
-    assert_eq!(declared.note, "n");
+    let mut capture = provenant_records::result_capture::ResultCapture::new(None);
+    capture.push(decoded.result.as_bytes());
+    assert_eq!(capture.finish().handoff, Ok(None));
 }
 
 // Spec: docs/specs/fabric.md#session-ready-steering
@@ -1147,8 +1129,8 @@ fn malformed_replay_frame_reports_evidence_defect_naming_the_line() {
 
     assert_eq!(decoded.outcome, run::Outcome::Unsettled);
     assert_eq!(
-        decoded.terminal_cause,
-        Some(run::TerminalCause::ProviderCaptureDefect { line: 2 })
+        decoded.cause,
+        Some(run::CauseKind::ProviderCaptureDefect { line: 2 })
     );
     let reason = decoded.reason.as_deref().unwrap();
     assert!(reason.contains("stdout.log line 2"));
@@ -1401,10 +1383,7 @@ fn claude_lane_auth_failure_reports_a_lost_lane_token_for_its_account()
             .and_then(|route| route.account_key.as_deref()),
         None
     );
-    assert_eq!(
-        decoded.terminal_cause,
-        Some(run::TerminalCause::LaneTokenLost)
-    );
+    assert_eq!(decoded.cause, Some(run::CauseKind::LaneTokenLost));
     let reason = decoded.reason.unwrap();
     assert!(reason.contains("pro [claude]"), "{reason}");
     assert!(
@@ -1465,7 +1444,7 @@ fn claude_lane_auth_failure_with_registered_token_settles_without_continuation()
         None,
     )?;
     assert_eq!(decoded.outcome, run::Outcome::AuthRequired);
-    assert_eq!(decoded.terminal_cause, None);
+    assert_eq!(decoded.cause, None);
     let reason = decoded.reason.unwrap();
     assert!(reason.contains("pro [claude]"), "{reason}");
     assert!(

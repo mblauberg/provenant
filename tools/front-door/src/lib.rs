@@ -1,9 +1,8 @@
 mod graph_interface;
 mod graph_support;
 // The process edge composes typed owners and owns ordinary result delivery.
-// `main.rs` parses and calls `dispatch`; the worktree driver includes this
-// file and dispatches with its fixture seams. Plain comments only: `include!`
-// refuses inner attributes.
+// `main.rs` parses and calls `dispatch`; the fixture-gated worktree driver
+// links this library and dispatches with its fixture seams.
 mod admit;
 mod apps;
 mod build_cmd;
@@ -13,7 +12,7 @@ mod checks;
 mod ci;
 mod cloud;
 pub mod commands;
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 mod compose_tests;
 mod console;
 mod custody;
@@ -32,7 +31,6 @@ mod event_delivery;
 mod events;
 mod gc_support;
 mod gc_sweep;
-mod handoff;
 mod hook_diagnostics;
 mod hook_state;
 mod hook_worktree;
@@ -44,7 +42,7 @@ pub mod local_answers;
 mod overflow;
 mod port_receipt_retention;
 mod pr;
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 mod pr_land_tests;
 mod process_tree;
 mod provider_retention;
@@ -55,6 +53,7 @@ mod retention_owner;
 mod roots;
 mod scratch_dir;
 mod scratch_owner;
+mod session_handoff;
 mod settlement;
 mod staging_gc;
 mod state_handoff;
@@ -62,7 +61,12 @@ mod status_wait;
 mod stranded_work;
 mod usage;
 mod verify;
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test harness linked into the library; clippy's allow-in-tests only applies under cfg(test)"
+)]
 pub mod worktree_tests;
 mod worktrees;
 use provenant_cli::{Command, ParseOutcome};
@@ -727,6 +731,47 @@ fn config_ports_prepare(table: &provenant_config::PortTable, full: bool) -> serd
     )
 }
 
+/// The effective forge facts for `config ports`: the one resolved remote,
+/// default branch and protected set, each with the layer and origin that
+/// supplied it. A checkout whose context cannot be resolved still reports the
+/// declared leaves, with the refusal as a warning rather than a failed command.
+///
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn config_ports_git(
+    project: &std::path::Path,
+    table: &provenant_config::PortTable,
+    full: bool,
+) -> serde_json::Value {
+    match provenant_config::resolve_for(project, table) {
+        Ok(forge) => serde_json::json!({
+            "remote": sourced_leaf_json(&forge.remote, &[], full),
+            "default_branch": sourced_leaf_json(&forge.default_branch, &[], full),
+            "protected": sourced_leaf_json(&forge.protected, &[], full),
+        }),
+        Err(error) => serde_json::json!({
+            "remote": config_port_leaf(
+                table,
+                "git.remote",
+                serde_json::Value::String(table.git.remote.clone()),
+                full,
+            ),
+            "default_branch": config_port_leaf(
+                table,
+                "git.default_branch",
+                serde_json::Value::String(table.git.default_branch.clone()),
+                full,
+            ),
+            "protected": config_port_leaf(
+                table,
+                "git.protected",
+                serde_json::to_value(&table.git.protected).unwrap_or_default(),
+                full,
+            ),
+            "warning": error.to_string(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod config_ports_tests {
     /// Spec: docs/specs/state.md#every-setting-reports-its-layer
@@ -848,6 +893,42 @@ mod config_ports_tests {
                 .ends_with("ports.json#worktree_layout.roots")
         );
     }
+
+    /// The configured remote and protected set are what `config ports` shows,
+    /// each with the layer and key that declared it.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn config_ports_reports_the_effective_remote_and_protected_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            r#"{"git":{"remote":"pinned","default_branch":"trunk","protected":["release"]}}"#,
+        )
+        .unwrap();
+        let table = provenant_config::PortTable::read_for(Some(&project), &state).unwrap();
+
+        let git = super::config_ports_git(&project, &table, false);
+        assert!(git.get("warning").is_none(), "{git}");
+        assert_eq!(git["remote"]["value"], "pinned");
+        assert_eq!(git["remote"]["layer"], "project");
+        assert!(
+            git["remote"]["origin"]
+                .as_str()
+                .unwrap()
+                .ends_with("ports.json#git.remote")
+        );
+        assert_eq!(git["default_branch"]["value"], "trunk");
+        assert_eq!(
+            git["protected"]["value"],
+            serde_json::json!(["release", "trunk"])
+        );
+        assert_eq!(git["protected"]["layer"], "project");
+    }
 }
 
 fn config_setting_value(
@@ -914,6 +995,11 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                     "build": {
                         "prepare": config_ports_prepare(&table, globals.full),
                     },
+                    // The one resolved forge context, read with its layer and
+                    // origin, so a non-origin remote and a declared protected
+                    // set are visible before any workflow command runs.
+                    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+                    "git": config_ports_git(&context.project, &table, globals.full),
                 })
             }
             ConfigAction::Detect => serde_json::to_value(config::detect::detect(&context.project))?,
@@ -1537,7 +1623,7 @@ pub fn dispatch(
     // Whether a status read waited: telemetry separates waits from reads.
     let status_wait = match &parsed {
         ParseOutcome::Invocation(inv) => match &inv.command {
-            Command::Status(args) if !args.session_stream => Some(false),
+            Command::Status(args) if !args.session_stream && !args.custody_stream => Some(false),
             Command::Wait(_) => Some(true),
             _ => None,
         },
@@ -1546,7 +1632,7 @@ pub fn dispatch(
     let read_only_graph = match &parsed {
         ParseOutcome::Invocation(inv) => {
             matches!(&inv.command, Command::Run(args) if args.explain)
-                || matches!(&inv.command, Command::Status(args) if args.session_stream)
+                || matches!(&inv.command, Command::Status(args) if args.session_stream || args.custody_stream)
                 || matches!(&inv.command, Command::Templates(_))
         }
         _ => false,

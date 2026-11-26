@@ -1,7 +1,7 @@
-//! Regression tests for #3869 outcome 3: a delivery request with no remote
-//! must not pass an empty name to Git. `refresh_origin(.., None)` performs no
-//! Git work at all; a push/PR destination with an empty remote is refused
-//! before a binding can be sealed.
+//! Regression tests for #3869 and #3895: a delivery destination is typed.
+//! `Destination::Local` is the only way to spell "no remote"; a malformed
+//! remote name is refused by the one `RemoteName` grammar at decode, so it can
+//! never reach Git as a push destination or a `refs/remotes/` namespace.
 //! Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
 
 use std::{
@@ -10,15 +10,15 @@ use std::{
 };
 
 use provenant_core::CancelToken;
-use provenant_records::run::{DeliveryMode, WriterDeliveryRequest, WriterRequest};
+use provenant_records::run::{DeliveryMode, Destination, WriterDeliveryRequest, WriterRequest};
 
 type FixtureResult<T> = std::result::Result<T, Box<dyn Error>>;
 
-fn request(mode: DeliveryMode, remote: &str) -> WriterDeliveryRequest {
+fn request(mode: DeliveryMode, remote: Destination) -> WriterDeliveryRequest {
     WriterDeliveryRequest {
         extra: Default::default(),
         mode,
-        remote: remote.to_owned(),
+        remote,
         branch: "lane".to_owned(),
         open_pr: false,
         fast_forward_only: false,
@@ -34,14 +34,51 @@ fn writer() -> WriterRequest {
     }
 }
 
-/// The destination seam is the only way a resolved remote enters delivery. An
-/// empty name is refused for push and PR, so a re-flatten of `None` to `""`
-/// cannot silently produce a destination that pushes to a nameless remote.
+/// The destination is parsed once on decode with the single `RemoteName`
+/// grammar. An empty string spells neither a remote nor a local destination;
+/// a name the resolver accepts, such as `team/upstream`, is usable here too.
 #[test]
-fn destination_for_remote_refuses_an_empty_name() {
+fn destination_is_parsed_once_with_the_single_remote_grammar() -> FixtureResult<()> {
+    let good = serde_json::to_value(request(
+        DeliveryMode::Push,
+        Destination::from_name("origin").expect("fixture remote"),
+    ))?;
+    for bad in [
+        serde_json::json!(""),
+        serde_json::json!("-origin"),
+        serde_json::json!(" origin"),
+        serde_json::json!("or igin"),
+        serde_json::json!("or..igin"),
+    ] {
+        let mut value = good.clone();
+        value["remote"] = bad.clone();
+        assert!(
+            serde_json::from_value::<WriterDeliveryRequest>(value).is_err(),
+            "the single grammar must refuse {bad}"
+        );
+    }
+    let mut value = good.clone();
+    value["remote"] = serde_json::json!("team/upstream");
+    let decoded: WriterDeliveryRequest = serde_json::from_value(value)?;
+    assert_eq!(
+        decoded.remote,
+        Destination::from_name("team/upstream").expect("fixture remote")
+    );
+    let mut value = good;
+    value["remote"] = serde_json::Value::Null;
+    let decoded: WriterDeliveryRequest = serde_json::from_value(value)?;
+    assert_eq!(decoded.remote, Destination::Local);
+    Ok(())
+}
+
+/// The destination seam is the only way a resolved remote enters delivery. A
+/// missing remote is refused for push and PR, so re-flattening absence to an
+/// empty name cannot silently produce a nameless destination.
+#[test]
+fn destination_for_remote_refuses_a_push_without_a_remote() {
     for mode in [DeliveryMode::Push, DeliveryMode::Pr] {
-        let error = crate::HostDeliveryContext::destination_for_remote(mode, "lane", "")
-            .expect_err("an empty remote must not make a push or PR destination");
+        let error = crate::HostDeliveryContext::destination_for_remote(mode, "lane", None)
+            .expect_err("an absent remote must not make a push or PR destination");
         assert_eq!(error.code(), "INVALID");
         assert!(
             error.to_string().contains("configured remote name"),
@@ -50,81 +87,84 @@ fn destination_for_remote_refuses_an_empty_name() {
     }
 }
 
-/// Local integration is the one explicit skip: an empty remote is allowed and
-/// kept empty rather than replaced with an invented `origin`.
+/// Local integration is the one explicit skip: its destination is typed
+/// `Local`, never an empty remote name.
 #[test]
-fn destination_for_remote_keeps_local_integration_remote_empty() {
+fn destination_for_remote_keeps_local_integration_local() -> FixtureResult<()> {
     let made = crate::HostDeliveryContext::destination_for_remote(
         DeliveryMode::Integrate("main".into()),
         "lane",
-        "",
-    )
-    .expect("local integration needs no remote")
+        None,
+    )?
     .expect("an integration destination is produced");
-    assert!(made.remote.is_empty());
+    assert_eq!(made.remote, Destination::Local);
     assert_eq!(made.branch, "main");
+    Ok(())
 }
 
-/// A sealed local-integration destination records `""` as the deliberate
-/// sentinel for "no remote". At the typed boundary that is an absence, while a
+/// A slash name that the resolver accepts is also accepted here: the write and
+/// read paths share one grammar.
+#[test]
+fn destination_for_remote_accepts_a_slash_name() -> FixtureResult<()> {
+    let upstream = provenant_config::RemoteName::new("team/upstream")?;
+    let made = crate::HostDeliveryContext::destination_for_remote(
+        DeliveryMode::Push,
+        "lane",
+        Some(upstream.clone()),
+    )?
+    .expect("push destination");
+    assert_eq!(made.remote, Destination::remote(upstream));
+    Ok(())
+}
+
+/// A sealed local-integration destination is typed `Local`; a
 /// stop-publication binding on a real remote still yields that remote.
 #[test]
-fn sealed_local_integration_remote_is_absent_and_stop_publish_is_named() -> FixtureResult<()> {
-    let host =
-        crate::HostDeliveryContext::new(Vec::new()).with_bound_remotes_for_test("", Some("origin"));
-    assert_eq!(host.delivery_remote()?, None);
+fn sealed_local_integration_is_local_and_stop_publish_is_named() -> FixtureResult<()> {
+    let host = crate::HostDeliveryContext::new(Vec::new()).with_bound_remotes_for_test(
+        Destination::Local,
+        Some(Destination::from_name("origin").expect("fixture remote")),
+    );
+    assert_eq!(host.delivery_remote(), None);
     let origin = provenant_config::RemoteName::new("origin")?;
-    assert_eq!(host.stop_publish_remote()?, Some(origin.clone()));
+    assert_eq!(host.stop_publish_remote(), Some(origin.clone()));
     assert_eq!(crate::writer::bound_stop_remote(Some(&host))?, Some(origin));
     Ok(())
 }
 
-/// A non-empty malformed record is corrupt, not the local-integration
-/// sentinel: it must still refuse and name the recorded value.
-#[test]
-fn sealed_non_empty_malformed_remote_refuses_naming_the_value() -> FixtureResult<()> {
-    for bad in ["-origin", " origin", "origin ", "or igin"] {
-        let host =
-            crate::HostDeliveryContext::new(Vec::new()).with_bound_remotes_for_test(bad, None);
-        let error = host
-            .delivery_remote()
-            .expect_err("a malformed sealed remote must be refused");
-        match error {
-            crate::RunError::InvalidSealedRemote(name) => assert_eq!(name, bad),
-            other => return Err(format!("unexpected refusal for {bad:?}: {other:?}").into()),
-        }
-    }
-    Ok(())
-}
-
 /// The launch destination is read only when the stop binding has no remote. A
-/// malformed launch record must not be inspected when stop publication already
-/// named its remote; a local-only binding with no stop publication is absence.
+/// named launch destination stays named; a local-only binding is absence.
 #[test]
 fn bound_stop_remote_reads_the_launch_binding_only_when_needed() -> FixtureResult<()> {
-    let host = crate::HostDeliveryContext::new(Vec::new())
-        .with_bound_remotes_for_test("-malformed", Some("origin"));
+    let host = crate::HostDeliveryContext::new(Vec::new()).with_bound_remotes_for_test(
+        Destination::from_name("upstream").expect("fixture remote"),
+        Some(Destination::from_name("origin").expect("fixture remote")),
+    );
     assert_eq!(
         crate::writer::bound_stop_remote(Some(&host))?,
         Some(provenant_config::RemoteName::new("origin")?)
     );
-    assert!(
-        matches!(host.delivery_remote(), Err(crate::RunError::InvalidSealedRemote(name)) if name == "-malformed")
+    // The named launch destination is readable, but stop publication still
+    // wins; a local-only launch has no remote at all.
+    assert_eq!(
+        host.delivery_remote(),
+        Some(provenant_config::RemoteName::new("upstream")?)
     );
-    let local_only =
-        crate::HostDeliveryContext::new(Vec::new()).with_bound_remotes_for_test("", None);
-    assert_eq!(crate::writer::bound_stop_remote(Some(&local_only))?, None);
+    let local_launch = crate::HostDeliveryContext::new(Vec::new())
+        .with_bound_remotes_for_test(Destination::Local, None);
+    assert_eq!(local_launch.delivery_remote(), None);
+    assert_eq!(crate::writer::bound_stop_remote(Some(&local_launch))?, None);
     assert_eq!(crate::writer::bound_stop_remote(None)?, None);
     Ok(())
 }
 
-/// `prepare` validates the request before any Git work. With no remote a push
-/// must be refused explicitly, not bound as if `""` were a remote name.
+/// `prepare` validates the request before any Git work. A local destination
+/// must be refused for push, not bound as if it named a remote.
 #[test]
 fn prepare_refuses_a_push_without_a_remote() {
     let host = crate::HostDeliveryContext::new(Vec::new());
     let error = host
-        .prepare(&writer(), &request(DeliveryMode::Push, ""))
+        .prepare(&writer(), &request(DeliveryMode::Push, Destination::Local))
         .expect_err("preparing a push with no remote must be refused");
     assert_eq!(error.code(), "INVALID");
     assert!(

@@ -42,7 +42,7 @@ fn reviews(results: &[&str]) -> FakeOwner {
         actor: "chair".into(),
         observations: results
             .iter()
-            .map(|text| terminal_with_result(AttemptOutcome::Succeeded, text))
+            .map(|text| terminal_with_result(GraphAttemptOutcome::Succeeded, text))
             .collect(),
         ..Default::default()
     }
@@ -647,7 +647,7 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
             last_attempt: attempt_key.clone(),
         });
     checkpoint.nodes[writer_index].state = NodeState::Succeeded;
-    checkpoint.nodes[writer_index].advance_error = Some("repair did not satisfy CI".into());
+    checkpoint.nodes[writer_index].advance_note = Some("repair did not satisfy CI".into());
     let writer_outputs = NodeOutputs {
         commit: Some("a".repeat(40)),
         ..Default::default()
@@ -665,7 +665,8 @@ fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
         route: serde_json::from_value(serde_json::json!({"alias":"junior"})).unwrap(),
         state: AttemptState::Terminal,
         attempt_ref: Some("attempt-1".into()),
-        outcome: Some(AttemptOutcome::Succeeded),
+        outcome: Some(GraphAttemptOutcome::Succeeded),
+        cause: None,
         launch_actor: "chair".into(),
         input_cap: None,
         input_cap_source: None,
@@ -823,22 +824,23 @@ fn loop_composite_review_pins_each_repaired_commit() {
     let commit2 = "2".repeat(40);
     let writer = |commit: &str| AttemptObservation::Terminal {
         attempt_ref: None,
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: None,
         commit: Some(commit.to_owned()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+    cause: None,
     };
     let mut owner = FakeOwner {
         observations: [
             writer(&commit1),
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"),
             writer(&commit2),
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: PASS"),
         ]
         .into(),
         ..Default::default()
@@ -1069,7 +1071,7 @@ fn loop_body_failure_blocks_later_rounds_and_dependants() {
     child.depends_on = vec!["revise".into()];
     document.nodes.push(child);
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::TaskFailed)].into(),
+        observations: [terminal(GraphAttemptOutcome::TaskFailed)].into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -1208,7 +1210,7 @@ fn loop_replays_every_checkpoint_boundary_including_extensions() {
             _: Replay<'_>,
         ) -> Result<AttemptObservation, Infallible> {
             Ok(terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 if key.node_id.contains("--r1--") {
                     "VERDICT: FAIL"
                 } else {
@@ -1346,7 +1348,7 @@ fn loop_inbox_extension_keeps_original_actor_and_applies_once() {
     assert_eq!(paused.status, GraphStatus::Paused);
     owner.inner.actor = "guardian".into();
     owner.inner.observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         "VERDICT: PASS",
     ));
     owner.decision = Some(LoopDecision::Extend { rounds: 1 });
@@ -1503,8 +1505,8 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
                 attempt_ref: Some("review-attempt".into()),
             });
         owner.inner.observations.extend([
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]);
         owner
             .inner
@@ -1523,8 +1525,8 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
         )
         .unwrap();
         owner.inner.observations.extend([
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
-            terminal(AttemptOutcome::Succeeded),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]);
         let paused = advance_with_budget(
             &document,
@@ -1612,7 +1614,7 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
     let mut after = node("after", route("fixture"));
     after.depends_on = vec!["revise".into()];
     document.nodes.push(after);
-    let mut observation = terminal(AttemptOutcome::OtherFailure);
+    let mut observation = terminal(GraphAttemptOutcome::OtherFailure);
     if let AttemptObservation::Terminal { attempt_ref, .. } = &mut observation {
         *attempt_ref = Some(format!("host/{attempt}"));
     }
@@ -1987,8 +1989,8 @@ fn loop_inbox_failure_pauses_without_stopping_later_attempt_observation() {
         AttemptObservation::Pending {
             attempt_ref: Some("review".into()),
         },
-        terminal(AttemptOutcome::Succeeded),
-        terminal(AttemptOutcome::Succeeded),
+        terminal(GraphAttemptOutcome::Succeeded),
+        terminal(GraphAttemptOutcome::Succeeded),
         AttemptObservation::Pending {
             attempt_ref: Some("late".into()),
         },
@@ -2004,8 +2006,8 @@ fn loop_inbox_failure_pauses_without_stopping_later_attempt_observation() {
     )
     .unwrap();
     owner.inner.observations.extend([
-        terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
-        terminal(AttemptOutcome::Succeeded),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"),
+        terminal(GraphAttemptOutcome::Succeeded),
     ]);
     let paused = advance_with_budget(
         &document,
@@ -2577,15 +2579,16 @@ fn integrating_repair(delivery: Option<&str>) -> GraphDocument {
 fn commit_terminal(commit: &str) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: None,
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: None,
         commit: Some(commit.to_owned()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+    cause: None,
     }
 }
 
@@ -2648,9 +2651,9 @@ fn loop_rounds_integrate_from_the_head_the_previous_round_delivered() {
         observations: [
             commit_terminal(&c0),
             commit_terminal(&c1),
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"),
             commit_terminal(&c2),
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: PASS"),
         ]
         .into(),
         // Each round starts when the target is at the previous delivery.
@@ -2686,7 +2689,7 @@ fn loop_stops_when_the_target_moved_after_the_previous_delivery() {
         observations: [
             commit_terminal(&c0),
             commit_terminal(&c1),
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"),
         ]
         .into(),
         // Someone else advanced the target after round one delivered.
@@ -2703,7 +2706,7 @@ fn loop_stops_when_the_target_moved_after_the_previous_delivery() {
         .unwrap();
     assert_eq!(second.state, NodeState::Failed);
     assert_eq!(
-        second.advance_error_code.as_deref(),
+        second.advance_code.as_deref(),
         Some("integration_head_moved")
     );
     assert!(second.attempts.is_empty());
@@ -2779,7 +2782,7 @@ fn loop_cancel_and_manual_decisions_close_unanswered_asks() {
         } else {
             let extension = if action == "extend" {
                 owner.inner.observations.push_back(terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     "VERDICT: PASS",
                 ));
                 "loop.revise.rounds=2".into()
@@ -4090,15 +4093,16 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
     );
     let writer = AttemptObservation::Terminal {
         attempt_ref: None,
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: Some("work/item".into()),
         commit: Some("1".repeat(40)),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+    cause: None,
     };
     let mut owner = repair_reviews(&[
         &finding,
@@ -4486,7 +4490,7 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
         run.checkpoint
             .nodes
             .iter()
-            .map(|node| (&node.id, node.state, &node.gate, &node.advance_error))
+            .map(|node| (&node.id, node.state, &node.gate, &node.advance_note))
             .collect::<Vec<_>>()
     );
     assert_eq!(owner.repair_panel_calls, 2);

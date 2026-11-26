@@ -36,10 +36,10 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
     assert!(matches!(record.state, AttemptState::Terminal {
         outcome: Outcome::Cancelled, ref reason, ..
     } if reason.as_deref().is_some_and(|reason| reason.contains("fixture preparation broke"))));
-    let AttemptState::Terminal { terminal_cause, .. } = &record.state else {
+    let AttemptState::Terminal { cause, .. } = &record.state else {
         return Err("cancelled attempt is not terminal".into());
     };
-    assert_eq!(*terminal_cause, Some(TerminalCause::HandoffRefused));
+    assert_eq!(*cause, Some(CauseKind::LaunchHandoffRefused));
     assert_eq!(record.provider_launched, Some(false));
     Ok(())
 }
@@ -106,7 +106,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     record.generation = 1;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
-        terminal_cause: None,
+        cause: None,
         terminal_note: None,
         stop: None,
         outcome: Outcome::Succeeded,
@@ -186,7 +186,7 @@ fn terminal_read_only_review_reservation_is_not_a_custody_fence() -> TestResult 
     let mut record = store.record(input.attempt_id, &call)?;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
-        terminal_cause: None,
+        cause: None,
         terminal_note: None,
         stop: None,
         outcome: Outcome::Failed,
@@ -356,7 +356,7 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
     record.generation = 1;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
-        terminal_cause: None,
+        cause: None,
         terminal_note: None,
         stop: None,
         outcome: Outcome::Succeeded,
@@ -1137,7 +1137,7 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
     let AttemptState::Terminal {
         outcome,
         reason,
-        terminal_cause,
+        cause,
         ..
     } = record.state
     else {
@@ -1149,7 +1149,7 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
         Some("runtime deadline exceeded: provider stopped after 3600s")
     );
     // The host's kill signal is the deadline, not a provider crash.
-    assert_eq!(terminal_cause, None);
+    assert_eq!(cause, None);
     Ok(())
 }
 
@@ -1313,7 +1313,7 @@ fn listing_scans_are_bounded_by_the_page_not_by_retained_history() -> TestResult
         let mut record = store.record(input.attempt_id, &call)?;
         record.state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: Outcome::Succeeded,

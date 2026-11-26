@@ -181,8 +181,11 @@ pub fn project_lane(
         root,
         now_wall,
         (HostView::from_observation(observe_host), &[]),
-        None,
-        false,
+        PresenceEvidence {
+            census: None,
+            unknown_when_unobserved: false,
+            relayed: None,
+        },
     )
 }
 
@@ -217,8 +220,11 @@ pub fn project_lane_with_census(
         root,
         now_wall,
         (HostView::from_observation(observe_host), &[]),
-        Some(census),
-        true,
+        PresenceEvidence {
+            census: Some(census),
+            unknown_when_unobserved: true,
+            relayed: None,
+        },
     )
 }
 
@@ -237,9 +243,64 @@ pub fn project_lane_with_admission(
         root,
         now_wall,
         (HostView::from_observation(observe_host), holders),
-        Some(census),
-        true,
+        PresenceEvidence {
+            census: Some(census),
+            unknown_when_unobserved: true,
+            relayed: None,
+        },
     )
+}
+
+/// Project a row from a peer's own liveness observation instead of this host's
+/// census. The caller relays the observation with the attempt record; old
+/// output is never used here to infer that a writer is still alive.
+pub fn project_lane_with_relayed_presence(
+    lane: &run::AttemptRecord,
+    waits: &[run::LaneWait],
+    root: &Path,
+    now_wall: Option<WallTime>,
+    presence: provenant_records::wire::LanePresence,
+) -> provenant_records::wire::LaneRow {
+    project_lane_inner(
+        lane,
+        waits,
+        root,
+        now_wall,
+        (HostView::Unobserved, &[]),
+        PresenceEvidence {
+            census: None,
+            unknown_when_unobserved: true,
+            relayed: Some(presence),
+        },
+    )
+}
+
+/// This host's census observation of one attempt, to relay with its status.
+/// A reader on another host cannot run this census itself; it must see the
+/// owner's result rather than guess from the age of relayed output events.
+pub fn relayed_presence(
+    root: &Path,
+    lane: &run::AttemptRecord,
+) -> Option<provenant_records::wire::LanePresence> {
+    use provenant_records::wire::LanePresence;
+    if !matches!(lane.state, run::AttemptState::Running { .. }) {
+        return None;
+    }
+    let census = provenant_supervisor::census::ProcessObserver::census(
+        &provenant_supervisor::census::SystemProcessObserver,
+        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+    )
+    .ok();
+    let observed = match census.as_ref() {
+        Some(census) => run::attempt_presence_with_census(root, lane, census),
+        None => run::attempt_presence_with_unavailable_census(root, lane),
+    };
+    observed.map(|presence| match presence {
+        run::AttemptPresence::Live => LanePresence::Live,
+        run::AttemptPresence::Unattended => LanePresence::Unattended,
+        run::AttemptPresence::Unknown => LanePresence::Unknown,
+        run::AttemptPresence::Settling => LanePresence::Settling,
+    })
 }
 
 /// Project a row for a reader that may be on another host. Presence comes from
@@ -257,8 +318,11 @@ pub fn project_lane_presence_only(
         root,
         now_wall,
         (HostView::PresenceOnly, &[]),
-        Some(Err(())),
-        true,
+        PresenceEvidence {
+            census: Some(Err(())),
+            unknown_when_unobserved: true,
+            relayed: None,
+        },
     )
 }
 
@@ -338,21 +402,39 @@ fn stalled_projection(
     now.map(|now| run::stalled_at(lane, now, true))
 }
 
+/// Where a projection gets writer presence. Bundled so a new evidence source
+/// does not grow `project_lane_inner`'s argument list: the host's own census,
+/// no observation at all, or a peer's relayed observation.
+struct PresenceEvidence<'a> {
+    /// This host's census result; `Err(())` records that it was unavailable.
+    census: Option<std::result::Result<&'a provenant_supervisor::census::Census, ()>>,
+    /// An unobserved running attempt reads `unknown`, not absent.
+    unknown_when_unobserved: bool,
+    /// The owner's own observation, relayed with a peer's status result.
+    relayed: Option<provenant_records::wire::LanePresence>,
+}
+
 fn project_lane_inner(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
     root: &Path,
     now_wall: Option<WallTime>,
     host: (HostView, &[provenant_os::admission::HeldInfo]),
-    census: Option<std::result::Result<&provenant_supervisor::census::Census, ()>>,
-    unknown_when_host_unobserved: bool,
+    evidence: PresenceEvidence<'_>,
 ) -> provenant_records::wire::LaneRow {
+    let PresenceEvidence {
+        census,
+        unknown_when_unobserved,
+        relayed,
+    } = evidence;
     let (view, lane_holders) = host;
     let usage = lane.effective_usage();
     let host_artifacts = view.projects_host_artifacts();
     let presence = if !view.observes_presence() {
-        (unknown_when_host_unobserved && matches!(lane.state, run::AttemptState::Running { .. }))
-            .then_some(provenant_records::wire::LanePresence::Unknown)
+        relayed.or_else(|| {
+            (unknown_when_unobserved && matches!(lane.state, run::AttemptState::Running { .. }))
+                .then_some(provenant_records::wire::LanePresence::Unknown)
+        })
     } else {
         let observed = match census {
             Some(Ok(census)) => run::attempt_presence_with_census(root, lane, census),
@@ -542,7 +624,7 @@ fn project_lane_inner(
         },
     );
     if let run::AttemptState::Terminal {
-        terminal_cause: Some(run::TerminalCause::HandoffRefused),
+        cause: Some(run::CauseKind::LaunchHandoffRefused),
         reason: Some(reason),
         ..
     } = &lane.state
@@ -624,13 +706,8 @@ fn session_inventory_page(
         context,
         chair: None,
     };
-    // One bounded host census serves the entire read-only page. If unavailable,
-    // rows remain Unknown and no read queues recovery or guesses from a PID.
-    let census = provenant_supervisor::census::ProcessObserver::census(
-        &provenant_supervisor::census::SystemProcessObserver,
-        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
-    )
-    .ok();
+    // Initialise only after the page header and only for a live row.
+    let mut census = None;
     let mut query = lane_query(all, limit, after);
     query.newest_first = all;
     let mut failed = false;
@@ -638,7 +715,31 @@ fn session_inventory_page(
         if failed { return; }
         let event = match entry {
             None => json!({"total": total, "next": next}),
+            // The settled digest filters non-terminal rows. Advance its cursor
+            // without opening host evidence or delaying later settled rows.
+            Some((cursor, lane)) if all && !matches!(lane.state, run::AttemptState::Terminal { .. }) => {
+                let projected = project_lane_with_census(
+                    lane,
+                    &[],
+                    session.context.state_root.as_path(),
+                    clock.wall_now().ok(),
+                    false,
+                    Err(()),
+                );
+                json!({"cursor": cursor, "lane": {
+                    "key": lane.key, "attempt_id": lane.attempt_id,
+                    "state": projected.state, "reason": projected.reason, "finished_at": null,
+                    "requested_route": lane.requested_route, "applied_route": lane.applied_route,
+                    "delivery": lane.delivery,
+                }})
+            }
             Some((cursor, lane)) => {
+                if !matches!(lane.state, run::AttemptState::Terminal { .. }) && census.is_none() {
+                    census = Some(provenant_supervisor::census::ProcessObserver::census(
+                        &provenant_supervisor::census::SystemProcessObserver,
+                        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+                    ).ok());
+                }
                 let waits = if all {
                     Vec::new()
                 } else {
@@ -650,7 +751,7 @@ fn session_inventory_page(
                     session.context.state_root.as_path(),
                     clock.wall_now().ok(),
                     lane.superseded_by.is_none(),
-                    census.as_ref().ok_or(()),
+                    census.as_ref().and_then(Option::as_ref).ok_or(()),
                 );
                 let state = projected.state;
                 let reason = projected.reason;

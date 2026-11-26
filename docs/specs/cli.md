@@ -94,6 +94,21 @@ in place and is reported as incomplete coverage, never as complete.
 - Why: a partial observation must not hide available work or imply complete
   coverage.
 
+### Graph wait recovery
+
+A graph status refresh is read-only. While a wait observes remote attempts, a
+successful reading that confirms terminal remote work re-drives an unsettled
+graph through the journal-locked advancement owner. A recovered endpoint can
+therefore settle work in the same wait; a successful advance also clears the
+transport error held from an earlier failed attempt to settle it. Unavailable
+remote readings remain pending and are retried within the wait budget; if the
+wait ends pending, it reports the last failed reading. A peer read failure
+also projects the attempt as unknown in status; that projection does not erase
+the failure from wait history.
+
+- Why: terminal remote work must settle as soon as its home endpoint can be
+  reached again, without requiring a second wait or a manual advance.
+
 ### Nested tree
 
 The tree distinguishes dispatch, continuation and retry relationships, and
@@ -211,7 +226,13 @@ own state, so an older settlement cannot satisfy a wait for new work.
 Local graph waiters share one filesystem event source; when it is unavailable
 the result says why and rereads at `domains.wait.local_interval_ms`. Peer and
 relayed rows use the same paced reread because the relay has no remote
-subscription. Every blocking forge operation inside a wait shares one request
+subscription. An unreachable home endpoint is one pending observation, not a
+failed wait: a graph wait keeps rereading remote attempts until its budget ends
+or a later reading succeeds. A successful reading clears the earlier failure;
+when the budget ends still pending, the wait names the last failed reading
+rather than the first one held when it began. A successful reading of a finished
+remote lane also clears the transport error held from an earlier failed advance,
+so status shows the lane's settled state. Every blocking forge operation inside a wait shares one request
 context (the wait's absolute deadline, capped per read by
 `domains.wait.pr_read_timeout_seconds`, and its cancellation), and a wait that
 settles cancels the forge transport of its other targets. Wait event lines,
@@ -256,6 +277,18 @@ serves every listed graph, so a `--full` page never repeats those scans per grap
 The admission summary reuses that holder reading, and the process census is
 taken only when local attempt evidence needs it.
 
+`status NAME` resolves the name in the caller's project first. On a miss it
+searches the state root's other registered projects: one match is read through
+the owning project's identity and reported with a `CROSS_PROJECT_TARGET_FOUND`
+warning naming that project; several matches refuse with `AMBIGUOUS_TARGET`
+listing every project instead of guessing one. Inside a lane the relay's project
+and chair-session read scope still applies
+([fabric](fabric.md#lane-graph-read-scope)).
+
+- Why: a graph in another registered project stays reachable without the caller
+  having to know which project owns it, and an ambiguous name is never resolved
+  by guessing.
+
 `status --mine` reads active custody across projects (or one `--project`),
 including attempts nested under the current chair and unattended items open to
 adoption. `status --adoptable` lists only the unattended items open to adoption.
@@ -270,7 +303,11 @@ Writer presence is `live`, `unattended`, `settling` or `unknown`. `running` show
 only while the recorded guardian or provider identity is present. A changed boot
 proves the old process tree is gone; same-boot absence, a reused PID, an
 unobservable host, incomplete evidence and unreachable peers stay `unknown`,
-because a child may have forked into another session and been reparented. Status
+because a child may have forked into another session and been reparented. A
+reachable peer supplies its own observed presence with the relayed status, so
+its attempt reports `running` on the launching host without that host reading
+the peer's process table; a reconcile hint for a peer-owned attempt names the
+peer's graph target and the host where it resolves. Status
 never mutates or schedules recovery; unattended and settling rows name the scoped
 `provenant reconcile` action, which rechecks custody before settlement. A
 settling row also names PIDs and the custody writer-lock path observed at the
@@ -464,6 +501,17 @@ Release checks inspect the artifact to be distributed as well as Git evidence.
 
 - Why: an inspection must not change its subject or certify an uninspected
   artifact.
+
+### Check config reports warm-target provenance
+
+`check config` names the layer that set `build.target` when a layer other than
+the builtin changed the target identity, and warns when the toolchain recorded in
+a warm slot differs from the checkout's `rust-toolchain.toml` pin. These are
+findings: the check never rewarms a target or edits a slot record.
+
+- Why: a warm cache built by a different toolchain or worktree is cold or
+  stale, and the source of that decision must be visible without building.
+- Owner: `tools/front-door/src/checks.rs`
 
 ### Check install uses recorded roots
 

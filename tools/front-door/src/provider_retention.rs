@@ -8,9 +8,19 @@ use std::path::Path;
 
 #[derive(Clone, Copy)]
 enum RetentionPass {
-    ProviderState { days: u64, logs_days: u64 },
-    AttemptScratch { idle_seconds: u64 },
-    PayloadCap { cap_bytes: u64, measure: bool },
+    ProviderState {
+        days: u64,
+        logs_days: u64,
+    },
+    AttemptScratch {
+        idle_seconds: u64,
+        scratch_cap_bytes: u64,
+        grace_seconds: u64,
+    },
+    PayloadCap {
+        cap_bytes: u64,
+        measure: bool,
+    },
 }
 
 #[allow(clippy::too_many_arguments)] // Host binding, retention policy and cooperative scan are explicit.
@@ -42,6 +52,8 @@ pub(crate) fn collect_attempt_scratch(
     home: &Path,
     assets: &Path,
     idle_seconds: u64,
+    scratch_cap_bytes: u64,
+    grace_seconds: u64,
     projects: Option<&[ProjectId]>,
     dry_run: bool,
     cancel: &CancelToken,
@@ -51,7 +63,11 @@ pub(crate) fn collect_attempt_scratch(
         roots,
         home,
         assets,
-        RetentionPass::AttemptScratch { idle_seconds },
+        RetentionPass::AttemptScratch {
+            idle_seconds,
+            scratch_cap_bytes,
+            grace_seconds,
+        },
         dry_run,
         projects,
         cancel,
@@ -208,7 +224,11 @@ fn collect_store(
                     report.kept.append(&mut collected.kept);
                     report.errors.append(&mut collected.errors);
                 }
-                RetentionPass::AttemptScratch { idle_seconds } => {
+                RetentionPass::AttemptScratch {
+                    idle_seconds,
+                    scratch_cap_bytes,
+                    grace_seconds,
+                } => {
                     let owner = crate::scratch_owner::Owner::new(host, home, assets);
                     let decide =
                         |record: &provenant_run::AttemptRecord,
@@ -217,6 +237,8 @@ fn collect_store(
                         };
                     let policy = provenant_run::ScratchPolicy {
                         idle_seconds,
+                        scratch_cap_bytes,
+                        grace_seconds,
                         projects,
                         attempts: None,
                         owner: Some(&decide),
@@ -454,6 +476,8 @@ pub(crate) fn run_branch_scratch(globals: &provenant_cli::Globals, branch: &str)
         };
         let policy = provenant_run::ScratchPolicy {
             idle_seconds: 0,
+            scratch_cap_bytes: 0,
+            grace_seconds: 86_400,
             projects: None,
             attempts: Some(&ids),
             owner: Some(&finished),
@@ -476,7 +500,7 @@ pub(crate) fn run_branch_scratch(globals: &provenant_cli::Globals, branch: &str)
     if collect().is_ok() { 0 } else { 1 }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, OperationId, RootInputs, WaitBudget, WallTime};
@@ -667,6 +691,8 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
         &home,
         &assets,
         7,
+        0,
+        86_400,
         None,
         true,
         &provenant_core::CancelToken::new(),
@@ -723,6 +749,8 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
         &home,
         &assets,
         7,
+        0,
+        86_400,
         None,
         false,
         &provenant_core::CancelToken::new(),

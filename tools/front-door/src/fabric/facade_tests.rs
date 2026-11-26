@@ -891,12 +891,17 @@ fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
     Ok(())
 }
 
-#[cfg(test)]
-#[allow(dead_code)] // The worktree driver includes these helpers without libtest.
+#[cfg(any(test, feature = "fixture"))]
+#[allow(dead_code)] // The fixture-gated worktree harness uses only some helpers.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test harness linked into the library; clippy's allow-in-tests only applies under cfg(test)"
+)]
 pub(crate) mod peer_tests {
     use super::*;
     #[allow(unused_imports)]
-    // The worktree driver includes this module without libtest functions.
+    // The fixture-gated worktree harness uses this module without libtest.
     use provenant_confinement::worktrees;
     use provenant_core::AttemptId;
     use provenant_run::{AttemptState, Outcome, RunStore};
@@ -1173,27 +1178,29 @@ pub(crate) mod peer_tests {
             model: Some(model.into()),
             ..Default::default()
         };
+        let fact = provenant_records::settlement::classify::settle(
+            &provenant_records::settlement::SettlementEvidence::fixture(
+                provenant_records::settlement::LaneRole::Reader,
+                outcome,
+                None,
+            ),
+        );
         store.publish_terminal(
             record.attempt_id,
             record.revision,
             &provenant_run::TerminalPublication {
-                handoff: Ok(None),
-                terminal_cause: None,
-                terminal_note: None,
-                outcome,
+                fact,
+                evidence: None,
                 finished_at: call.clock.wall_now()?,
                 started_at: None,
                 provider_ms: None,
-                reason: None,
                 result: "OK",
-                complete: true,
                 redacted: false,
                 resolved_route: Some(route.clone()),
                 applied_route: Some(route.clone()),
                 observed_route: Some(route),
                 usage: Default::default(),
                 session: None,
-                partial_signals: Vec::new(),
             },
             &exit,
             call,

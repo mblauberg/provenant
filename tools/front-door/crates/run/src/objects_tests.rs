@@ -472,7 +472,7 @@ impl Fixture {
     }
 
     fn git_overlay_raw(&self, scratch: &Path, args: &[&str]) -> TestResult<Output> {
-        Ok(provenant_os::fixture::git_command_at(&self.git)
+        let output = provenant_os::fixture::git_command_at(&self.git)
             .env_clear()
             .envs(provenant_os::fixture::fixture_git_settings())
             .env("PATH", "/usr/bin:/bin")
@@ -486,7 +486,21 @@ impl Fixture {
             .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
             .args(args)
             .current_dir(&self.lane)
-            .output()?)
+            .output()?;
+        // This helper deliberately selects the common dir directly to pin the
+        // private merge state there. Keep the linked registration's per-worktree
+        // HEAD in step: the production shim writes HEAD through the registration,
+        // and a stale symbolic ref makes Git refuse to check out that branch as
+        // "already used by" the lane worktree.
+        let common = scratch.join("git-common");
+        let registration_head = common
+            .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+            .join(provenant_core::LANE_GIT_REGISTRATION)
+            .join("HEAD");
+        if registration_head.is_file() {
+            fs::copy(common.join("HEAD"), registration_head)?;
+        }
+        Ok(output)
     }
 
     fn prepare_attempt(&self, id: AttemptId, base: GitOid) -> TestResult<(Directory, PathBuf)> {
@@ -2256,6 +2270,19 @@ fn private_git_supports_stash_rebase_merge_and_gc_without_shared_metadata_change
     fixture.git_overlay(&scratch, &["add", "side"])?;
     fixture.git_overlay(&scratch, &["commit", "-qm", "side change"])?;
     fixture.git_overlay(&scratch, &["checkout", "lane"])?;
+    // A branch switch must leave the linked registration's HEAD in step with
+    // the lane: a stale ref makes Git treat that branch as held by another
+    // worktree and refuse the checkout.
+    let private_common = scratch.join("git-common");
+    assert_eq!(
+        fs::read(private_common.join("HEAD"))?,
+        fs::read(
+            private_common
+                .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+                .join(provenant_core::LANE_GIT_REGISTRATION)
+                .join("HEAD")
+        )?
+    );
     fixture.git_overlay(&scratch, &["rebase", "side"])?;
     fixture.git_overlay(&scratch, &["merge", "--no-ff", "side", "-m", "merge"])?;
     fixture.git_overlay(&scratch, &["gc"])?;

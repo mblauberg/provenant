@@ -1,7 +1,7 @@
 //! Attempt outcomes joined to retained access and route-selection evidence.
 use std::collections::BTreeMap;
 
-use provenant_records::{AttemptFact, AttemptOutcome};
+use provenant_records::{AttemptFact, run::Outcome};
 use provenant_routing::{ModelId, OutcomeKey, PriorKey, RoutePrior};
 use serde::Serialize;
 
@@ -43,10 +43,10 @@ fn exact_route(route: &provenant_records::RouteFact) -> Option<String> {
 
 /// Account identity evidence is independent of whether provider work finished.
 /// Q1 keeps unobserved accounts unknown; it must not invent model failures.
-pub fn provider_work_incomplete(signals: &[provenant_records::run::PartialSignal]) -> bool {
+pub fn provider_work_incomplete(signals: &[provenant_records::run::SettlementSignal]) -> bool {
     signals
         .iter()
-        .any(|signal| *signal != provenant_records::run::PartialSignal::IdentityUnobserved)
+        .any(|signal| *signal != provenant_records::run::SettlementSignal::IdentityUnobserved)
 }
 
 // Host stops still describe who stopped the process. A settlement declaration
@@ -56,8 +56,8 @@ fn has_quality_outcome(fact: &AttemptFact) -> bool {
     use provenant_records::run::{CauseSource, SettlementTerminalOutcome};
     fact.cause_source == CauseSource::Provider
         || (fact.cause_source == CauseSource::Host
-            && fact.terminal_state == AttemptOutcome::Succeeded
-            && fact.settlement_reason.is_some_and(|reason| {
+            && fact.terminal_state == Outcome::Succeeded
+            && fact.settlement_class.is_some_and(|reason| {
                 reason.rule().terminal_outcome == SettlementTerminalOutcome::Succeeded
             }))
 }
@@ -104,10 +104,8 @@ pub fn priors(
             continue;
         };
         let success = match item.fact.terminal_state {
-            AttemptOutcome::Succeeded => !item.partial,
-            AttemptOutcome::Failed | AttemptOutcome::Rejected | AttemptOutcome::ReviewRequired => {
-                false
-            }
+            Outcome::Succeeded => !item.partial,
+            Outcome::Failed | Outcome::Rejected | Outcome::ReviewRequired => false,
             _ => continue,
         };
         let counts = groups
@@ -201,9 +199,7 @@ pub fn report(
             let samples = items.len() as u64;
             let successes = items
                 .iter()
-                .filter(|item| {
-                    item.fact.terminal_state == AttemptOutcome::Succeeded && !item.partial
-                })
+                .filter(|item| item.fact.terminal_state == Outcome::Succeeded && !item.partial)
                 .count() as u64;
             let mut time = 0u64;
             let mut missing_time = 0;

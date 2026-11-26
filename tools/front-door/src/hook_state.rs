@@ -7,7 +7,6 @@ use provenant_cli::Globals;
 use provenant_core::{Clock, MonoTime};
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-use provenant_records::custody::HolderPresence;
 use provenant_workflow::session::{
     CommandPrefix, CustodyLine, DigestScope, LaneLine, SessionState, Unavailable, WorktreeLine,
 };
@@ -106,26 +105,65 @@ impl<'a> Cli<'a> {
             .executor
             .execute(options)
             .map_err(|error| format!("could not start: {error}"))?;
-        if out.timed_out {
-            return Err("timed out".into());
-        }
+        // Read the answer before the timeout flag. A child that wrote its
+        // complete envelope and was killed before it could exit still leaves
+        // a usable section; dropping that output turns a bounded partial
+        // summary into an `unavailable` section the agent cannot act on.
         let envelope: Option<Value> = if out.stdout.truncated {
             None
         } else {
             serde_json::from_slice(&out.stdout.bytes).ok()
         };
         let Some(envelope) = envelope else {
-            return Err(match out.termination {
-                Termination::Exit(0) => "unreadable output".into(),
-                Termination::Exit(code) => format!("exit {code}"),
-                _ => "terminated".into(),
+            return Err(if out.timed_out {
+                "timed out".into()
+            } else {
+                match out.termination {
+                    Termination::Exit(0) => "unreadable output".into(),
+                    Termination::Exit(code) => format!("exit {code}"),
+                    _ => "terminated".into(),
+                }
             });
         };
-        if envelope["status"] == "ok" && out.termination == Termination::Exit(0) {
+        // A complete success envelope is authoritative. A child killed at its
+        // deadline ends on a signal, not `Exit(0)`, but its answer is still
+        // complete; only an unreadable or refused envelope is a failure.
+        if envelope["status"] == "ok" && (out.termination == Termination::Exit(0) || out.timed_out)
+        {
             return Ok(envelope["data"].clone());
         }
         let message = envelope["error"]["message"].as_str().unwrap_or("refused");
         Err(provenant_workflow::session::clean(message, 120))
+    }
+
+    fn custody_listing(
+        &self,
+        deadline: MonoTime,
+        session: Option<&str>,
+    ) -> Result<(Vec<CustodyLine>, Option<String>), String> {
+        let time = LISTING_TIME.min(self.remaining(deadline));
+        if time < Duration::from_millis(50) {
+            return Err("hook deadline reached".into());
+        }
+        let mut args = vec!["status", "--mine", "--custody-stream", "--limit", LANE_PAGE];
+        if let Some(session) = session {
+            args.extend(["--session", session]);
+        }
+        let argv = self.argv(&args);
+        let mut options = ExecOptions::new(&argv, self.cwd, time);
+        options.stdout = StreamPolicy::Capture { limit: OUTPUT_CAP };
+        options.stderr = StreamPolicy::Capture { limit: 2048 };
+        let out = self
+            .executor
+            .execute(options)
+            .map_err(|error| format!("could not start: {error}"))?;
+        parse_custody_stream(&out.stdout.bytes).ok_or_else(|| {
+            if out.timed_out {
+                "timed out".into()
+            } else {
+                "inventory unavailable".into()
+            }
+        })
     }
 
     /// Preserve complete inventory records even when the child hits its budget.
@@ -244,13 +282,7 @@ fn collect_with_cli(
         let worktrees = want
             .worktrees
             .then(|| scope.spawn(move || cli.worktree_listing(deadline)));
-        let custody = scope.spawn(move || {
-            let mut args = vec!["status", "--mine", "--limit", LANE_PAGE];
-            if let Some(session) = want.session.as_deref() {
-                args.extend(["--session", session]);
-            }
-            cli.data(&args, LISTING_TIME, deadline)
-        });
+        let custody = scope.spawn(move || cli.custody_listing(deadline, want.session.as_deref()));
         match active.join() {
             Ok(Ok((lanes, next, skipped))) => {
                 state.active = lanes;
@@ -298,33 +330,16 @@ fn collect_with_cli(
             }
         }
         match custody.join() {
-            Ok(Ok(data)) => {
-                match serde_json::from_value::<provenant_records::custody::CustodyStatus>(data) {
-                    Ok(view) => {
-                        for item in view.items {
-                            let presence = match item.presence {
-                                HolderPresence::Live => "live",
-                                HolderPresence::Unattended => "unattended",
-                                HolderPresence::Unknown => "unknown",
-                            };
-                            state.custody.push(CustodyLine {
-                                subject: item.record.subject.to_string(),
-                                presence: presence.to_owned(),
-                                project: item.record.project.to_string(),
-                                mine: item.mine,
-                            });
-                        }
-                        state.custody_more = view.next.map(|cursor| {
-                            state
-                                .commands
-                                .command(&format!("status --mine --cursor {cursor}"))
-                        });
-                    }
-                    Err(error) => state.unavailable.push(Unavailable {
-                        source: "custody".into(),
-                        reason: format!("invalid custody response: {error}"),
-                    }),
-                }
+            Ok(Ok((items, next))) => {
+                state.custody = items;
+                state.custody_more = next.map(|cursor| {
+                    state
+                        .commands
+                        .command(&crate::custody::custody_page_command(
+                            want.session.as_deref(),
+                            cursor.parse().ok(),
+                        ))
+                });
             }
             Ok(Err(reason)) => state.unavailable.push(Unavailable {
                 source: "custody".into(),
@@ -398,7 +413,7 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
     for lane in rows {
         if let Some(after) = settled_after_unix {
             if !lane["state"].as_str().is_some_and(|state| {
-                serde_json::from_value::<provenant_records::AttemptOutcome>(Value::String(
+                serde_json::from_value::<provenant_records::run::Outcome>(Value::String(
                     state.to_owned(),
                 ))
                 .is_ok()
@@ -433,6 +448,67 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
         });
     }
     (lanes, data["next_cursor"].as_str().map(str::to_owned))
+}
+
+/// Keep complete inspected custody rows and resume before an interrupted row.
+fn parse_custody_stream(bytes: &[u8]) -> Option<(Vec<CustodyLine>, Option<String>)> {
+    let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
+    let header = lines.next()?;
+    if !header.ends_with(b"\n") {
+        return None;
+    }
+    let header: Value = serde_json::from_slice(header).ok()?;
+    let total = usize::try_from(header.get("total")?.as_u64()?).ok()?;
+    if total > 100 {
+        return None;
+    }
+    let mut items = Vec::new();
+    let mut inspected = 0;
+    let mut last = None;
+    for line in lines {
+        if !line.ends_with(b"\n") || inspected >= total {
+            break;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            break;
+        };
+        let Some(cursor) = event.get("cursor").and_then(Value::as_u64) else {
+            break;
+        };
+        let Some(item) = event.get("item") else {
+            break;
+        };
+        if !item.is_null() {
+            let (Some(subject), Some(project), Some(presence), Some(mine)) = (
+                item.get("subject").and_then(Value::as_str),
+                item.get("project").and_then(Value::as_str),
+                item.get("presence").and_then(Value::as_str),
+                item.get("mine").and_then(Value::as_bool),
+            ) else {
+                break;
+            };
+            if !matches!(presence, "live" | "unattended" | "unknown") {
+                break;
+            }
+            items.push(CustodyLine {
+                subject: subject.into(),
+                presence: presence.into(),
+                project: project.into(),
+                mine,
+            });
+        }
+        inspected += 1;
+        last = Some(cursor);
+    }
+    let next = if inspected < total {
+        Some(last.map_or_else(String::new, |cursor| cursor.to_string()))
+    } else {
+        header
+            .get("next")
+            .and_then(Value::as_u64)
+            .map(|cursor| cursor.to_string())
+    };
+    Some((items, next))
 }
 
 /// The header describes one page; a timed-out partial page resumes after its
@@ -560,7 +636,10 @@ mod tests {
             fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
                 self.0.lock().unwrap().push(options.timeout);
                 let args: Vec<&str> = options.argv.iter().filter_map(|arg| arg.to_str()).collect();
-                let stdout = if args.contains(&"worktree") {
+                let stdout = if args.contains(&"--custody-stream") {
+                    assert!(args.windows(2).any(|pair| pair == ["--session", "chair-a"]));
+                    "{\"total\":2,\"next\":null}\n{\"cursor\":4,\"item\":null}\n"
+                } else if args.contains(&"worktree") {
                     WORKTREES
                 } else if args.contains(&"--all") {
                     SETTLED
@@ -606,7 +685,7 @@ mod tests {
             &Want {
                 worktrees: true,
                 settled_after_unix: 0,
-                session: None,
+                session: Some("chair-a".into()),
                 project: None,
                 scope: DigestScope::Project,
                 scope_source: None,
@@ -614,6 +693,10 @@ mod tests {
             deadline,
         );
         let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert_eq!(
+            state.custody_more.as_deref(),
+            Some("provenant status --mine --session 'chair-a' --cursor 4")
+        );
         assert!(digest.contains("g/a#1"), "{digest}");
         assert!(digest.contains("/lane"), "{digest}");
         assert!(
@@ -752,6 +835,76 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn custody_answer_written_before_the_deadline_survives_a_timeout() {
+        use super::*;
+        use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome};
+
+        struct KilledAfterAnswer;
+        impl Executor for KilledAfterAnswer {
+            fn execute(&self, _options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let bytes = br#"{"status":"ok","data":{"items":[{"record":{"subject":"g/a#1","project":"p"},"presence":"unattended","mine":true}],"next":null}}"#;
+                Ok(ExecOutcome {
+                    termination: Termination::Signal(15),
+                    stdout: CapturedStream {
+                        bytes: bytes.to_vec(),
+                        total_bytes: bytes.len() as u64,
+                        ..Default::default()
+                    },
+                    stderr: CapturedStream::default(),
+                    timed_out: true,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let executor = KilledAfterAnswer;
+        let cli = Cli {
+            exe: PathBuf::from("provenant"),
+            state_dir: None,
+            cwd: temp.path(),
+            executor: &executor,
+            clock: &SYSTEM_CLOCK,
+        };
+        let data = cli
+            .data(
+                &["status", "--mine", "--limit", "100"],
+                LISTING_TIME,
+                cli.deadline_after(Duration::from_secs(1)),
+            )
+            .expect("a complete custody answer is kept even though the child was killed");
+        assert_eq!(data["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            data["items"][0]["record"]["subject"].as_str(),
+            Some("g/a#1")
+        );
+    }
+
+    #[test]
+    fn custody_stream_resumes_after_last_complete_inspected_row() {
+        use super::*;
+        let stream = b"{\"total\":3,\"next\":9}\n{\"cursor\":3,\"item\":{\"subject\":\"branch-a\",\"project\":\"p\",\"presence\":\"live\",\"mine\":true}}\n{\"cursor\":4,\"item\":null}\n{\"cursor\":5";
+        let (items, next) = parse_custody_stream(stream).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].subject, "branch-a");
+        assert_eq!(next.as_deref(), Some("4"));
+        let (_, next) = parse_custody_stream(b"{\"total\":1,\"next\":null}\n").unwrap();
+        assert_eq!(next.as_deref(), Some(""));
+        assert_eq!(
+            crate::custody::custody_page_command(Some("chair-a"), Some(4)),
+            "status --mine --session 'chair-a' --cursor 4"
+        );
+        assert_eq!(
+            crate::custody::custody_page_command(Some("chair-a"), None),
+            "status --mine --session 'chair-a'"
+        );
+    }
+
+    #[test]
     fn worktree_stream_keeps_completed_rows_and_counts_skipped() {
         use super::*;
         let stream = b"{\"total\":4}\n{\"worktree\":{\"path\":\"/primary\"}}\n{\"worktree\":{\"path\":\"/one\",\"branch\":\"refs/heads/one\",\"dirty\":\"clean\",\"writer\":\"free\"}}\n{\"worktree\":{\"path\":\"/incomplete\"";
@@ -844,9 +997,9 @@ mod tests {
         use serde_json::json;
         let outcome = |outcome| serde_json::to_value(outcome).unwrap();
         let data = json!({"lanes":[
-            {"key":{"graph":"g","node":"new","attempt":1},"attempt_id":"new","state":outcome(provenant_records::AttemptOutcome::Failed),"reason":"boom","finished_at":"2026-10-27T01:00:00Z"},
-            {"key":{"graph":"g","node":"old","attempt":1},"attempt_id":"old","state":outcome(provenant_records::AttemptOutcome::Succeeded),"finished_at":"2026-10-27T00:00:00Z"},
-            {"key":{"graph":"g","node":"no_finish","attempt":1},"attempt_id":"no-finish","state":outcome(provenant_records::AttemptOutcome::Lost)},
+            {"key":{"graph":"g","node":"new","attempt":1},"attempt_id":"new","state":outcome(provenant_records::run::Outcome::Failed),"reason":"boom","finished_at":"2026-10-27T01:00:00Z"},
+            {"key":{"graph":"g","node":"old","attempt":1},"attempt_id":"old","state":outcome(provenant_records::run::Outcome::Succeeded),"finished_at":"2026-10-27T00:00:00Z"},
+            {"key":{"graph":"g","node":"no_finish","attempt":1},"attempt_id":"no-finish","state":outcome(provenant_records::run::Outcome::Lost)},
             {"key":{"graph":"g","node":"active","attempt":1},"attempt_id":"active","state":"running"}
         ],"next_cursor":null});
         let after = "2026-10-27T00:30:00Z"

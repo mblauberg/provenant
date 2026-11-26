@@ -34,7 +34,7 @@ pub const TEMPLATE_FIELD: &str = "template";
 /// roots: strict scope and custody still bind and out-of-scope edits are
 /// reported at settlement.
 /// Spec: docs/specs/delivery-queue.md#shared-types (`escalate`).
-pub const FINAL_RUNG_SCOPE_BRIEF: &str = "At this final route rung you may widen the change within your actual authority and the node's literal write scope. Strict scope and custody still bind: keep every write inside the supplied scope and report out-of-scope edits in the handoff.";
+pub const FINAL_RUNG_SCOPE_BRIEF: &str = "At this final route rung you may widen the change within your actual authority and the node's literal write scope. Strict scope and custody still bind: keep every write inside the supplied scope and report out-of-scope edits in your declaration.";
 
 /// Instruction carried by every repair brief. Single-test repairs dominate
 /// observed round counts, so a repair must sweep the whole defect class.
@@ -853,7 +853,7 @@ impl ReviewBehaviour {
         }
         let prompt = node.entry("prompt").or_insert_with(|| "".into());
         let brief = prompt.as_str().unwrap_or_default();
-        *prompt = format!("{brief}\n{instruction}\nReturn a fenced findings JSON block with schema_version 1 and a findings array (at most 32 entries). Use [] when clean. Keep qualified IDs and propagation markers. Read full member results and the input index when bounded exports are truncated; disclose unavailable evidence and lenses. For overflow, follow the supplied DISPOSITION protocol. PASS requires complete acceptance evidence and no repair-eligible findings; missing evidence is INCONCLUSIVE. {}", super::review::VERDICT_THEN_HANDOFF).into();
+        *prompt = format!("{brief}\n{instruction}\nReturn a fenced findings JSON block with schema_version 1 and a findings array (at most 32 entries). Use [] when clean. Keep qualified IDs and propagation markers. Read full member results and the input index when bounded exports are truncated; disclose unavailable evidence and lenses. For overflow, follow the supplied DISPOSITION protocol. PASS requires complete acceptance evidence and no repair-eligible findings; missing evidence is INCONCLUSIVE. {}", super::review::VERDICT_LAST).into();
     }
 }
 

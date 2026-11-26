@@ -9,7 +9,7 @@ fn row() -> LaneRow {
         git_import_failure: None,
         stop_work: None,
         warnings: None,
-        terminal_cause: None,
+        cause: None,
         project_id: "9".repeat(32),
         graph: "g".into(),
         node: "n".into(),
@@ -17,7 +17,7 @@ fn row() -> LaneRow {
         attempt_number: 1,
         retry_of: None,
         superseded_by: None,
-        cause: None,
+        settlement_class: None,
         state: "running".into(),
         presence: None,
         recorded_state: None,
@@ -43,7 +43,7 @@ fn row() -> LaneRow {
         runtime_deadline: Value::Null,
         overdue: Some(false),
         stale: Some(false),
-        partial_signals: json!([]),
+        signals: json!([]),
         usage: json!({}),
         delivery_id: None,
         write_grants: Some(json!([])),
@@ -119,7 +119,7 @@ fn lane_rows_validate_with_and_without_optional_members() {
     full.state = "terminal".into();
     full.retry_of = Some("3".repeat(32));
     full.superseded_by = Some("4".repeat(32));
-    full.cause = Some(crate::run::SettlementReason::DeclaredStop);
+    full.settlement_class = Some(crate::run::SettlementClass::DeclaredStop);
     full.exit_code = Some(0);
     full.reason = Some("done".into());
     full.settlement = Some(LaneSettlement {
@@ -151,7 +151,7 @@ fn lane_rows_validate_with_and_without_optional_members() {
     let value = serde_json::to_value(&full).unwrap();
     assert_eq!(value["requested_priority"], 10);
     assert_eq!(value["title"], "Review\nchanges");
-    assert_eq!(value["cause"], "declared_stop");
+    assert_eq!(value["settlement_class"], "declared_stop");
     assert_eq!(value["retry_of"], "3".repeat(32));
     assert_eq!(value["superseded_by"], "4".repeat(32));
     assert_eq!(value["steering"]["state"], "resumed");
@@ -185,11 +185,11 @@ fn lane_rows_validate_with_and_without_optional_members() {
         "session_proof_incomplete"
     );
     for cause in [
-        crate::run::TerminalCause::Steered,
-        crate::run::TerminalCause::EmptyWriterResult,
-        crate::run::TerminalCause::ProviderCaptureDefect { line: 52 },
+        crate::run::CauseKind::Steered,
+        crate::run::CauseKind::EmptyWriterResult,
+        crate::run::CauseKind::ProviderCaptureDefect { line: 52 },
     ] {
-        full.terminal_cause = Some(cause);
+        full.cause = Some(cause);
         accepted(&schema, &full);
     }
 }
@@ -252,6 +252,19 @@ fn dead_and_unobservable_writer_projection_is_truthful_and_actionable()
     assert!(dead.reason.as_deref().is_some_and(|reason| {
         reason.contains("provenant reconcile") && reason.contains(&target.to_string())
     }));
+
+    let settling = LaneRow::project(
+        &attempt,
+        LaneProjectionFacts {
+            presence: Some(LanePresence::Settling),
+            ..Default::default()
+        },
+    );
+    assert_eq!(settling.state, "settling");
+    assert_eq!(
+        settling.reason.as_deref(),
+        Some("the writer exited; settlement recovery is outstanding")
+    );
 
     let unknown = LaneRow::project(
         &attempt,
@@ -366,6 +379,9 @@ fn chunk() -> OutputChunk {
         writer_head: None,
         residual_tree: None,
         publication: None,
+        pushed_head: None,
+        uncommitted_paths: None,
+        declaration_source: None,
         selected: None,
     }
 }
@@ -441,6 +457,9 @@ fn chunk_optional_members_and_encodings() {
     full.writer_head = Some("b".repeat(40));
     full.residual_tree = Some("clean (current observation)".into());
     full.publication = Some("pushed".into());
+    full.pushed_head = Some("c".repeat(40));
+    full.uncommitted_paths = Some(vec!["src/lib.rs".into()]);
+    full.declaration_source = Some("declared".into());
     full.lane.provider_error = Some("failed".into());
     full.lane.result_path =
         json!(crate::StructuredPathWire::from_path(std::path::Path::new("/s/result.md")).unwrap());
@@ -451,7 +470,14 @@ fn chunk_optional_members_and_encodings() {
     assert!(plain.get("tail").is_none());
     // Missing Git evidence is represented as null, never as an inferred clean tree.
     let mut unavailable = plain.clone();
-    for field in ["writer_base", "writer_head", "residual_tree", "publication"] {
+    for field in [
+        "writer_base",
+        "writer_head",
+        "residual_tree",
+        "publication",
+        "pushed_head",
+        "declaration_source",
+    ] {
         unavailable[field] = Value::Null;
     }
     schema::validate(&schema, &unavailable).unwrap();
@@ -524,7 +550,7 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         attempt_id: id,
         found: cancel::ReconciledWire::Settling {
             phase: "delivering".into(),
-            blocking_reason: None,
+            held_reason: None,
         },
     }]);
     data.lanes = Some(vec![row()]);

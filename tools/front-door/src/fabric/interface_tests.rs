@@ -1845,71 +1845,150 @@ fn replay_digest_tracks_delivery_source_commit() -> Result {
 }
 
 #[test]
-fn smoke_root_commit_skips_review_without_blocking_other_nodes() -> Result {
+fn smoke_review_is_bounded_to_the_writer_scratch_commit() -> Result {
     let rig = crate::worktree_tests::repository()?;
     let factory = factory(&rig)?;
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let cancel = CancelToken::new();
-    let preview = factory.graph_document(
-        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
-        budget,
-        &cancel,
-    )?;
-    let skipped = preview["skipped"].as_array().ok_or("skipped rows")?;
-    assert!(
-        skipped.iter().any(|row| {
-            row["node"]
-                .as_str()
-                .is_some_and(|id| id.contains("review--"))
-                && row["reason"]
+    let review_skipped = |preview: &Value| {
+        preview["skipped"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["node"]
                     .as_str()
-                    .is_some_and(|reason| reason.contains("smoke-review"))
-        }),
-        "review must be skipped: {preview}"
-    );
-    assert!(
-        !skipped.iter().any(|row| {
-            row["node"].as_str().is_some_and(|id| {
-                id.ends_with("task--read")
-                    || id.ends_with("task--retry-route")
-                    || id.ends_with("task--steer-route")
+                    .is_some_and(|id| id.contains("review--"))
+                    && row["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("smoke-review"))
             })
-        }),
-        "other read nodes must remain eligible: {preview}"
-    );
-    assert!(
-        preview["warnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| {
-                warning
-                    .as_str()
-                    .is_some_and(|text| text.contains("checkout first parent is unavailable"))
-            })),
-        "the reason must be recorded: {preview}"
-    );
-
-    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    std::fs::write(rig.project.join("subject.txt"), "subject\n")?;
-    crate::worktree_tests::git(&rig, &["add", "subject.txt"])?;
-    crate::worktree_tests::git(&rig, &["commit", "-qm", "subject"])?;
-    let with_parent = factory.graph_document(
-        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
+        })
+    };
+    let preview = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "explain":true}),
         budget,
         &cancel,
     )?;
     assert!(
-        !with_parent["skipped"]
+        review_skipped(&preview),
+        "a launch with no writer must skip review, never review the caller checkout: {preview}"
+    );
+    assert!(
+        !preview["skipped"]
             .as_array()
             .ok_or("skipped rows")?
             .iter()
             .any(|row| {
-                row["node"]
-                    .as_str()
-                    .is_some_and(|id| id.contains("review--"))
+                row["node"].as_str().is_some_and(|id| {
+                    id.ends_with("task--read")
+                        || id.ends_with("task--retry-route")
+                        || id.ends_with("task--steer-route")
+                })
             }),
-        "a parent must enable review: {with_parent}"
+        "other read nodes must remain eligible: {preview}"
     );
-    assert!(serde_json::to_string(&with_parent["document"])?.contains(&base));
+    let warns = |preview: &Value, text: &str| {
+        preview["warnings"].as_array().is_some_and(|warnings| {
+            warnings
+                .iter()
+                .any(|warning| warning.as_str().is_some_and(|w| w.contains(text)))
+        })
+    };
+    assert!(
+        warns(&preview, "no writer scratch commit"),
+        "the reason must be recorded: {preview}"
+    );
+
+    // A writer bounds the review to its own scratch base, not the caller's
+    // first parent: the range is the writer's single smoke commit.
+    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    let with_writer = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "branch":"smoke-test", "base":base, "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    assert!(
+        !review_skipped(&with_writer),
+        "a writer must enable review: {with_writer}"
+    );
+    assert!(
+        serde_json::to_string(&with_writer["document"])?.contains(&base),
+        "the review base must be the writer's source commit: {with_writer}"
+    );
+    assert!(
+        warns(&with_writer, "source: smoke writer base"),
+        "the default's source must be shown: {with_writer}"
+    );
+
+    let overridden = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "branch":"smoke-test-2", "base":base,
+               "set":{"diff_base":"2222222222222222222222222222222222222222"}, "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    assert!(
+        warns(&overridden, "source: --set diff_base"),
+        "an explicit override must show its source: {overridden}"
+    );
+    Ok(())
+}
+
+#[test]
+fn smoke_review_uses_existing_branch_checkout_head_as_its_base() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let factory = factory(&rig)?;
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let cancel = CancelToken::new();
+    let branch = "smoke/existing";
+    let worktree = factory
+        .context
+        .port_table
+        .managed_writer_path(branch)?
+        .to_string_lossy()
+        .into_owned();
+    std::fs::create_dir_all(rig.project.join(&worktree).parent().unwrap())?;
+    git(&rig, &["worktree", "add", "-qb", branch, &worktree])?;
+    git(
+        &rig,
+        &[
+            "-C",
+            &worktree,
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "prior change one",
+        ],
+    )?;
+    git(
+        &rig,
+        &[
+            "-C",
+            &worktree,
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "prior change two",
+        ],
+    )?;
+    let pre_write_head = git(&rig, &["-C", &worktree, "rev-parse", "HEAD"])?;
+
+    let preview = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "branch":branch, "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    assert!(
+        serde_json::to_string(&preview["document"])?.contains(&pre_write_head),
+        "the smoke review base must be the existing writer checkout HEAD before the write: {preview}"
+    );
+    assert!(
+        preview["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning.as_str().is_some_and(|warning| {
+                    warning.contains("source: existing smoke writer checkout HEAD")
+                })
+            })
+        }),
+        "the selected existing-checkout base source must be shown: {preview}"
+    );
     Ok(())
 }
 
@@ -2199,15 +2278,16 @@ fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
             self.0 += 1;
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: Some("fixture/review".into()),
-                outcome: graph::AttemptOutcome::Succeeded,
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: None,
                 result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }
@@ -4436,15 +4516,16 @@ fn writer_sourced_template_review_selects_shape_and_pins_every_stage() -> Result
                 .push(b"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n");
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: Some(format!("fixture/{}", key.node_id)),
-                outcome: graph::AttemptOutcome::Succeeded,
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(result.finish())),
                 result_warning: None,
                 result_path: None,
                 branch: writer.then(|| "slice".into()),
                 commit: writer.then(|| self.commit.clone()),
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }
@@ -4939,5 +5020,21 @@ fn review_child_refuses_unknown_tier_under_advisory_default() -> Result {
     );
     assert!(reason.contains("valid tiers: "), "{reason}");
     assert!(!reason.contains("not both"), "{reason}");
+    Ok(())
+}
+
+#[test]
+fn explain_uses_the_declared_adapter_for_an_uncanonicalised_model() -> Result {
+    use provenant_fabric_runtime::graph::GraphNode;
+    let rig = TestRig::new()?;
+    let factory = factory(&rig)?;
+    let node: GraphNode = serde_json::from_value(json!({
+        "id":"exact", "access":"read_only", "prompt":"inspect",
+        "route":{"adapter":"codex","model":"unprefixed-model"}
+    }))?;
+    let rows = factory.explain_node_routes(&[node]);
+    assert_eq!(rows[0]["adapter"], "codex");
+    assert_eq!(rows[0]["model"], "unprefixed-model");
+    assert_eq!(rows[0]["sources"]["adapter"], "node field");
     Ok(())
 }

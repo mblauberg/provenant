@@ -54,12 +54,17 @@ impl WarningCode {
 pub const CONFIG_KEY_IGNORED: WarningCode = WarningCode("CONFIG_KEY_IGNORED");
 /// A configured value was malformed, so the default applied.
 pub const CONFIG_MALFORMED: WarningCode = WarningCode("CONFIG_MALFORMED");
+/// An `on_stop` default was set for a pinned cause, whose table row cannot be
+/// overridden. The declared default was kept and named with its source.
+pub const ON_STOP_PINNED_IGNORED: WarningCode = WarningCode("ON_STOP_PINNED_IGNORED");
 /// A candidate value came from a layer its family does not list.
 pub const SETTING_LAYER_IGNORED: WarningCode = WarningCode("SETTING_LAYER_IGNORED");
 /// A name differed only by case and was folded to its canonical spelling.
 pub const NAME_CASE_FOLDED: WarningCode = WarningCode("NAME_CASE_FOLDED");
 /// A name matched a declared alias rather than its canonical spelling.
 pub const NAME_ALIAS_USED: WarningCode = WarningCode("NAME_ALIAS_USED");
+/// A target was found in a registered project other than the caller's.
+pub const CROSS_PROJECT_TARGET_FOUND: WarningCode = WarningCode("CROSS_PROJECT_TARGET_FOUND");
 /// The lane's branch is behind its base and will be updated.
 pub const BRANCH_BEHIND_BASE: WarningCode = WarningCode("BRANCH_BEHIND_BASE");
 /// An existing worktree was adopted although it had uncommitted changes.
@@ -94,6 +99,8 @@ pub const CONFIG_UNAVAILABLE: WarningCode = WarningCode("CONFIG_UNAVAILABLE");
 pub const PROJECT_DIRECTORY_IGNORED: WarningCode = WarningCode("PROJECT_DIRECTORY_IGNORED");
 /// Free disk space fell below the configured floor; collection may proceed.
 pub const DISK_FLOOR_LOW: WarningCode = WarningCode("DISK_FLOOR_LOW");
+/// Attempt scratch holds more than the configured share of free space.
+pub const ATTEMPT_SCRATCH_HIGH: WarningCode = WarningCode("ATTEMPT_SCRATCH_HIGH");
 /// Native package cache settings could not be resolved safely and were kept.
 pub const PACKAGE_CACHE_SETTINGS_UNRESOLVED: WarningCode =
     WarningCode("PACKAGE_CACHE_SETTINGS_UNRESOLVED");
@@ -179,6 +186,9 @@ pub const WRITER_FENCE_LIST_FAILED: WarningCode = WarningCode("WRITER_FENCE_LIST
 /// A settled writer attempt named a retained fence that is missing; abandon proceeds.
 pub const ABANDON_RETAINED_FENCE_MISSING: WarningCode =
     WarningCode("ABANDON_RETAINED_FENCE_MISSING");
+/// A dead lane's attributed process was found but cannot be proven enough to
+/// reap; it is named in status for the chair.
+pub const ORPHAN_PROCESS_ATTRIBUTED: WarningCode = WarningCode("ORPHAN_PROCESS_ATTRIBUTED");
 /// An abandoned lane left a stale Git worktree registration; the lane settled.
 pub const ABANDON_STALE_WORKTREE_REGISTRATION: WarningCode =
     WarningCode("ABANDON_STALE_WORKTREE_REGISTRATION");
@@ -223,6 +233,10 @@ pub const PRIMARY_POSITION_UNRECORDED: WarningCode = WarningCode("PRIMARY_POSITI
 pub const ADMISSION_RECORD_MALFORMED: WarningCode = WarningCode("ADMISSION_RECORD_MALFORMED");
 /// A steer targeted a settled lane and was handled by the sourced setting.
 pub const STEER_TARGET_SETTLED: WarningCode = WarningCode("STEER_TARGET_SETTLED");
+/// A dead attempt's undecodable record was preserved and its writer lease released.
+pub const UNREADABLE_RECORD_RELEASED: WarningCode = WarningCode("UNREADABLE_RECORD_RELEASED");
+/// A dead attempt's undecodable record still fences custody; liveness is unproved.
+pub const UNREADABLE_RECORD_HELD: WarningCode = WarningCode("UNREADABLE_RECORD_HELD");
 
 // Event-specific codes added when the warning slices named each site.
 // A violated policy rule warns under its own rule code (see policy.rs), so the
@@ -244,6 +258,7 @@ pub const PORT_DECLARATION_IGNORED: WarningCode = WarningCode("PORT_DECLARATION_
 /// An invalid verify port full-after duration fell back to the builtin.
 pub const PORT_DURATION_INVALID: WarningCode = WarningCode("PORT_DURATION_INVALID");
 /// An invalid `verify.static_checks` entry was dropped from the writer preamble.
+pub const PORT_LANE_CHECK_INVALID: WarningCode = WarningCode("PORT_LANE_CHECK_INVALID");
 pub const PORT_STATIC_CHECK_INVALID: WarningCode = WarningCode("PORT_STATIC_CHECK_INVALID");
 /// An installed agent's PATH would fall back from the trusted Rust toolchain.
 pub const AGENT_TOOLCHAIN_PATH: WarningCode = WarningCode("AGENT_TOOLCHAIN_PATH");
@@ -295,6 +310,11 @@ pub const UPSTREAM_UNRESOLVED: WarningCode = WarningCode("UPSTREAM_UNRESOLVED");
 pub const BRANCH_CONFIG_UNREADABLE: WarningCode = WarningCode("BRANCH_CONFIG_UNREADABLE");
 /// A notes cursor acknowledgement failed; a page may replay.
 pub const NOTES_CURSOR_UNACKNOWLEDGED: WarningCode = WarningCode("NOTES_CURSOR_UNACKNOWLEDGED");
+/// A re-drive offered different evidence; the sealed copy was kept.
+pub const SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS: WarningCode =
+    WarningCode("SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS");
+/// A settlement knob had an unrecognised value, so the shipped default applied.
+pub const SETTLEMENT_POLICY_INVALID: WarningCode = WarningCode("SETTLEMENT_POLICY_INVALID");
 /// A PR journal could not be read; reconciliation covers the gap.
 pub const PR_JOURNAL_UNAVAILABLE: WarningCode = WarningCode("PR_JOURNAL_UNAVAILABLE");
 /// A build context, Git binding or repository was unavailable; build ran locally.
@@ -382,6 +402,9 @@ pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIAL
 /// A route model is a full `ADAPTER/ID` that the effective catalogue does not
 /// know. The declared spelling is preserved; the warning names it.
 pub const ROUTE_MODEL_NOT_CATALOGUED: WarningCode = WarningCode("ROUTE_MODEL_NOT_CATALOGUED");
+/// A declaration succeeded but its journal is nearly full. The claim still
+/// succeeds; the named setting is the one to raise.
+pub const DECLARATION_JOURNAL_NEAR_FULL: WarningCode = WarningCode("DECLARATION_JOURNAL_NEAR_FULL");
 
 impl Warning {
     /// A warning with no subject, source or repair.

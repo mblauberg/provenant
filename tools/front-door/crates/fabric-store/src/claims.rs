@@ -5,6 +5,9 @@ use crate::{
 };
 use provenant_records::custody::*;
 
+/// Custody records paired with the cursor after each record.
+pub type CustodyRows = Vec<(u64, CustodyRecord)>;
+
 fn canonical(subject: &Subject) -> Result<Subject> {
     text(&subject.id, "custody subject")?;
     if subject.id.chars().any(char::is_control) {
@@ -681,6 +684,19 @@ impl HostStore {
     }
     /// Indexed pagination shared by retention, status and the session digest.
     pub fn custody(&self, query: &CustodyQuery, request: &Request<'_>) -> Result<CustodyPage> {
+        let (items, next) = self.custody_with_cursors(query, request)?;
+        Ok(CustodyPage {
+            items: items.into_iter().map(|(_, record)| record).collect(),
+            next,
+        })
+    }
+
+    /// Include each inspected record's cursor so interrupted consumers can resume safely.
+    pub fn custody_with_cursors(
+        &self,
+        query: &CustodyQuery,
+        request: &Request<'_>,
+    ) -> Result<(CustodyRows, Option<u64>)> {
         request.check()?;
         let limit = i64::try_from(query.limit).map_err(|_| Error::Invalid("custody limit"))?;
         if !(1..=100).contains(&limit) {
@@ -717,13 +733,10 @@ impl HostStore {
             if record.schema_version != 2 {
                 return Err(Error::Invalid("custody schema version"));
             }
-            items.push(record);
-            bytes += raw.len();
             cursor = u64::try_from(seq).map_err(|_| Error::Invalid("custody cursor"))?;
+            items.push((cursor, record));
+            bytes += raw.len();
         }
-        Ok(CustodyPage {
-            items,
-            next: more.then_some(cursor),
-        })
+        Ok((items, more.then_some(cursor)))
     }
 }

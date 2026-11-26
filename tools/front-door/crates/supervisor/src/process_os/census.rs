@@ -749,14 +749,10 @@ fn darwin_process(pid: i32, boot: &str, sample_cpu: bool) -> ProcessObservation 
         )
     };
     if read == 0 {
-        if matches!(
-            io::Error::last_os_error().raw_os_error(),
-            Some(libc::EACCES | libc::EPERM)
-        ) {
-            return darwin_short_process(pid, boot);
+        if let Some(fact) = darwin_sysctl_process(pid, boot) {
+            return ProcessObservation::Present(fact);
         }
-        let (session, errno) = darwin_zero_probe_session(pid);
-        return classify_darwin_zero_probe(session, errno);
+        return darwin_short_process(pid, boot);
     }
     if read < 0 {
         // The public libproc wrapper returns zero on an underlying error. A
@@ -852,6 +848,111 @@ fn darwin_process(pid: i32, boot: &str, sample_cpu: bool) -> ProcessObservation 
         zombie: bsd.pbi_status == 5,
         cpu_micros,
         command: Some(command.chars().take(128).collect()),
+    })
+}
+
+// Darwin's public 64-bit kinfo_proc ABI (sys/proc.h and sys/sysctl.h).
+// Read only process metadata, never arguments or task information. Require the
+// complete known record and check its layout against this process before using
+// it: an unfamiliar ABI must remain unknown, not become an ancestry proof.
+#[cfg(target_os = "macos")]
+#[derive(PartialEq, Eq)]
+struct DarwinSysctlRecord {
+    start: u64,
+    pid: i32,
+    parent: i32,
+    group: i32,
+    status: u8,
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_sysctl_record(pid: i32) -> Option<DarwinSysctlRecord> {
+    const RECORD_SIZE: usize = 648;
+    let mut bytes = [0u8; RECORD_SIZE];
+    let mut size = bytes.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    // SAFETY: the MIB and the bounded output buffer remain live for sysctl.
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size != RECORD_SIZE {
+        return None;
+    }
+    let i32_at = |offset| {
+        Some(i32::from_ne_bytes(
+            bytes.get(offset..offset + 4)?.try_into().ok()?,
+        ))
+    };
+    let i64_at = |offset| {
+        Some(i64::from_ne_bytes(
+            bytes.get(offset..offset + 8)?.try_into().ok()?,
+        ))
+    };
+    let seconds = u64::try_from(i64_at(0)?).ok()?;
+    let micros = u64::try_from(i64_at(8)?).ok()?;
+    if micros >= 1_000_000 {
+        return None;
+    }
+    Some(DarwinSysctlRecord {
+        start: seconds.checked_mul(1_000_000)?.checked_add(micros)?,
+        pid: i32_at(40)?,
+        parent: i32_at(560)?,
+        group: i32_at(564)?,
+        status: bytes[36],
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_sysctl_process(pid: i32, boot: &str) -> Option<ProcessFact> {
+    let own_pid = i32::try_from(std::process::id()).ok()?;
+    let own = darwin_sysctl_record(own_pid)?;
+    // SAFETY: getppid takes no arguments and retains no pointers.
+    let own_parent = unsafe { libc::getppid() };
+    // SAFETY: getpgrp takes no arguments and retains no pointers.
+    let own_group = unsafe { libc::getpgrp() };
+    if own.pid != own_pid || own.parent != own_parent || own.group != own_group {
+        return None;
+    }
+    let first = darwin_sysctl_record(pid)?;
+    // SAFETY: getpgid accepts a scalar PID and retains no pointers.
+    let group = unsafe { libc::getpgid(pid) };
+    // SAFETY: getsid accepts a scalar PID and retains no pointers.
+    let session = unsafe { libc::getsid(pid) };
+    let second = darwin_sysctl_record(pid)?;
+    // SAFETY: getpgid again accepts a scalar PID and retains no pointers.
+    let group_again = unsafe { libc::getpgid(pid) };
+    // SAFETY: getsid again accepts a scalar PID and retains no pointers.
+    let session_again = unsafe { libc::getsid(pid) };
+    if first != second
+        || first.pid != pid
+        || first.parent < 0
+        || group <= 0
+        || first.group != group
+        || group != group_again
+        || session <= 0
+        || session != session_again
+    {
+        return None;
+    }
+    Some(ProcessFact {
+        identity: ProcessIdentity {
+            boot: boot.to_owned(),
+            pid: i64::from(pid),
+            native_start: first.start,
+            group_id: i64::from(group),
+            session_id: i64::from(session),
+        },
+        parent_pid: i64::from(first.parent),
+        zombie: first.status == 5,
+        cpu_micros: None,
+        command: None,
     })
 }
 
@@ -1006,6 +1107,69 @@ unsafe extern "C" {
     ) -> libc::c_int;
 }
 
+/// Read the inherited argument and environment record for a Darwin process.
+/// Missing or malformed records remain unavailable to callers.
+#[cfg(target_os = "macos")]
+pub(crate) fn darwin_process_environment(pid: i64) -> Option<Vec<u8>> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROCARGS2,
+        i32::try_from(pid).ok()?,
+    ];
+    let mut size = 0;
+    // SAFETY: sysctl borrows the three initialized MIB entries and writes only
+    // the returned length; a null output requests the current record size.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || size < std::mem::size_of::<libc::c_int>()
+        || size > 1_048_576
+    {
+        return None;
+    }
+    let mut bytes = vec![0; size];
+    // SAFETY: bytes has exactly the requested capacity and sysctl updates size
+    // to the number of initialized bytes. The MIB contains only scalar values.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || size > bytes.len()
+    {
+        return None;
+    }
+    bytes.truncate(size);
+    let argc = i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?);
+    if argc < 0 {
+        return None;
+    }
+    let mut cursor = 4;
+    cursor = bytes.get(cursor..)?.iter().position(|byte| *byte == 0)? + cursor + 1;
+    while bytes.get(cursor) == Some(&0) {
+        cursor += 1;
+    }
+    for _ in 0..argc {
+        cursor = bytes.get(cursor..)?.iter().position(|byte| *byte == 0)? + cursor + 1;
+    }
+    Some(bytes.get(cursor..)?.to_vec())
+}
+
 /// Whether a process is still inside the sandbox of the attempt that owns
 /// `lookup_name`: sandboxed at all, allowed to look that name up, yet denied an
 /// unrelated name. Only the attempt's own profile grants that one name while
@@ -1157,6 +1321,20 @@ mod native_tests {
             darwin_owner_holds_lock(1, 1, 1),
             Err(CustodyProofError::Unknown)
         ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn darwin_sysctl_metadata_preserves_native_identity_and_parent() {
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let ProcessObservation::Present(full) = darwin_process(pid, "recorded-boot", true) else {
+            panic!("native identity unavailable");
+        };
+        let metadata = darwin_sysctl_process(pid, "recorded-boot")
+            .expect("public process metadata must provide a stable identity");
+        assert_eq!(metadata.identity, full.identity);
+        assert_eq!(metadata.parent_pid, full.parent_pid);
+        assert_eq!(metadata.zombie, full.zombie);
     }
 
     #[test]

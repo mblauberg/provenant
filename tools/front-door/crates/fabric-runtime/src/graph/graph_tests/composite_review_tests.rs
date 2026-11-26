@@ -52,8 +52,8 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
             observations: answers
                 .into_iter()
                 .map(|answer| match answer {
-                    Some(text) => terminal_with_result(AttemptOutcome::Succeeded, text),
-                    None => terminal(AttemptOutcome::AdapterUnavailable),
+                    Some(text) => terminal_with_result(GraphAttemptOutcome::Succeeded, text),
+                    None => terminal(GraphAttemptOutcome::AdapterUnavailable),
                 })
                 .collect(),
             ..Default::default()
@@ -75,7 +75,7 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
         );
         if expected.is_none() {
             assert_eq!(
-                composite.advance_error_code.as_deref(),
+                composite.advance_code.as_deref(),
                 Some("coverage_below_minimum")
             );
         }
@@ -97,7 +97,7 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
         ]
     })).unwrap();
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::AdapterUnavailable)].into(),
+        observations: [terminal(GraphAttemptOutcome::AdapterUnavailable)].into(),
         ..Default::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -108,7 +108,7 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
         .find(|n| n.id == "reviews")
         .unwrap();
     assert_eq!(
-        composite.advance_error_code.as_deref(),
+        composite.advance_code.as_deref(),
         Some("coverage_below_minimum")
     );
     assert!(composite.outputs.is_none());
@@ -148,9 +148,9 @@ fn split_verdict_patch_runs_one_adjudicator_and_supplies_the_gate_verdict() {
     ] {
         let mut owner = FakeOwner {
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &answer(first)),
-                terminal_with_result(AttemptOutcome::Succeeded, &answer("VERDICT: PASS")),
-                terminal_with_result(AttemptOutcome::Succeeded, &answer("VERDICT: PASS")),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(first)),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("VERDICT: PASS")),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("VERDICT: PASS")),
             ]
             .into(),
             ..Default::default()
@@ -240,7 +240,7 @@ fn each_split_panel_uses_its_own_adjudicator_on_its_pinned_head() {
     })).unwrap();
     let mut owner = FakeOwner {
         observations: ["FAIL", "PASS", "PASS", "FAIL", "PASS", "FAIL"]
-            .into_iter().map(|verdict| terminal_with_result(AttemptOutcome::Succeeded, &answer(verdict))).collect(),
+            .into_iter().map(|verdict| terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(verdict))).collect(),
         ..Default::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -281,9 +281,9 @@ fn soft_panel_settles_and_names_its_stopped_lens() {
         observations: (0..3)
             .map(|index| {
                 if index == 1 {
-                    terminal(AttemptOutcome::DeclaredStop)
+                    terminal(GraphAttemptOutcome::DeclaredStop)
                 } else {
-                    terminal_with_result(AttemptOutcome::Succeeded, clean)
+                    terminal_with_result(GraphAttemptOutcome::Succeeded, clean)
                 }
             })
             .collect(),
@@ -307,7 +307,7 @@ fn soft_panel_settles_and_names_its_stopped_lens() {
     assert!(excerpt.contains("Missing review lenses:"), "{excerpt}");
     assert!(excerpt.contains("lens-1"), "{excerpt}");
     assert!(output.warnings.iter().any(|warning| warning.contains("review_coverage_below_floor")));
-    assert_eq!(panel.advance_error_code, None);
+    assert_eq!(panel.advance_code, None);
     assert_eq!(
         advance(&document, &mut owner, &mut journal)
             .unwrap()
@@ -364,11 +364,11 @@ fn final_panel_settlement_keeps_missing_lens_names_through_synthesis() {
     })).unwrap();
     let mut owner = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::DeclaredStop),
-            terminal_with_result(AttemptOutcome::Succeeded, clean),
-            terminal(AttemptOutcome::DeclaredStop),
-            terminal_with_result(AttemptOutcome::Succeeded, clean),
-            terminal_with_result(AttemptOutcome::Succeeded, clean),
+            terminal(GraphAttemptOutcome::DeclaredStop),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, clean),
+            terminal(GraphAttemptOutcome::DeclaredStop),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, clean),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, clean),
         ]
         .into(),
         ..Default::default()
@@ -425,9 +425,9 @@ fn protected_panel_hard_floor_requires_named_lens_even_when_count_is_met() {
         observations: (0..2)
             .map(|index| {
                 if index == 1 {
-                    terminal(AttemptOutcome::DeclaredStop)
+                    terminal(GraphAttemptOutcome::DeclaredStop)
                 } else {
-                    terminal_with_result(AttemptOutcome::Succeeded, clean)
+                    terminal_with_result(GraphAttemptOutcome::Succeeded, clean)
                 }
             })
             .collect(),
@@ -443,12 +443,12 @@ fn protected_panel_hard_floor_requires_named_lens_even_when_count_is_met() {
         .unwrap();
     assert_eq!(panel.state, NodeState::Failed);
     assert_eq!(
-        panel.advance_error_code.as_deref(),
+        panel.advance_code.as_deref(),
         Some("coverage_below_minimum")
     );
     assert!(
         panel
-            .advance_error
+            .advance_note
             .as_deref()
             .unwrap()
             .contains("security-privacy")
@@ -468,10 +468,10 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
         r#"{"id":"F1","severity":42,"file":"a.rs","summary":"issue","status":1},{"id":"F2","severity":"mystery","file":"b.rs","summary":"other","status":"open"},{"severity":"high"},{"id":"F3","severity":"high","file":"c.rs","summary":"valid finding","status":"open"}"#,
     );
     owner.observations = VecDeque::from([
-        terminal_with_result(AttemptOutcome::Succeeded, &malformed),
-        terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
-        terminal(AttemptOutcome::AdapterUnavailable),
-        terminal_with_result(AttemptOutcome::Succeeded, "verified"),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &malformed),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text("")),
+        terminal(GraphAttemptOutcome::AdapterUnavailable),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, "verified"),
     ]);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let lens = run
@@ -553,7 +553,7 @@ fn fan_in_requires_all_members_unless_a_minimum_is_declared() {
     for minimum in [None, Some(2)] {
         let (mut document, mut owner) = partial_review(2);
         document.nodes[0].composite.as_mut().unwrap().min_successful = minimum;
-        owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+        owner.observations[1] = terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(""));
         let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
         let synthesis = run
             .checkpoint
@@ -591,9 +591,9 @@ fn a_failed_nested_minimum_cannot_be_hidden_by_an_outer_group() {
     })).unwrap();
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::OtherFailure),
-            terminal_with_result(AttemptOutcome::Succeeded, "b"),
-            terminal_with_result(AttemptOutcome::Succeeded, "c"),
+            terminal(GraphAttemptOutcome::OtherFailure),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "b"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "c"),
         ]),
         ..Default::default()
     };
@@ -615,8 +615,8 @@ fn cancelled_member_counts_against_the_group_minimum() {
     // The host maps a cancelled attempt to OtherFailure.
     for (minimum, outcome) in [(2, GraphOutcome::Partial), (3, GraphOutcome::Failed)] {
         let (document, mut owner) = partial_review(minimum);
-        owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
-        owner.observations[2] = terminal(AttemptOutcome::OtherFailure);
+        owner.observations[1] = terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(""));
+        owner.observations[2] = terminal(GraphAttemptOutcome::OtherFailure);
         let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(run.outcome, Some(outcome));
     }
@@ -631,10 +631,10 @@ fn review_fail_and_one_unavailable_reach_evaluator() {
     }
     let fail = findings_text(&entry("")).replace("VERDICT: PASS", "VERDICT: FAIL");
     owner.observations = VecDeque::from([
-        terminal_with_result(AttemptOutcome::DeclaredStop, &fail),
-        terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
-        terminal(AttemptOutcome::AdapterUnavailable),
-        terminal_with_result(AttemptOutcome::Succeeded, "evaluated"),
+        terminal_with_result(GraphAttemptOutcome::DeclaredStop, &fail),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text("")),
+        terminal(GraphAttemptOutcome::AdapterUnavailable),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, "evaluated"),
     ]);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let lens = run
@@ -668,7 +668,7 @@ fn successful_review_with_fail_verdict_is_a_result() {
     review.required_verdict = Some("VERDICT: PASS".into());
     let result = findings_text("").replace("VERDICT: PASS", "VERDICT: FAIL");
     let mut owner = FakeOwner {
-        observations: VecDeque::from([terminal_with_result(AttemptOutcome::Succeeded, &result)]),
+        observations: VecDeque::from([terminal_with_result(GraphAttemptOutcome::Succeeded, &result)]),
         ..Default::default()
     };
     let run = advance(
@@ -709,8 +709,8 @@ fn declared_stop_requires_a_valid_review_result_and_never_accepts_a_writer() {
         // no round accepts the node.
         let mut owner = FakeOwner {
             observations: VecDeque::from([
-                terminal_with_result(AttemptOutcome::DeclaredStop, &text),
-                terminal_with_result(AttemptOutcome::DeclaredStop, &text),
+                terminal_with_result(GraphAttemptOutcome::DeclaredStop, &text),
+                terminal_with_result(GraphAttemptOutcome::DeclaredStop, &text),
             ]),
             ..Default::default()
         };
@@ -731,7 +731,7 @@ fn declared_stop_requires_a_valid_review_result_and_never_accepts_a_writer() {
 #[test]
 fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
     let (document, mut owner) = partial_review(3);
-    owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+    owner.observations[1] = terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(""));
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let verify = run
         .checkpoint
@@ -742,7 +742,7 @@ fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
     assert_eq!(verify.state, NodeState::Blocked);
     assert!(
         verify
-            .advance_error
+            .advance_note
             .as_deref()
             .unwrap()
             .contains("lenses (Failed)")
@@ -752,7 +752,7 @@ fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
 #[test]
 fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reasons() {
     let (document, mut owner) = partial_review(3);
-    owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+    owner.observations[1] = terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(""));
     let mut journal = MemoryJournal::default();
     advance(&document, &mut owner, &mut journal).unwrap();
     let checkpoint = journal.0.as_mut().unwrap();
@@ -762,8 +762,8 @@ fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reaso
         .find(|n| n.id == "verify")
         .unwrap();
     assert_eq!(verify.state, NodeState::Blocked);
-    verify.advance_error = None;
-    verify.advance_error_code = None;
+    verify.advance_note = None;
+    verify.advance_code = None;
 
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     let verify = replay
@@ -773,11 +773,11 @@ fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reaso
         .find(|n| n.id == "verify")
         .unwrap();
     assert_eq!(
-        verify.advance_error_code.as_deref(),
+        verify.advance_code.as_deref(),
         Some("upstream_blocked")
     );
     assert_eq!(
-        verify.advance_error.as_deref(),
+        verify.advance_note.as_deref(),
         Some("blocked by lenses (Failed)")
     );
     assert_eq!(journal.0.as_ref().unwrap(), &replay.checkpoint);
@@ -790,8 +790,8 @@ fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reaso
         .iter_mut()
         .find(|n| n.id == "verify")
         .unwrap();
-    verify.advance_error = Some("existing reason".into());
-    verify.advance_error_code = Some("other_reason".into());
+    verify.advance_note = Some("existing reason".into());
+    verify.advance_code = Some("other_reason".into());
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     let verify = replay
         .checkpoint
@@ -799,8 +799,8 @@ fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reaso
         .iter()
         .find(|n| n.id == "verify")
         .unwrap();
-    assert_eq!(verify.advance_error.as_deref(), Some("existing reason"));
-    assert_eq!(verify.advance_error_code.as_deref(), Some("other_reason"));
+    assert_eq!(verify.advance_note.as_deref(), Some("existing reason"));
+    assert_eq!(verify.advance_code.as_deref(), Some("other_reason"));
 }
 
 #[test]
@@ -818,7 +818,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     assert_eq!(node("lens-a").state, NodeState::Succeeded);
     assert_eq!(node("lens-b").state, NodeState::Failed);
     assert_eq!(
-        node("lens-b").advance_error_code.as_deref(),
+        node("lens-b").advance_code.as_deref(),
         Some("findings_required")
     );
     assert_eq!(node("verify").state, NodeState::Succeeded);
@@ -838,12 +838,12 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
             .attempts
             .last()
             .and_then(|attempt| attempt.outcome),
-        Some(AttemptOutcome::AdapterUnavailable)
+        Some(GraphAttemptOutcome::AdapterUnavailable)
     );
     assert!(excerpt.contains(&format!(
         "{}: {}",
         unavailable.id,
-        unavailable.advance_error.as_deref().unwrap()
+        unavailable.advance_note.as_deref().unwrap()
     )));
     assert!(excerpt.contains("LENS-A-OK"));
     assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
@@ -874,8 +874,8 @@ fn minimum_successful_composite_joins_exported_gate_recovery_alternatives() {
         (
             "ci-pass",
             "VERDICT: PASS",
-            AttemptOutcome::Succeeded,
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             false,
             NodeState::Succeeded,
             NodeState::Skipped,
@@ -885,8 +885,8 @@ fn minimum_successful_composite_joins_exported_gate_recovery_alternatives() {
         (
             "ci-repaired",
             "VERDICT: FAIL",
-            AttemptOutcome::Succeeded,
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             false,
             NodeState::Failed,
             NodeState::Succeeded,
@@ -896,8 +896,8 @@ fn minimum_successful_composite_joins_exported_gate_recovery_alternatives() {
         (
             "ci-exhausted",
             "VERDICT: FAIL",
-            AttemptOutcome::Succeeded,
-            AttemptOutcome::TaskFailed,
+            GraphAttemptOutcome::Succeeded,
+            GraphAttemptOutcome::TaskFailed,
             false,
             NodeState::Failed,
             NodeState::Failed,
@@ -907,8 +907,8 @@ fn minimum_successful_composite_joins_exported_gate_recovery_alternatives() {
         (
             "ci-blocked-non-export",
             "VERDICT: PASS",
-            AttemptOutcome::Succeeded,
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             true,
             NodeState::Succeeded,
             NodeState::Skipped,
@@ -918,8 +918,8 @@ fn minimum_successful_composite_joins_exported_gate_recovery_alternatives() {
         (
             "ci-blocked-export",
             "VERDICT: PASS",
-            AttemptOutcome::TaskFailed,
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::TaskFailed,
+            GraphAttemptOutcome::Succeeded,
             false,
             NodeState::Blocked,
             NodeState::Blocked,
@@ -1060,9 +1060,9 @@ fn qualified_findings_survive_model_synthesis() {
         );
         let mut owner = FakeOwner {
             observations: VecDeque::from([
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&finding)),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&finding)),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
                 ),
             ]),
@@ -1113,8 +1113,8 @@ fn qualified_findings_survive_deterministic_review_reduction() {
     let result = format!("{}\nVERDICT: FAIL", findings_text(&finding));
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal_with_result(AttemptOutcome::Succeeded, &result),
-            terminal_with_result(AttemptOutcome::Succeeded, &result),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &result),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &result),
         ]),
         ..Default::default()
     };
@@ -1155,10 +1155,10 @@ fn partial_composite_below_its_minimum_fails_with_the_recorded_reason() {
         .unwrap();
     assert_eq!(lenses.state, NodeState::Failed);
     assert_eq!(
-        lenses.advance_error_code.as_deref(),
+        lenses.advance_code.as_deref(),
         Some("coverage_below_minimum")
     );
-    let reason = lenses.advance_error.as_deref().unwrap();
+    let reason = lenses.advance_note.as_deref().unwrap();
     assert!(
         reason.contains("1 of 3 members succeeded, minimum 2"),
         "{reason}"
@@ -1193,8 +1193,8 @@ fn composite_executes_nested_children_and_exports_only_declared_outputs() {
     .unwrap();
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "evidence"),
-            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "evidence"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "done"),
         ]
         .into(),
         ..Default::default()

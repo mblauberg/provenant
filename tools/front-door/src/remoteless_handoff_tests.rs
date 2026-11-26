@@ -17,7 +17,7 @@ use provenant_core::{Clock, HostId, RootInputs, WaitBudget};
 use provenant_fabric_runtime::handoff::session::Tree;
 use provenant_os::clock::SystemClock;
 
-use crate::handoff::{Source, Target, recreate, resolve_remote, wip};
+use crate::session_handoff::{Source, Target, recreate, resolve_remote, wip};
 
 type FixtureResult<T> = std::result::Result<T, Box<dyn Error>>;
 

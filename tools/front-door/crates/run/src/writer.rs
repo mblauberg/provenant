@@ -352,19 +352,19 @@ pub(crate) struct StopWorkPolicy<'a> {
 }
 
 /// The remote bound for stop publication wins over the launch destination: a
-/// local-integration launch deliberately records no remote, while its
-/// stop-publication binding names the real remote the stopped head must use.
-/// The launch binding is read only when the stop binding has no remote, and an
-/// empty recorded launch remote is an absence, not a corrupt name.
+/// local-integration launch has no remote, while its stop-publication binding
+/// names the real remote the stopped head must use. The launch binding is read
+/// only when the stop binding has no remote. Both destinations were typed on
+/// decode, so neither can carry an empty name.
 pub(super) fn bound_stop_remote(
     publish: Option<&crate::HostDeliveryContext>,
 ) -> Result<Option<provenant_config::RemoteName>> {
     let Some(host) = publish else {
         return Ok(None);
     };
-    match host.stop_publish_remote()? {
+    match host.stop_publish_remote() {
         Some(remote) => Ok(Some(remote)),
-        None => host.delivery_remote(),
+        None => Ok(host.delivery_remote()),
     }
 }
 
@@ -720,6 +720,18 @@ impl WriterLaunch {
         status_paths(&output)
     }
 
+    /// The remote-tracking tip of the bound branch, when the remote has one.
+    /// Read where `ahead_of_remote` reads it, so both describe the same ref.
+    pub(super) fn remote_tip(
+        &self,
+        git: &Path,
+        remote: Option<&provenant_config::RemoteName>,
+    ) -> Option<GitOid> {
+        let branch = self.branch.as_str().strip_prefix("refs/heads/")?;
+        let upstream = format!("refs/remotes/{}/{branch}", remote?);
+        crate::objects::resolve_ref(git, self.worktree.repo(), &upstream).ok()
+    }
+
     pub(super) fn ahead_of_remote(
         &self,
         git: &Path,
@@ -772,7 +784,7 @@ impl WriterLaunch {
         let source = crate::objects::bound_source(attempt)?
             .ok_or(RunError::Validation("clean point needs private Git state"))?;
         let index_dir = &source.refs;
-        if worktrees::incomplete_git_operation(index_dir, None)?.is_some() {
+        if crate::objects::incomplete_git_operation(&source, None)?.is_some() {
             return Ok(false);
         }
         index_dir.read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
@@ -924,8 +936,8 @@ impl WriterLaunch {
         let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
         // Never stage away conflict stages or finish an in-progress Git
         // operation on the lane's behalf. Its state stays private for recovery.
-        if let Some(operation) = worktrees::incomplete_git_operation(&source.refs, None)? {
-            return Ok(BudgetCommit::note(in_progress_note(operation.label)));
+        if let Some(operation) = crate::objects::incomplete_git_operation(&source, None)? {
+            return Ok(BudgetCommit::note(in_progress_note(operation.marker.label)));
         }
         let objects = crate::objects::prepare_budget_objects(&source.objects, repo)?;
         // Reuse stable, no-follow reading before passing the index path to Git.
@@ -1246,6 +1258,30 @@ fn lane_git_operation_warning(
         Ok(Some(operation)) => operation,
         _ => return None,
     };
+    lane_git_operation_warning_for_marker(directory, path, operation, resolve)
+}
+
+fn candidate_git_operation_warning(
+    source: &crate::objects::ObjectSource,
+    fallback_path: &Path,
+    resolve: impl FnOnce(&str) -> Result<GitOid>,
+) -> Option<String> {
+    let operation = crate::objects::incomplete_git_operation(source, None)
+        .ok()
+        .flatten()?;
+    let path = operation
+        .directory
+        .current_path()
+        .unwrap_or_else(|_| fallback_path.to_path_buf());
+    lane_git_operation_warning_for_marker(&operation.directory, &path, operation.marker, resolve)
+}
+
+fn lane_git_operation_warning_for_marker(
+    directory: &Directory,
+    path: &Path,
+    operation: worktrees::GitOperationMarker,
+    resolve: impl FnOnce(&str) -> Result<GitOid>,
+) -> Option<String> {
     let commit = (|| {
         let raw = directory.read_stable(OsStr::new("HEAD"), 1024).ok()?;
         let head = std::str::from_utf8(&raw).ok()?.trim();
@@ -1338,6 +1374,22 @@ struct GitPins {
     schema_version: u64,
     scope: provenant_records::custody::Scope,
     base: GitOid,
+}
+
+/// The launch-pinned Git base, read from the sealed writer pins. This is the
+/// only progress pin settlement uses; remote-tracking refs and pushes are not
+/// evidence. Absent pins mean progress is unknown, never no-work.
+pub(crate) fn launch_pin(attempt: &Directory) -> Result<Option<GitOid>> {
+    let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "writer-git-pins.json", crate::RECORD_LIMIT)?
+    else {
+        return Ok(None);
+    };
+    let pins: GitPins = crate::db::decode(&raw)?;
+    if pins.schema_version != 1 {
+        return Err(RunError::Validation("writer Git pins version mismatch"));
+    }
+    Ok(Some(pins.base))
 }
 
 /// The primary checkout as launch found it, sealed beside the attempt: the
@@ -3231,7 +3283,7 @@ impl WriterLaunch {
         // phase is already Publish or Record. Only a host operation that touches
         // a ref settlement moves (or settlement writing that very checkout)
         // refuses; every other operation, including the lane's own in its
-        // private Git or candidate common directory, is named and left intact
+        // private Git or candidate Git store, is named and left intact
         // while the committed tip is published.
         let repo = self.worktree.repo();
         let delivery_destination = sealed_delivery_destination(attempt)?;
@@ -3274,7 +3326,7 @@ impl WriterLaunch {
             .unwrap_or_else(|| PathBuf::from("an unknown path"));
         if let Some(source) = &source
             && let Some(warning) =
-                lane_git_operation_warning(&source.refs, &candidate_path, |reference| {
+                candidate_git_operation_warning(source, &candidate_path, |reference| {
                     crate::objects::private_tip(source, reference)
                 })
         {
@@ -3288,9 +3340,16 @@ impl WriterLaunch {
         // the rebase's head-name is this lane's branch; any other HEAD (a
         // conflicted merge on main, a random detach, an unborn HEAD) still has
         // to name the lane branch.
+        let candidate_rebase = source
+            .as_ref()
+            .map(crate::objects::rebase_operation_ref)
+            .transpose()?
+            .flatten();
         let detached_under_lane_rebase = GitOid::parse(head).is_ok()
-            && worktrees::rebase_operation_ref(repo.private_dir()).as_deref()
-                == Some(self.branch.as_str());
+            && (candidate_rebase
+                .or_else(|| worktrees::rebase_operation_ref(repo.private_dir()))
+                .as_deref()
+                == Some(self.branch.as_str()));
         if !on_lane_branch && !detached_under_lane_rebase {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
@@ -3602,7 +3661,7 @@ impl WriterLaunch {
                         let request = crate::HostDeliveryContext::destination_for_remote(
                             crate::DeliveryMode::Push,
                             branch,
-                            remote.as_str(),
+                            Some(remote.clone()),
                         )?
                         .ok_or(RunError::Validation("stop publication destination missing"))?;
                         crate::HostDeliveryContext::capture()
@@ -3690,6 +3749,9 @@ impl WriterLaunch {
                 push,
             }
         });
+        // The remote-tracking tip at the cut, after any stop push. Sealed
+        // with the head so a re-drive reads the same value; diagnostic only.
+        let pushed_head = self.remote_tip(&git_executable, stop_remote.as_ref());
         crate::artifacts::seal(
             attempt,
             "writer-terminal.json",
@@ -3698,6 +3760,7 @@ impl WriterLaunch {
                 // Replay may observe a later writer's descendant on the branch.
                 // Attribute only the head pinned for this attempt's settlement.
                 head: verified_tip,
+                pushed_head,
                 stop_work,
                 warnings,
             })?,
@@ -3989,7 +4052,7 @@ impl WriterLaunch {
         state: &Path,
         custody: &provenant_supervisor::custody::Recovery,
         cancel: &CancelToken,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<UncommittedWork>> {
         let base = custody
             .writer_base(
                 self.worktree.repo().root_dir(),
@@ -4014,18 +4077,18 @@ impl WriterLaunch {
             "read writer uncommitted changes",
             Some(self.worktree.path()),
         ))?;
-        Ok(uncommitted_reason(&paths).map(|work| work.render()))
+        Ok(uncommitted_reason(&paths))
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct UncommittedWork {
-    paths: Vec<String>,
-    omitted: usize,
+pub(crate) struct UncommittedWork {
+    pub(crate) paths: Vec<String>,
+    pub(crate) omitted: usize,
 }
 
 impl UncommittedWork {
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let mut reason = format!(
             "writer left uncommitted edits and no new commit: {}",
             self.paths.join(", ")
@@ -4052,19 +4115,12 @@ fn uncommitted_reason(paths: &[Vec<u8>]) -> Option<UncommittedWork> {
         paths: listed,
     })
 }
+#[path = "writer_terminal.rs"]
+mod terminal;
 #[cfg(test)]
 #[path = "writer_uncommitted_tests.rs"]
 mod uncommitted_tests;
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct WriterTerminal {
-    pub schema_version: u64,
-    pub head: GitOid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop_work: Option<provenant_records::run::StopWorkSummary>,
-    /// Settlement warnings recorded once, so a resume does not re-emit them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
-}
+pub(crate) use terminal::{WriterTerminal, pushed_head, terminal_head};
 #[derive(serde::Serialize)]
 struct WriterManifest {
     #[serde(flatten)]

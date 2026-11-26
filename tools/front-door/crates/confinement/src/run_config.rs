@@ -38,6 +38,9 @@ source_view_bytes = 536870912
 retained_custody_seconds = 3600
 sandboxed_routes = []
 sandbox_cache_reads = []
+declaration_journal_bytes = 1048576
+declaration_relay_seconds = 10
+declaration_relay_retries = 1
 
 [projects]
 "#;
@@ -130,6 +133,16 @@ pub struct RunConfig {
     /// as a compiler cache. An unsandboxed lane has ordinary access to them.
     #[serde(default)]
     pub sandbox_cache_reads: Vec<PathBuf>,
+    /// Maximum bytes in one attempt's declaration journal.
+    #[serde(default = "default_declaration_journal_bytes")]
+    pub declaration_journal_bytes: u64,
+    /// Seconds a lane's `provenant declare` waits for one relay reply.
+    #[serde(default = "default_declaration_relay_seconds")]
+    pub declaration_relay_seconds: u64,
+    /// Extra relay attempts after a transport failure; retries reuse the
+    /// request id, so they are idempotent.
+    #[serde(default = "default_declaration_relay_retries")]
+    pub declaration_relay_retries: u8,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
@@ -305,6 +318,15 @@ fn default_source_view_bytes() -> u64 {
 fn default_retained_custody_seconds() -> u64 {
     provenant_supervisor::custody::DEFAULT_RETAINED_CUSTODY_SECONDS
 }
+fn default_declaration_journal_bytes() -> u64 {
+    provenant_records::declaration::DEFAULT_DECLARATION_JOURNAL_BYTES
+}
+fn default_declaration_relay_seconds() -> u64 {
+    10
+}
+fn default_declaration_relay_retries() -> u8 {
+    1
+}
 /// One project's replacement for the host-wide settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -328,6 +350,15 @@ pub struct ProjectRunConfig {
     /// Replaces the host `sandbox_cache_reads` for this project.
     #[serde(default)]
     pub sandbox_cache_reads: Option<Vec<PathBuf>>,
+    /// Replaces the host declaration journal bound for this project.
+    #[serde(default)]
+    pub declaration_journal_bytes: Option<u64>,
+    /// Replaces the host declaration relay timeout for this project.
+    #[serde(default)]
+    pub declaration_relay_seconds: Option<u64>,
+    /// Replaces the host declaration relay retry count for this project.
+    #[serde(default)]
+    pub declaration_relay_retries: Option<u8>,
 }
 /// Host defaults for a writer's token budget at one routing tier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,6 +399,9 @@ impl Default for RunConfig {
             retained_custody_seconds: default_retained_custody_seconds(),
             sandboxed_routes: default_sandboxed_routes(),
             sandbox_cache_reads: Vec::new(),
+            declaration_journal_bytes: default_declaration_journal_bytes(),
+            declaration_relay_seconds: default_declaration_relay_seconds(),
+            declaration_relay_retries: default_declaration_relay_retries(),
             projects: BTreeMap::new(),
         }
     }
@@ -610,6 +644,47 @@ impl RunConfig {
             (grace, Layer::Host)
         } else {
             (BudgetGrace::default(), Layer::Default)
+        }
+    }
+
+    /// The declaration journal bound for `project`: its own setting, then the
+    /// host setting, then the compiled default. The layer is returned so a
+    /// `Full` refusal can name the setting that must change.
+    pub fn declaration_journal_bytes_for(&self, project: &str) -> (u64, Layer) {
+        if let Some(bytes) = self
+            .projects
+            .get(project)
+            .and_then(|settings| settings.declaration_journal_bytes)
+        {
+            (bytes, Layer::Project)
+        } else {
+            (self.declaration_journal_bytes, Layer::Host)
+        }
+    }
+
+    /// The declaration relay timeout for `project`, with project over host.
+    pub fn declaration_relay_seconds_for(&self, project: &str) -> (u64, Layer) {
+        if let Some(seconds) = self
+            .projects
+            .get(project)
+            .and_then(|settings| settings.declaration_relay_seconds)
+        {
+            (seconds, Layer::Project)
+        } else {
+            (self.declaration_relay_seconds, Layer::Host)
+        }
+    }
+
+    /// The declaration relay retry count for `project`, with project over host.
+    pub fn declaration_relay_retries_for(&self, project: &str) -> (u8, Layer) {
+        if let Some(retries) = self
+            .projects
+            .get(project)
+            .and_then(|settings| settings.declaration_relay_retries)
+        {
+            (retries, Layer::Project)
+        } else {
+            (self.declaration_relay_retries, Layer::Host)
         }
     }
 
@@ -871,6 +946,16 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("sandboxed_routes", "array"),
     FieldMetadata::new("sandbox_cache_reads", "array"),
     FieldMetadata::new("projects.{project}.sandbox_cache_reads", "array"),
+    FieldMetadata::int("declaration_journal_bytes", 65536, 16777216),
+    FieldMetadata::int("declaration_relay_seconds", 1, 300),
+    FieldMetadata::int("declaration_relay_retries", 0, 5),
+    FieldMetadata::int(
+        "projects.{project}.declaration_journal_bytes",
+        65536,
+        16777216,
+    ),
+    FieldMetadata::int("projects.{project}.declaration_relay_seconds", 1, 300),
+    FieldMetadata::int("projects.{project}.declaration_relay_retries", 0, 5),
 ];
 pub const SECTION: DomainSection = DomainSection::new::<RunConfig>("run", |_| DEFAULTS)
     .with_boundary_checks()

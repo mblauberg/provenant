@@ -167,9 +167,13 @@ still reads a valid tree and sees the fixture staged into its lane scratch. The
 staged fixture carries a fresh random fact absent from the committed tree and
 the bundled template: a reader that reconstructs the answer from source cannot
 report it. A manual
-`run smoke` with no `diff_base` uses the checkout's first parent as a fixed
-review range and warns with its source. If the parent is unavailable, it skips
-review with a reason; supply `--set diff_base=BASE` to enable review.
+`run smoke` reviews the writer's own scratch commit: the review node runs after
+the write and reads the commit the writer produced in its scratch worktree
+against the commit it branched from, so the cost is bounded by the smoke change
+and never by the caller checkout. A
+launch with no writer skips review with a sourced reason. Supply
+`--set diff_base=BASE` to override the review base; its source is shown in the
+warnings.
 The scratch
 project's host binding is removed when the verification ends, including on
 failure, so the deleted fixture never

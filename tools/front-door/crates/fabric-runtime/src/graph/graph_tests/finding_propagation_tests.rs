@@ -33,10 +33,10 @@ fn verifier_markers_without_the_composite_prefix_keep_each_lens_finding_separate
     .join(",");
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&verified)),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&settled)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&verified)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&settled)),
         ]
         .into(),
         ..Default::default()
@@ -54,7 +54,7 @@ fn verifier_markers_without_the_composite_prefix_keep_each_lens_finding_separate
         synthesis.state,
         NodeState::Succeeded,
         "{:?}",
-        synthesis.advance_error
+        synthesis.advance_note
     );
     assert!(
         !node("verify")
@@ -107,10 +107,10 @@ fn a_marker_shared_by_several_findings_stays_unresolved() {
     })).unwrap();
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(",\"propagates\":\"F1\"")),
             ),
         ]
@@ -162,15 +162,15 @@ fn qualified_propagations_group_colliding_originals() {
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(",\"original\":\"a-original\"")),
             ),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(",\"original\":\"b-original\"")),
             ),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&propagated)),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&propagated)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(decisions)),
         ]
         .into(),
         ..Default::default()
@@ -190,7 +190,7 @@ fn qualified_propagations_group_colliding_originals() {
         run.checkpoint.nodes[3].state,
         NodeState::Succeeded,
         "{:?}",
-        run.checkpoint.nodes[3].advance_error
+        run.checkpoint.nodes[3].advance_note
     );
     let prompt = &owner.prompts[3];
     assert!(prompt.contains("a-verified") && prompt.contains("b-verified"));
@@ -226,21 +226,21 @@ fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
     synthesis.inputs = vec![input("lens"), input("verify"), input("verify2")];
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(
                     ",\"verification\":\"evidence-one\",\"propagates\":\"lens:F1\"",
                 )),
             ),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(
                     ",\"verification\":\"evidence-two\",\"propagates\":\"lens:F1\"",
                 )),
             ),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified","verification":"combined"}"#),
             ),
         ]
@@ -262,7 +262,7 @@ fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
         run.checkpoint.nodes[3].state,
         NodeState::Succeeded,
         "{:?}",
-        run.checkpoint.nodes[3].advance_error
+        run.checkpoint.nodes[3].advance_note
     );
     let prompt = &owner.prompts[3];
     assert!(prompt.contains("evidence-one") && prompt.contains("evidence-two"));
@@ -302,13 +302,13 @@ fn chain_resolves_rendered_markers_and_preserves_every_copy() {
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(",\"evidence\":\"first\"")),
             ),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&propagated)),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&last)),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&propagated)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&last)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(decisions)),
         ]
         .into(),
         ..Default::default()
@@ -330,7 +330,7 @@ fn chain_resolves_rendered_markers_and_preserves_every_copy() {
         progress.state,
         NodeState::Succeeded,
         "{:?}",
-        progress.advance_error
+        progress.advance_note
     );
     let findings = &progress.outputs.as_ref().unwrap().findings;
     assert_eq!(findings.len(), 4);
@@ -373,17 +373,17 @@ fn result_only_inputs_do_not_change_rendered_finding_ids() {
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry("").replace("\"id\":\"F1\"", "\"id\":\"b:F1\"")),
             ),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(",\"propagates\":\"b:b:F1\"")),
             ),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"yes"}"#),
             ),
         ]
@@ -406,7 +406,7 @@ fn result_only_inputs_do_not_change_rendered_finding_ids() {
         run.checkpoint.nodes[4].state,
         NodeState::Succeeded,
         "{:?}",
-        run.checkpoint.nodes[4].advance_error
+        run.checkpoint.nodes[4].advance_note
     );
     assert_eq!(
         run.checkpoint.nodes[4]
@@ -452,13 +452,13 @@ fn qualified_id_collision_requires_three_distinct_dispositions() {
         synth.inputs = vec![input("a"), input("b"), input("c")];
         let mut owner = FakeOwner {
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &findings_text(&entry("").replace("\"id\":\"F1\"", "\"id\":\"a:F1\"")),
                 ),
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(decisions)),
             ]
             .into(),
             ..Default::default()
@@ -477,7 +477,7 @@ fn qualified_id_collision_requires_three_distinct_dispositions() {
         assert_eq!(
             run.checkpoint.nodes[3].state, expected,
             "{:?}",
-            run.checkpoint.nodes[3].advance_error
+            run.checkpoint.nodes[3].advance_note
         );
     }
 }
@@ -508,14 +508,14 @@ fn ambiguous_propagation_warns_and_remains_independent() {
     let decisions = r#"{"id":"b:F1","disposition":"accepted","reason":"yes"},{"id":"verify:F1","disposition":"rejected","reason":"no"}"#;
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&c_findings)),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&a_findings)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&c_findings)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&a_findings)),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(",\"propagates\":\"a:b:F1\"")),
             ),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(decisions)),
         ]
         .into(),
         ..Default::default()
@@ -542,7 +542,7 @@ fn ambiguous_propagation_warns_and_remains_independent() {
         run.checkpoint.nodes[4].state,
         NodeState::Succeeded,
         "{:?}",
-        run.checkpoint.nodes[4].advance_error
+        run.checkpoint.nodes[4].advance_note
     );
     let findings = &run.checkpoint.nodes[4].outputs.as_ref().unwrap().findings;
     assert_eq!(
@@ -571,12 +571,12 @@ fn unresolved_marker_warns_and_remains_an_independent_identity() {
     let decisions = r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"verify:F1","disposition":"rejected","reason":"no"}"#;
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(",\"propagates\":\"not-an-input:F1\"")),
             ),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(decisions)),
         ]
         .into(),
         ..Default::default()
@@ -639,14 +639,14 @@ fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions()
     ] {
         let mut owner = FakeOwner {
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &findings_text(
                         &entry("").replace("\"summary\":\"s\"", "\"summary\":\"other\""),
                     ),
                 ),
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(decisions)),
             ]
             .into(),
             ..Default::default()
@@ -678,8 +678,8 @@ fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
     let decisions = r#"{"id":"F1","disposition":"accepted","reason":"yes"},{"id":"F9","disposition":"rejected","reason":"no"}"#;
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&upstream)),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&upstream)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(decisions)),
         ]
         .into(),
         ..Default::default()
@@ -688,13 +688,13 @@ fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[1].advance_error_code.as_deref(),
+        run.checkpoint.nodes[1].advance_code.as_deref(),
         Some("disposition_count")
     );
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(replay.checkpoint.nodes[1].state, NodeState::Failed);
     assert_eq!(
-        replay.checkpoint.nodes[1].advance_error_code.as_deref(),
+        replay.checkpoint.nodes[1].advance_code.as_deref(),
         Some("disposition_count")
     );
 }
@@ -706,7 +706,7 @@ fn required_findings_prompt_includes_empty_example_even_when_fence_is_mentioned(
     lens.prompt = "Review the existing ```findings block.".into();
     let mut owner = FakeOwner {
         observations: VecDeque::from([terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
         )]),
         ..Default::default()
@@ -781,10 +781,10 @@ fn synthesis_recovers_upheld_findings_when_verifier_block_is_truncated() {
     let upheld = "F1 remains valid: UPHELD because the call still panics.\n```findings\n{\"schema_version\":1,\"findings\":[";
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-            terminal_with_result(AttemptOutcome::Succeeded, upheld),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, upheld),
             terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 &findings_text(&entry(
                     ",\"disposition\":\"accepted\",\"reason\":\"Verifier reproduced the panic\"",
                 )),
@@ -840,13 +840,13 @@ fn a_synthesis_without_valid_dispositions_settles_as_failed_with_a_reason() {
     for (text, expected) in cases {
         let progress = synthesis_run(&text);
         assert_eq!(progress.state, NodeState::Failed, "{text}");
-        assert_eq!(progress.advance_error_code.as_deref(), Some(expected));
+        assert_eq!(progress.advance_code.as_deref(), Some(expected));
     }
     // A node that declares no dispositions keeps accepting bare findings.
     let plain = node("plain", route("first"));
     let mut owner = FakeOwner {
         observations: [terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             &findings_text(&entry("")),
         )]
         .into(),
@@ -863,7 +863,7 @@ fn a_synthesis_without_valid_dispositions_settles_as_failed_with_a_reason() {
 
 fn settle_single(node: GraphNode, result: &str) -> NodeProgress {
     let mut owner = FakeOwner {
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, result)].into(),
+        observations: [terminal_with_result(GraphAttemptOutcome::Succeeded, result)].into(),
         ..Default::default()
     };
     let run = advance(
@@ -899,7 +899,7 @@ fn findings_required_and_review_nodes_still_fail_on_a_missing_block() {
     let settled = settle_single(required, "");
     assert_eq!(settled.state, NodeState::Failed);
     assert_eq!(
-        settled.advance_error_code.as_deref(),
+        settled.advance_code.as_deref(),
         Some("findings_required")
     );
 

@@ -2,6 +2,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use provenant_records::custody::Scope;
+use provenant_test_support::wait_step;
 
 use provenant_core::{AttemptId, CancelToken, WaitBudget};
 use provenant_os::{
@@ -191,6 +192,58 @@ impl ProcessObserver for CensusGateObserver {
                         "transient census failure",
                     )));
                 }
+            }
+        }
+        // The detached-service case needs a real post-reparent snapshot. A
+        // zombie provider alone is insufficient: its child can still name it
+        // as parent until the kernel completes reparenting.
+        if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from)
+            && state.join("s2-wait-for-reparent").is_file()
+        {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let read_pid = |name: &str| -> std::result::Result<i64, CensusError> {
+                loop {
+                    match std::fs::read_to_string(state.join(name)) {
+                        Ok(pid) => {
+                            return pid.trim().parse::<i64>().map_err(|error| {
+                                CensusError::ProcessList(io::Error::other(error))
+                            });
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(CensusError::ProcessList(error)),
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(CensusError::ProcessList(io::Error::other(format!(
+                            "fixture did not publish {name}"
+                        ))));
+                    }
+                    std::thread::yield_now();
+                }
+            };
+            let provider_pid = read_pid("s2-detach-provider-pid")?;
+            let service_pid = read_pid("s2-detach-service-pid")?;
+            if !matches!(self.observe(provider_pid), ProcessObservation::Absent) {
+                return Err(CensusError::ProcessList(io::Error::other(
+                    "detached provider exit could not be observed",
+                )));
+            }
+            loop {
+                let census = fixture::RecordedBootObserver.census(max_entries)?;
+                if matches!(
+                    census.process(service_pid),
+                    provenant_supervisor::census::ProcessLookup::Present(fact)
+                        if !fact.zombie && fact.parent_pid != provider_pid
+                ) {
+                    std::fs::write(state.join("s2-reparent-observed"), b"reparented")
+                        .map_err(CensusError::ProcessList)?;
+                    return Ok(census);
+                }
+                if Instant::now() >= deadline {
+                    return Err(CensusError::ProcessList(io::Error::other(
+                        "detached service was not reparented",
+                    )));
+                }
+                std::thread::yield_now();
             }
         }
         let census = fixture::RecordedBootObserver.census(max_entries)?;
@@ -652,7 +705,7 @@ fn wait_for_census_record(path: &Path, incomplete: bool) -> Result<()> {
                 "reservation census_incomplete did not become {incomplete}; last reservation: {last}"
             )).into());
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+        wait_step(deadline);
     }
 }
 fn wait_for_descendant(path: &Path, identity: &ProcessIdentity) -> Result<()> {
@@ -664,7 +717,7 @@ fn wait_for_descendant(path: &Path, identity: &ProcessIdentity) -> Result<()> {
         if Instant::now() >= deadline {
             return Err(io::Error::other("provider descendant was not durably tracked").into());
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+        wait_step(deadline);
     }
 }
 fn wait_for_registry_reads(home: &Path, minimum: u64) -> Result<()> {
@@ -681,7 +734,7 @@ fn wait_for_registry_reads(home: &Path, minimum: u64) -> Result<()> {
         if Instant::now() >= deadline {
             return Err(io::Error::other("guardian did not revisit nested registration").into());
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+        wait_step(deadline);
     }
 }
 fn wait_for_file(path: &Path) -> Result<()> {
@@ -693,7 +746,7 @@ fn wait_for_file(path: &Path) -> Result<()> {
         if Instant::now() >= deadline {
             return Err(io::Error::other("fixture marker was not published").into());
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+        wait_step(deadline);
     }
 }
 fn wait_for_identity_absence(identity: &ProcessIdentity) -> Result<()> {
@@ -707,7 +760,7 @@ fn wait_for_identity_absence(identity: &ProcessIdentity) -> Result<()> {
         if Instant::now() >= deadline {
             return Err(io::Error::other("fixture descendant did not exit").into());
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+        wait_step(deadline);
     }
 }
 fn immediate_exit_identity_survives_absent_observation(root: &Path) -> Result<()> {
@@ -776,7 +829,7 @@ fn live_census_failure_warns_once(root: &Path) -> Result<()> {
         if Instant::now() >= deadline {
             return Err(io::Error::other("live census failures were not observed").into());
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+        wait_step(deadline);
     }
     drop(held);
     let exit = exited(&handle)?;
@@ -949,7 +1002,7 @@ fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
             Instant::now() < deadline,
             "journal failures were not retried"
         );
-        std::thread::park_timeout(Duration::from_millis(5));
+        wait_step(deadline);
     }
     std::fs::remove_dir(
         root.join("tracking-writer")
@@ -1350,7 +1403,7 @@ fn publication_failure_retains_the_lease_and_retries_without_overwrite(root: &Pa
         if Instant::now() >= deadline {
             return Err(io::Error::other("publication pending was not observable").into());
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+        wait_step(deadline);
     }
     drop(writer);
     let clock = SystemClock::new();
@@ -1659,7 +1712,7 @@ fn descendant_session_after_parent(root: &Path, timed: bool) -> Result<()> {
         .join("reservation.json");
     if timed {
         while Instant::now() < parent_deadline {
-            std::thread::park_timeout(parent_deadline.saturating_duration_since(Instant::now()));
+            wait_step(parent_deadline);
         }
     } else {
         wait_for_descendant(&reservation, &parent)?;
@@ -2142,9 +2195,16 @@ fn retained_custody_releases_the_writer_soon_after_the_last_blocker_exits(
 }
 #[cfg(target_os = "macos")]
 fn unsandboxed_detached_service_does_not_block_settlement(root: &Path) -> Result<()> {
-    std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(root.join("PROVENANT_STATE_DIR"))?;
     std::fs::write(
         root.join("PROVENANT_STATE_DIR/s2-provider-exit-first"),
+        b"gate",
+    )?;
+    std::fs::write(
+        root.join("PROVENANT_STATE_DIR/s2-wait-for-reparent"),
         b"gate",
     )?;
     let ready_path = root.join("native-detached.sock");
@@ -2160,7 +2220,20 @@ fn unsandboxed_detached_service_does_not_block_settlement(root: &Path) -> Result
     byte(&mut stream, b'R')?;
     let service = process_identity(read_pid_line(&mut stream)?)?;
     assert_eq!(service.session_id, service.pid);
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::write(
+        state.join("s2-detach-service-pid.tmp"),
+        service.pid.to_string(),
+    )?;
+    std::fs::rename(
+        state.join("s2-detach-service-pid.tmp"),
+        state.join("s2-detach-service-pid"),
+    )?;
     let exit = exited(&handle)?;
+    assert!(
+        root.join("PROVENANT_STATE_DIR/s2-reparent-observed")
+            .is_file()
+    );
     assert!(!exit.unresolved_cleanup, "{exit:?}");
     // No sandbox mark or ancestry gives cleanup authority over this service.
     assert_eq!(process_identity(service.pid)?, service);
@@ -2304,7 +2377,7 @@ fn cancel_after_unresolved_exit_republishes_a_settled_exit(root: &Path) -> Resul
             if Instant::now() >= deadline {
                 return Err(io::Error::other("cancel did not settle the exit").into());
             }
-            std::thread::park_timeout(Duration::from_millis(50));
+            wait_step(deadline);
         };
         assert_eq!(settled.stop_reason, Some(StopReason::ExplicitCancellation));
         assert!(settled.unresolved_pids.is_empty());
@@ -2328,6 +2401,12 @@ impl ChildRegistry for FileChildRegistry {
                 state_dir.join(S2_SUPPRESSED_REGISTRY_READ),
                 b"stale-census registry snapshot",
             )?;
+            // Consume the gate here, before the guardian can take another
+            // census. A persistent gate would let later retained-custody
+            // looks miss the late owner too, so the guardian would signal it
+            // and settle instead of leaving cleanup unresolved. The caller
+            // only needs the stale census to see a suppressed registry once.
+            std::fs::remove_file(state_dir.join(S2_IGNORE_CHILD_REGISTRY))?;
             return Ok(Vec::new());
         }
         let identity_path = self.home.join("s2-owner.json");
@@ -2477,8 +2556,9 @@ fn stale_complete_census_does_not_signal_a_late_shared_group_owner(root: &Path) 
         StopReceipt::Requested
     );
     std::fs::write(state_dir.join(S2_CENSUS_RELEASE), b"resume old snapshot")?;
+    // The registry consumes its own suppression gate once, so no later
+    // guardian census can race this test into hiding the late owner again.
     wait_for_file(&state_dir.join(S2_SUPPRESSED_REGISTRY_READ))?;
-    std::fs::remove_file(state_dir.join(S2_IGNORE_CHILD_REGISTRY))?;
 
     let exit = exited(&handle)?;
     assert!(exit.unresolved_cleanup);
@@ -2517,7 +2597,7 @@ fn reservation_identity(writer_path: &Path, field: &str) -> Result<ProcessIdenti
         if Instant::now() >= deadline {
             return Err(io::Error::other(format!("reservation omitted {field} identity")).into());
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+        wait_step(deadline);
     }
 }
 
@@ -2667,7 +2747,9 @@ fn wait_for_zombie(identity: &ProcessIdentity) -> Result<()> {
                 return Ok(());
             }
             ProcessObservation::Absent => return Ok(()),
-            _ if Instant::now() < deadline => std::thread::park_timeout(Duration::from_millis(5)),
+            _ if Instant::now() < deadline => {
+                wait_step(deadline);
+            }
             other => {
                 return Err(io::Error::other(format!("provider did not exit: {other:?}")).into());
             }
@@ -2723,7 +2805,7 @@ fn bounded_reap(child: &mut std::process::Child) -> Result<()> {
         if Instant::now() >= end {
             return Err(io::Error::other("fixture did not reap").into());
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+        wait_step(end);
     }
 }
 fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {

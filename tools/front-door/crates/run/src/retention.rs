@@ -53,6 +53,10 @@ pub struct ProviderStateGc {
     /// Scratch candidates examined but not fully collected, with bounded size observations.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub scratch_deferred: Vec<DeferredScratch>,
+    /// A read-only preview stopped at `gc.preview_budget` rather than the
+    /// applied sweep budget; the remedy is a longer preview or `--apply`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub preview_budget_stopped: bool,
     pub attempt_logs: Vec<AttemptLogRemoval>,
     /// Event rows expired (or eligible to expire in a dry run).
     pub expired_events: u64,
@@ -116,11 +120,23 @@ pub enum ScratchOwner {
 pub type ScratchOwnerResolver<'a> = dyn Fn(&AttemptRecord, &CanonicalRequest) -> ScratchOwner + 'a;
 
 /// One retention scan's resume position and cooperative work budget.
-#[derive(Default)]
 pub struct RetentionScan<'a> {
     pub start_at: Option<AttemptId>,
     pub detail: Option<&'a str>,
     pub keep_going: Option<&'a dyn Fn() -> bool>,
+    /// Wall time allowed for one read-only preview before it reports that the
+    /// remaining attempts need an applied pass.
+    pub preview_budget: std::time::Duration,
+}
+impl Default for RetentionScan<'_> {
+    fn default() -> Self {
+        Self {
+            start_at: None,
+            detail: None,
+            keep_going: None,
+            preview_budget: std::time::Duration::from_secs(1),
+        }
+    }
 }
 
 impl RetentionScan<'_> {
@@ -199,6 +215,12 @@ impl Drop for SqlCancellation {
 
 pub struct ScratchPolicy<'a> {
     pub idle_seconds: u64,
+    /// Per-attempt scratch size above which a settled attempt's scratch is
+    /// collectible before `idle_seconds`; zero disables the cap.
+    pub scratch_cap_bytes: u64,
+    /// Bounded grace for an unreadable, invalid or custody-unproven record.
+    /// Measured from the scratch tree's newest write.
+    pub grace_seconds: u64,
     pub projects: Option<&'a [provenant_core::ProjectId]>,
     pub attempts: Option<&'a [AttemptId]>,
     pub owner: Option<&'a ScratchOwnerResolver<'a>>,
@@ -207,6 +229,8 @@ impl ScratchPolicy<'_> {
     pub fn new(idle_seconds: u64) -> Self {
         Self {
             idle_seconds,
+            scratch_cap_bytes: 0,
+            grace_seconds: 86_400,
             projects: None,
             attempts: None,
             owner: None,
@@ -424,13 +448,61 @@ impl RunStore {
         .with_cancellation(call.cancel.clone());
         #[allow(clippy::disallowed_methods)] // Bound read-only maintenance in real time.
         let preview_started = std::time::Instant::now();
+        let preview_budget = scan.preview_budget;
         loop {
-            let rows =
+            let mut rows =
                 self.retention_page(scratch.is_some(), scratch.and_then(|p| p.attempts), after)?;
             if rows.is_empty() {
                 break;
             }
-            for (sequence, id, project, raw) in rows {
+            // The resume cursor is sequence-based, so the whole page is
+            // consumed before ranking: a cooperative stop still resumes after
+            // the last row of this page, never inside it.
+            after = rows.iter().map(|row| row.0).max().unwrap_or(after);
+            if scratch.is_some() {
+                // Best-effort sizes rank collection within the page. A bounded
+                // census cannot rank attempts in pages it has not read yet, and
+                // an unmeasurable tree ranks below a measured one so uncertain
+                // observations never win on a guess.
+                let mut sizes = provenant_os::disk::DiskReport::with_walk_budget(
+                    self.context.state_root.as_path().into(),
+                    0,
+                    10_000,
+                    std::time::Duration::from_millis(500),
+                )
+                .with_cancellation(call.cancel.clone());
+                let mut ranked = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let temporary = self
+                        .context
+                        .state_root
+                        .as_path()
+                        .join(crate::plan::ATTEMPT_SCRATCH)
+                        .join(&row.1)
+                        .join("tmp");
+                    sizes.entries.clear();
+                    sizes.errors.clear();
+                    let present = !std::fs::symlink_metadata(&temporary)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+                    let bytes = if present && scan.permits(call) {
+                        sizes
+                            .measure("attempt_tmp", &temporary)
+                            .and_then(|index| sizes.entries.get(index))
+                            .map_or(0, |entry| entry.allocated_bytes)
+                    } else {
+                        0
+                    };
+                    ranked.push((bytes, row));
+                }
+                ranked.sort_by(|left, right| {
+                    right
+                        .0
+                        .cmp(&left.0)
+                        .then_with(|| (right.1).0.cmp(&(left.1).0))
+                });
+                rows = ranked.into_iter().map(|(_, row)| row).collect();
+            }
+            for (_sequence, id, project, raw) in rows {
                 let attempt_path = self
                     .context
                     .state_root
@@ -440,13 +512,14 @@ impl RunStore {
                     report.interrupted_at = Some(attempt_path);
                     return Ok(report);
                 }
-                after = sequence;
-                if dry_run && preview_started.elapsed() >= std::time::Duration::from_secs(1) {
+                if dry_run && preview_started.elapsed() >= preview_budget {
+                    report.preview_budget_stopped = true;
                     report.kept.push(ProviderStateIssue {
                         path: self.context.state_root.as_path().into(),
-                        reason:
-                            "preview budget reached; remaining attempts require an applied GC pass"
-                                .into(),
+                        reason: format!(
+                            "preview budget {}ms reached; raise gc.preview_budget or use gc --apply to finish the pass",
+                            preview_budget.as_millis()
+                        ),
                     });
                     report.interrupted_at = Some(attempt_path);
                     return Ok(report);
@@ -466,8 +539,39 @@ impl RunStore {
                 let first_removal = report.removed.len();
                 let first_tightened = report.tightened.len();
                 let result = (|| -> Result<()> {
-                    let mut record: AttemptRecord = crate::db::decode_attempt(&raw)?;
-                    crate::reader::validate_attempt(&record)?;
+                    let mut record: AttemptRecord = match crate::db::decode_attempt(&raw) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            if let Some(policy) = scratch {
+                                return self.collect_grace_scratch(
+                                    &id,
+                                    now,
+                                    dry_run,
+                                    policy,
+                                    call,
+                                    scan,
+                                    &mut temporary_sizes,
+                                    &mut report,
+                                );
+                            }
+                            return Err(error);
+                        }
+                    };
+                    if let Err(error) = crate::reader::validate_attempt(&record) {
+                        if let Some(policy) = scratch {
+                            return self.collect_grace_scratch(
+                                &id,
+                                now,
+                                dry_run,
+                                policy,
+                                call,
+                                scan,
+                                &mut temporary_sizes,
+                                &mut report,
+                            );
+                        }
+                        return Err(error);
+                    }
                     record.superseded_by = self.same_session_successor(record.attempt_id)?;
                     if record.attempt_id.to_string() != id
                         || record.project_id.to_string() != project
@@ -480,13 +584,37 @@ impl RunStore {
                     if call.cancel.is_cancelled() {
                         return Err(RunError::Cancelled);
                     }
+                    let held = match self.hold_attempt(&record, call) {
+                        Ok(held) => held,
+                        // A missing release receipt, an unproven loss or private
+                        // Git with no import proof is not a permanent fence.
+                        // After the configured grace the scratch is collectible
+                        // under fresh lock and continuation checks below.
+                        Err(error) => {
+                            if matches!(error, RunError::Validation(_))
+                                && let Some(policy) = scratch
+                            {
+                                return self.collect_grace_scratch(
+                                    &id,
+                                    now,
+                                    dry_run,
+                                    policy,
+                                    call,
+                                    scan,
+                                    &mut temporary_sizes,
+                                    &mut report,
+                                );
+                            }
+                            return Err(error);
+                        }
+                    };
                     let Some(Held {
                         attempt,
                         continuing,
                         _publication,
                         _writer,
                         _settlement,
-                    }) = self.hold_attempt(&record, call)?
+                    }) = held
                     else {
                         return Ok(());
                     };
@@ -500,13 +628,44 @@ impl RunStore {
                         }
                     ) && record.exit_evidence.is_none();
                     // Settlement and custody are checked separately; every
-                    // attempt observes the same minimum scratch idle period.
+                    // attempt observes the same minimum scratch idle period,
+                    // unless a bounded measurement finds its scratch over the
+                    // configured cap. An unmeasured tree is never over cap.
+                    let cap = scratch.and_then(|policy| {
+                        (policy.scratch_cap_bytes > 0).then_some(policy.scratch_cap_bytes)
+                    });
+                    let over_cap = match cap {
+                        Some(cap) if !continuing => {
+                            let temporary = self
+                                .context
+                                .state_root
+                                .as_path()
+                                .join(crate::plan::ATTEMPT_SCRATCH)
+                                .join(&id)
+                                .join("tmp");
+                            temporary_sizes.entries.clear();
+                            temporary_sizes.errors.clear();
+                            let present = !std::fs::symlink_metadata(&temporary)
+                                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+                            let measured = if present && scan.permits(call) {
+                                temporary_sizes.measure("attempt_tmp", &temporary)
+                            } else {
+                                None
+                            };
+                            measured
+                                .filter(|_| temporary_sizes.errors.is_empty())
+                                .map(|index| temporary_sizes.entries[index].allocated_bytes)
+                                .is_some_and(|bytes| bytes > cap)
+                        }
+                        _ => false,
+                    };
                     let scratch_eligible = if let Some(policy) = scratch {
                         !continuing
-                            && age
+                            && (age
                                 >= i64::try_from(policy.idle_seconds)
                                     .unwrap_or(i64::MAX)
                                     .saturating_mul(1_000_000)
+                                || over_cap)
                     } else {
                         false
                     };
@@ -766,6 +925,167 @@ impl RunStore {
             }
         }
         Ok(report)
+    }
+
+    /// Collect scratch for a settled attempt whose record cannot prove custody.
+    /// The grace is measured from the newest observed write in the scratch tree
+    /// and its private-Git marker, so a live writer keeps its own lifetime.
+    /// Fresh publication, writer and continuation checks still gate removal.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn collect_grace_scratch(
+        &self,
+        id: &str,
+        now: WallTime,
+        dry_run: bool,
+        policy: &ScratchPolicy<'_>,
+        call: &Request<'_>,
+        scan: &RetentionScan<'_>,
+        sizes: &mut provenant_os::disk::DiskReport,
+        report: &mut ProviderStateGc,
+    ) -> Result<()> {
+        let temporary = self
+            .context
+            .state_root
+            .as_path()
+            .join(crate::plan::ATTEMPT_SCRATCH)
+            .join(id)
+            .join("tmp");
+        let parsed = id
+            .parse::<AttemptId>()
+            .map_err(|_| RunError::Validation("grace scratch attempt id"))?;
+        let attempt = match self.attempt_dir(parsed, false) {
+            Ok(attempt) => Some(attempt),
+            Err(error) if missing_directory(&error) => None,
+            Err(error) => return Err(error),
+        };
+        if std::fs::symlink_metadata(&temporary)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            if !dry_run {
+                self.write(call, |tx| {
+                    tx.execute(
+                        "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND terminal=1",
+                        [id],
+                    )?;
+                    Ok(())
+                })?;
+            }
+            return Ok(());
+        }
+        sizes.entries.clear();
+        sizes.errors.clear();
+        let measured = scan
+            .permits(call)
+            .then(|| sizes.measure("attempt_tmp", &temporary))
+            .flatten();
+        let Some((bytes, newest_ns)) = measured.map(|index| {
+            let entry = &sizes.entries[index];
+            (entry.allocated_bytes, entry.newest_write_ns)
+        }) else {
+            report.kept.push(ProviderStateIssue {
+                path: temporary,
+                reason: "custody proof unavailable; scratch grace could not be observed, kept"
+                    .into(),
+            });
+            return Ok(());
+        };
+        if !sizes.errors.is_empty() {
+            report.kept.push(ProviderStateIssue {
+                path: temporary,
+                reason: "custody proof unavailable; partial scratch census keeps it".into(),
+            });
+            return Ok(());
+        }
+        // A marker refreshed by settlement or a private-Git import restarts the
+        // grace; an idle tree has no live writer to protect.
+        let newest_ns = attempt.as_ref().map_or(newest_ns, |run| {
+            let marker_names = [
+                OsStr::new("writer-objects.json"),
+                OsStr::new(AttemptFile::Release.name()),
+            ];
+            let newest = marker_names.into_iter().fold(newest_ns, |newest, name| {
+                run.metadata_at(name, false)
+                    .map_or(newest, |meta| newest.max(meta.modified_ns))
+            });
+            // A reservation refreshed by a live guardian also restarts the
+            // grace; an old, unrenewed one is not proof of a live holder.
+            match run.open_verified_directory(OsStr::new(id)) {
+                Ok(evidence) => evidence
+                    .metadata_at(OsStr::new("reservation.json"), false)
+                    .map_or(newest, |meta| newest.max(meta.modified_ns)),
+                Err(_) => newest,
+            }
+        });
+        let grace_micros = i128::from(policy.grace_seconds) * 1_000_000;
+        let elapsed = (i128::from(now.as_micros()) - newest_ns / 1_000).max(0);
+        if elapsed < grace_micros {
+            let remaining = (grace_micros - elapsed) / 1_000_000;
+            report.kept.push(ProviderStateIssue {
+                path: temporary,
+                reason: format!(
+                    "custody proof unavailable; scratch grace {}s, {}s remaining ({} bytes retained)",
+                    policy.grace_seconds, remaining, bytes
+                ),
+            });
+            return Ok(());
+        }
+        let _publication = match attempt.as_ref() {
+            Some(run) => {
+                Some(run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?)
+            }
+            None => None,
+        };
+        if self.scratch_in_use(parsed)? {
+            report.kept.push(ProviderStateIssue {
+                path: temporary,
+                reason: "custody proof unavailable; a continuation still needs scratch".into(),
+            });
+            return Ok(());
+        }
+        let _writer = match attempt.as_ref() {
+            Some(run) => {
+                match run.try_lock_existing(
+                    OsStr::new(AttemptFile::WriterLock.name()),
+                    LockMode::Exclusive,
+                ) {
+                    Ok(guard) => Some(guard),
+                    Err(error) if error.is_not_found() => None,
+                    Err(_) => {
+                        report.kept.push(ProviderStateIssue {
+                            path: temporary,
+                            reason: "custody proof unavailable; writer lock still held".into(),
+                        });
+                        return Ok(());
+                    }
+                }
+            }
+            None => None,
+        };
+        let scratch = match self.attempt_scratch_dir(parsed, false) {
+            Ok(scratch) => scratch,
+            Err(error) if missing_directory(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let keep_going = || scan.permits(call);
+        if let Err(error) =
+            collect_temporary(&scratch, &temporary, dry_run, report, sizes, &keep_going)
+        {
+            if retention_interrupted(&error) {
+                return Err(error);
+            }
+            record_issue(report, temporary, &error);
+            return Ok(());
+        }
+        if !dry_run {
+            self.write(call, |tx| {
+                tx.execute(
+                    "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND terminal=1",
+                    [id],
+                )?;
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     fn retention_after(&self, start: Option<AttemptId>) -> Result<i64> {

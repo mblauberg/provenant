@@ -111,5 +111,6 @@
   },
   "default_tier": "0",
   "test_threads": null,
+  "lane": [],
   "static_checks": []
 }

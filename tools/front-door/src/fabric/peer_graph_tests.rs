@@ -392,67 +392,6 @@ fn peer_placed_reader_binds_its_own_source_like_a_local_reader() -> TestResult {
 }
 
 #[test]
-// Spec: docs/specs/run-launch.md#writer-binding — a remote smoke read node gets
-// the same fixture as a local one, carried as bytes rather than a caller path.
-fn peer_placed_smoke_reader_carries_its_fixture_to_the_remote_attempt() -> TestResult {
-    if host_test(
-        "fabric::peer_tests::peer_graph_tests::peer_placed_smoke_reader_carries_its_fixture_to_the_remote_attempt",
-    )? {
-        return Ok(());
-    }
-    let (rig, factory) = receiver()?;
-    let cancel = CancelToken::new();
-    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    let input = serde_json::from_value(json!({
-        "op":"submit", "operation_id":"peer-smoke-reader-fixture",
-        "origin_work_key":provenant_records::WorkKey::new(
-            provenant_core::ProjectId::from_bytes([77; 16]), "origin-graph", "read", 1)?,
-        "task":{"prompt":"Read the supplied fixture and report its single stated fact.",
-            "access":"read_only", "head":head,
-            "fixture":{"name":"fixture.txt","content":b"smoke fixture\n".to_vec()},
-            "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
-            "timeout_seconds":30,
-            "context":{"graph_id":"origin-graph", "node_id":"read", "attempt":1,
-                "graph_template_launch":true}}
-    }))?;
-    let receipt = provenant_cli::run::with_deferred_provider_launch(|| {
-        super::super::peer::peer_submit_graph(
-            &factory,
-            input,
-            factory.context.identity.inbox.actor,
-            Default::default(),
-            None,
-            None,
-            WaitBudget::cli(factory.clock.mono_now(), 30).unwrap(),
-            &cancel,
-        )
-    })?;
-    let attempt = receipt.targets[0].attempt;
-    let owner = BinaryRunOwner {
-        factory: &factory,
-        allow_remote: false,
-        actor: None,
-        chair: None,
-    };
-    let store = owner.store(&cancel)?;
-    let call = owner.call(&cancel);
-    let record = store.record(attempt, &call)?;
-    let request = store.request(record.attempt_id, &call)?;
-    let fixture = request
-        .task
-        .fixture
-        .as_ref()
-        .ok_or("the remote read node lost its fixture")?;
-    assert_eq!(fixture.name, "fixture.txt");
-    assert_eq!(fixture.content, b"smoke fixture\n");
-    assert!(
-        !String::from_utf8_lossy(&fixture.content).contains(factory.cwd.to_string_lossy().as_ref()),
-        "a caller path leaked into the fixture bytes"
-    );
-    Ok(())
-}
-
-#[test]
 // Spec: docs/specs/run-launch.md#writer-binding — a remote reader binds the
 // peer's own checkout even when the sender pins a commit the peer never saw.
 fn peer_placed_smoke_reader_binds_the_peer_checkout_when_the_sender_head_is_absent() -> TestResult {
@@ -525,6 +464,67 @@ fn peer_placed_smoke_reader_binds_the_peer_checkout_when_the_sender_head_is_abse
         .ok_or("the remote read node lost its fixture")?;
     assert_eq!(fixture.name, "fixture.txt");
     assert_eq!(fixture.content, b"token-7f3a9c21\n");
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#writer-binding — a remote smoke read node gets
+// the same fixture as a local one, carried as bytes rather than a caller path.
+fn peer_placed_smoke_reader_carries_its_fixture_to_the_remote_attempt() -> TestResult {
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::peer_placed_smoke_reader_carries_its_fixture_to_the_remote_attempt",
+    )? {
+        return Ok(());
+    }
+    let (rig, factory) = receiver()?;
+    let cancel = CancelToken::new();
+    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    let input = serde_json::from_value(json!({
+        "op":"submit", "operation_id":"peer-smoke-reader-fixture",
+        "origin_work_key":provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([77; 16]), "origin-graph", "read", 1)?,
+        "task":{"prompt":"Read the supplied fixture and report its single stated fact.",
+            "access":"read_only", "head":head,
+            "fixture":{"name":"fixture.txt","content":b"smoke fixture\n".to_vec()},
+            "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
+            "timeout_seconds":30,
+            "context":{"graph_id":"origin-graph", "node_id":"read", "attempt":1,
+                "graph_template_launch":true}}
+    }))?;
+    let receipt = provenant_cli::run::with_deferred_provider_launch(|| {
+        super::super::peer::peer_submit_graph(
+            &factory,
+            input,
+            factory.context.identity.inbox.actor,
+            Default::default(),
+            None,
+            None,
+            WaitBudget::cli(factory.clock.mono_now(), 30).unwrap(),
+            &cancel,
+        )
+    })?;
+    let attempt = receipt.targets[0].attempt;
+    let owner = BinaryRunOwner {
+        factory: &factory,
+        allow_remote: false,
+        actor: None,
+        chair: None,
+    };
+    let store = owner.store(&cancel)?;
+    let call = owner.call(&cancel);
+    let record = store.record(attempt, &call)?;
+    let request = store.request(record.attempt_id, &call)?;
+    let fixture = request
+        .task
+        .fixture
+        .as_ref()
+        .ok_or("the remote read node lost its fixture")?;
+    assert_eq!(fixture.name, "fixture.txt");
+    assert_eq!(fixture.content, b"smoke fixture\n");
+    assert!(
+        !String::from_utf8_lossy(&fixture.content).contains(factory.cwd.to_string_lossy().as_ref()),
+        "a caller path leaked into the fixture bytes"
+    );
     Ok(())
 }
 
@@ -1288,7 +1288,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
             };
             route.set_guard_facts(None, Some(self.0.clone())).unwrap();
             let mut refusal = provenant_run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                provenant_records::run::CauseKind::RouteResolutionRefused,
                 "PRIVATE_PACING_SENTINEL",
             );
             refusal.skipped_routes.push(route);
@@ -1423,7 +1423,7 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             _: Option<&provenant_run::AttemptRecord>,
         ) -> Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>> {
             let mut refusal = provenant_run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                provenant_records::run::CauseKind::RouteResolutionRefused,
                 "allowance spent",
             );
             refusal
@@ -1489,14 +1489,14 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             .start(record.attempt_id, &Allowance, &|_, _| Ok(Vec::new()), &call);
     }
     let mut result = json!({"checkpoint":{"nodes":[{
-        "id":"parent", "advance_error_code":"preparation_refused",
-        "advance_error":"The launch was refused before admission.",
+        "id":"parent", "advance_code":"preparation_refused",
+        "advance_note":"The launch was refused before admission.",
         "attempts":[{"attempt_ref": format!("{}/{attempt}", factory.context.identity.host)}]
     }]}});
     factory.name_refusal_causes(&mut result);
-    let message = result["checkpoint"]["nodes"][0]["advance_error"]
+    let message = result["checkpoint"]["nodes"][0]["advance_note"]
         .as_str()
-        .ok_or("advance_error")?;
+        .ok_or("advance_note")?;
     let route = provenant_records::run::SkippedRoute {
         skipped_accounts: Vec::new(),
         extra: Default::default(),

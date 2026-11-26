@@ -225,8 +225,8 @@ fn route_identity_distinguishes_missing_evidence_from_contradictions() {
         );
     }
     assert!(!I::Unobserved.permits_success(&[]));
-    assert!(I::Unobserved.permits_success(&[PartialSignal::IdentityUnobserved]));
-    assert!(!I::Mismatch.permits_success(&[PartialSignal::IdentityUnobserved]));
+    assert!(I::Unobserved.permits_success(&[SettlementSignal::IdentityUnobserved]));
+    assert!(!I::Mismatch.permits_success(&[SettlementSignal::IdentityUnobserved]));
 }
 
 #[test]
@@ -783,25 +783,33 @@ pub(super) fn route() -> RouteRecord {
         ..Default::default()
     }
 }
+pub(super) fn publication_fact(
+    outcome: Outcome,
+    cause: Option<CauseKind>,
+) -> provenant_records::settlement::OutcomeFact {
+    provenant_records::settlement::classify::settle(
+        &provenant_records::settlement::SettlementEvidence::fixture(
+            provenant_records::settlement::LaneRole::Reader,
+            outcome,
+            cause,
+        ),
+    )
+}
+
 pub(super) fn publication() -> TerminalPublication<'static> {
     TerminalPublication {
-        handoff: Ok(None),
-        terminal_cause: None,
-        terminal_note: None,
-        outcome: Outcome::Succeeded,
+        fact: publication_fact(Outcome::Succeeded, None),
+        evidence: None,
         finished_at: WallTime::from_micros(200).unwrap(),
         started_at: Some(WallTime::from_micros(110).unwrap()),
         provider_ms: Some(1),
-        reason: None,
         result: "sealed result ☀",
-        complete: true,
         redacted: false,
         resolved_route: Some(route()),
         applied_route: Some(route()),
         observed_route: Some(route()),
         usage: UsageRecord::default(),
         session: None,
-        partial_signals: Vec::new(),
     }
 }
 pub(super) fn exit() -> ExitObservation {
@@ -955,7 +963,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: Default::default(),
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "published/lane".into(),
         open_pr: false,
         fast_forward_only: false,
@@ -971,16 +979,17 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;
     let mut publication = publication();
-    publication.outcome = Outcome::ReviewRequired;
-    publication.reason = Some("protected changes require review".into());
+    publication.fact.outcome = Outcome::ReviewRequired;
+    publication.fact.reason = Some("protected changes require review".into());
     let mut incomplete = publication.clone();
-    incomplete.complete = false;
+    incomplete.fact.complete = false;
     assert!(matches!(
         store.publish_terminal(id, 1, &incomplete, &exit(), &call),
         Err(RunError::Validation(_))
@@ -1003,7 +1012,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     );
     assert_eq!(
         store.attempt(id, &call)?.terminal_state,
-        provenant_records::AttemptOutcome::ReviewRequired
+        provenant_records::run::Outcome::ReviewRequired
     );
     Ok(())
 }
@@ -1029,7 +1038,7 @@ fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> T
     input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: provenant_records::run::DeliveryMode::Integrate("batch/next".into()),
-        remote: String::new(),
+        remote: provenant_records::run::Destination::Local,
         branch: "batch/next".into(),
         open_pr: false,
         fast_forward_only: false,
@@ -1046,13 +1055,14 @@ fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> T
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head: base,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;
     let mut publication = publication();
-    publication.outcome = Outcome::Succeeded;
+    publication.fact.outcome = Outcome::Succeeded;
     let record = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
     assert_eq!(record.head, Some(base));
     assert!(matches!(
@@ -1069,7 +1079,7 @@ fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> T
         &db::bytes(&WriterDeliveryReceipt {
             extra: Default::default(),
             schema_version: 1,
-            remote: String::new(),
+            remote: provenant_records::run::Destination::Local,
             branch: "batch/next".into(),
             head: Some(integrated),
             review_acceptance: None,
@@ -1079,7 +1089,7 @@ fn integrate_delivery_receipt_projects_when_head_differs_from_writer_head() -> T
             },
             integration: Some(provenant_records::run::WriterIntegration {
                 extra: Default::default(),
-                remote: String::new(),
+                remote: provenant_records::run::Destination::Local,
                 push_url: None,
                 target: "refs/heads/batch/next".into(),
                 previous: Some(base),
@@ -1133,8 +1143,10 @@ fn project_delivery_receipt(
     // Push delivery needs a named remote; the integrate cases keep the
     // local destination the integration fixture uses.
     let remote = match &mode {
-        provenant_records::run::DeliveryMode::Integrate(_) => String::new(),
-        _ => "origin".into(),
+        provenant_records::run::DeliveryMode::Integrate(_) => {
+            provenant_records::run::Destination::Local
+        }
+        _ => provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
     };
     input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
@@ -1156,13 +1168,14 @@ fn project_delivery_receipt(
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head: base,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;
     let mut publication = publication();
-    publication.outcome = Outcome::Succeeded;
+    publication.fact.outcome = Outcome::Succeeded;
     store.publish_terminal(id, 1, &publication, &exit(), &call)?;
     artifacts::seal(
         &attempt,
@@ -1177,13 +1190,13 @@ fn project_delivery_receipt(
 
 fn delivered_receipt(
     branch: &str,
-    remote: &str,
+    remote: provenant_records::run::Destination,
     head: provenant_core::GitOid,
 ) -> WriterDeliveryReceipt {
     WriterDeliveryReceipt {
         extra: Default::default(),
         schema_version: 1,
-        remote: remote.into(),
+        remote,
         branch: branch.into(),
         head: Some(head),
         review_acceptance: None,
@@ -1201,7 +1214,13 @@ fn delivered_receipt(
 fn delivery_receipt_with_wrong_branch_is_not_projected() -> TestResult {
     let (projected, delivered) = project_delivery_receipt(
         provenant_records::run::DeliveryMode::Integrate("batch/next".into()),
-        |base, _| delivered_receipt("another-branch", "", base),
+        |base, _| {
+            delivered_receipt(
+                "another-branch",
+                provenant_records::run::Destination::Local,
+                base,
+            )
+        },
     )?;
     assert!(matches!(
         projected,
@@ -1219,7 +1238,14 @@ fn delivery_receipt_with_wrong_branch_is_not_projected() -> TestResult {
 fn delivery_receipt_with_wrong_remote_is_not_projected() -> TestResult {
     let (projected, delivered) = project_delivery_receipt(
         provenant_records::run::DeliveryMode::Integrate("batch/next".into()),
-        |base, _| delivered_receipt("batch/next", "another-remote", base),
+        |base, _| {
+            delivered_receipt(
+                "batch/next",
+                provenant_records::run::Destination::from_name("another-remote")
+                    .expect("fixture remote"),
+                base,
+            )
+        },
     )?;
     assert!(matches!(
         projected,
@@ -1243,7 +1269,11 @@ fn failed_delivery_receipt_is_not_projected_as_delivered() -> TestResult {
                 stage: WriterDeliveryStage::Integrate,
                 reason: Some("integration_conflict".into()),
             },
-            ..delivered_receipt("batch/next", "", base)
+            ..delivered_receipt(
+                "batch/next",
+                provenant_records::run::Destination::Local,
+                base,
+            )
         },
     )?;
     assert!(matches!(
@@ -1264,7 +1294,13 @@ fn failed_delivery_receipt_is_not_projected_as_delivered() -> TestResult {
 fn push_delivery_receipt_with_different_head_is_not_projected() -> TestResult {
     let (projected, delivered) = project_delivery_receipt(
         provenant_records::run::DeliveryMode::Push,
-        |_, integrated| delivered_receipt("batch/next", "origin", integrated),
+        |_, integrated| {
+            delivered_receipt(
+                "batch/next",
+                provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
+                integrated,
+            )
+        },
     )?;
     assert!(matches!(
         projected,
@@ -1304,21 +1340,46 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;
-    let mut publication = publication();
-    publication.outcome = Outcome::ReviewRequired;
-    publication.terminal_cause = Some(TerminalCause::IdentityMismatch);
-    publication.observed_route = Some(RouteRecord {
+    // The fact comes from `settle` over the same route evidence the holder
+    // seals, so the reason is the classifier's own text.
+    let observed = RouteRecord {
         model: Some("other/model".into()),
         ..route()
+    };
+    let base = provenant_core::GitOid::parse(&"a".repeat(40))?;
+    let mut evidence = provenant_records::settlement::SettlementEvidence::fixture(
+        // An adapter writer owes no handoff, so the reason is the mismatch alone.
+        provenant_records::settlement::LaneRole::AdapterWriter,
+        Outcome::Succeeded,
+        None,
+    );
+    evidence.custody.identity.route =
+        crate::holder::route_identity_fact(Some(&route()), Some(&route()), Some(&observed));
+    evidence.git = Some(provenant_records::settlement::GitEvidence {
+        input_head: Some(base),
+        writer_head: Some(head),
+        uncommitted: None,
+        uncommitted_paths: Vec::new(),
+        pushed_head: None,
+        primary: provenant_records::settlement::PrimaryCheckout::Clean,
     });
-    publication.reason = Some(
-        "warning: observed provider identity (model other/model) differs from the requested route (model fixture/model); kept commit for review"
-            .into(),
+    let mut publication = publication();
+    publication.fact = provenant_records::settlement::classify::settle(&evidence);
+    publication.observed_route = Some(observed);
+    assert_eq!(
+        publication.fact.reason.as_deref(),
+        Some(
+            format!(
+                "warning: observed provider identity (provider fixture, model other/model, effort high) differs from the requested route (provider fixture, model fixture/model, effort high); kept commit {head} for review"
+            )
+            .as_str()
+        )
     );
     let record = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
     assert_eq!(record.head, Some(head));
@@ -1326,7 +1387,7 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
         record.state,
         AttemptState::Terminal {
             outcome: Outcome::ReviewRequired,
-            terminal_cause: Some(TerminalCause::IdentityMismatch),
+            cause: Some(CauseKind::IdentityMismatch),
             ..
         }
     ));
@@ -1394,7 +1455,7 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: Default::default(),
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "published/lane".into(),
         open_pr: false,
         fast_forward_only: false,
@@ -1410,7 +1471,10 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
             extra: Default::default()
         }
     );
-    assert_eq!((receipt.remote.as_str(), receipt.head), ("origin", None));
+    assert_eq!(
+        (receipt.remote.as_str(), receipt.head),
+        (Some("origin"), None)
+    );
     Ok(())
 }
 #[test]
@@ -1617,7 +1681,7 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     )?;
     assert_eq!(
         String::from_utf8(result.bytes)?,
-        TerminalCause::Unrecorded.detail()
+        CauseKind::Unrecorded.detail()
     );
     Ok(())
 }
@@ -2738,7 +2802,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
                 EffectDisposition::Failed { reason, retryable: true } if reason == "crash-retained conflict")
             );
         }
-        assert!(store.record(id, &call)?.terminal_evidence.is_some());
+        assert!(store.record(id, &call)?.terminal_basis.is_some());
         assert!(
             store
                 .read_output(
@@ -2854,7 +2918,7 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
         .pragma_query_value(None, "page_count", |row| row.get(0))?;
     store.db.pragma_update(None, "max_page_count", pages)?;
     let mut publication = publication();
-    publication.reason = Some("x".repeat(128 * 1024));
+    publication.fact.reason = Some("x".repeat(128 * 1024));
     assert!(matches!(
         store.publish_terminal(id, 1, &publication, &exit(), &call),
         Err(RunError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
@@ -2905,13 +2969,16 @@ fn receipt_cancellation_requires_ordered_delivery() -> TestResult {
         observation.cancel_delivered_before_exit = delivered;
         seal_observation(&store, &input, &observation)?;
         let mut publication = publication();
-        publication.outcome = Outcome::Cancelled;
+        publication.fact.outcome = Outcome::Cancelled;
+        if delivered == Some(true) {
+            publication.fact.terminal_basis = TerminalBasis::EffectiveCancellation;
+        }
         let result = store.publish_terminal(id, 1, &publication, &observation, &call);
         if delivered == Some(true) {
             let record = result?;
             assert_eq!(
-                record.terminal_evidence,
-                Some(TerminalEvidence::EffectiveCancellation)
+                record.terminal_basis,
+                Some(TerminalBasis::EffectiveCancellation)
             );
         } else {
             assert!(result.is_err());
@@ -3181,7 +3248,7 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
             RECORD_LIMIT,
         )?;
         let mut publication = publication();
-        publication.outcome = if prelaunch {
+        publication.fact.outcome = if prelaunch {
             Outcome::Cancelled
         } else {
             Outcome::TimedOut
@@ -3205,10 +3272,7 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
             replayed.cancellation_disposition,
             record.cancellation_disposition
         );
-        assert_eq!(
-            replayed.terminal_evidence,
-            Some(TerminalEvidence::ProcessExit)
-        );
+        assert_eq!(replayed.terminal_basis, Some(TerminalBasis::ProcessExit));
     }
     Ok(())
 }
@@ -3258,7 +3322,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
     observation.termination = None;
     seal_observation(&store, &input, &observation)?;
     let mut publication = publication();
-    publication.outcome = Outcome::QuotaLimited;
+    publication.fact.outcome = Outcome::QuotaLimited;
     publication.started_at = None;
     publication.provider_ms = None;
     let record = store.publish_terminal(id, 1, &publication, &observation, &call)?;
@@ -3514,7 +3578,7 @@ fn settle_one(
     observation.termination = None;
     seal_observation(store, &input, &observation)?;
     let mut publication = publication();
-    publication.outcome = Outcome::QuotaLimited;
+    publication.fact.outcome = Outcome::QuotaLimited;
     publication.started_at = None;
     publication.provider_ms = None;
     store.publish_terminal(id, 1, &publication, &observation, call)?;
@@ -3871,8 +3935,6 @@ fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult
         );
         blocker.execute_batch("ROLLBACK")?;
         let conflicting = TerminalPublication {
-            terminal_cause: None,
-            terminal_note: None,
             result: "conflicting result",
             ..publication()
         };
@@ -3932,8 +3994,6 @@ fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
         let original = std::fs::read(path.join("terminal-pending.json"))?;
         blocker.execute_batch("ROLLBACK")?;
         let conflicting = TerminalPublication {
-            terminal_cause: None,
-            terminal_note: None,
             result: "conflicting result",
             ..publication()
         };
@@ -4195,5 +4255,93 @@ fn run_store_keeps_no_run_or_operation_tables() -> TestResult {
         );
     }
     assert!(names.iter().any(|name| name == "attempts"));
+    Ok(())
+}
+
+#[test]
+fn base_15_settlement_fields_migrate_once_without_extra_fields() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    // The old row is an attempt record: its `state` is the internally tagged
+    // AttemptState object, not an OperationState string. A refusal’s old
+    // `terminal_cause` lived under that object, beside the other terminal
+    // fields; the settlement names were top-level on the attempt record.
+    store.create(&input, &call)?;
+    let mut record = store.record(input.attempt_id, &call)?;
+    record.state = AttemptState::Terminal {
+        extra: Default::default(),
+        cause: None,
+        terminal_note: None,
+        stop: None,
+        outcome: Outcome::Rejected,
+        exit_code: None,
+        finished_at: record.queued_at,
+        reason: Some("pre_launch_refusal".into()),
+    };
+    // A base-15 pre-launch refusal row recorded that no provider started; its
+    // migrated pre-launch basis is validated against that custody fact.
+    record.provider_launched = Some(false);
+    // A sealed refusal still publishes its (empty) result artifact.
+    record.result = Some(ArtifactRecord {
+        extra: Default::default(),
+        path: crate::artifacts::artifact_path(
+            input.attempt_id,
+            provenant_records::AttemptFile::Result.name(),
+        )?,
+        digest: CanonicalV1::file_digest(b""),
+        bytes: 0,
+        complete: true,
+        redacted: false,
+    });
+    let mut value = serde_json::to_value(record)?;
+    value["state"]["terminal_cause"] = serde_json::json!("handoff_refused");
+    value["state"].as_object_mut().unwrap().remove("cause");
+    value["partial_signals"] = serde_json::json!(["handoff_missing"]);
+    value["terminal_evidence"] = serde_json::json!({"kind":"pre_launch_refusal"});
+    value["settlement_reason"] = serde_json::json!("pre_launch_refusal");
+    for key in ["signals", "terminal_basis", "settlement_class"] {
+        value.as_object_mut().unwrap().remove(key);
+    }
+    store
+        .db
+        .execute_batch("DROP TRIGGER immutable_terminal_update")?;
+    store.db.execute(
+        "UPDATE attempts SET record=?1, terminal=1 WHERE id=?2",
+        rusqlite::params![serde_json::to_vec(&value)?, input.attempt_id.to_string()],
+    )?;
+    store.db.pragma_update(None, "user_version", 15)?;
+    drop(store);
+    let migrated = RunStore::open(&context, &call)?;
+    let record = migrated.record(input.attempt_id, &call)?;
+    assert_eq!(
+        record.state.cause(),
+        Some(provenant_records::run::CauseKind::LaunchHandoffRefused)
+    );
+    for key in ["partial_signals", "terminal_evidence", "settlement_reason"] {
+        assert!(!record.extra.contains_key(key));
+    }
+    if let AttemptState::Terminal { extra, .. } = &record.state {
+        assert!(!extra.contains_key("terminal_cause"));
+    } else {
+        panic!("expected terminal state");
+    }
+    let bytes: Vec<u8> = migrated.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [input.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    drop(migrated);
+    let reopened = RunStore::open(&context, &call)?;
+    let again: Vec<u8> = reopened.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [input.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(bytes, again);
     Ok(())
 }

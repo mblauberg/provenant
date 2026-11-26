@@ -144,9 +144,12 @@ impl crate::Process for Fixture {
 }
 
 /// The worktree driver's entry. Its children re-enter it as the fake
-/// provider or as the command edge with fixture seams.
-pub fn main() -> std::process::ExitCode {
+/// provider or as the command edge with fixture seams. `production_binary` is
+/// the driver's Cargo-provided path; the library cannot read that target-local
+/// env itself, so fixtures that launch the real CLI take the explicit value.
+pub fn main(production_binary: Option<PathBuf>) -> std::process::ExitCode {
     use std::process::ExitCode;
+    support::set_production_binary(production_binary);
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let first = args.first().and_then(|arg| arg.to_str());
     let exit = |role: &str, result: Result| match result {
@@ -975,6 +978,8 @@ pub(super) fn writer_run(
 
 pub(super) struct WriterProvider {
     pub(super) state: PathBuf,
+    /// The store the fixture lane declares its result to.
+    pub(super) context: provenant_run::ExecutionContext,
     pub(super) home: PathBuf,
     pub(super) project: provenant_core::ProjectId,
     pub(super) mode: &'static str,
@@ -992,6 +997,28 @@ impl provenant_run::Providers for WriterProvider {
             if resume.is_some() {
                 return Err("writer fixture does not resume".into());
             }
+            // The declaration journal is the only handoff channel. This driver
+            // serves no lane relay, so the fixture's done declaration is
+            // appended for the lane through the same host-bound journal call
+            // the relay makes; settlement reads it as a real lane's.
+            open_writer_store(&self.context)
+                .map_err(|error| error.to_string())?
+                .declare(
+                    paths.attempt_id,
+                    &provenant_records::declaration::DeclarationInput {
+                        request_id: "writer-fixture".into(),
+                        payload: serde_json::json!({
+                            "schema_version": 2,
+                            "status": "done",
+                            "remaining": [],
+                            "decisions": [],
+                            "verify": [],
+                            "note": "writer fixture",
+                        }),
+                    },
+                    &provenant_records::declaration::DeclarationLimit::shipped(),
+                )
+                .map_err(|error| error.to_string())?;
             let request = task.writer.as_ref().ok_or("writer request missing")?;
             let writer = provenant_run::prepare_writer(request, &self.state, self.project)
                 .map_err(|error| error.to_string())?;
@@ -1118,7 +1145,7 @@ impl provenant_run::Providers for WriterProvider {
         })()
         .map_err(|error| {
             provenant_run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::HandoffRefused,
+                provenant_records::run::CauseKind::LaunchHandoffRefused,
                 error.to_string(),
             )
         })
@@ -1365,7 +1392,8 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
         _ => return Err("unknown writer provider fixture mode".into()),
     }
     fs::write(worktree.join("writer-edited"), "writer fixture completed")?;
-    // The answer reports a handoff; the assistant message repeats it so the
+    // The handoff is declared through the journal in `prepare`; the answer
+    // only states the result, and the assistant message repeats it so the
     // decoder ties the answering model to the final result.
     let answer = "writer fixture completed\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"writer fixture\"}\n```";
     let stdout = std::io::stdout();

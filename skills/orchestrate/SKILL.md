@@ -66,12 +66,14 @@ or unreadable file warns with its layer and the launch proceeds. Cargo target,
 CI scope and verification lines keep their own knobs and are not repeated in
 the preamble file.
 
-A project may declare cheap `verify.static_checks` entries in its port table
-(`.provenant/ports.json`): each has an `argv`, a repository-relative `cwd` and a
-`timeout_seconds` cap. The writer preamble names them with their source and
-tells the writer to run them before pushing. They need no build. A failure is
-reported in the handoff, does not refuse the push, and CI still gates the
-merge. With no declaration, no static-check text is added.
+A project may declare cheap `verify.static_checks` entries in its project,
+host or bound host-project port table: each has an `argv`, a repository-relative
+`cwd` and a `timeout_seconds` cap. The writer preamble names them with their
+source and tells the writer to run them before pushing. They need no build. A
+failure is reported in the declaration, does not refuse the push, and CI still gates
+the merge. The same list is recorded as `static_checks` on the launch receipt, with
+each check carrying its source; with no declaration there is no preamble text
+and no receipt field.
 
 ## Wait and recover
 
@@ -79,7 +81,7 @@ Block on one `wait` call, with `--any` for the first settlement; never poll.
 Expiry leaves targets running. Reconcile the returned event before resuming.
 Recover an existing graph with `status`, `output` and `retry` before launching
 replacement work. Read a settled lane with `result NAME`, which carries its
-handoff, head and verification; do not parse provider logs. An idle run or
+declaration, head and verification; do not parse provider logs. An idle run or
 empty queue means no eligible work now, not done.
 
 For a Claude Code chair, arm a Monitor on `provenant events --follow --json

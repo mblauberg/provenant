@@ -281,6 +281,13 @@ impl<E> ResolveError<E> {
     }
 }
 
+/// Strip a typed code that a fault's `Display` carries when the envelope
+/// already names that code. Otherwise a human renderer prints it twice.
+pub fn fault_message(code: &str, text: &str) -> String {
+    let prefix = format!("{code}: ");
+    text.strip_prefix(&prefix).unwrap_or(text).to_owned()
+}
+
 fn close(matches: &[String]) -> String {
     if matches.is_empty() {
         String::new()

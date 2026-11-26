@@ -75,7 +75,12 @@ submodule on either side of the change.
 ## Skips are named
 
 A main-tier suite is deferred on a pull request unless the delta touches its
-declared pull-request paths or a full run is requested. Every Cargo package a
+declared pull-request paths or a full run is requested. The `ci:macos` PR label
+forces all macOS suites on the next run, before evidence reuse; dispatches also
+run them. `ci:full`, full dispatch and main run every suite. macOS Clippy paths
+cover every Rust file containing macOS-specific cfg, checked by
+`scripts/check-ci-suites`; cross-platform changes can still break macOS and
+main remains the backstop. Every Cargo package a
 main-tier suite's jobs name in a `package(=NAME)` test filter has at least one
 pull-request path inside that package's directory, either the whole crate or the
 narrow files its filtered tests cover; a glob shared across crates does not
@@ -96,7 +101,10 @@ Whenever native macOS tests run, every declared native test must have passed and
 every quarantine entry must resolve against both platform test lists. A run that
 did not build the native list only warns on an entry it cannot resolve; `main`
 always builds both lists, and a change to quarantine entries pulls the native
-suite into its pull request.
+suite into its pull request. The native evidence verifier runs only after its
+archive producer succeeds; if the archive is skipped or fails, the selected
+suite's required archive job still fails the `ci-status` gate without a
+secondary missing-artifact error.
 
 - Why: a quarantine entry must name a real test, but a pull request that defers
   native tests cannot see the native list.
@@ -108,7 +116,46 @@ A failed `ci-status` on a `main` push opens, or updates, one red-main issue
 naming the failed jobs and the commit range since the last green `main`; the
 next green `main` run closes it. A cancelled run reports nothing, because jobs
 that still run after a cancellation fail on missing evidence rather than on
-`main`.
+`main`. A failure whose every JUnit test failure is already quarantined, or is
+confirmed by a passing re-run of the same tests, opens no red-main issue only
+when every failed test job has matching JUnit evidence and no other CI job
+failed. Missing JUnit evidence and failures outside those test jobs remain
+visible as red-main issues.
 
-- Why: `main` is fixed forward, so its breakage must reach the owner at once.
+- Why: `main` is fixed forward, so its breakage must reach the owner at once;
+  a known flake must not spend a chair cycle on a duplicate issue.
 - Owner: `scripts/report-main-health`
+
+## Quarantine is bounded and evidence-backed
+
+Quarantine state lives in two places with one schema:
+`tools/front-door/.config/quarantine.toml` and open `ci:flaky` issues whose
+body carries `<!-- provenant-flaky:v1 -->` with `package`, `name`, `owner` and
+`expires`. Both are read by `scripts/flaky-quarantine`, which validates every
+entry against the platform test inventories and prints the nextest exclusion
+filter. A test that failed once on `main` and passed when the re-run job ran
+that exact test is registered as one `ci:flaky` issue owned by `chair` and
+expiring in 30 days. The quarantine job still runs registered tests, so each
+re-run adds evidence; fixing the test closes its issue and removes it from the
+filter. The total across both sources is capped at ten tests: at the cap, new
+failures stay actionable and still open a red-main issue rather than silently
+disabling a suite.
+
+- Why: automatic quarantine must never hide a real regression or grow without
+  bound, and its state must not require a push to `main` from a CI job.
+- Owner: `scripts/report-main-health`; `scripts/junit-failures`;
+  `scripts/flaky-quarantine`; `ci.yml`
+
+## Test waits are bounded by events or a caller deadline
+
+Fixtures wait on an event or pass the deadline they already own to
+`provenant-test-support::wait_until`; they never name a fixed sleep as a
+synchronisation primitive. `workspace_policy` warns on fixed waits in test
+scopes, including fixed durations assigned to local variables and passed to timeout
+primitives, and refuses them when `PROVENANT_STRICT_TEST_WAITS=1` is set, so the
+migration can be adopted without breaking existing fixtures. The supervisor
+custody group uses the shared `wait_step` boundary and names no fixed sleep.
+
+- Why: wall-clock polling passes on an idle host and flakes under load; the
+  cadence belongs to one bounded helper, not to each test.
+- Owner: `crates/test-support`; `tests/workspace_policy.rs`

@@ -1150,7 +1150,7 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         status: GraphStatus::Cancelled,
                         outcome: None,
                         checkpoint,
-                        advance_error: None,
+                        advance_note: None,
                     })));
                 }
             } else {
@@ -1683,9 +1683,7 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     && progress.attempts.last().is_some_and(|attempt| {
                         attempt.key == key && attempt.state == AttemptState::Terminal
                     })
-                    && review::malformed_delivery_evidence_error(
-                        progress.advance_error_code.as_deref(),
-                    );
+                    && review::malformed_delivery_evidence_error(progress.advance_code.as_deref());
                 if malformed_delivery_review {
                     let progress = &checkpoint.nodes[node_index];
                     let attempt_ref = progress
@@ -1709,9 +1707,9 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         });
                     let head = progress.source_commit.clone();
                     let mut evidence = progress
-                        .advance_error_code
+                        .advance_code
                         .iter()
-                        .chain(progress.advance_error.iter())
+                        .chain(progress.advance_note.iter())
                         .cloned()
                         .collect::<Vec<_>>();
                     if let Some(outputs) = &progress.outputs {
@@ -1800,7 +1798,7 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     resume = false;
                     continue 'schedule;
                 }
-                if checkpoint.nodes[node_index].advance_error_code.as_deref()
+                if checkpoint.nodes[node_index].advance_code.as_deref()
                     == Some("review_verdict_invalid")
                 {
                     resume = false;

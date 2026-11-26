@@ -501,6 +501,95 @@ fn malformed_attempt_record_does_not_abort_the_base_twelve_migration() -> TestRe
     Ok(())
 }
 
+#[test]
+fn base_fourteen_migration_preserves_local_delivery_receipts() -> TestResult {
+    let (_temp, context, store, input, _attempt) = seeded()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    crate::tests::seal_exit_fixture(&store, &input)?;
+    store.publish_terminal(
+        input.attempt_id,
+        1,
+        &crate::tests::publication(),
+        &crate::tests::exit(),
+        &call,
+    )?;
+    let mut legacy = base_twelve_record(&store, input.attempt_id)?;
+    legacy["delivery"] = serde_json::json!({
+        "schema_version": 1, "remote": "", "branch": "main",
+        "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state": {"state": "delivered", "pull_request": null},
+        "integration": {"remote": "", "target": "refs/heads/main",
+            "previous": null, "integrated": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    });
+    let mut remote = legacy.clone();
+    remote["delivery"]["remote"] = "team/upstream".into();
+    remote["delivery"]["integration"]["remote"] = "team/upstream".into();
+    let remote_id = AttemptId::from_bytes([21; 16]);
+    insert_base_twelve_record(&store, input.attempt_id, remote_id, 1000, &remote)?;
+    let remote_bytes: Vec<u8> = store.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [remote_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let broken_id = AttemptId::from_bytes([22; 16]);
+    store.db.execute(
+        "INSERT INTO attempts (id,project,graph,node,attempt,digest,actor,operation,number,operation_record,revision,terminal,record) SELECT ?1,project,graph,node,attempt+1001,digest,actor,operation,number+1001,operation_record,revision,1,?2 FROM attempts WHERE id=?3",
+        rusqlite::params![broken_id.to_string(), b"{broken".as_slice(), input.attempt_id.to_string()],
+    )?;
+    store
+        .db
+        .execute_batch("DROP TRIGGER immutable_terminal_update")?;
+    store.db.execute(
+        "UPDATE attempts SET record=?1 WHERE id=?2",
+        rusqlite::params![serde_json::to_vec(&legacy)?, input.attempt_id.to_string()],
+    )?;
+    store.db.execute_batch(
+        "CREATE TRIGGER immutable_terminal_update
+         BEFORE UPDATE OF rowid,oid,_rowid_,sequence,id,project,graph,node,attempt,digest,actor,operation,number,continues,refused,revision,terminal,record,sealed,repository,head ON attempts
+         WHEN OLD.terminal=1 BEGIN SELECT RAISE(ABORT,'terminal attempt is immutable'); END;
+         PRAGMA user_version=14;",
+    )?;
+    drop(store);
+
+    let store = RunStore::open(&context, &call)?;
+    let receipt = store
+        .record(input.attempt_id, &call)?
+        .delivery
+        .ok_or("receipt")?;
+    assert!(receipt.remote.is_local());
+    assert!(receipt.integration.ok_or("integration")?.remote.is_local());
+    let retained: Vec<u8> = store.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [remote_id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(retained, remote_bytes);
+    assert!(store.record(broken_id, &call).is_err());
+    assert!(
+        store
+            .db
+            .execute(
+                "UPDATE attempts SET record=record WHERE id=?1",
+                [input.attempt_id.to_string()],
+            )
+            .is_err()
+    );
+    assert_eq!(provenant_sqlite::stored_version(&store.db)?, 16);
+    drop(store);
+    let reopened = RunStore::open(&context, &call)?;
+    assert_eq!(base_twelve_record(&reopened, remote_id)?, remote);
+    assert!(
+        reopened
+            .record(input.attempt_id, &call)?
+            .delivery
+            .ok_or("receipt")?
+            .remote
+            .is_local()
+    );
+    Ok(())
+}
+
 fn seal_base_thirteen_row(
     store: &RunStore,
     id: AttemptId,
@@ -1223,6 +1312,60 @@ fn pressure_only_collects_temporary_and_keeps_captures_and_provider_state() -> T
     assert!(
         !scratch_root_of(&attempt).exists(),
         "an emptied per-attempt scratch root must not accumulate"
+    );
+    Ok(())
+}
+
+#[test]
+fn over_cap_scratch_is_collected_before_idle_once_settled() -> TestResult {
+    let (_temp, context, store, input, attempt) = seeded()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    withdraw(&store, &input, &call)?;
+    let scratch = scratch_root_of(&attempt).join("tmp");
+    fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+    fs::write(scratch.join("payload"), vec![1; 8192])?;
+    let unowned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Unowned;
+    let root = Directory::open_anchor(context.state_root.as_path())?;
+    // Three days into a seven-day idle window: age alone keeps the scratch.
+    let now = WallTime::from_micros(200 + 3 * DAY_MICROS)?;
+    let under_cap = ScratchPolicy {
+        scratch_cap_bytes: 16_384,
+        owner: Some(&unowned),
+        ..ScratchPolicy::new(7 * 86_400)
+    };
+    let kept = store.gc_temporary(
+        &root,
+        &under_cap,
+        now,
+        false,
+        &call,
+        &RetentionScan::default(),
+    )?;
+    assert!(kept.errors.is_empty(), "{kept:?}");
+    assert!(
+        kept.attempt_tmp.is_empty(),
+        "under-cap scratch must wait out gc.idle"
+    );
+    assert!(scratch.join("payload").is_file());
+    // The same settled attempt is over a smaller cap, so its scratch goes now.
+    let over_cap = ScratchPolicy {
+        scratch_cap_bytes: 4096,
+        ..under_cap
+    };
+    let collected = store.gc_temporary(
+        &root,
+        &over_cap,
+        now,
+        false,
+        &call,
+        &RetentionScan::default(),
+    )?;
+    assert!(collected.errors.is_empty(), "{collected:?}");
+    assert_eq!(collected.attempt_tmp.len(), 1);
+    assert!(
+        !scratch.exists(),
+        "over-cap scratch must be reclaimed once settled"
     );
     Ok(())
 }
@@ -2976,5 +3119,71 @@ fn evicted_payload_keeps_records_tails_and_refuses_resume() -> TestResult {
     let totals = payload_totals(&Directory::open_anchor(pair.context.state_root.as_path())?)
         .ok_or("totals")?;
     assert_eq!(totals.1, report.reclaimed_bytes);
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
+fn settled_scratch_without_custody_proof_is_collected_after_grace() -> TestResult {
+    use provenant_core::Clock;
+    let (_temp, context, store, input, attempt) = seeded()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    withdraw(&store, &input, &call)?;
+    let scratch = scratch_root_of(&attempt).join("tmp");
+    fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+    fs::write(scratch.join("payload"), vec![1; 8_192])?;
+    // A private-Git marker with no import proof makes custody unavailable.
+    // The record is terminal and released, so this is a settled attempt whose
+    // scratch must not be kept forever.
+    fs::write(attempt.join("writer-objects.json"), b"{}")?;
+    let now = provenant_os::clock::SystemClock.wall_now()?;
+    let old = std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_micros(
+            u64::try_from(now.as_micros())?
+                .saturating_sub(u64::try_from(DAY_MICROS)?.saturating_mul(3)),
+        ))
+        .ok_or("fixture time")?;
+    for path in [
+        &scratch,
+        &scratch.join("payload"),
+        &attempt.join("writer-objects.json"),
+    ] {
+        std::fs::File::open(path)?.set_times(std::fs::FileTimes::new().set_modified(old))?;
+    }
+    let unowned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Unowned;
+    let root = Directory::open_anchor(context.state_root.as_path())?;
+    let within = ScratchPolicy {
+        grace_seconds: 7 * 86_400,
+        owner: Some(&unowned),
+        ..ScratchPolicy::new(0)
+    };
+    let kept = store.gc_temporary(&root, &within, now, false, &call, &RetentionScan::default())?;
+    assert!(kept.attempt_tmp.is_empty(), "{kept:?}");
+    assert!(scratch.join("payload").is_file());
+    assert!(
+        kept.kept
+            .iter()
+            .any(|issue| issue.reason.contains("scratch grace")),
+        "{:?}",
+        kept.kept
+    );
+    let elapsed = ScratchPolicy {
+        grace_seconds: 86_400,
+        owner: Some(&unowned),
+        ..ScratchPolicy::new(0)
+    };
+    let collected = store.gc_temporary(
+        &root,
+        &elapsed,
+        now,
+        false,
+        &call,
+        &RetentionScan::default(),
+    )?;
+    assert!(collected.errors.is_empty(), "{collected:?}");
+    assert_eq!(collected.attempt_tmp.len(), 1, "{collected:?}");
+    assert_eq!(collected.attempt_tmp[0].path, scratch);
+    assert!(!scratch.exists());
     Ok(())
 }

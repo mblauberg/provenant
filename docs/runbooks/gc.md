@@ -25,7 +25,20 @@ provenant --project /absolute/path/to/repo gc --apply --json
   ownerless idle artefacts eligible at once. `--full` lists each affected PID
   where the text output aggregates them.
 - Attempt scratch is collected before the broader provider-state and payload-cap
-  scans, so those scans do not consume its first pass budget.
+  scans, so those scans do not consume its first pass budget. A settled attempt
+  whose scratch exceeds `gc.attempt_scratch_max` (default `2G`, `0` disables it)
+  is collected without waiting out `gc.idle`; the effective value and source
+  appear as `attempt scratch cap` in text and `attempt_scratch_max_bytes`/
+  `attempt_scratch_max_source` in JSON. An unmeasurable tree stays.
+- A settled attempt whose record is unreadable or cannot prove custody is kept
+  only for `gc.scratch_grace` (default `1d`, source shown by `provenant gc`),
+  measured from the scratch tree's newest write. Fresh locks and no live
+  continuation still gate collection; settlement releases the same scratch.
+- A read-only preview stops at `gc.preview_budget` (default `1s`); applied passes
+  stop at `gc.sweep_budget`. Exit 3 names which bound stopped the pass, its
+  value and source, and whether to raise the setting or use `--apply`. Attempt
+  scratch is collected largest first within each resume page, and the report
+  lists reclaimed bytes per retention class.
 - The advisory dweller census runs after collection with one cached observation
   per pass, so a large settled store cannot spend `gc.sweep_budget` before
   anything is collected. The report names how many settled candidates were
@@ -123,8 +136,12 @@ as `partial` and counts as progress. Read the tick logs when a sweep fails.
 
 Port command receipts and graph checkpoints have their own classes. A
 collected graph name stays reserved so its identity is never reused, and an
-unreadable receipt is reported and kept. For uncertain custody see
-[worktrees](../worktrees.md) and [lane recovery](lane-lifecycle.md#recovery).
+unreadable receipt is reported and kept. An undecodable attempt record is likewise preserved under
+`quarantine/`; once supervisor evidence proves its owner quiescent, reconcile reclaims the writer
+lease with a typed warning naming the source, and neither collection nor release deletes the
+record. Completed exit evidence can prove same-boot quiescence; an exit still settling keeps the
+fence. For uncertain
+custody see [worktrees](../worktrees.md) and [lane recovery](lane-lifecycle.md#recovery).
 
 ## Detached services and unsettled lanes
 

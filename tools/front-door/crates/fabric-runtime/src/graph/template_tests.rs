@@ -1212,23 +1212,28 @@ fn every_bundled_template_compiles_with_required_bindings() {
 
 #[test]
 // Spec: docs/specs/fabric.md#bundled-template-declarations — the bundled smoke
-// template declares the read, review, write, retry-route and steer-route nodes.
-fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
+// template declares the read, write, review, retry-route and steer-route nodes,
+// with review after the write so it reads the writer's own scratch commit.
+fn smoke_template_compiles_the_read_write_review_retry_and_steer_nodes() {
     let library = library();
     let node = Compiler::new(&library)
         .compile(&json!({"id":"smoke", "use":"smoke"}))
         .unwrap();
     let composite = node.composite.unwrap();
+    // With no writer there is no scratch commit to review, so the read node is
+    // the graph's result; review is gated on smoke-write by the issue's change.
     assert_eq!(composite.exports.len(), 1);
-    assert_eq!(composite.exports[0].node, "review");
+    assert_eq!(composite.exports[0].node, "read");
     let children = composite.nodes;
     let by_id = |id: &str| children.iter().find(|node| node.id == id).unwrap();
+    // The writer runs before review so the review's node source is the smoke
+    // writer's scratch commit, never the caller checkout's commit.
     assert_eq!(
         children
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
-        ["read", "review", "write", "retry-route", "steer-route"]
+        ["read", "write", "review", "retry-route", "steer-route"]
     );
     assert_eq!(by_id("read").access, AccessMode::ReadOnly);
     assert_eq!(by_id("review").access, AccessMode::ReadOnly);
@@ -1242,7 +1247,10 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
             "with":{"worktree":"/fixture/writer", "smoke-write":true}
         }))
         .unwrap();
-    assert_eq!(node.composite.unwrap().exports[0].node, "write");
+    // With a writer and review enabled, the bounded review is the result.
+    let composite = node.composite.unwrap();
+    assert_eq!(composite.exports.len(), 1);
+    assert_eq!(composite.exports[0].node, "review");
 }
 
 #[test]
@@ -1322,44 +1330,54 @@ fn smoke_nodes_resolve_on_a_free_capable_tier() {
 // pinned to its base only when a launch supplies one.
 fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
     let library = library();
-    let review_bases = |with: Value| -> Vec<Option<String>> {
+    let review_lenses = |with: Value| -> Vec<GraphNode> {
         let compiled = Compiler::new(&library)
             .compile(&json!({"id":"smoke", "use":"smoke", "with":with}))
             .unwrap();
         let composite = compiled.composite.unwrap();
-        // The non-review nodes stay in the graph in either case.
+        // The review runs after the write so its source is the writer's own
+        // scratch commit, not whatever commit the caller checkout is on. A node
+        // source, not a head source: head is reserved for delivered pr/push
+        // writers and would refuse a graph whose writer only makes a local
+        // scratch commit.
         assert_eq!(
             composite
                 .nodes
                 .iter()
                 .map(|node| node.id.as_str())
                 .collect::<Vec<_>>(),
-            ["read", "review", "write", "retry-route", "steer-route"]
+            ["read", "write", "review", "retry-route", "steer-route"]
         );
-        composite
+        let review = composite
             .nodes
             .into_iter()
             .find(|node| node.id == "review")
-            .unwrap()
-            .composite
-            .unwrap()
-            .nodes
-            .into_iter()
-            .map(|lens| lens.review_base)
-            .collect()
+            .unwrap();
+        assert!(
+            matches!(
+                &review.source,
+                Some(SourceBinding::Node { node }) if node == "write"
+            ),
+            "the smoke review must read the writer's scratch commit: {review:?}"
+        );
+        review.composite.unwrap().nodes
     };
-    // A launch binds the fixture's base so every review lens has that range.
+    // A launch binds the writer's base so every review lens has a bounded range.
     let base = "1111111111111111111111111111111111111111";
-    let bound = review_bases(json!({"diff_base":base}));
+    let bound = review_lenses(json!({"diff_base":base}));
     assert_eq!(bound.len(), 2);
-    assert!(bound.iter().all(|value| value.as_deref() == Some(base)));
+    assert!(
+        bound
+            .iter()
+            .all(|lens| lens.review_base.as_deref() == Some(base))
+    );
 
     // Without a launch binding no review lens carries a base at all, so the
     // facade decides whether to skip review while read and write compile unchanged.
-    let unbound = review_bases(json!({}));
+    let unbound = review_lenses(json!({}));
     assert_eq!(unbound.len(), bound.len());
     assert!(
-        unbound.iter().all(|value| value.is_none()),
+        unbound.iter().all(|lens| lens.review_base.is_none()),
         "a smoke review lens was pinned without diff_base: {unbound:?}"
     );
 }

@@ -55,7 +55,7 @@ mod output_projection_tests {
     fn peer_output_preserves_binding_refusal_paths() {
         use super::*;
         use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
-        use provenant_records::{CanonicalV1, run::TerminalCause};
+        use provenant_records::{CanonicalV1, run::CauseKind};
 
         fn attempt(state: serde_json::Value) -> provenant_run::AttemptRecord {
             serde_json::from_value(serde_json::json!({
@@ -97,7 +97,7 @@ mod output_projection_tests {
             "outcome":"permission_denied",
             "exit_code":null,
             "finished_at":WallTime::from_micros(2).unwrap(),
-            "terminal_cause":"project_binding_directory_unsafe",
+            "cause":"project_binding_directory_unsafe",
             "terminal_note":private_repair,
             "reason":format!("{private_path} has unsafe ownership or permissions")
         }));
@@ -107,7 +107,7 @@ mod output_projection_tests {
             reason.contains(private_path) && reason.contains(private_repair)
         }));
         let remote_reason = peer.reason.expect("peer diagnostic");
-        assert!(remote_reason.starts_with(TerminalCause::ProjectBindingDirectoryUnsafe.detail()));
+        assert!(remote_reason.starts_with(CauseKind::ProjectBindingDirectoryUnsafe.detail()));
         assert!(remote_reason.contains(private_path));
         assert!(remote_reason.contains(private_repair));
 
@@ -119,7 +119,7 @@ mod output_projection_tests {
             "outcome":"permission_denied",
             "exit_code":null,
             "finished_at":WallTime::from_micros(3).unwrap(),
-            "terminal_cause":"access_policy_refused",
+            "cause":"access_policy_refused",
             "terminal_note":user_text.clone(),
             "reason":user_text
         }));
@@ -136,9 +136,9 @@ mod output_projection_tests {
     // Spec: docs/specs/state.md#config-never-widens-authority
     fn peer_event_output_preserves_binding_diagnostics() {
         use provenant_core::{AttemptId, ProjectId, WallTime};
-        use provenant_records::run::{AttemptState, Outcome, RunEvent, TerminalCause};
+        use provenant_records::run::{AttemptState, CauseKind, Outcome, RunEvent};
 
-        fn event(sequence: u64, cause: TerminalCause, reason: String, note: String) -> RunEvent {
+        fn event(sequence: u64, cause: CauseKind, reason: String, note: String) -> RunEvent {
             RunEvent {
                 extra: Default::default(),
                 schema_version: 1,
@@ -148,7 +148,7 @@ mod output_projection_tests {
                 revision: sequence,
                 change: AttemptState::Terminal {
                     extra: Default::default(),
-                    terminal_cause: Some(cause),
+                    cause: Some(cause),
                     terminal_note: Some(note),
                     stop: None,
                     outcome: Outcome::PermissionDenied,
@@ -166,13 +166,13 @@ mod output_projection_tests {
         let original = vec![
             event(
                 1,
-                TerminalCause::ProjectBindingDirectoryUnsafe,
+                CauseKind::ProjectBindingDirectoryUnsafe,
                 format!("{private_path} has unsafe ownership or permissions"),
                 private_repair.into(),
             ),
             event(
                 2,
-                TerminalCause::AccessPolicyRefused,
+                CauseKind::AccessPolicyRefused,
                 user_prompt.clone(),
                 user_prompt.clone(),
             ),
@@ -186,7 +186,7 @@ mod output_projection_tests {
         assert!(matches!(
             &remote[0].change,
             AttemptState::Terminal {
-                terminal_cause: Some(TerminalCause::ProjectBindingDirectoryUnsafe),
+                cause: Some(CauseKind::ProjectBindingDirectoryUnsafe),
                 ..
             }
         ));
@@ -195,7 +195,7 @@ mod output_projection_tests {
             AttemptState::Terminal {
                 reason: Some(reason),
                 terminal_note: Some(note),
-                terminal_cause: Some(TerminalCause::AccessPolicyRefused),
+                cause: Some(CauseKind::AccessPolicyRefused),
                 ..
             } if reason == &user_prompt && note == &user_prompt
         ));
@@ -905,27 +905,25 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
         other => run_kind_facade(other),
     }
 }
-fn terminal_cause(
-    lane: &provenant_run::AttemptRecord,
-) -> Option<provenant_records::run::TerminalCause> {
-    lane.state.terminal_cause()
+fn cause(lane: &provenant_run::AttemptRecord) -> Option<provenant_records::run::CauseKind> {
+    lane.state.cause()
 }
 /// Only positive sealed evidence of a pre-launch refusal can reject a replay.
 pub(crate) fn durable_launch_refusal(
     lanes: &[provenant_run::AttemptRecord],
 ) -> Option<provenant_core::AttemptId> {
-    use provenant_records::run::{AttemptState, SettlementReason, TerminalCause};
+    use provenant_records::run::{AttemptState, CauseKind, SettlementClass};
     (!lanes.is_empty()
         && lanes.iter().all(|lane| {
             lane.provider_launched == Some(false)
-                && lane.settlement_reason == Some(SettlementReason::PreLaunchRefusal)
+                && lane.settlement_class == Some(SettlementClass::PreLaunchRefusal)
                 && matches!(lane.state, AttemptState::Terminal { .. })
-                && (terminal_cause(lane).is_some_and(|cause| {
+                && (cause(lane).is_some_and(|cause| {
                     matches!(
                         cause,
-                        TerminalCause::DiskFloor
-                            | TerminalCause::DiskObservationUnavailable
-                            | TerminalCause::RetainedWriterImport
+                        CauseKind::DiskFloor
+                            | CauseKind::DiskObservationUnavailable
+                            | CauseKind::RetainedWriterImport
                     )
                 }) || lane.skipped_routes.iter().any(|route| {
                     route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
@@ -1028,7 +1026,7 @@ pub(crate) fn launch_refusal(
                     .collect::<Vec<_>>()
                     .join("; ");
                 let reason = if pacing.is_empty() {
-                    terminal_cause(lane)
+                    cause(lane)
                         .map(|cause| cause.detail())
                         .unwrap_or("pacing reserve refused")
                 } else {
@@ -2036,8 +2034,17 @@ impl BinaryRunOwner<'_> {
                 let attempt = self.snapshot(target, budget, cancel)?;
                 let store = self.store(cancel)?;
                 let waits = store.lane_waits(std::slice::from_ref(&attempt), &self.call(cancel));
+                // A caller on another host cannot observe this host's writers.
+                // Relay our own bounded observation with the record so the
+                // launching host reports the same presence we do, instead of
+                // guessing from the age of relayed output events.
+                let presence = provenant_cli::run::relayed_presence(
+                    self.factory.context.roots.state.as_path(),
+                    &attempt,
+                );
                 Ok(RunResult::Status {
                     extra: Default::default(),
+                    presence,
                     lane_waits: waits,
                     attempt,
                 })

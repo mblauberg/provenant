@@ -1,31 +1,7 @@
 use provenant_core::{ActorId, AttemptId, DeliveryId, GitOid, ProjectId, WallTime};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{FileDigest, PathWire, Trace};
-
-/// Terminal attempt outcomes published to workflow, telemetry and the CLI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttemptOutcome {
-    Succeeded,
-    ReviewRequired,
-    Failed,
-    Rejected,
-    Cancelled,
-    TimedOut,
-    RateLimited,
-    QuotaLimited,
-    AuthRequired,
-    ModelUnavailable,
-    PermissionDenied,
-    Quarantined,
-    Lost,
-    /// The available evidence cannot establish a more specific outcome.
-    Unsettled,
-    Uncommitted,
-    InputRequired,
-    Unclassified,
-}
 
 /// Route details resolved for an attempt. Unknown provider observations remain
 /// absent rather than being filled from a requested route.
@@ -100,12 +76,12 @@ pub struct AttemptFact {
     pub key: crate::WorkKey,
     pub attempt_number: u64,
     pub project_id: ProjectId,
-    pub terminal_state: AttemptOutcome,
+    pub terminal_state: crate::run::Outcome,
     /// Source of the settlement cause, or an explicit unavailable state.
     pub cause_source: crate::run::CauseSource,
     /// Sealed settlement declaration, retained independently of the stop source.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub settlement_reason: Option<crate::run::SettlementReason>,
+    pub settlement_class: Option<crate::run::SettlementClass>,
     /// Verified account identity for this attempt, or explicit unknown evidence.
     pub account_identity: crate::AccountIdentity,
     pub exit_code: Option<i64>,

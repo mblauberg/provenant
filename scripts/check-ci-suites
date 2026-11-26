@@ -130,13 +130,55 @@ def workspace_packages(root):
     return packages
 
 
+# Walk balanced cfg expressions so nested all/any/not and multiline cfg work.
+CFG_START = re.compile(r'\bcfg\s*\(')
+MACOS = re.compile(r'target_os\s*=\s*["\']macos["\']')
+NOT_LINUX = re.compile(r'not\s*\(\s*target_os\s*=\s*["\']linux["\']\s*\)')
+UNIX = re.compile(r'\bunix\b')
+
+
+def cfg_expressions(content):
+    for match in CFG_START.finditer(content):
+        depth = 1
+        for index in range(match.end(), len(content)):
+            if content[index] == '(':
+                depth += 1
+            elif content[index] == ')':
+                depth -= 1
+                if depth == 0:
+                    yield content[match.end():index]
+                    break
+
+
+def macos_cfg_paths(root):
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in ('.git', 'target')]
+        for name in sorted(files):
+            if not name.endswith('.rs'):
+                continue
+            path = Path(directory) / name
+            content = path.read_text()
+            expressions = list(cfg_expressions(content))
+            if (any(MACOS.search(cfg) or NOT_LINUX.search(cfg) for cfg in expressions)
+                    or (any(UNIX.search(cfg) for cfg in expressions)
+                        and re.search(r'\b(?:macos|darwin)\b', content, re.IGNORECASE))):
+                yield path.relative_to(root).as_posix()
+
+
+def uncovered_macos(config, root):
+    suite = next(s for s in config['suite'] if s['name'] == 'macos_lint')
+    return [f'{path}: macOS-specific cfg is not covered by macos_lint.pr_paths'
+            for path in macos_cfg_paths(root)
+            if not selector.any_match(suite.get('pr_paths', []), path)]
+
+
 def main():
     try:
         import yaml
         config = selector.manifest()
         workflow_path = Path(os.environ.get('CI_WORKFLOW', selector.ROOT / '.github/workflows/ci.yml'))
         workflow = yaml.safe_load(workflow_path.read_text())
-        errors = check(config, workflow, workspace_packages(selector.ROOT))
+        errors = check(config, workflow, workspace_packages(selector.ROOT)) + uncovered_macos(config, selector.ROOT)
         if errors:
             print('\n'.join(errors), file=sys.stderr); return 1
         print('CI workflow matches suite manifest.'); return 0
