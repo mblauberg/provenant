@@ -517,7 +517,7 @@ fn fixed_wait_violations(source: &str, test_file: bool) -> Vec<String> {
             // A crate-wide `#![allow]` is a blanket suppression, not a named
             // boundary; it cannot exempt every test in the file.
             let blanket = tokens.starts_with(&["#", "!", "["]);
-            if !blanket && tokens.iter().any(|token| *token == "disallowed_methods") {
+            if !blanket && tokens.contains(&"disallowed_methods") {
                 return None;
             }
             // A fixed `Duration` is a wait only when the statement also names
