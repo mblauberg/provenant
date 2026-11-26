@@ -26,6 +26,17 @@ unrecognised lines are reported. Cost reports read the ledger.
   reader of one ledger cannot disagree with itself.
 - Owner: `crates/telemetry/src/ledger.rs`, `src/settlement.rs`
 
+Terminal attempt rows name one cause (`cause`, with `cause_code` in status and federation), one
+settlement class (`settlement_class`) and the advisory settlement signals (`signals`); the old
+`terminal_cause`, `settlement_reason` and `partial_signals` keys retire at the one store and
+checkpoint crossings declared in [state](state.md). `handoff_missing` and `handoff_malformed` are
+`settlement_class` values, so their rates need no separate counter. Declaration counts reach the row
+as `handoff_declarations_accepted` and `handoff_declarations_rejected`, and `handoff_source`
+(`Declared` or `Host`) says whether the lane declared its result or the host synthesised a stop
+handoff. Adapter writers have no declarations and report neither count nor source; an absent count
+is never read as zero.
+- Why: per-route tool reliability and declaration provenance are measurable without a prose parser.
+
 ## Usage merges by declared semantics
 
 Provider usage travels as one typed report. An adapter builds it from the

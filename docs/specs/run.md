@@ -300,23 +300,23 @@ chair, and no successor writer starts while custody is uncertain. A restart pres
 worktree and archives prior attempts. See [routing](routing.md) for route selection.
 - Why: one decision keeps stop handling consistent and protects writer custody.
 
-A writer's declared stop settles as `stopped_early`, or, when its final handoff is blocked,
+A writer's declared stop settles as `stopped_early`, or, when its final declaration is blocked,
 as `blocked_environment` or `blocked_dependency` per its `blocked_on`, else `blocked` (an owner
-decision, a missing capability or no kind given). The node's advance code records whether the
-stop left committed work: `declared_stop` when the head moved past its source commit,
-`stopped_no_work` otherwise. Both take the `stopped_early` row unless the node overrides it:
-a new route in a fresh session on the retained worktree. A junior route escalates to senior;
-otherwise a declared route not yet launched is used, and an alias route may resolve again.
+decision, a missing capability or no kind given). Both take the `stopped_early` row unless the node
+overrides it: a new route in a fresh session on the retained worktree. A junior route escalates to
+senior; otherwise a declared route not yet launched is used, and an alias route may resolve again.
 
-A lane's graph outcome is classified from evidence, not from the stop path that reported it:
-commits ahead of the node's input head count whether or not they were pushed, and a sealed `done`
-handoff closes the brief. Neither a terminal cause nor a partial signal may call a lane with new
-commits `stopped_no_work`; with a done handoff and a moved head the node succeeds even when a stop
-was recorded. The code comes from the projected outcome, not from observed refs: a declared stop
-with work takes `declared_stop`, one with no work takes `stopped_no_work`.
+A lane's graph outcome is projected from the one sealed settlement fact. `declared_stop` and
+`stopped_no_work` are display codes keyed by that projected outcome, not by observed refs or the
+stop path that reported them. No-work requires a known, unchanged head: the head must be known and
+equal to the launch pin, and the cause must be `StoppedNoWork`. A `Moved` or `Unknown` head keeps
+`declared_stop` (or `StoppedEarly` for a stop without a declaration), so a lane that committed and
+pushed before declaring `blocked` stays `blocked` and is never called no-work. Graph-owned overrides
+— a result warning, failed or not-attempted delivery, and a configured deadline — apply above the
+projection, and the sealed stop agrees with the projected cause.
 
 The settlement-derived advance codes are `declared_stop` and `stopped_no_work`, owned by
-`records::graph::AttemptOutcome::advance_code`. Every other advance code comes from the owner or a
+`records::graph::GraphAttemptOutcome::advance_code`. Every other advance code comes from the owner or a
 launch refusal.
 
 With no different route, a stop that can continue on its own route (`stopped_early`,

@@ -173,6 +173,20 @@ exclusion remain until cleanup proves quiescence and import, publication and rel
 have settled. Result readers keep the committed outcome and report surviving processes; an early
 result never permits a second writer.
 
+The holder records only host-proven facts — process exit, crash, timeout, cancel, Git import and
+custody failures, budget, context-handoff and lane-token stops, and route identity — then seals them
+as `<attempt>/settlement-evidence.json`. One pure `settlement::classify::settle` reads that sealed
+record and publishes the single `OutcomeFact`; no other path writes an outcome, cause, settlement
+class, stop or settlement signal for a launched attempt. The store publishes the fact and no longer
+classifies. Progress compares the writer's head with the pin sealed at launch: `Moved` only when
+both are known and differ, `Unchanged` when both are known and equal, `Unknown` otherwise. Remote
+tracking refs, `settlement.base()` and pushes are not evidence, and `Unknown` never yields no-work.
+Delivery follows the published fact.
+- Why: deciding over evidence read at different moments lets five paths disagree; one decider over
+  one sealed record makes re-drives and restarts reproduce the same outcome (#4020, #4024).
+- Owner: `crates/run/src/holder.rs`, `crates/records/src/settlement/classify.rs`,
+  `crates/run/src/store.rs`
+
 The outcome references an immutable provider-exit snapshot. Cleanup may update its own
 process-exit observation but cannot rewrite the provider's stop reason, delivery ordering or
 decision, and a stop delivered only to descendants after exit does not cancel completed work.
@@ -192,16 +206,17 @@ when no unfinished-work signal remains, retaining the typed host stop and releas
 writer with non-exempt uncommitted work does not deliver it.
 - Why: a crash, truncation or wrong identity must not read as success.
 
-A declared stop or missing writer handoff makes an otherwise successful attempt need review, and
-only a valid final handoff determines a declared stop. A missing required handoff seals
-`handoff_missing`; a present but malformed one seals `handoff_malformed`, with a typed diagnostic
-naming each dropped field by serde path (for example `verify[0]`). Both go to the chair, and graph
-dependants cannot treat either as success. Custody facts (lost, unsettled, cancelled) keep priority
-but the malformed evidence survives in their sealed stop. A missing handoff keeps the census of
-uncommitted paths and the pinned head in the terminal reason; an empty final message is
-`empty_result` and is appended to that reason, never substituted for it. One settlement
-classification derives terminal outcome, sealed stop and graph outcome; host stops preserve valid
-handoffs and never count as negative provider-quality evidence.
+A declared stop or a model writer with no accepted declaration makes an otherwise successful
+attempt need review, and only the last accepted declaration determines a declared stop.
+`handoff_missing` means a model writer accepted no declaration; `handoff_malformed` means
+declarations were submitted and none was accepted, with a typed diagnostic naming each dropped
+field by serde path (for example `verify[0]`). An adapter writer owes no declaration. Both classes
+go to the chair, and graph dependants cannot treat either as success. Custody facts (lost,
+unsettled, cancelled) keep priority but the malformed evidence survives in their sealed stop. A
+missing declaration keeps the census of uncommitted paths and the pinned head in the terminal
+reason; an empty final message is `empty_result` and is appended to that reason, never substituted
+for it. One settlement class derives terminal outcome, sealed stop and graph outcome; host stops
+preserve valid declarations and never count as negative provider-quality evidence.
 - Why: unfinished work must not appear complete or lose its handoff, and all readers need one cause
   for the next decision.
 
@@ -218,55 +233,46 @@ settlement checks still apply.
   lock must remain an exclusion boundary during concurrent release (#3844).
 - Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`
 
-The handoff is the closed `handoff` fence that ends the answer, which always wins. When an answer
-contains several blocks, the last one that ends the answer is authoritative: earlier blocks and the
-prose between them are ordinary answer text. Without one, a `json` fence that decodes as a handoff
-and is followed only by ordinary prose is accepted with a warning naming the fallback; a
-verdict-shaped line, a second fence, or a fence nested in a larger block leaves it ordinary content
-(#3941). Adjacent repeated blocks are one declaration (identical copies accepted, differing copies
-settle on the last), each with a warning. When exactly one block closes and only ordinary prose
-follows it (#3928) — including a line over 12 KiB or one that merely mentions a verdict (#3941) —
-the declaration still settles and the output-order tolerance is recorded in the terminal reason.
-Prose after a repeated last block, a fence or near-miss `handoff` opener after the declaration, and
-a truncated or invalid block still fail, with a diagnostic naming the recovery ("end the answer with
-one handoff; retry the node"). With turn boundaries, a turn that ran tool work keeps the strict rule
-until turn ends order tool work against the handoff (#3938). A review's final handoff may be
-followed by exactly one recognised standalone verdict and nothing else; a prose line on either side
-of that verdict keeps the strict rule, and an accepted order tolerance is recorded in the terminal
-reason. The trailing-verdict and trailing-prose tolerances are mutually exclusive and diagnostic
-only: neither changes the handoff's fields or authority; a json fallback warning may accompany the
-trailing-prose note.
-- Why: providers drift to `json` fences and repeat blocks, a late background task can append prose
-  and a corrected handoff, and a finished writer that keeps explaining its work after one complete
-  declaration must not be failed; refusing a complete declaration for its label or trailing prose
-  loses finished work, while the warning and the named recovery keep the drift visible.
-- Owner: `crates/records/src/handoff.rs`, `crates/run/src/completion.rs`
+The lane declares its result with `provenant handoff --file <path>|--stdin`, exactly one of which is
+required. The command reads `PROVENANT_PARENT_ATTEMPT_ID`, validates the schema v2 JSON through
+`Handoff::from_json`, and sends one declaration over the attempt's relay socket. A field error comes
+back at once as `handoff field <field>: <error>`, so the lane can fix it and call again. Every line
+carries a sequence and a `request_id`: replaying the same id with the same bytes returns the original
+receipt, while the same id with different bytes is a conflict. Declarations close at settlement and
+the last accepted declaration wins; rejected submissions are journalled but never displace an
+accepted one. Prose, fenced blocks and an assistant-written `handoff.json` are never read: none can
+settle a lane or change its sealed snapshot.
+- Why: one command and one journal give the host a single auditable declaration channel instead of
+  parsing tolerances over model prose; immediate field errors let a lane correct itself in turn.
+- Owner: `crates/cli/src/declaration.rs`, `crates/run/src/declaration.rs`,
+  `crates/records/src/handoff.rs`
 
 The `<attempt>/handoff.json` snapshot slot is owned by settlement, not the lane. Settlement seals a
-`HandoffResult` envelope derived from captured output; the envelope shape is the provenance, so there
-is no separate tag and no window in which a snapshot exists without its proof. Bytes found in the
+`HandoffResult` envelope from the last accepted declaration in `<attempt>/declarations.jsonl`; the
+envelope shape and its journal provenance are the proof, so there is no separate tag and no window in
+which a snapshot exists without it. Bytes found in the
 slot at capture that do not decode as that envelope were written by the provider, including files
 left by older launches whose scratch lived under the attempt directory. Settlement keeps those bytes as
 `handoff.provider-written.json`, warns that the file was provider-written, clears the slot and seals
-the envelope from output: a complete answer still settles rather than retrying forever (#3844).
+the envelope from the journal: a lane with an accepted declaration still settles rather than retrying
+forever (#3844).
 Only a `HandoffResult` envelope is settlement's snapshot. Before #3078 the slot held a bare
 `Handoff` (or `Option<Handoff>`), which is foreign evidence with no compatibility path: an attempt
 sealed by that build is reconciled by moving its bare snapshot aside as
-`handoff.provider-written.json` and settling from captured output, never by reading it as a sealed
-handoff. Bytes that were read but do not decode as an envelope after settlement settle
+`handoff.provider-written.json` and settling from its declaration journal, never by reading it as a
+sealed handoff. Bytes that were read but do not decode as an envelope after settlement settle
 `handoff_malformed` with the typed diagnostic and keep the raw file, instead of retrying an
 unchanging decode. An entry in the slot that cannot be read safely — an oversize file, a symlink, a
 hard link, a directory or another unsafe entry type — was left by a provider that is gone at
 settlement. Capture renames it aside by name without following or reading it, under
 `handoff.provider-written.json` (or the declared `handoff.provider-written.unsafe` when the entry
-is not a regular file), warns that it was provider-written, and seals the envelope from captured
-output. When the preferred evidence name is occupied by a directory, symlink or other non-regular
+is not a regular file), warns that it was provider-written, and seals the envelope from the journal. When the preferred evidence name is occupied by a directory, symlink or other non-regular
 entry, capture moves the slot entry to the declared unsafe name instead; only when both declared
 destinations are unusable does capture fail with the typed error. A transient storage IO failure on
 a safe entry is not an unsafe class: it
 keeps its typed, retriable cause and does not settle. The launch prompt tells the lane that the
-harness writes the attempt's own records, including the sealed `handoff.json`, while the progress
-handoff under `provider-state` is the lane's to update throughout the task. Provider scratch and
+harness writes the attempt's own records, including the sealed `handoff.json`, while its result is
+declared with `provenant handoff` into `declarations.jsonl`. Provider scratch and
 `$TMPDIR` live in the sibling scratch root; settlement still validates ownership of its snapshot slot.
 - Why: a lane can discover supervisor records from its scratch and write a bare handoff object that
   fails the sealed-envelope decode; trusting it, or retrying a decode that can never change, strands
@@ -281,9 +287,9 @@ lists dropped paths. Retained fields are evidence for the chair and never turn a
 declaration into completion or continuation authority. `blocked_on` is additive
 (`schema_version` stays 2): an unknown kind, or one given with another status, is kept, ignored
 and warned about, and it sets the sealed cause per [what follows a stop](run.md#what-follows-a-stop).
-A malformed final handoff never falls back to stale progress, including on interruption; only an
-absent declaration on an interrupted attempt may use its granted progress file. Local persistence
-is lossless and disclosure uses a destination projection.
+A malformed declaration never falls back to prose or a progress file, including on interruption;
+there is no parse path that can turn trailing text into a declaration. Local persistence is lossless
+and disclosure uses a destination projection.
 
 ## Identity mismatch keeps writer work
 
@@ -301,8 +307,9 @@ A writer's work is the commits on its bound branch. At settlement, once the term
 passes, the host observes stray work only when (a) the primary checkout now sits on a branch that
 did not exist at launch, or (b) commits reachable from the primary's HEAD or a new or advanced
 local branch are reachable from none of the launch tips, the current remote-tracking tips that
-existed at launch, or any other linked worktree's HEAD. How the lane settles depends on where its
-own work is:
+existed at launch, or any other linked worktree's HEAD. The host records the disposition as
+`PrimaryCheckout` and the uncommitted census in the sealed evidence; `settle` alone decides the
+outcome and signals from those facts. How the lane settles depends on where its own work is:
 
 - The bound branch tip differs from the tip sealed at launch: the lane worked in the right place.
   The primary move is not attributed to it, so settlement warns naming the new primary HEAD and
@@ -323,6 +330,56 @@ commits.
   is surfaced as a warning for the chair. Fetched tips and other worktrees' heads account for
   ordinary moves. The check asks for review or warns; it never refuses a lane.
 - Owner: `crates/run/src/writer.rs`, `crates/run/src/holder.rs`
+
+## Declared settlement policy
+
+Settlement behaviour is data, sealed with the evidence. Resolution uses `SETTLEMENT_PRECEDENCE`,
+lowest first: `Default` < `Host` (`<state>/config.toml [knobs]`) < `Project`
+(`.provenant/config.toml [knobs]`, in any repository) < `Route` (the matched route's
+`model_policy.defaults.lane.settlement.<key>` and `rules.policy.lane.settlement.<key>`). There are no
+host-name or project-name special cases. Each value is a `Sourced<T>` carrying its layer and origin;
+the effective `SettlementPolicy` is sealed into `settlement-evidence.json` so a re-drive and an audit
+reproduce the decision. An invalid value warns `SETTLEMENT_POLICY_INVALID` naming the key, layer and
+origin, keeps the default and never refuses. `config show`, `config schema`, `check` and
+`run --explain` report the same value and source, and status names an `AppliedPolicy` when a
+non-default action changed the outcome or the settlement class.
+
+| Key | Allowed | Default | Scope | Effect |
+| --- | --- | --- | --- | --- |
+| `lanes.settlement.handoff_missing` | `review`, `fail`, `warn`, `off` | `review` | host, project, route | Model writer with no accepted declaration; adapter writers owe none. |
+| `lanes.settlement.handoff_malformed` | `review`, `fail`, `warn`, `off` | `review` | host, project, route | Declarations submitted, none accepted. |
+| `lanes.settlement.empty_result` | `review`, `fail`, `warn` | `review` | host, project, route | Writer's empty final message; a reader's empty result stays `Failed`. |
+| `lanes.settlement.uncommitted_work` | `hold`, `review`, `warn`, `off` | `hold` | host, project, route | Never touches files; `domains.run.review_exempt` still decides which paths count. |
+| `lanes.settlement.stray_work` | `review`, `warn`, `off` | `review` | host, project, route | `off` skips the primary-checkout check; `warn` keeps `PRIMARY_MOVED_UNATTRIBUTED`. |
+| `lanes.settlement.no_work` | `detect`, `off` | `detect` | host, project, route | `off` keeps `DeclaredStop`/`StoppedEarly` on an unchanged head. |
+| `domains.fabric.graph.on_stop.<stop_cause>`, `projects.{project}.on_stop.<stop_cause>` | the `OnStop` spellings | the stop table | host, project | Resolved at graph admission; template and node `on_stop` stay above. A pinned cause warns `ON_STOP_PINNED_IGNORED`. |
+| `domains.run.handoff_journal_bytes`, `projects.{project}.handoff_journal_bytes` | 65536–16777216 | 1048576 | host, project | `Full` past the limit; under 10% remaining the receipt warns `HANDOFF_JOURNAL_NEAR_FULL`. |
+| `domains.run.handoff_relay_seconds` | 1–300 | 10 | host, project | Lane relay timeout; unreadable config warns and uses the default. |
+| `domains.run.handoff_relay_retries` | 0–5 | 1 | host, project | Retries reuse the `request_id`; 0 disables retry. |
+| `policy.SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS` | `warn`, `off` | `warn` | host, project | The sealed copy always wins; the rule is not refusable. |
+| `policy.HANDOFF_JOURNAL_NEAR_FULL` | `warn`, `off` | `warn` | host, project | Boundary-free and not refusable. |
+
+A signal's action changes only the outcome and the warning: the signal itself is always recorded.
+`review` turns `Succeeded` into `ReviewRequired`; `fail` turns it into `Failed` with its configured
+source; `warn` leaves the outcome unchanged with a warning; `off` leaves it unchanged without one.
+With `warn` or `off` the signal drops out of the class ladder, so the class is `Completed` and
+dependants release.
+
+Fixed, with reason: progress is pin-relative and `Unknown` is never no-work — calling committed work
+"no work" is the defect this batch closes. The sealed evidence wins on a re-drive. A lane appends only
+to its own socket's attempt. Sequences and `request_id` idempotency are invariants. Prose is never
+read: the command guidance is the protocol text and lane rules sit in `lanes.brief_preamble`.
+`declared_stop` is the lane's own statement and its follow-up is `on_stop`.
+
+Four auditable values accompany the decider. `GitEvidence.pushed_head` is the remote-tracking tip of
+the bound branch at the cut: `lane show` prints `pushed: <oid>`, and `settle` never reads it.
+`GitEvidence.uncommitted_paths` is the bounded, sorted census behind the `uncommitted` note and
+appears in `lane show --json`. `DeclarationCounts` on `DeclarationEvidence` counts accepted and
+rejected declarations, reaching telemetry as `handoff_declarations_accepted` and
+`handoff_declarations_rejected`. `OutcomeFact.handoff_source` is `Declared` for an accepted
+declaration and `Host` for a host-synthesised stop handoff, reaching telemetry and `lane show` as
+`handoff_source`.
+- Why: per-route reliability and provenance need a measure without restoring a prose parser.
 
 ## Guardian loss proof
 

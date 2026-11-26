@@ -256,6 +256,27 @@ free-form source to the typed `stream` source, preserving every stated number.
 A malformed row is skipped so it fails only its own decode; a row already in the
 new shape is left byte-identical. No decoder accepts a retired spelling.
 
+The run store's base-14-to-15 migration (`crates/run/src/migration_14_15.sql`) is the one crossing
+for the settlement renames. On a writable open it renames `$.state.terminal_cause` to
+`$.state.cause`, rewriting the value `handoff_refused` to `launch_handoff_refused`, and renames
+`$.partial_signals` to `$.signals`, `$.terminal_evidence` to `$.terminal_basis`, and
+`$.settlement_reason` to `$.settlement_class`. Each walk is total and guarded by `json_valid`; a row
+already in the new shape stays byte-identical and a malformed row fails only its own decode. Because
+`AttemptState::Terminal` and `AttemptRecord` flatten `ExtraFields`, the migration test also asserts
+that no migrated row keeps an old key as an extra field. Other stores that persist one of these keys
+declare their own crossing in the same slice, and a versioned federation envelope is refused with a
+typed version error rather than decoded by an old peer.
+- Why: the wire spellings change once at one declared crossing, and no decoder keeps a retired key
+  alive.
+
+The graph checkpoint moves from 2 to 3 through one declared step, `migrate_checkpoint_2_3`, which is
+the only v2 reader. It renames each node's `advance_error_code` to `advance_code` and `advance_error`
+to `advance_note`, rewrites the value `writer_declared_stop` to `declared_stop`, renames the
+execution-level `advance_error`, revalidates the result and publishes it atomically under the
+journal lock. A bare version bump would strand in-flight v2 graphs; after the step v2 has no reader
+but this migration, and v1 is refused.
+- Why: one migration owns the old spelling, so checkpoints are never silently reinterpreted.
+
 ### One sourced port table
 
 One table declares forge operations, verify, land, CI observation, worktree

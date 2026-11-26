@@ -1863,13 +1863,13 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/routing/src/resolve.rs", 4500),
         ("crates/routing/src/review.rs", 3000),
         ("crates/run/src/build_dir_gc.rs", 6250),
-        ("crates/run/src/completion.rs", 2500),
+        ("crates/run/src/completion.rs", 2250),
         // Stall detection and its opt-in policy (#3903).
         ("crates/run/src/controls.rs", 5250),
         ("crates/run/src/delivery.rs", 4750),
         ("crates/run/src/git_context.rs", 3000),
-        // The #3941 end-to-end settlement test for trailing prose.
-        ("crates/run/src/holder.rs", 9500),
+        // One host phase and one sealed settlement assembly (#4020, #4024).
+        ("crates/run/src/holder.rs", 5750),
         ("crates/run/src/launch.rs", 4250),
         // Scratch-root pruning and its pinned-Git invariants (#3947).
         ("crates/run/src/retention.rs", 5250),
@@ -1888,7 +1888,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/fabric/peer.rs", 2500),
         ("src/fabric/run_owner.rs", 3000),
         ("src/fabric/unified.rs", 4500),
-        ("src/handoff.rs", 1750),
+        ("src/session_handoff.rs", 1750),
         ("src/hooks.rs", 2750),
         ("src/install.rs", 3250),
         ("src/lane_cleanup.rs", 3250),
@@ -1941,6 +1941,151 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
     assert!(
         violations.is_empty(),
         "production files grew past their line ceilings:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/run-settlement.md#outcome-before-release
+// One pure `settle` is the only writer of a launched attempt's outcome fact. The
+// patterns use the slice 12 spellings (`CauseKind`, `SettlementClass`); old names
+// are refused so a compatibility alias cannot silently reintroduce a decider.
+#[test]
+fn settlement_outcome_has_one_writer() -> Result<(), Box<dyn Error>> {
+    const SETTLE_OWNER: &str = "crates/records/src/settlement/classify.rs";
+    const HOLDER: &str = "crates/run/src/holder.rs";
+    const TRANSITIONS: &str = "crates/fabric-runtime/src/graph/transitions.rs";
+    const HOLDER_CEILING: usize = 5750;
+
+    // Blank test-only items without moving line numbers, so an assertion can
+    // name both the file and the line. Whole test files are blanked as well:
+    // stale parser call sites in tests are not production deciders.
+    let production = |source: &str, test_file: bool| -> String {
+        let base = source.as_ptr() as usize;
+        let mut spans: Vec<(usize, usize)> = test_scopes(source, test_file)
+            .iter()
+            .map(|scope| {
+                let start = scope.as_ptr() as usize - base;
+                (start, start + scope.len())
+            })
+            .collect();
+        spans.sort_unstable();
+        let mut out = String::with_capacity(source.len());
+        let mut cursor = 0;
+        for (start, end) in spans {
+            let start = start.max(cursor).min(source.len());
+            let end = end.min(source.len());
+            if start > cursor {
+                out.push_str(&source[cursor..start]);
+            }
+            for ch in source[start..end].chars() {
+                out.push(if ch == '\n' { '\n' } else { ' ' });
+            }
+            cursor = cursor.max(end);
+        }
+        if cursor < source.len() {
+            out.push_str(&source[cursor..]);
+        }
+        out
+    };
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    for path in source_roots() {
+        rust_sources(&path, &mut sources)?;
+    }
+    let mut violations = Vec::new();
+    let mut holder_lines = 0usize;
+
+    for path in sources {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = fs::read_to_string(&path)?;
+        if relative == HOLDER {
+            holder_lines = source.lines().count();
+        }
+        // `*_invariants.rs` modules are registered under `#[cfg(test)]` in this
+        // workspace, so they are test sources too even though their stem does
+        // not carry a test suffix.
+        let test_file = is_test_source(&relative) || relative.ends_with("_invariants.rs");
+        let scanned = production(&source, test_file);
+        let lines: Vec<&str> = scanned.lines().collect();
+
+        for (index, line) in lines.iter().enumerate() {
+            let where_ = format!("{relative}:{}", index + 1);
+            if line.contains("OutcomeFact {")
+                && !line.contains("struct OutcomeFact")
+                && !line.trim_start().starts_with("->")
+                && relative != SETTLE_OWNER
+            {
+                violations.push(format!("{where_}: outcome fact built outside settle"));
+            }
+            if line.contains("AppliedPolicy {")
+                && !line.contains("struct AppliedPolicy")
+                && relative != SETTLE_OWNER
+            {
+                violations.push(format!("{where_}: applied policy built outside settle"));
+            }
+            if relative == SETTLE_OWNER
+                && (line.contains(".pushed_head") || line.contains(".uncommitted_paths"))
+            {
+                violations.push(format!("{where_}: settle reads display-only Git evidence"));
+            }
+            if relative != TRANSITIONS
+                && line.contains("advance_code = Some(")
+                && line.contains("\"stopped_no_work\"")
+            {
+                violations.push(format!(
+                    "{where_}: no-work advance code written outside transitions"
+                ));
+            }
+            for retired in [
+                "from_turns",
+                "json_fence_fallback",
+                "SettlementReason::derive",
+                "DECLARED_STOP_CODES",
+                "TerminalCause",
+                "PartialSignal",
+                "SettlementReason",
+            ] {
+                if line.contains(retired) {
+                    violations.push(format!("{where_}: retired settlement name `{retired}`"));
+                }
+            }
+        }
+
+        let settle_line = if relative == HOLDER {
+            lines
+                .iter()
+                .position(|line| line.contains("classify::settle("))
+        } else {
+            None
+        };
+        if let Some(settle_line) = settle_line {
+            for (index, line) in lines.iter().enumerate().skip(settle_line + 1) {
+                if line.contains("decoded.outcome =") || line.contains("decoded.terminal_cause =") {
+                    violations.push(format!(
+                        "{relative}:{}: host outcome mutated after settle",
+                        index + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    if holder_lines > HOLDER_CEILING {
+        eprintln!(
+            "settlement host phase grew to {holder_lines} lines (ceiling {HOLDER_CEILING}); \
+             split the host-phase record from the sealed assembly step before raising the ceiling"
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "settlement outcome has more than one writer:\n{}",
         violations.join("\n")
     );
     Ok(())
