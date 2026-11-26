@@ -2874,19 +2874,36 @@ fn status_name_reads_one_other_project_and_lists_several() -> Result<(), Box<dyn
         &roots,
         provenant_config::ProjectLocation::from_verified_primary_checkout(common, &project)?,
     )?;
+    // The search reads `registered_projects`: an ordinary directory is a
+    // transient location and never joins that index. Give each other project
+    // the production layout of a Git checkout bound by its common directory.
     let other = rig.root.join("other");
     let third = rig.root.join("third");
     std::fs::create_dir(&other)?;
     std::fs::create_dir(&third)?;
-    let foreign =
-        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&other)?)?;
-    let extra =
-        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&third)?)?;
+    crate::worktree_tests::git(&rig, &["init", "-q", other.to_str().ok_or("other path")?])?;
+    crate::worktree_tests::git(&rig, &["init", "-q", third.to_str().ok_or("third path")?])?;
+    let other = std::fs::canonicalize(other)?;
+    let third = std::fs::canonicalize(third)?;
+    let foreign = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            std::fs::canonicalize(other.join(".git"))?,
+            &other,
+        )?,
+    )?;
+    let extra = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            std::fs::canonicalize(third.join(".git"))?,
+            &third,
+        )?,
+    )?;
 
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 30)?;
-    for (binding, directory) in [(&foreign, &other), (&extra, &third)] {
+    let bind_shared = |binding: &provenant_config::ProjectBinding, directory: &Path| {
         let id = binding.project_id();
         let mut journal = FileJournal::open(&roots.state, id, "shared", budget, &cancel, &clock)?;
         journal.bind(GraphExecution {
@@ -2901,7 +2918,10 @@ fn status_name_reads_one_other_project_and_lists_several() -> Result<(), Box<dyn
         let mut checkpoint = checkpoint("shared");
         journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
-    }
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    // One foreign owner holds the name first: it is read and noted alone.
+    bind_shared(&foreign, &other)?;
 
     let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
     let factory = Factory {
@@ -2949,6 +2969,7 @@ fn status_name_reads_one_other_project_and_lists_several() -> Result<(), Box<dyn
         notice.message
     );
     // A second owner makes the name ambiguous: list both rather than picking.
+    bind_shared(&extra, &third)?;
     let matches = cross_project_matches(&roots, own.project_id(), &target)?;
     assert_eq!(matches.len(), 2, "{matches:?}");
     let fault = cross_project_ambiguity(&target, &matches);
