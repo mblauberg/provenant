@@ -1387,12 +1387,15 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let literal = regex::Regex::new(&format!(r#""(?:{names})""#))?;
     let comparison = adapter_identity_comparison()?;
     let mut sources = Vec::new();
-    // Every production crate that can dispatch on adapter identity is in scope.
-    // Providers and config declare their own adapter bindings and name adapters
-    // in declarative data and diagnostics, so only identity comparisons are
-    // policy there; the routing/cli/quota side has no such declarations.
-    for name in ["cli", "routing", "quota", "providers", "config"] {
-        rust_sources(&root.join("crates").join(name).join("src"), &mut sources)?;
+    // Every crate can dispatch on adapter identity, so every crate is in scope.
+    // Provider, config and registry sources declare their own adapter bindings
+    // and name adapters in declarative data and diagnostics, so only identity
+    // comparisons are policy there; elsewhere a bare adapter literal is policy.
+    for entry in fs::read_dir(root.join("crates"))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_symlink() {
+            rust_sources(&entry.path().join("src"), &mut sources)?;
+        }
     }
     rust_sources(&root.join("src"), &mut sources)?;
     let mut violations = Vec::new();
@@ -1406,7 +1409,8 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
         let declarative = path.starts_with(root.join("src"))
             || path == root.join("crates/cli/src/hooks.rs")
             || path.starts_with(root.join("crates/providers/src"))
-            || path.starts_with(root.join("crates/config/src"));
+            || path.starts_with(root.join("crates/config/src"))
+            || path == root.join("crates/records/src/adapters.rs");
         let checks: Vec<_> = if declarative {
             vec![&comparison]
         } else {
@@ -1428,7 +1432,30 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
                 || (path.ends_with("run/status.rs")
                     && source[found.end()..].starts_with(": cursor"))
                 || (path.ends_with("run/provider/preparation.rs")
-                    && source[found.end()..].starts_with(':'));
+                    && source[found.end()..].starts_with(':'))
+                // Chair telemetry reads the Claude transcript format only.
+                || (path.ends_with("telemetry/src/ingest.rs")
+                    && line_text.contains("PROVIDER"))
+                // 2026-11-26: removed by batch A slice 2.
+                || path.ends_with("fabric-runtime/src/graph/validation.rs")
+                // Host credential declarations are declarative adapter data.
+                || path.ends_with("confinement/src/permissions/policy/host.rs")
+                // Built-in credential inventory is declarative adapter data.
+                || path.ends_with("core/src/credential_declarations.rs")
+                // A name-kind example in documentation, not an adapter identity.
+                || (path.ends_with("core/src/names.rs") && line_text.contains("///"))
+                // Fixture document data, not an adapter policy branch.
+                || path.ends_with("fabric-runtime/src/graph/cutover_followup_invariants.rs")
+                // A declared host-native constant, not an adapter policy branch.
+                || (path.ends_with("fabric-runtime/src/graph/next_step.rs")
+                    && line_text.contains("HOST_NATIVE"))
+                // Result-envelope schema field names, not adapter identities.
+                || path.ends_with("records/src/wire/mod.rs")
+                // CLI event JSON field names, not adapter identities.
+                || path.ends_with("telemetry/src/signals.rs")
+                // A declared cache inventory, not an adapter policy branch.
+                || (path.ends_with("run/src/retention.rs")
+                    && source[..found.start()].contains("PROVIDER_CACHES"));
             if non_adapter_literal {
                 continue;
             }
