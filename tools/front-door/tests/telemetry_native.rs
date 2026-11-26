@@ -109,13 +109,12 @@ fn prices_refresh_never_overwrites_the_sheet_even_through_an_alias() -> Result {
         rig.project.join("l.json"),
         r#"{"x":{"input_cost_per_token":1e-06}}"#,
     )?;
-    std::os::unix::fs::symlink(
-        "config/telemetry-prices.toml",
-        rig.project.join("alias.toml"),
-    )?;
+    let installed = rig.assets.join("config/telemetry-prices.toml");
+    std::os::unix::fs::symlink(&installed, rig.project.join("alias.toml"))?;
+    let indirect = rig.assets.join("config/../config/telemetry-prices.toml");
     for out in [
-        "config/telemetry-prices.toml",
-        "config/../config/telemetry-prices.toml",
+        installed.to_str().ok_or("sheet path")?,
+        indirect.to_str().ok_or("sheet path")?,
         "alias.toml",
     ] {
         let output = rig.command(&[

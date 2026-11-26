@@ -826,7 +826,10 @@ fn command_custom_shebang_runtime_keeps_credentials_and_writes_denied() -> Resul
     };
     assert!(built.status.success(), "{built:?}");
     fs::remove_file(&source)?;
-    let script = rig.project.join("check-script");
+    // The command lives outside the project: a grant inside the source
+    // checkout would overlap the tree a read-only lane pins.
+    let script = rig.root.join("commands/check-script");
+    fs::create_dir_all(script.parent().ok_or("script parent")?)?;
     fs::write(
         &script,
         format!(

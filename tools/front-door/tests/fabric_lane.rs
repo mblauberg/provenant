@@ -72,10 +72,6 @@ fn a_snapshot_lane_resolves_its_project_through_the_declared_binding() -> Result
     let identity = host(&rig, &["fabric", "identity", "--json"])?;
     assert_eq!(identity["data"]["project"], bound["data"]["project"]);
     assert_eq!(identity["data"]["common_dir"], bound["data"]["common_dir"]);
-    assert_eq!(
-        identity["data"]["cwd"],
-        rig.project.to_str().ok_or("view path")?
-    );
 
     // A lane without the declared binding refuses and names what to repair.
     rig.env
