@@ -257,11 +257,11 @@ fn window_report(
     let bounds = w
         .window_seconds
         .zip(w.resets_unix_seconds)
-        .map(|(len, reset)| {
-            (
-                reset.saturating_sub(i64::try_from(len).unwrap_or(i64::MAX)),
-                reset,
-            )
+        .and_then(|(len, reset)| {
+            let length = i64::try_from(len).ok().filter(|n| *n > 0)?;
+            let start = reset.checked_sub(length)?;
+            let observed = records.last()?.observed_unix_seconds;
+            (start <= observed && observed < reset).then_some((start, observed))
         });
     let cost_basis = bounds.map_or_else(
         || "unavailable_no_window_bounds".to_owned(),
@@ -834,6 +834,24 @@ mod tests {
         assert_eq!(trend["value"]["direction"], "up");
         assert_eq!(trend["value"]["change_microdollars"], 2_000_000);
         assert_eq!(trend["value"]["samples"], 2);
+
+        // The current window's cost must be paired with the same observation
+        // as its utilisation, not later ledger activity or the next cycle.
+        let later_rows = [
+            row(250, "observed"),
+            row(295, "later"),
+            row(300, "next_cycle"),
+        ];
+        let (current, _) = window_report(
+            &records[2].windows[0],
+            &records[..3],
+            &later_rows,
+            "claude",
+            &identity,
+            None,
+        )
+        .expect("window report");
+        assert_eq!(current["usage"]["attempts"], 1);
 
         rows[1].cost = None;
         let (window, _) = window_report(

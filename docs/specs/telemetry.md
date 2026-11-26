@@ -82,8 +82,9 @@ are reported as such and never zero-filled: unpriced cost is a bound, and a
 failed optional read names its cause and degrades that field. A plan price is
 compared with USD API-equivalent cost only when its currency is USD or it has
 an explicit `notional_usd`; a foreign-currency amount is not treated as USD.
-`--since` limits the report summary, while bounded-window cost uses the complete
-ledger cycle. If the window has no bounds, full-window cost is named
+`--since` limits the report summary, while bounded-window cost uses ledger rows
+from the cycle start through the quota observation paired with its utilisation.
+If the observation falls outside valid cycle bounds, full-window cost is named
 `incomplete_window` rather than scaled from a partial report range.
 Plan suggestions are expiring recommendations with evidence counts; nothing
 applies them.

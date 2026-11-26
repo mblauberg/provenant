@@ -34,8 +34,9 @@ chair session to an account, see [account switching](configuration.md#chair-acco
   `price_source` and `window_source` name where the defaults came from. The
   value multiple uses a USD plan price or explicit `notional_usd`; unsupported
   currencies are named unavailable. `--since` limits the summary, not a bounded
-  quota cycle's cost; a window without cycle bounds has unavailable full-window
-  cost. Compare a full billing period before acting on any of it.
+  quota cycle's cost through its quota observation; a window without valid cycle
+  bounds or an observation within them has unavailable full-window cost.
+  Compare a full billing period before acting on any of it.
 - `telemetry mileage` is what one quota point costs: it joins quota history with
   ingested usage, so run ingest first. Do not pass `--model`: quota deltas cover
   every model, so a model filter understates mileage.
