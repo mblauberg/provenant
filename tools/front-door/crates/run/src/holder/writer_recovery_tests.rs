@@ -2108,7 +2108,7 @@ fn writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff()
         return Err("typed full scope report".into());
     };
     assert_eq!(code, "WRITE_SCOPE");
-    assert_eq!(strength, provenant_records::policy::Strength::Warn);
+    assert_eq!(*strength, provenant_records::policy::Strength::Warn);
     assert!(
         paths
             .iter()

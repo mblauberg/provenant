@@ -1221,7 +1221,7 @@ mod tests {
         Ok(())
     }
 
-    fn declared_payload(status: &str) -> Result<serde_json::Value, serde_json::Error> {
+    fn declared_payload(status: &str) -> std::result::Result<serde_json::Value, serde_json::Error> {
         serde_json::from_slice(&snapshot(status))
     }
 
@@ -1719,7 +1719,6 @@ mod tests {
         let input = input();
         store.create(&input, &call)?;
         let id = input.attempt_id;
-        let mut record = store.record(id, &call)?;
         let attempt = store.attempt_dir(id, false)?;
         let mut bad = declared_payload("done")?;
         bad["verify"] = serde_json::json!([false]);
@@ -1746,7 +1745,7 @@ mod tests {
             &provenant_records::declaration::DeclarationLimit::shipped(),
         )?;
         assert_eq!(receipt.sequence, 2, "the rejected line counts");
-        record = store.record(id, &call)?;
+        let record = store.record(id, &call)?;
         let evidence = store.capture_declaration(&attempt, &record)?;
         assert!(matches!(evidence, DeclarationEvidence::Accepted(_)));
         assert_eq!(
@@ -1895,7 +1894,7 @@ mod tests {
         store.create(&input, &call)?;
         seal_observation(&store, &input, &exit())?;
         let id = input.attempt_id;
-        let mut old = store.record(id, &call)?;
+        let old = store.record(id, &call)?;
         let attempt = store.attempt_dir(id, false)?;
         let secret_shape = "sk-abcdefghijklmnopqrstuvwx";
         let mut value = declared_payload("stopped_early")?;
