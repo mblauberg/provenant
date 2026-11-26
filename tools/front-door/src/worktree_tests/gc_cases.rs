@@ -567,11 +567,6 @@ pub(super) fn gc_reports_transient_and_preserves_unobserved_project_array() -> R
     let moved = parent.join("repository");
     fs::rename(&rig.project, &moved)?;
     rig.project = moved;
-    for (key, value) in &mut rig.env {
-        if key == "PROVENANT_ROOT" {
-            *value = rig.project.clone().into_os_string();
-        }
-    }
     let common = rig.project.join(".git");
     let outside = rig.root.join("outside");
     git(

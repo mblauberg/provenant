@@ -83,12 +83,7 @@ fn finish_graph_command(mut pending: PendingGraphCommand, phase: &str) -> Result
 /// builds themselves; the surviving disk decision is admission's, pinned by
 /// `crates/run/src/dispatch_disk_admission_tests.rs`.
 pub(super) fn graph_run_refuses_unavailable_reader_route() -> Result {
-    let mut rig = repository()?;
-    let assets = rig.root.join("product-assets");
-    fs::create_dir(&assets)?;
-    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
-    rig.env
-        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
+    let rig = repository()?;
     let document = rig.root.join("reader-unavailable.json");
     fs::write(
         &document,

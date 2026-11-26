@@ -1345,9 +1345,9 @@ fn builtin_verification_failure_is_not_a_refusal() -> Result {
     let rig = TestRig::new()?;
     let ports = verify_fixture_port(json!({"kind":"builtin"}))?;
     write_project_verify_port(&rig, &ports)?;
-    fs::create_dir_all(rig.project.join("scripts"))?;
+    fs::create_dir_all(rig.assets.join("scripts"))?;
     fs::write(
-        rig.project.join("scripts/verify-tier"),
+        rig.assets.join("scripts/verify-tier"),
         "raise SystemExit(1)\n",
     )?;
     let output = rig.command(&["verify", "security/linux", "--json"])?;

@@ -16,11 +16,6 @@ fn federated_identity(rig: &mut TestRig) -> Result<Value> {
     let moved = rig.home.join("repo");
     std::fs::rename(&rig.project, &moved)?;
     rig.project = moved;
-    for (key, value) in &mut rig.env {
-        if key == "PROVENANT_ROOT" {
-            *value = rig.project.clone().into();
-        }
-    }
     let output = rig.command(&["fabric", "identity", "--json"])?;
     assert_eq!(code(&output), 0);
     Ok(serde_json::from_slice(&output.stdout.bytes)?)
@@ -521,11 +516,6 @@ fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     let moved = rig.home.join("repo");
     std::fs::rename(&rig.project, &moved)?;
     rig.project = moved;
-    for (key, value) in &mut rig.env {
-        if key == "PROVENANT_ROOT" {
-            *value = rig.project.clone().into();
-        }
-    }
     let identity = rig.command(&["fabric", "identity", "--json"])?;
     assert_eq!(code(&identity), 0);
     let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;

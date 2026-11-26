@@ -1941,8 +1941,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         &roots,
         provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
     )?;
-    let assets = rig.root.join("assets");
-    fs::create_dir(&assets)?;
+    let assets = rig.assets.clone();
     let mut host = provenant_run::HostLaunchContext::from_environment(
         &rig.state,
         &rig.project,
@@ -5235,12 +5234,7 @@ fn graph_writer_restart_case(alternative: bool, dirty: bool) -> Result {
 
 /// A real owner observation must retain a non-adapter preparation refusal.
 fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
-    let mut rig = policy_codex_fixture()?;
-    let assets = rig.root.join("product-assets");
-    fs::create_dir(&assets)?;
-    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
-    rig.env
-        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
+    let rig = policy_codex_fixture()?;
     let _cleanup = rig.process_cleanup();
     let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
     let committed = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
@@ -6287,12 +6281,7 @@ fn graph_codex_commit_source_starts_and_returns_a_verdict() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    let mut rig = policy_codex_fixture()?;
-    let assets = rig.root.join("product-assets");
-    fs::create_dir(&assets)?;
-    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
-    rig.env
-        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
+    let rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
     fs::write(
         rig.project.join("review-subject.txt"),

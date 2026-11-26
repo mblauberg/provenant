@@ -354,6 +354,9 @@ pub struct TestRig {
     pub root: PathBuf,
     pub home: PathBuf,
     pub project: PathBuf,
+    /// Installed release assets (`PROVENANT_ROOT`), kept apart from the
+    /// project so read-only lanes never see assets inside their source.
+    pub assets: PathBuf,
     pub state: PathBuf,
     pub env: Vec<(OsString, OsString)>,
     executor: SystemExecutor,
@@ -408,10 +411,12 @@ impl TestRig {
         provenant_os::fixture::private_state_dir(&root)?;
         let home = root.join("home");
         let project = root.join("project");
+        let assets = root.join("assets");
         let state = root.join("state");
         for path in [
             &home,
             &project,
+            &assets,
             &root.join("config"),
             &root.join("cache"),
             &root.join("claude"),
@@ -437,7 +442,7 @@ impl TestRig {
             ("CODEX_HOME", root.join("codex")),
             ("PROVENANT_GIT", git.clone()),
             ("PROVENANT_STATE_DIR", state.clone()),
-            ("PROVENANT_ROOT", project.clone()),
+            ("PROVENANT_ROOT", assets.clone()),
             ("TMPDIR", root.clone()),
         ]
         .into_iter()
@@ -464,6 +469,7 @@ impl TestRig {
             root,
             home,
             project,
+            assets,
             state,
             env,
             executor: SystemExecutor::new(8)?,

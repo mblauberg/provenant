@@ -6,9 +6,9 @@ use support::{Result, TestRig, code, register_account};
 #[test]
 fn prices_refresh_proposes_a_deterministic_diff_and_never_edits_the_sheet() -> Result {
     let rig = TestRig::new()?;
-    fs::create_dir_all(rig.project.join("config"))?;
+    fs::create_dir_all(rig.assets.join("config"))?;
     let sheet = include_str!("../../../config/telemetry-prices.toml");
-    fs::write(rig.project.join("config/telemetry-prices.toml"), sheet)?;
+    fs::write(rig.assets.join("config/telemetry-prices.toml"), sheet)?;
     // Haiku 4.5 at $1/$5 per million with a 25% cache-read change; LiteLLM disagrees on output.
     fs::write(
         rig.project.join("openrouter.json"),
@@ -54,14 +54,14 @@ fn prices_refresh_proposes_a_deterministic_diff_and_never_edits_the_sheet() -> R
     assert_eq!(json["data"]["applied"], false);
     assert!(rig.project.join("proposal.json").exists());
     assert_eq!(
-        fs::read_to_string(rig.project.join("config/telemetry-prices.toml"))?,
+        fs::read_to_string(rig.assets.join("config/telemetry-prices.toml"))?,
         sheet
     );
     let again: Value = serde_json::from_slice(&run()?.stdout.bytes)?;
     assert_eq!(again["data"]["proposal"], *proposal);
     // A sheet that already matches both sources is clean (exit 0).
     fs::write(
-        rig.project.join("config/telemetry-prices.toml"),
+        rig.assets.join("config/telemetry-prices.toml"),
         r#"schema_version = 1
 id = "t"
 reviewed_at = "2026-10-27"
@@ -92,9 +92,9 @@ output_excluding_reasoning = 5000000
 
 fn refresh_rig() -> std::result::Result<(TestRig, String), Box<dyn std::error::Error>> {
     let rig = TestRig::new()?;
-    fs::create_dir_all(rig.project.join("config"))?;
+    fs::create_dir_all(rig.assets.join("config"))?;
     let sheet = include_str!("../../../config/telemetry-prices.toml").to_owned();
-    fs::write(rig.project.join("config/telemetry-prices.toml"), &sheet)?;
+    fs::write(rig.assets.join("config/telemetry-prices.toml"), &sheet)?;
     Ok((rig, sheet))
 }
 
@@ -137,7 +137,7 @@ fn prices_refresh_never_overwrites_the_sheet_even_through_an_alias() -> Result {
             String::from_utf8_lossy(&output.stdout.bytes)
         );
         assert_eq!(
-            fs::read_to_string(rig.project.join("config/telemetry-prices.toml"))?,
+            fs::read_to_string(rig.assets.join("config/telemetry-prices.toml"))?,
             sheet
         );
     }
@@ -180,7 +180,7 @@ fn prices_refresh_flags_missing_models_and_rejects_unrelated_documents() -> Resu
 fn stats_surfaces_a_stale_price_sheet() -> Result {
     let (rig, sheet) = refresh_rig()?;
     fs::write(
-        rig.project.join("config/telemetry-prices.toml"),
+        rig.assets.join("config/telemetry-prices.toml"),
         sheet.replace(
             "reviewed_at = \"2026-10-27\"",
             "reviewed_at = \"2020-01-01\"",
