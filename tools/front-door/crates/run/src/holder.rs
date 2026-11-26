@@ -4139,8 +4139,10 @@ fn undelivered_writer_result(result: &str) -> String {
 }
 
 pub const EMPTY_WRITER_RESULT: &str = "[the provider sent no final message]";
+#[cfg(test)]
 pub const EMPTY_WRITER_REASON: &str =
     "the provider ended with an empty final message; its commit is kept for review";
+#[cfg(test)]
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
 
 /// Captured text can suggest a denial, but cannot establish its source or

@@ -520,7 +520,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         TerminalBasis::Unsettled {
             reason: reason
                 .clone()
-                .unwrap_or(Outcome::Unsettled.diagnostic_reason().to_owned()),
+                .unwrap_or_else(|| Outcome::Unsettled.diagnostic_reason().to_owned()),
         }
     } else if outcome == Outcome::Cancelled
         && cause != Some(CauseKind::Steered)

@@ -12,7 +12,7 @@ pub(super) fn declaration_row(
 ) -> Value {
     let mut accepted = 0u64;
     let mut rejected = 0u64;
-    let mut sources = BTreeMap::new();
+    let mut sources: BTreeMap<String, u64> = BTreeMap::new();
     for (counts, source) in entries {
         if let Some(counts) = counts {
             accepted += u64::from(counts.accepted);
