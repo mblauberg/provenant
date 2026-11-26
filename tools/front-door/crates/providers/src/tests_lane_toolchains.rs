@@ -697,7 +697,7 @@ fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
                 .iter()
                 .chain(&spec.state_writes)
                 .chain(
-                    spec.login.authentication
+                    spec.authentication
                         .iter()
                         .flat_map(|auth| &auth.in_place_writes),
                 )

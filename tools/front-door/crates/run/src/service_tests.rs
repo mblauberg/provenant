@@ -580,12 +580,16 @@ fn undeclared_effort_degrades_but_only_refusals_block_dispatch() -> TestResult {
         assert!(recorded, "{provider} {effort:?} left no operation");
     }
     // A preflight refusal still names the adapter, field, reason and source.
-    let mut task = submission("capabilities").task;
-    task.route = model("command", Some("high"));
-    let route = Service::route(task.route.clone())?;
-    assert!(check_launch_capabilities(&task, &route).is_ok());
-    task.profile.require_skill_location = true;
-    let refused = check_launch_capabilities(&task, &route).unwrap_err();
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = submission("capabilities");
+    input.task.route = model("command", Some("high"));
+    input.task.profile.require_skill_location = true;
+    let refused = Service::new(&store)
+        .dispatch(input, temp.path(), &call)
+        .unwrap_err();
     assert!(
         refused
             .to_string()
@@ -634,6 +638,7 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
             model: "command/m".into(),
             effort: Some("high".into()),
         };
+        input.task.profile.require_skill_location = true;
         input
     };
     let mut operations = Vec::new();
@@ -754,6 +759,7 @@ fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestR
                 model: "command/m".into(),
                 effort: Some("high".into()),
             };
+            input.task.profile.require_skill_location = true;
             input
         };
         let input = make();
@@ -1026,11 +1032,11 @@ fn writer_replay_preserves_current_request_and_authority() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let mut context = context(&root)?;
-    std::fs::create_dir_all(context.state_root.as_path())?;
-    std::fs::set_permissions(
-        context.state_root.as_path(),
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )?;
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(context.state_root.as_path())?;
     let mut roots = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
     roots.state_dir = Some(context.state_root.as_path().to_owned());
     let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
