@@ -476,7 +476,7 @@ pub(crate) fn run_branch_scratch(globals: &provenant_cli::Globals, branch: &str)
     if collect().is_ok() { 0 } else { 1 }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, OperationId, RootInputs, WaitBudget, WallTime};
