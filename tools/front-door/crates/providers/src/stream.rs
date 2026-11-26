@@ -548,7 +548,9 @@ impl StreamState {
                 "VERDICT: FAIL\n"
             });
             self.pending.clear();
-            self.terminal = true;
+            // Raw output carries the sole authoritative exit-derived verdict,
+            // but it is not a provider terminal event. Settlement reads the
+            // adapter's declared terminal-event strength below instead.
             final_events.push(ProviderEvent::Text(text));
         }
         // A malformed provider result can carry a useful typed diagnostic
@@ -576,6 +578,13 @@ impl StreamState {
                 }
             }
         }
+        // An unknown adapter is treated strictly: success still requires a
+        // provider terminal event. A declared `None` adapter (raw command
+        // output) settles a clean exit on the process contract alone.
+        let terminal_event = provenant_records::AdapterSpec::get(self.adapter)
+            .map_or(provenant_records::TerminalEvent::Weak, |spec| {
+                spec.capabilities.terminal_event.value
+            });
         let status = if self.malformed {
             OutcomeStatus::Malformed
         } else if self.refusal || self.auth_required {
@@ -586,7 +595,7 @@ impl StreamState {
             OutcomeStatus::Partial
         } else if exit.code != Some(0) {
             OutcomeStatus::Failed
-        } else if self.terminal {
+        } else if self.terminal || terminal_event == provenant_records::TerminalEvent::None {
             OutcomeStatus::Success
         } else {
             OutcomeStatus::Partial

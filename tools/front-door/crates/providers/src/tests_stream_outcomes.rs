@@ -242,6 +242,42 @@ fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dy
     Ok(())
 }
 #[test]
+fn settlement_follows_the_declared_terminal_event() -> Result<(), ProviderError> {
+    // The command row declares terminal_event = None: a clean process exit is
+    // the contract, but no provider terminal event is claimed. The fabricated
+    // terminal for raw output is gone, so `terminal()` is false here.
+    for (exit, expected) in [
+        (EXIT, OutcomeStatus::Success),
+        (
+            ExitObservation {
+                code: Some(7),
+                ..EXIT
+            },
+            OutcomeStatus::Failed,
+        ),
+        (
+            ExitObservation {
+                timed_out: true,
+                ..EXIT
+            },
+            OutcomeStatus::Partial,
+        ),
+    ] {
+        let outcome = replay(&command::Command, "some output\n", exit)?.1;
+        assert_eq!(outcome.status(), expected, "exit={exit:?}");
+        assert!(
+            !outcome.terminal(),
+            "raw output claims no provider terminal event"
+        );
+    }
+    // A JSONL row declares terminal_event = Weak: a clean exit without a
+    // provider terminal event stays Partial.
+    let outcome = replay(&codex::Codex, "{\"type\":\"turn.started\"}\n", EXIT)?.1;
+    assert_eq!(outcome.status(), OutcomeStatus::Partial);
+    assert!(!outcome.terminal());
+    Ok(())
+}
+#[test]
 fn refusal_does_not_claim_authentication_required() -> Result<(), ProviderError> {
     let mut stream = StreamState::new("claude", |_| Ok(vec![ProviderEvent::Refusal]), &provenant_records::policy::Policy::default());
     claude::Claude.observe(&mut stream, b"refusal\n")?;
