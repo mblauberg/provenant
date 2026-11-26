@@ -141,10 +141,12 @@ fn derived_reason(
     if partial.contains(&SettlementSignal::UncommittedWork) || outcome == Outcome::Uncommitted {
         return SettlementClass::UncommittedWork;
     }
+    // A review outcome was decided by an earlier step (an empty answer, a
+    // denial); the budget class confirms a completion, never overrides one.
     if cause == Some(CauseKind::TokenBudget)
         && matches!(
             outcome,
-            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Failed | Outcome::TimedOut
+            Outcome::Succeeded | Outcome::Failed | Outcome::TimedOut
         )
         && handoff
             .as_ref()

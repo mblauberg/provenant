@@ -5522,56 +5522,53 @@ fn resolve_on_stop_defaults(
             return provenant_records::OnStop::default();
         }
     };
-    let host = "domains.fabric.graph.on_stop.";
-    let scoped = "domains.fabric.graph.projects.";
+    // A project entry overrides the host entry for the same cause; both are
+    // typed domain settings, so an unknown cause or step is refused where
+    // the configuration is read, with its file and line.
+    let graph = &config.domains.fabric.graph;
+    let source = |layer: provenant_records::Layer, key: String| provenant_records::Source {
+        layer,
+        origin: Some(
+            config
+                .origins
+                .get(&key)
+                .map_or(key, |origin| origin.to_string()),
+        ),
+    };
+    let host = graph.on_stop.iter().map(|(cause, step)| {
+        (
+            cause,
+            step,
+            source(
+                provenant_records::Layer::Host,
+                format!("domains.fabric.graph.on_stop.{cause}"),
+            ),
+        )
+    });
+    let scoped = graph
+        .projects
+        .get(project)
+        .into_iter()
+        .flat_map(|scoped| scoped.on_stop.iter())
+        .map(|(cause, step)| {
+            (
+                cause,
+                step,
+                source(
+                    provenant_records::Layer::Project,
+                    format!("domains.fabric.graph.projects.{project}.on_stop.{cause}"),
+                ),
+            )
+        });
     let mut steps = std::collections::BTreeMap::new();
-    for (key, sourced) in &config.knobs {
-        let name = if let Some(rest) = key.strip_prefix(host) {
-            rest
-        } else if let Some(rest) = key.strip_prefix(scoped) {
-            let Some((owner, rest)) = rest.split_once(".on_stop.") else {
-                continue;
-            };
-            if owner != project {
-                continue;
-            }
-            rest
-        } else {
-            continue;
-        };
-        let cause = match serde_json::from_value::<provenant_records::StopCause>(
-            serde_json::Value::String(name.to_owned()),
-        ) {
-            Ok(cause) => cause,
-            Err(_) => {
-                warn(Warning::new(
-                    provenant_records::warning::CONFIG_MALFORMED,
-                    format!("unknown on_stop cause in {key}"),
-                ));
-                continue;
-            }
-        };
-        let mut object = serde_json::Map::new();
-        object.insert(cause.as_str().to_owned(), sourced.value.clone());
-        let decoded =
-            serde_json::from_value::<provenant_records::OnStop>(serde_json::Value::Object(object));
-        let step = match decoded.ok().and_then(|on_stop| on_stop.get(cause)) {
-            Some(step) => step,
-            None => {
-                warn(Warning::new(
-                    provenant_records::warning::CONFIG_MALFORMED,
-                    format!("on_stop.{cause} is not a declared next step"),
-                ));
-                continue;
-            }
-        };
+    for (cause, step, source) in host.chain(scoped) {
         if cause.rule().pinned {
             warn(
                 Warning::new(
                     provenant_records::warning::ON_STOP_PINNED_IGNORED,
                     format!("on_stop.{cause} is pinned; the table default is kept"),
                 )
-                .source(sourced.source.clone()),
+                .source(source),
             );
             continue;
         }
@@ -5923,9 +5920,11 @@ mod on_stop_defaults_tests {
         }
         std::fs::write(
             state.join("config.toml"),
-            "schema_version = 1\n[knobs]\n\
-             \"domains.fabric.graph.on_stop.stopped_no_work\" = \"chair\"\n\
-             \"domains.fabric.graph.on_stop.blocked\" = \"new_route\"\n",
+            "schema_version = 1\n[domains.fabric.graph.on_stop]\n\
+             stopped_no_work = \"chair\"\n\
+             blocked = \"new_route\"\n\
+             [domains.fabric.graph.projects.other.on_stop]\n\
+             stopped_no_work = \"new_route\"\n",
         )
         .unwrap();
         let roots = crate::roots::child(&home, &project, state).unwrap();
@@ -5937,5 +5936,11 @@ mod on_stop_defaults_tests {
         // `blocked` is pinned, so its configured default is ignored with
         // ON_STOP_PINNED_IGNORED and the table row stands.
         assert_eq!(defaults.get(provenant_records::StopCause::Blocked), None);
+        // A project entry overrides the host entry for its own project only.
+        let scoped = super::resolve_on_stop_defaults(&roots, "other");
+        assert_eq!(
+            scoped.get(provenant_records::StopCause::StoppedNoWork),
+            Some(provenant_records::NextStep::NewRoute)
+        );
     }
 }

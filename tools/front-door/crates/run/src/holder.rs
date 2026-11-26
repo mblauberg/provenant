@@ -3034,7 +3034,10 @@ impl RunStore {
             // result the host retained, so seal the substitution complete.
             // A non-empty but truncated answer never enters here: its decoded
             // completeness stands, and the later gate rejects it as success.
-            decoded.cause = Some(CauseKind::TokenBudget);
+            // A declared done handoff keeps the typed host budget stop that
+            // carries it; the review outcome is not upgraded by the budget
+            // class. A clean point with no declaration has no stop to type.
+            decoded.cause = completed_budget_handoff.then_some(CauseKind::TokenBudget);
             if let Some(handoff) = &handoff {
                 decoded.result = handoff.fenced();
             }

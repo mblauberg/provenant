@@ -266,6 +266,22 @@ pub struct GraphConfig {
     pub allowed_read_roots: Vec<String>,
     /// What a graph `land` node does at each risk tier.
     pub land: GraphLand,
+    /// Host default next step for each stop cause, resolved once at graph
+    /// admission and sealed in the checkpoint. A node's own `on_stop` wins.
+    #[serde(skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    pub on_stop: provenant_records::OnStop,
+    /// Per-project graph defaults, keyed by Fabric project ID.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub projects: BTreeMap<String, GraphProject>,
+}
+
+/// One project's graph defaults. Each entry overrides the host entry of the
+/// same name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphProject {
+    #[serde(skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    pub on_stop: provenant_records::OnStop,
 }
 
 pub const DEFAULT_DECIDE_TIMEOUT_SECONDS: u64 = 300;
@@ -284,6 +300,8 @@ impl Default for GraphConfig {
             ci_poll_overrides: Default::default(),
             allowed_read_roots: Default::default(),
             land: Default::default(),
+            on_stop: Default::default(),
+            projects: Default::default(),
         }
     }
 }
@@ -910,6 +928,11 @@ impl DomainConfig for FabricConfig {
         for project in self.graph.land.projects.keys() {
             if !crate::graph::valid_identifier(project) {
                 reject(format!("graph.land.projects.{project}"));
+            }
+        }
+        for project in self.graph.projects.keys() {
+            if !crate::graph::valid_identifier(project) {
+                reject(format!("graph.projects.{project}"));
             }
         }
         let plan = &self.plan;

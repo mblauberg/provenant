@@ -4255,6 +4255,9 @@ fn base_14_settlement_fields_migrate_once_without_extra_fields() -> TestResult {
         finished_at: provenant_core::WallTime::from_micros(1)?,
         reason: Some("pre_launch_refusal".into()),
     };
+    // A base-14 pre-launch refusal row recorded that no provider started; its
+    // migrated pre-launch basis is validated against that custody fact.
+    record.provider_launched = Some(false);
     let mut value = serde_json::to_value(record)?;
     value["state"]["terminal_cause"] = serde_json::json!("handoff_refused");
     value["state"].as_object_mut().unwrap().remove("cause");
