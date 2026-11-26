@@ -380,7 +380,7 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
     for lane in rows {
         if let Some(after) = settled_after_unix {
             if !lane["state"].as_str().is_some_and(|state| {
-                serde_json::from_value::<provenant_records::AttemptOutcome>(Value::String(
+                serde_json::from_value::<provenant_records::run::Outcome>(Value::String(
                     state.to_owned(),
                 ))
                 .is_ok()
@@ -820,9 +820,9 @@ mod tests {
         use serde_json::json;
         let outcome = |outcome| serde_json::to_value(outcome).unwrap();
         let data = json!({"lanes":[
-            {"key":{"graph":"g","node":"new","attempt":1},"attempt_id":"new","state":outcome(provenant_records::AttemptOutcome::Failed),"reason":"boom","finished_at":"2026-10-27T01:00:00Z"},
-            {"key":{"graph":"g","node":"old","attempt":1},"attempt_id":"old","state":outcome(provenant_records::AttemptOutcome::Succeeded),"finished_at":"2026-10-27T00:00:00Z"},
-            {"key":{"graph":"g","node":"no_finish","attempt":1},"attempt_id":"no-finish","state":outcome(provenant_records::AttemptOutcome::Lost)},
+            {"key":{"graph":"g","node":"new","attempt":1},"attempt_id":"new","state":outcome(provenant_records::run::Outcome::Failed),"reason":"boom","finished_at":"2026-10-27T01:00:00Z"},
+            {"key":{"graph":"g","node":"old","attempt":1},"attempt_id":"old","state":outcome(provenant_records::run::Outcome::Succeeded),"finished_at":"2026-10-27T00:00:00Z"},
+            {"key":{"graph":"g","node":"no_finish","attempt":1},"attempt_id":"no-finish","state":outcome(provenant_records::run::Outcome::Lost)},
             {"key":{"graph":"g","node":"active","attempt":1},"attempt_id":"active","state":"running"}
         ],"next_cursor":null});
         let after = "2026-10-27T00:30:00Z"

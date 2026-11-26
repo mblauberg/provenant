@@ -7,7 +7,7 @@ use provenant_os::clock::SystemClock;
 use provenant_records::{
     CanonicalRequest,
     declaration::{
-        DeclarationError, DeclarationInput, DeclarationLimit, DeclarationReceipt, JournalLine,
+        DeclarationError, DeclarationInput, DeclarationLimit, DeclarationReceipt, DeclarationLine,
     },
 };
 use provenant_run::{ExecutionContext, PreparedRun, Request, RunStore};
@@ -123,7 +123,7 @@ impl Fixture {
         )
     }
 
-    fn journal_lines(&self) -> Result<Vec<JournalLine>> {
+    fn journal_lines(&self) -> Result<Vec<DeclarationLine>> {
         let path = self
             .context
             .state_root
@@ -160,7 +160,7 @@ fn a_valid_declaration_gets_a_one_based_receipt() -> Result {
     assert_eq!(receipt.request_id, "first");
     let lines = fixture.journal_lines()?;
     assert_eq!(lines.len(), 1);
-    let JournalLine::Accepted(sealed) = &lines[0] else {
+    let DeclarationLine::Accepted(sealed) = &lines[0] else {
         panic!("expected an accepted line")
     };
     assert_eq!(sealed.sequence, 1);
@@ -229,7 +229,7 @@ fn a_closed_journal_refuses_every_later_declaration() -> Result {
         .join(fixture.attempt.to_string());
     std::fs::write(
         directory.join("declarations.jsonl"),
-        format!("{}\n", serde_json::to_string(&JournalLine::Closed)?),
+        format!("{}\n", serde_json::to_string(&DeclarationLine::Closed)?),
     )?;
     let refusal = fixture.declare(&store, "late", payload("too late"));
     assert!(matches!(refusal, Err(DeclarationError::Closed)));

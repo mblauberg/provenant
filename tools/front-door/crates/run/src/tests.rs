@@ -225,8 +225,8 @@ fn route_identity_distinguishes_missing_evidence_from_contradictions() {
         );
     }
     assert!(!I::Unobserved.permits_success(&[]));
-    assert!(I::Unobserved.permits_success(&[PartialSignal::IdentityUnobserved]));
-    assert!(!I::Mismatch.permits_success(&[PartialSignal::IdentityUnobserved]));
+    assert!(I::Unobserved.permits_success(&[SettlementSignal::IdentityUnobserved]));
+    assert!(!I::Mismatch.permits_success(&[SettlementSignal::IdentityUnobserved]));
 }
 
 #[test]
@@ -785,7 +785,7 @@ pub(super) fn route() -> RouteRecord {
 }
 pub(super) fn publication_fact(
     outcome: Outcome,
-    cause: Option<TerminalCause>,
+    cause: Option<CauseKind>,
 ) -> provenant_records::settlement::OutcomeFact {
     provenant_records::settlement::classify::settle(
         &provenant_records::settlement::SettlementEvidence::fixture(
@@ -1011,7 +1011,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     );
     assert_eq!(
         store.attempt(id, &call)?.terminal_state,
-        provenant_records::AttemptOutcome::ReviewRequired
+        provenant_records::run::Outcome::ReviewRequired
     );
     Ok(())
 }
@@ -1319,7 +1319,7 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
     )?;
     let mut publication = publication();
     publication.fact.outcome = Outcome::ReviewRequired;
-    publication.fact.cause = Some(TerminalCause::IdentityMismatch);
+    publication.fact.cause = Some(CauseKind::IdentityMismatch);
     publication.observed_route = Some(RouteRecord {
         model: Some("other/model".into()),
         ..route()
@@ -1334,7 +1334,7 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
         record.state,
         AttemptState::Terminal {
             outcome: Outcome::ReviewRequired,
-            terminal_cause: Some(TerminalCause::IdentityMismatch),
+            cause: Some(CauseKind::IdentityMismatch),
             ..
         }
     ));
@@ -1625,7 +1625,7 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     )?;
     assert_eq!(
         String::from_utf8(result.bytes)?,
-        TerminalCause::Unrecorded.detail()
+        CauseKind::Unrecorded.detail()
     );
     Ok(())
 }
@@ -2746,7 +2746,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
                 EffectDisposition::Failed { reason, retryable: true } if reason == "crash-retained conflict")
             );
         }
-        assert!(store.record(id, &call)?.terminal_evidence.is_some());
+        assert!(store.record(id, &call)?.terminal_basis.is_some());
         assert!(
             store
                 .read_output(
@@ -2915,14 +2915,14 @@ fn receipt_cancellation_requires_ordered_delivery() -> TestResult {
         let mut publication = publication();
         publication.fact.outcome = Outcome::Cancelled;
         if delivered == Some(true) {
-            publication.fact.terminal_evidence = TerminalEvidence::EffectiveCancellation;
+            publication.fact.terminal_basis = TerminalBasis::EffectiveCancellation;
         }
         let result = store.publish_terminal(id, 1, &publication, &observation, &call);
         if delivered == Some(true) {
             let record = result?;
             assert_eq!(
-                record.terminal_evidence,
-                Some(TerminalEvidence::EffectiveCancellation)
+                record.terminal_basis,
+                Some(TerminalBasis::EffectiveCancellation)
             );
         } else {
             assert!(result.is_err());
@@ -3216,10 +3216,7 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
             replayed.cancellation_disposition,
             record.cancellation_disposition
         );
-        assert_eq!(
-            replayed.terminal_evidence,
-            Some(TerminalEvidence::ProcessExit)
-        );
+        assert_eq!(replayed.terminal_basis, Some(TerminalBasis::ProcessExit));
     }
     Ok(())
 }
@@ -4202,5 +4199,68 @@ fn run_store_keeps_no_run_or_operation_tables() -> TestResult {
         );
     }
     assert!(names.iter().any(|name| name == "attempts"));
+    Ok(())
+}
+
+#[test]
+fn base_14_settlement_fields_migrate_once_without_extra_fields() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let record = store.record_refusal(
+        &input,
+        provenant_records::diagnostic::Diagnostic::new("REFUSED"),
+        None,
+        &call,
+    )?;
+    let mut value = serde_json::to_value(record)?;
+    value["state"]["terminal_cause"] = serde_json::json!("handoff_refused");
+    value["state"].as_object_mut().unwrap().remove("cause");
+    value["partial_signals"] = serde_json::json!(["handoff_missing"]);
+    value["terminal_evidence"] = serde_json::json!({"kind":"pre_launch_refusal"});
+    value["settlement_reason"] = serde_json::json!("pre_launch_refusal");
+    for key in ["signals", "terminal_basis", "settlement_class"] {
+        value.as_object_mut().unwrap().remove(key);
+    }
+    store
+        .db
+        .execute_batch("DROP TRIGGER immutable_terminal_update")?;
+    store.db.execute(
+        "UPDATE attempts SET record=?1 WHERE id=?2",
+        rusqlite::params![serde_json::to_vec(&value)?, input.attempt_id.to_string()],
+    )?;
+    store.db.pragma_update(None, "user_version", 14)?;
+    drop(store);
+    let migrated = RunStore::open(&context, &call)?;
+    let record = migrated.record(input.attempt_id, &call)?;
+    assert_eq!(
+        record.state.cause(),
+        Some(provenant_records::run::CauseKind::LaunchHandoffRefused)
+    );
+    for key in ["partial_signals", "terminal_evidence", "settlement_reason"] {
+        assert!(!record.extra.contains_key(key));
+    }
+    if let AttemptState::Terminal { extra, .. } = &record.state {
+        assert!(!extra.contains_key("terminal_cause"));
+    } else {
+        panic!("expected terminal state");
+    }
+    let bytes: Vec<u8> = migrated.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [input.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    drop(migrated);
+    let reopened = RunStore::open(&context, &call)?;
+    let again: Vec<u8> = reopened.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [input.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(bytes, again);
     Ok(())
 }

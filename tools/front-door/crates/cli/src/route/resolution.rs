@@ -126,10 +126,7 @@ pub(crate) fn selection_evidence(
                     .map_err(|e| e.to_string())?;
                 for lane in page.lanes {
                     if !matches!(lane.state, run::AttemptState::Terminal { .. })
-                        || !matches!(
-                            lane.terminal_evidence,
-                            Some(run::TerminalEvidence::ProcessExit)
-                        )
+                        || !matches!(lane.terminal_basis, Some(run::TerminalBasis::ProcessExit))
                     {
                         continue;
                     }
@@ -142,7 +139,7 @@ pub(crate) fn selection_evidence(
                         })
                         .map(|receipt| receipt.pool.clone());
                     let partial = provenant_telemetry::route_outcomes::provider_work_incomplete(
-                        &lane.partial_signals,
+                        &lane.signals,
                     );
                     let fact = run::fact(lane).map_err(|e| e.to_string())?;
                     outcomes.push(provenant_telemetry::route_outcomes::Evidence {

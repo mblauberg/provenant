@@ -732,8 +732,8 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 cancelled_from: None,
                 wait_reason: None,
                 skip_reason: when::skip_reason(&n.when),
-                advance_error: None,
-                advance_error_code: None,
+                advance_note: None,
+                advance_code: None,
                 advance_owner_code: None,
                 launch_retry: None,
                 fallback_evidence_retry: None,
@@ -757,7 +757,7 @@ pub(super) fn validate_progress(
     if checkpoint.ask_actor.is_none()
         || !progress.attempts.is_empty()
         || progress.gate.is_some() && !repair::is_repair(node)
-        || progress.advance_error.is_some()
+        || progress.advance_note.is_some()
     {
         return Err(());
     }
@@ -1058,7 +1058,7 @@ pub(super) fn pause_invalid_decision<R: Error + 'static, J: GraphJournal>(
         progress.loop_cause = Some(NodeDecisionCause::InvalidLoopDecision);
         progress.loop_pause = Some(format!(
             "loop {node} exhausted; decision cannot be applied: {}; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept",
-            bounded(reason, MAX_ADVANCE_ERROR_BYTES)
+            bounded(reason, MAX_ADVANCE_NOTE_BYTES)
         ));
     }
     refresh_pause(checkpoint);

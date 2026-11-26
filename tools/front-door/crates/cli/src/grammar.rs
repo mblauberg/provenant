@@ -70,7 +70,7 @@ pub enum Command {
     #[command(subcommand)]
     Notes(crate::notes::Notes),
     /// Declare this lane's handoff to the host-bound journal
-    Handoff(crate::declaration::Handoff),
+    Handoff(crate::declaration::HandoffArgs),
     /// Answer a request using the revision you saw
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts

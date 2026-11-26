@@ -620,9 +620,9 @@ const _: () = {
 /// The stop cause of a terminal cause. Exhaustive, so a new terminal cause
 /// must name its stop cause. A host refusal without a more specific cause has
 /// no entry: preparation names the cause that refused.
-impl From<crate::run::TerminalCause> for StopCause {
-    fn from(cause: crate::run::TerminalCause) -> Self {
-        use crate::run::TerminalCause as T;
+impl From<crate::run::CauseKind> for StopCause {
+    fn from(cause: crate::run::CauseKind) -> Self {
+        use crate::run::CauseKind as T;
         match cause {
             T::SourceViewRefused => Self::SourceViewRefused,
             T::ProjectBindingDirectoryUnsafe => Self::AccessPolicyRefused,
@@ -635,7 +635,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::CloudPlacementRemoved => Self::CloudPlacementRemoved,
             T::WriteGrantsRefused => Self::WriteGrantsRefused,
             T::WorktreeBusy => Self::WorktreeBusy,
-            T::HandoffRefused => Self::LaunchHandoffRefused,
+            T::LaunchHandoffRefused => Self::LaunchHandoffRefused,
             T::PreparationRefused => Self::PreparationRefused,
             T::WriterPinMismatch { .. } => Self::LaunchHandoffRefused,
             T::RetainedWriterImport => Self::RetainedWriterImport,
@@ -754,15 +754,15 @@ impl Stop {
     /// how the work was left, and a declared stop already covers edits left on
     /// the worktree, so the declared cause wins over it.
     pub fn sealed(
-        cause: Option<crate::run::TerminalCause>,
+        cause: Option<crate::run::CauseKind>,
         outcome: crate::run::Outcome,
-        reason: crate::run::SettlementReason,
+        reason: crate::run::SettlementClass,
         handoff: HandoffResult,
     ) -> Result<Option<Self>, StopError> {
         let declared = handoff
             .as_ref()
             .is_ok_and(|handoff| handoff.as_ref().is_some_and(Handoff::unfinished));
-        let host = if reason == crate::run::SettlementReason::HandoffMalformed {
+        let host = if reason == crate::run::SettlementClass::HandoffMalformed {
             Some(StopCause::HandoffMalformed)
         } else {
             cause.map(Into::into).or(reason.rule().stop_cause)

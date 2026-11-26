@@ -60,7 +60,7 @@ fn budget_completion_never_overrides_unsettled_provider_evidence() -> TestResult
             let fake = Fake {
             observed: Some(route()),
             outcome: Some(Outcome::Unsettled),
-            terminal_cause: Some(TerminalCause::ProviderCaptureDefect { line: 3 }),
+            cause: Some(CauseKind::ProviderCaptureDefect { line: 3 }),
             reason: Some("provider capture evidence defect at stdout.log line 3; replay incomplete".into()),
             complete: Some(false),
             // Even a done declaration cannot repair missing provider evidence.
@@ -73,7 +73,7 @@ fn budget_completion_never_overrides_unsettled_provider_evidence() -> TestResult
                     record.state,
                     AttemptState::Terminal {
                         outcome: Outcome::Unsettled,
-                        terminal_cause: Some(TerminalCause::ProviderCaptureDefect { line: 3 }),
+                        cause: Some(CauseKind::ProviderCaptureDefect { line: 3 }),
                         ..
                     }
                 ),
@@ -705,7 +705,7 @@ fn a_declared_stop_settles_review_required() -> TestResult {
         return Err("not terminal".into());
     };
     assert_eq!(*outcome, Outcome::ReviewRequired);
-    assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
+    assert_eq!(record.signals, [SettlementSignal::DeclaredStop]);
     let reason = reason.as_deref().ok_or("no reason")?;
     assert!(reason.contains("renderer and tests remain"), "{reason}");
     let blocked = STOPPED_EARLY.replace("stopped_early", "blocked");
@@ -717,7 +717,7 @@ fn a_declared_stop_settles_review_required() -> TestResult {
             ..
         }
     ));
-    assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
+    assert_eq!(record.signals, [SettlementSignal::DeclaredStop]);
     Ok(())
 }
 #[test]
@@ -727,7 +727,7 @@ fn trailing_prose_does_not_change_a_declared_stop() -> TestResult {
     let answer =
         format!("Done: parser.\n\n{STOPPED_EARLY}\nThe wait was redundant; nothing changed.");
     let record = settle_with(&answer, Some(Outcome::Succeeded), Vec::new())?;
-    assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
+    assert_eq!(record.signals, [SettlementSignal::DeclaredStop]);
     assert!(matches!(
         record.state,
         AttemptState::Terminal {
@@ -751,7 +751,7 @@ fn a_read_only_answer_without_handoff_settles_succeeded() -> TestResult {
         format!("The contract says:\n````text\n{STOPPED_EARLY}\n````\nI followed it and finished."),
     ] {
         let record = settle_with(&answer, Some(Outcome::Succeeded), Vec::new())?;
-        assert!(record.partial_signals.is_empty(), "{answer}");
+        assert!(record.signals.is_empty(), "{answer}");
         let AttemptState::Terminal {
             outcome: Outcome::Succeeded,
             reason: None,
@@ -761,8 +761,8 @@ fn a_read_only_answer_without_handoff_settles_succeeded() -> TestResult {
             return Err(format!("read-only answer must succeed: {:?}", record.state).into());
         };
         assert_ne!(
-            record.settlement_reason,
-            Some(provenant_records::run::SettlementReason::HandoffMissing)
+            record.settlement_class,
+            Some(provenant_records::run::SettlementClass::HandoffMissing)
         );
     }
     Ok(())
@@ -772,17 +772,20 @@ fn provider_stops_are_kept_and_failures_carry_no_flag() -> TestResult {
     let record = settle_with(
         "answer",
         Some(Outcome::Succeeded),
-        vec![PartialSignal::ProviderStop],
+        vec![SettlementSignal::ProviderStop],
     )?;
-    assert_eq!(record.partial_signals, [PartialSignal::ProviderStop]);
+    assert_eq!(record.signals, [SettlementSignal::ProviderStop]);
     let record = settle_with(
         &format!("{STOPPED_EARLY}\n"),
         Some(Outcome::Failed),
-        vec![PartialSignal::ProviderStop],
+        vec![SettlementSignal::ProviderStop],
     )?;
     assert_eq!(
-        record.partial_signals,
-        [PartialSignal::DeclaredStop, PartialSignal::ProviderStop]
+        record.signals,
+        [
+            SettlementSignal::DeclaredStop,
+            SettlementSignal::ProviderStop
+        ]
     );
     Ok(())
 }
@@ -790,7 +793,7 @@ fn provider_stops_are_kept_and_failures_carry_no_flag() -> TestResult {
 fn handoff_missing_and_done_outcome_contradictions() -> TestResult {
     let done = STOPPED_EARLY.replace("stopped_early", "done");
     let success = settle_with(&done, Some(Outcome::Succeeded), Vec::new())?;
-    assert!(success.partial_signals.is_empty());
+    assert!(success.signals.is_empty());
     for outcome in [Outcome::Cancelled, Outcome::ReviewRequired] {
         let record = settle_with(&done, Some(outcome), Vec::new())?;
         let AttemptState::Terminal {
@@ -854,19 +857,11 @@ fn incomplete_identity_evidence_preserves_settlement_failures() -> TestResult {
                 ..Fake::default()
             };
             let record = store.finish(id, &dir, &observed, &fake, &call)?;
-            let AttemptState::Terminal {
-                outcome,
-                terminal_cause,
-                ..
-            } = record.state
-            else {
+            let AttemptState::Terminal { outcome, cause, .. } = record.state else {
                 return Err("not terminal".into());
             };
             assert_eq!(outcome, Outcome::Failed);
-            assert_eq!(
-                terminal_cause,
-                route_mismatch.then_some(TerminalCause::IdentityMismatch)
-            );
+            assert_eq!(cause, route_mismatch.then_some(CauseKind::IdentityMismatch));
         }
     }
     Ok(())
@@ -927,7 +922,7 @@ fn identity_observations_warn_when_missing_and_hold_when_contradictory() -> Test
         assert_eq!(record.observed_route, observed_route);
         let AttemptState::Terminal {
             outcome,
-            terminal_cause,
+            cause,
             stop,
             ..
         } = &record.state
@@ -939,14 +934,14 @@ fn identity_observations_warn_when_missing_and_hold_when_contradictory() -> Test
             assert_eq!(*outcome, Outcome::Succeeded);
             assert!(
                 record
-                    .partial_signals
-                    .contains(&PartialSignal::IdentityUnobserved)
+                    .signals
+                    .contains(&SettlementSignal::IdentityUnobserved)
             );
             assert!(stop.is_none());
-            assert_eq!(*terminal_cause, None);
+            assert_eq!(*cause, None);
         } else {
             assert_eq!(*outcome, Outcome::Failed);
-            assert_eq!(*terminal_cause, Some(TerminalCause::IdentityMismatch));
+            assert_eq!(*cause, Some(CauseKind::IdentityMismatch));
             assert_eq!(
                 stop.as_ref().map(|stop| stop.cause()),
                 Some(provenant_records::StopCause::IdentityMismatch)

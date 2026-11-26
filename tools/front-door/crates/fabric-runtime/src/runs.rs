@@ -43,7 +43,7 @@ pub struct AttemptSummary {
     pub finished_at: Option<provenant_core::WallTime>,
     pub retry_of: Option<provenant_core::AttemptId>,
     pub superseded_by: Option<provenant_core::AttemptId>,
-    pub cause: Option<provenant_records::run::SettlementReason>,
+    pub cause: Option<provenant_records::run::SettlementClass>,
     pub requested_route: provenant_records::run::RequestedRoute,
     pub applied_route: Option<provenant_records::run::RouteRecord>,
     pub queued_at: provenant_core::WallTime,
@@ -74,7 +74,7 @@ impl From<AttemptRecord> for AttemptSummary {
             finished_at,
             retry_of: record.retry_of,
             superseded_by: record.superseded_by,
-            cause: record.settlement_reason,
+            cause: record.settlement_class,
             requested_route: record.requested_route,
             applied_route: record.applied_route,
             queued_at: record.queued_at,
@@ -431,7 +431,7 @@ mod tests {
                 |records| {
                     records[0].state = AttemptState::Terminal {
                         extra: Default::default(),
-                        terminal_cause: None,
+                        cause: None,
                         terminal_note: None,
                         stop: None,
                         outcome: Outcome::Succeeded,
@@ -458,7 +458,7 @@ mod tests {
     fn input_required_wakes_all_without_waiting_for_a_sibling() {
         let input = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: Outcome::InputRequired,

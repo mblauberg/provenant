@@ -372,8 +372,8 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
         let refusal = error.into_refusal();
         if plan_error == "resolver" {
             assert_eq!(
-                refusal.terminal_cause,
-                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                refusal.cause,
+                provenant_records::run::CauseKind::RouteResolutionRefused,
             );
             assert_eq!(
                 refusal.terminal_note.as_deref(),

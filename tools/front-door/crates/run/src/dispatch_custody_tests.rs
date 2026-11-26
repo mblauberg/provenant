@@ -132,7 +132,7 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     let fact = store.attempt(run.attempt_id, &call)?;
     assert_eq!(
         fact.terminal_state,
-        provenant_records::AttemptOutcome::Rejected
+        provenant_records::run::Outcome::Rejected
     );
     assert!(fact.started_at.is_none());
     assert!(
@@ -184,10 +184,7 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
     let AttemptState::Terminal { .. } = &state else {
         return Err("attempt is not terminal".into());
     };
-    assert_eq!(
-        state.terminal_cause(),
-        Some(TerminalCause::CloudPlacementRemoved)
-    );
+    assert_eq!(state.cause(), Some(CauseKind::CloudPlacementRemoved));
     assert!(
         store
             .start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?
@@ -279,8 +276,8 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
         if budget {
             let reopened = store.record(id, &call)?;
             assert_eq!(
-                reopened.settlement_reason,
-                Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+                reopened.settlement_class,
+                Some(provenant_records::run::SettlementClass::CompletedBeforeBudget)
             );
             let stop: provenant_records::Stop = match &reopened.state {
                 AttemptState::Terminal { stop, .. } => stop.clone().ok_or("stop")?,
@@ -294,8 +291,8 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
             let fact = store.attempt(id, &call)?;
             assert_eq!(fact.cause_source, provenant_records::run::CauseSource::Host);
             assert_eq!(
-                fact.settlement_reason,
-                Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+                fact.settlement_class,
+                Some(provenant_records::run::SettlementClass::CompletedBeforeBudget)
             );
         }
         assert_eq!(store.finish(id, &dir, &observed, &fake, &call)?, record);
@@ -349,7 +346,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     let fact = store.attempt(id, &call)?;
     assert_eq!(
         fact.terminal_state,
-        provenant_records::AttemptOutcome::Rejected
+        provenant_records::run::Outcome::Rejected
     );
     assert_eq!(fact.reason.as_deref(), Some("admission refused"));
     let record = store.record(id, &call)?;

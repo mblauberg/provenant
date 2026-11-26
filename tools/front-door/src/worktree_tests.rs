@@ -1118,7 +1118,7 @@ impl provenant_run::Providers for WriterProvider {
         })()
         .map_err(|error| {
             provenant_run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::HandoffRefused,
+                provenant_records::run::CauseKind::LaunchHandoffRefused,
                 error.to_string(),
             )
         })

@@ -48,10 +48,9 @@ pub(super) fn retained_findings(node: &PlannedNode, progress: &NodeProgress) -> 
     progress.state == NodeState::Failed
         && ((node.composite.is_some() && progress.outputs.as_ref().is_some_and(partial))
             || (template::review_behaviour(node).is_some()
-                && progress
-                    .attempts
-                    .last()
-                    .is_some_and(|attempt| attempt.outcome == Some(AttemptOutcome::TaskFailed))))
+                && progress.attempts.last().is_some_and(|attempt| {
+                    attempt.outcome == Some(GraphAttemptOutcome::TaskFailed)
+                })))
         && progress
             .outputs
             .as_ref()
@@ -238,8 +237,7 @@ pub(super) fn correct_verdict(
             && checkpoint.nodes[*index]
                 .review_verdict_correction_refused
                 .is_none()
-            && checkpoint.nodes[*index].advance_error_code.as_deref()
-                == Some("review_verdict_invalid")
+            && checkpoint.nodes[*index].advance_code.as_deref() == Some("review_verdict_invalid")
             && !checkpoint
                 .expansions
                 .iter()
@@ -292,7 +290,7 @@ pub(super) fn correct_verdict(
             plans::clear_expansion_pause(&mut next, index, true);
         }
         next.nodes[index].review_verdict_correction_refused =
-            Some(bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES));
+            Some(bounded(&error.to_string(), MAX_ADVANCE_NOTE_BYTES));
         return Ok(Some(next));
     }
     transitions::retain_automatic_retry_accounting(

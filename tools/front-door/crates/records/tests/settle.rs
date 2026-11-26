@@ -12,10 +12,11 @@ use provenant_records::declaration::{
 };
 use provenant_records::handoff::{Handoff, HandoffError, HandoffStatus};
 use provenant_records::provenance::{Layer, Source, Sourced};
-use provenant_records::run::{Outcome, PartialSignal, SettlementReason, TerminalCause};
+use provenant_records::run::{CauseKind, Outcome, SettlementClass, SettlementSignal};
 use provenant_records::settlement::{
-    CustodyFacts, GitEvidence, HandoffSource, HostVerdict, IdentityEvidence, IdentityPolicyEffect,
-    LaneRole, PrimaryCheckout, Progress, SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
+    CustodyFacts, GitEvidence, HandoffSource, HeadProgress, HostFacts, IdentityEvidence,
+    IdentityPolicyEffect, LaneRole, PrimaryCheckout, SETTLEMENT_EVIDENCE_SCHEMA,
+    SettlementEvidence,
     classify::budget_completed,
     classify::settle,
     policy::{NoWork, RouteSettlement, SettlementPolicy, SignalAction},
@@ -50,11 +51,11 @@ fn accepted(handoff: Handoff) -> DeclarationEvidence {
     })
 }
 
-fn base(lane: LaneRole, outcome: Outcome, cause: Option<TerminalCause>) -> SettlementEvidence {
+fn base(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> SettlementEvidence {
     SettlementEvidence {
         schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
         lane,
-        host: HostVerdict {
+        host: HostFacts {
             outcome,
             cause,
             complete: true,
@@ -63,7 +64,7 @@ fn base(lane: LaneRole, outcome: Outcome, cause: Option<TerminalCause>) -> Settl
             terminal_note: None,
             signals: vec![],
             denial: None,
-            stopped_handoff: None,
+            host_handoff: None,
         },
         handoff: DeclarationEvidence::Missing,
         declarations: DeclarationCounts::default(),
@@ -88,8 +89,8 @@ fn base(lane: LaneRole, outcome: Outcome, cause: Option<TerminalCause>) -> Settl
 
 fn git_at(pinned: Option<&str>, head: Option<&str>) -> Option<GitEvidence> {
     Some(GitEvidence {
-        pinned: pinned.map(|text| GitOid::parse(text).unwrap()),
-        head: head.map(|text| GitOid::parse(text).unwrap()),
+        input_head: pinned.map(|text| GitOid::parse(text).unwrap()),
+        writer_head: head.map(|text| GitOid::parse(text).unwrap()),
         uncommitted: None,
         uncommitted_paths: Vec::new(),
         pushed_head: None,
@@ -101,11 +102,11 @@ struct Row {
     name: &'static str,
     evidence: SettlementEvidence,
     outcome: Outcome,
-    cause: Option<TerminalCause>,
-    reason: SettlementReason,
+    cause: Option<CauseKind>,
+    reason: SettlementClass,
     stop: Option<StopCause>,
-    signals: Vec<PartialSignal>,
-    progress: Option<Progress>,
+    signals: Vec<SettlementSignal>,
+    progress: Option<HeadProgress>,
 }
 
 fn rows() -> Vec<Row> {
@@ -147,8 +148,8 @@ fn rows() -> Vec<Row> {
 
     let mut stray = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     stray.git = Some(GitEvidence {
-        pinned: Some(GitOid::parse(BASE).unwrap()),
-        head: Some(GitOid::parse(HEAD).unwrap()),
+        input_head: Some(GitOid::parse(BASE).unwrap()),
+        writer_head: Some(GitOid::parse(HEAD).unwrap()),
         uncommitted: None,
         uncommitted_paths: Vec::new(),
         pushed_head: None,
@@ -172,8 +173,8 @@ fn rows() -> Vec<Row> {
 
     let mut uncommitted = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     uncommitted.git = Some(GitEvidence {
-        pinned: Some(GitOid::parse(BASE).unwrap()),
-        head: Some(GitOid::parse(HEAD).unwrap()),
+        input_head: Some(GitOid::parse(BASE).unwrap()),
+        writer_head: Some(GitOid::parse(HEAD).unwrap()),
         uncommitted: Some("M src/lib.rs".into()),
         uncommitted_paths: vec!["src/lib.rs".into()],
         pushed_head: None,
@@ -193,13 +194,13 @@ fn rows() -> Vec<Row> {
     let capture = base(
         LaneRole::ModelWriter,
         Outcome::Failed,
-        Some(TerminalCause::ProviderCaptureDefect { line: 42 }),
+        Some(CauseKind::ProviderCaptureDefect { line: 42 }),
     );
 
     let mut budget = base(
         LaneRole::ModelWriter,
         Outcome::Failed,
-        Some(TerminalCause::TokenBudget),
+        Some(CauseKind::TokenBudget),
     );
     budget.handoff = accepted(handoff(HandoffStatus::Done, "Delivered and pushed"));
 
@@ -212,90 +213,90 @@ fn rows() -> Vec<Row> {
             name: "pushed then blocked",
             evidence: pushed_blocked,
             outcome: Outcome::ReviewRequired,
-            cause: Some(TerminalCause::Blocked),
-            reason: SettlementReason::DeclaredStop,
+            cause: Some(CauseKind::Blocked),
+            reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::Blocked),
-            signals: vec![PartialSignal::DeclaredStop],
-            progress: Some(Progress::Moved),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "pushed then done",
             evidence: pushed_done,
             outcome: Outcome::Succeeded,
             cause: None,
-            reason: SettlementReason::Completed,
+            reason: SettlementClass::Completed,
             stop: None,
             signals: vec![],
-            progress: Some(Progress::Moved),
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "committed, not pushed, stopped early",
             evidence: committed_stopped,
             outcome: Outcome::ReviewRequired,
             cause: None,
-            reason: SettlementReason::DeclaredStop,
+            reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
-            signals: vec![PartialSignal::DeclaredStop],
-            progress: Some(Progress::Moved),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "self-rebased force-push",
             evidence: force_pushed,
             outcome: Outcome::ReviewRequired,
             cause: None,
-            reason: SettlementReason::DeclaredStop,
+            reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
-            signals: vec![PartialSignal::DeclaredStop],
-            progress: Some(Progress::Moved),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "restart after commit with the sealed pin",
             evidence: restarted,
             outcome: Outcome::ReviewRequired,
             cause: None,
-            reason: SettlementReason::DeclaredStop,
+            reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
-            signals: vec![PartialSignal::DeclaredStop],
-            progress: Some(Progress::Moved),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "stopped early with an unchanged head",
             evidence: unchanged,
             outcome: Outcome::ReviewRequired,
-            cause: Some(TerminalCause::StoppedNoWork),
-            reason: SettlementReason::DeclaredStop,
+            cause: Some(CauseKind::StoppedNoWork),
+            reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
-            signals: vec![PartialSignal::DeclaredStop],
-            progress: Some(Progress::Unchanged),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Unchanged),
         },
         Row {
             name: "stopped early with an unknown head",
             evidence: unknown,
             outcome: Outcome::ReviewRequired,
             cause: None,
-            reason: SettlementReason::DeclaredStop,
+            reason: SettlementClass::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
-            signals: vec![PartialSignal::DeclaredStop],
-            progress: Some(Progress::Unknown),
+            signals: vec![SettlementSignal::DeclaredStop],
+            progress: Some(HeadProgress::Unknown),
         },
         Row {
             name: "stray primary checkout",
             evidence: stray,
             outcome: Outcome::ReviewRequired,
             cause: None,
-            reason: SettlementReason::StrayWork,
+            reason: SettlementClass::StrayWork,
             stop: None,
-            signals: vec![PartialSignal::StrayWork],
-            progress: Some(Progress::Moved),
+            signals: vec![SettlementSignal::StrayWork],
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "rejected declaration only",
             evidence: rejected,
             outcome: Outcome::ReviewRequired,
             cause: None,
-            reason: SettlementReason::HandoffMalformed,
+            reason: SettlementClass::HandoffMalformed,
             stop: Some(StopCause::HandoffMalformed),
-            signals: vec![PartialSignal::HandoffMalformed],
+            signals: vec![SettlementSignal::HandoffMalformed],
             progress: None,
         },
         Row {
@@ -303,9 +304,9 @@ fn rows() -> Vec<Row> {
             evidence: missing,
             outcome: Outcome::ReviewRequired,
             cause: None,
-            reason: SettlementReason::HandoffMissing,
+            reason: SettlementClass::HandoffMissing,
             stop: Some(StopCause::HandoffMissing),
-            signals: vec![PartialSignal::HandoffMissing],
+            signals: vec![SettlementSignal::HandoffMissing],
             progress: None,
         },
         Row {
@@ -313,7 +314,7 @@ fn rows() -> Vec<Row> {
             evidence: adapter,
             outcome: Outcome::Succeeded,
             cause: None,
-            reason: SettlementReason::Completed,
+            reason: SettlementClass::Completed,
             stop: None,
             signals: vec![],
             progress: None,
@@ -323,7 +324,7 @@ fn rows() -> Vec<Row> {
             evidence: reader,
             outcome: Outcome::Succeeded,
             cause: None,
-            reason: SettlementReason::Completed,
+            reason: SettlementClass::Completed,
             stop: None,
             signals: vec![],
             progress: None,
@@ -332,10 +333,10 @@ fn rows() -> Vec<Row> {
             name: "empty writer result",
             evidence: empty,
             outcome: Outcome::ReviewRequired,
-            cause: Some(TerminalCause::EmptyWriterResult),
-            reason: SettlementReason::EmptyResult,
+            cause: Some(CauseKind::EmptyWriterResult),
+            reason: SettlementClass::EmptyResult,
             stop: Some(StopCause::EmptyResult),
-            signals: vec![PartialSignal::HandoffMissing],
+            signals: vec![SettlementSignal::HandoffMissing],
             progress: None,
         },
         Row {
@@ -343,17 +344,17 @@ fn rows() -> Vec<Row> {
             evidence: uncommitted,
             outcome: Outcome::Uncommitted,
             cause: None,
-            reason: SettlementReason::UncommittedWork,
+            reason: SettlementClass::UncommittedWork,
             stop: Some(StopCause::Uncommitted),
-            signals: vec![PartialSignal::UncommittedWork],
-            progress: Some(Progress::Moved),
+            signals: vec![SettlementSignal::UncommittedWork],
+            progress: Some(HeadProgress::Moved),
         },
         Row {
             name: "cancelled and steered",
             evidence: steered,
             outcome: Outcome::Cancelled,
-            cause: Some(TerminalCause::Steered),
-            reason: SettlementReason::Steered,
+            cause: Some(CauseKind::Steered),
+            reason: SettlementClass::Steered,
             stop: Some(StopCause::Steered),
             signals: vec![],
             progress: None,
@@ -363,7 +364,7 @@ fn rows() -> Vec<Row> {
             evidence: unknown_cancel,
             outcome: Outcome::Unsettled,
             cause: None,
-            reason: SettlementReason::Unsettled,
+            reason: SettlementClass::Unsettled,
             stop: Some(StopCause::Unsettled),
             signals: vec![],
             progress: None,
@@ -372,8 +373,8 @@ fn rows() -> Vec<Row> {
             name: "identity mismatch",
             evidence: identity,
             outcome: Outcome::Failed,
-            cause: Some(TerminalCause::IdentityMismatch),
-            reason: SettlementReason::Failed,
+            cause: Some(CauseKind::IdentityMismatch),
+            reason: SettlementClass::Failed,
             stop: Some(StopCause::IdentityMismatch),
             signals: vec![],
             progress: None,
@@ -382,8 +383,8 @@ fn rows() -> Vec<Row> {
             name: "capture defect",
             evidence: capture,
             outcome: Outcome::Failed,
-            cause: Some(TerminalCause::ProviderCaptureDefect { line: 42 }),
-            reason: SettlementReason::Failed,
+            cause: Some(CauseKind::ProviderCaptureDefect { line: 42 }),
+            reason: SettlementClass::Failed,
             stop: Some(StopCause::Unsettled),
             signals: vec![],
             progress: None,
@@ -392,8 +393,8 @@ fn rows() -> Vec<Row> {
             name: "budget completion",
             evidence: budget,
             outcome: Outcome::Succeeded,
-            cause: Some(TerminalCause::TokenBudget),
-            reason: SettlementReason::CompletedBeforeBudget,
+            cause: Some(CauseKind::TokenBudget),
+            reason: SettlementClass::CompletedBeforeBudget,
             stop: Some(StopCause::TokenBudget),
             signals: vec![],
             progress: None,
@@ -403,7 +404,7 @@ fn rows() -> Vec<Row> {
             evidence: prelaunch,
             outcome: Outcome::Failed,
             cause: None,
-            reason: SettlementReason::PreLaunchRefusal,
+            reason: SettlementClass::PreLaunchRefusal,
             stop: None,
             signals: vec![],
             progress: None,
@@ -418,7 +419,7 @@ fn one_decider_settles_every_family_from_one_sealed_record() {
         assert_eq!(fact.outcome, row.outcome, "{}: outcome", row.name);
         assert_eq!(fact.cause, row.cause, "{}: cause", row.name);
         assert_eq!(
-            fact.settlement_reason, row.reason,
+            fact.settlement_class, row.reason,
             "{}: settlement reason",
             row.name
         );
@@ -429,12 +430,12 @@ fn one_decider_settles_every_family_from_one_sealed_record() {
             row.name
         );
         assert_eq!(fact.signals, row.signals, "{}: signals", row.name);
-        assert_eq!(fact.progress, row.progress, "{}: progress", row.name);
+        assert_eq!(fact.head_progress, row.progress, "{}: progress", row.name);
         // No-work needs a known, unchanged head. Unknown and Moved never yield it.
-        if row.progress != Some(Progress::Unchanged) {
+        if row.progress != Some(HeadProgress::Unchanged) {
             assert_ne!(
                 fact.cause,
-                Some(TerminalCause::StoppedNoWork),
+                Some(CauseKind::StoppedNoWork),
                 "{}: no-work without an unchanged head",
                 row.name
             );
@@ -447,14 +448,14 @@ fn progress_is_pin_relative_and_never_reads_remote_state() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     evidence.git = git_at(Some(BASE), Some(BASE));
     evidence.handoff = accepted(handoff(HandoffStatus::StoppedEarly, "Nothing left to do."));
-    assert_eq!(settle(&evidence).cause, Some(TerminalCause::StoppedNoWork));
+    assert_eq!(settle(&evidence).cause, Some(CauseKind::StoppedNoWork));
 
     // A push, a moved remote ref or a settlement base is not a field of the
     // record. Only the sealed head changes when it is re-read after a restart.
     evidence.git.as_mut().unwrap().head = Some(GitOid::parse(HEAD).unwrap());
     let fact = settle(&evidence);
-    assert_eq!(fact.progress, Some(Progress::Moved));
-    assert_ne!(fact.cause, Some(TerminalCause::StoppedNoWork));
+    assert_eq!(fact.head_progress, Some(HeadProgress::Moved));
+    assert_ne!(fact.cause, Some(CauseKind::StoppedNoWork));
 
     // Re-reading HEAD to the same value leaves the sealed fact byte-identical.
     let again = settle(&evidence);
@@ -505,7 +506,7 @@ fn pushed_head_and_uncommitted_paths_are_not_settlement_evidence() {
 #[test]
 fn a_host_stop_records_a_host_handoff_source() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::ReviewRequired, None);
-    evidence.host.stopped_handoff = Some(handoff(
+    evidence.host.host_handoff = Some(handoff(
         HandoffStatus::StoppedEarly,
         "the host stopped this attempt",
     ));
@@ -560,10 +561,10 @@ fn handoff_missing_fail_settles_failed_with_its_source() {
     evidence.policy.handoff_missing = sourced_action(SignalAction::Fail);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Failed);
-    assert_eq!(fact.settlement_reason, SettlementReason::Failed);
-    assert!(fact.signals.contains(&PartialSignal::HandoffMissing));
+    assert_eq!(fact.settlement_class, SettlementClass::Failed);
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMissing));
     assert_eq!(fact.applied.len(), 1);
-    assert_eq!(fact.applied[0].signal, PartialSignal::HandoffMissing);
+    assert_eq!(fact.applied[0].signal, SettlementSignal::HandoffMissing);
     assert_eq!(fact.applied[0].action, SignalAction::Fail);
     assert_eq!(fact.applied[0].source.layer, Layer::Project);
 }
@@ -574,12 +575,12 @@ fn handoff_missing_off_records_the_signal_but_releases_dependants() {
     evidence.policy.handoff_missing = sourced_action(SignalAction::Off);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Succeeded);
-    assert_eq!(fact.settlement_reason, SettlementReason::Completed);
+    assert_eq!(fact.settlement_class, SettlementClass::Completed);
     assert_eq!(
-        fact.node,
-        provenant_records::run::SettlementNodeOutcome::Succeeded
+        fact.release,
+        provenant_records::run::DependantRelease::Release
     );
-    assert!(fact.signals.contains(&PartialSignal::HandoffMissing));
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMissing));
     assert_eq!(fact.applied.len(), 1);
     assert_eq!(fact.applied[0].action, SignalAction::Off);
 }
@@ -593,8 +594,8 @@ fn handoff_malformed_off_keeps_the_error_but_completes_the_lane() {
     evidence.policy.handoff_malformed = sourced_action(SignalAction::Off);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Succeeded);
-    assert_eq!(fact.settlement_reason, SettlementReason::Completed);
-    assert!(fact.signals.contains(&PartialSignal::HandoffMalformed));
+    assert_eq!(fact.settlement_class, SettlementClass::Completed);
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMalformed));
     assert!(fact.handoff.is_err());
     assert_eq!(fact.applied.len(), 1);
 }
@@ -606,9 +607,9 @@ fn empty_result_fail_overrides_the_default_review() {
     evidence.policy.empty_result = sourced_action(SignalAction::Fail);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Failed);
-    assert_eq!(fact.settlement_reason, SettlementReason::Failed);
+    assert_eq!(fact.settlement_class, SettlementClass::Failed);
     assert_eq!(fact.applied.len(), 1);
-    assert_eq!(fact.applied[0].signal, PartialSignal::HandoffMissing);
+    assert_eq!(fact.applied[0].signal, SettlementSignal::HandoffMissing);
 }
 
 #[test]
@@ -620,8 +621,8 @@ fn uncommitted_work_off_does_not_downgrade_a_success() {
     evidence.policy.uncommitted_work = sourced_action(SignalAction::Off);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Succeeded);
-    assert_eq!(fact.settlement_reason, SettlementReason::Completed);
-    assert!(fact.signals.contains(&PartialSignal::UncommittedWork));
+    assert_eq!(fact.settlement_class, SettlementClass::Completed);
+    assert!(fact.signals.contains(&SettlementSignal::UncommittedWork));
     assert_eq!(fact.applied.len(), 1);
 }
 
@@ -633,10 +634,10 @@ fn no_work_off_keeps_a_declared_stop_on_an_unchanged_head() {
     evidence.policy.no_work = sourced_no_work(NoWork::Off);
     let fact = settle(&evidence);
     assert_eq!(fact.cause, None);
-    assert_eq!(fact.settlement_reason, SettlementReason::DeclaredStop);
+    assert_eq!(fact.settlement_class, SettlementClass::DeclaredStop);
     assert_eq!(fact.applied.len(), 1);
     assert_eq!(fact.applied[0].source.layer, Layer::Route);
-    assert_eq!(fact.applied[0].signal, PartialSignal::DeclaredStop);
+    assert_eq!(fact.applied[0].signal, SettlementSignal::DeclaredStop);
 }
 
 #[test]

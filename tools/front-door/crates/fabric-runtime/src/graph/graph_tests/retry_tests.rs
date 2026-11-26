@@ -524,7 +524,7 @@ fn dynamic_composite_redo_drops_stale_failed_dependencies_and_launches_once() {
     let mut owner = FakeOwner {
         observations: [
             terminal_from(&slice_fragment("broken"), "planner-old"),
-            terminal_with_result(AttemptOutcome::TaskFailed, "broken"),
+            terminal_with_result(GraphAttemptOutcome::TaskFailed, "broken"),
         ]
         .into(),
         ..Default::default()
@@ -655,7 +655,7 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
         .iter_mut()
         .find(|node| node.id == "work--leaf")
         .unwrap();
-    leaf.advance_error_code = Some("launch_refused".into());
+    leaf.advance_code = Some("launch_refused".into());
     let attempt = &mut leaf.attempts[0];
     attempt.state = AttemptState::Starting;
     // Dispatch sets this flag before the host can refuse acceptance.
@@ -676,7 +676,7 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
             }
             1 => leaf.attempts[0].state = AttemptState::Running,
             2 => leaf.attempts[0].attempt_ref = Some("host/uncertain".into()),
-            _ => leaf.advance_error_code = Some("launch_retry_exhausted".into()),
+            _ => leaf.advance_code = Some("launch_retry_exhausted".into()),
         }
         let before = candidate.clone();
         assert!(retry_id(&document, &mut candidate, "work", None, None).is_err());
@@ -1218,7 +1218,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     let mut checkpoint: GraphCheckpoint =
         serde_json::from_value(serde_json::to_value(checkpoint).unwrap()).unwrap();
     assert_eq!(
-        checkpoint.nodes[work_index].advance_error_code.as_deref(),
+        checkpoint.nodes[work_index].advance_code.as_deref(),
         Some("launch_refused")
     );
     assert_eq!(
@@ -1323,7 +1323,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
                 candidate.nodes[work_index].attempts[0].attempt_ref = Some("host/uncertain".into())
             }
             2 => {
-                candidate.nodes[work_index].advance_error_code =
+                candidate.nodes[work_index].advance_code =
                     Some("launch_retry_exhausted".into())
             }
             3 => candidate.nodes[work_index].state = NodeState::Running,
@@ -1845,7 +1845,7 @@ fn public_retry_preserves_live_spawn_only_children() {
 
 #[test]
 fn no_work_writer_continues_in_place_and_records_the_patch() {
-    for final_outcome in [AttemptOutcome::StoppedNoWork, AttemptOutcome::Succeeded] {
+    for final_outcome in [GraphAttemptOutcome::StoppedNoWork, GraphAttemptOutcome::Succeeded] {
         let mut work = node("work", pool_route("junior"));
         work.access = AccessMode::WorktreeWrite;
         work.worktree = Some(".worktrees/work".into());
@@ -1856,14 +1856,14 @@ fn no_work_writer_continues_in_place_and_records_the_patch() {
         // branch beyond this graph's admission binding at A. Settlement proves
         // that this attempt started and stopped at B.
         let stopped = || no_work_stop(Some(&"b".repeat(40)));
-        let second = if final_outcome == AttemptOutcome::Succeeded {
+        let second = if final_outcome == GraphAttemptOutcome::Succeeded {
             done_as("finished")
         } else {
             stopped()
         };
         // A writer that stops again restarts until the graph-wide budget of
         // two restarts is spent, then pauses for the chair.
-        let again = final_outcome != AttemptOutcome::Succeeded;
+        let again = final_outcome != GraphAttemptOutcome::Succeeded;
         let mut observations = vec![stopped(), second];
         if again {
             observations.push(stopped());
@@ -1880,7 +1880,7 @@ fn no_work_writer_continues_in_place_and_records_the_patch() {
         assert_eq!(owner.permissions[0], owner.permissions[1]);
         assert!(owner.prompts[1].contains("Finish the accepted brief"));
         let progress = &run.checkpoint.nodes[0];
-        let expected = if final_outcome == AttemptOutcome::Succeeded {
+        let expected = if final_outcome == GraphAttemptOutcome::Succeeded {
             NodeState::Succeeded
         } else {
             NodeState::Failed
@@ -1889,7 +1889,7 @@ fn no_work_writer_continues_in_place_and_records_the_patch() {
         assert_eq!(progress.previous_attempts.len(), calls - 1);
         assert_eq!(
             progress.previous_attempts[0].outcome,
-            Some(AttemptOutcome::StoppedNoWork)
+            Some(GraphAttemptOutcome::StoppedNoWork)
         );
         let records: Vec<_> = run
             .checkpoint
@@ -1913,14 +1913,14 @@ fn no_work_writer_continues_in_place_and_records_the_patch() {
 fn no_work_stop(head: Option<&str>) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some("stopped".into()),
-        outcome: AttemptOutcome::StoppedNoWork,
+        outcome: GraphAttemptOutcome::StoppedNoWork,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: None,
         commit: head.map(str::to_owned),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     }
@@ -1958,7 +1958,7 @@ fn writer_stop_restarts_only_for_enabled_writers_and_leaves_others_failed() {
         if head.as_deref() != Some("a".repeat(40).as_str())
             && let AttemptObservation::Terminal { outcome, .. } = &mut stopped
         {
-            *outcome = AttemptOutcome::DeclaredStop;
+            *outcome = GraphAttemptOutcome::DeclaredStop;
         }
         let mut observations = vec![stopped];
         if restarts {
@@ -2163,17 +2163,17 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     assert!(checkpoint.pause.is_none());
     let original = checkpoint.nodes[0].clone();
     assert_eq!(
-        original.advance_error_code.as_deref(),
+        original.advance_code.as_deref(),
         Some("stopped_no_work")
     );
     assert!(next_step::pending(&checkpoint));
     cancel_node_subtree(&document, &mut checkpoint, "work", Some("chair stop")).unwrap();
     assert_eq!(checkpoint.nodes[0].attempts, original.attempts);
     assert_eq!(checkpoint.nodes[0].state, original.state);
-    assert_eq!(checkpoint.nodes[0].advance_error, original.advance_error);
+    assert_eq!(checkpoint.nodes[0].advance_note, original.advance_note);
     assert_eq!(
-        checkpoint.nodes[0].advance_error_code,
-        original.advance_error_code
+        checkpoint.nodes[0].advance_code,
+        original.advance_code
     );
     journal.save(&checkpoint).unwrap();
     drop(journal);
@@ -2188,10 +2188,10 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     assert!(next_step::stop_cause(&checkpoint.nodes[0], &checkpoint).is_none());
     assert!(!next_step::pending(&checkpoint));
     assert_eq!(checkpoint.nodes[0].attempts, original.attempts);
-    assert_eq!(checkpoint.nodes[0].advance_error, original.advance_error);
+    assert_eq!(checkpoint.nodes[0].advance_note, original.advance_note);
     assert_eq!(
-        checkpoint.nodes[0].advance_error_code,
-        original.advance_error_code
+        checkpoint.nodes[0].advance_code,
+        original.advance_code
     );
     let mut recovery_owner = FakeOwner::default();
     let run = advance(&document, &mut recovery_owner, &mut journal).unwrap();
@@ -2263,7 +2263,7 @@ fn no_work_continuation_retains_sealed_quota_retry_spending_and_models() {
     work.worktree = Some(".worktrees/work".into());
     let document = graph(vec![work]);
     let quota = |reference: &str| {
-        let mut observation = terminal(AttemptOutcome::UsageLimited);
+        let mut observation = terminal(GraphAttemptOutcome::UsageLimited);
         if let AttemptObservation::Terminal { attempt_ref, .. } = &mut observation {
             *attempt_ref = Some(reference.into());
         }
@@ -2434,7 +2434,7 @@ fn no_work_restart_preserves_raw_handoff_and_the_stop() {
     // projected StoppedNoWork, and next_step keys on that projected outcome.
     assert_eq!(
         run.checkpoint.nodes[0].previous_attempts[0].outcome,
-        Some(AttemptOutcome::StoppedNoWork)
+        Some(GraphAttemptOutcome::StoppedNoWork)
     );
     assert!(!next_step::pending(&run.checkpoint));
     let saved = journal.load(&document.graph_id).unwrap().unwrap();
@@ -2477,11 +2477,11 @@ fn writer_owner_decision_or_missing_capability_returns_to_chair_without_launch()
         "Missing capability: network access is required",
     ] {
         for outcome in [
-            AttemptOutcome::Succeeded,
-            AttemptOutcome::DeclaredStop,
-            AttemptOutcome::StoppedNoWork,
+            GraphAttemptOutcome::Succeeded,
+            GraphAttemptOutcome::DeclaredStop,
+            GraphAttemptOutcome::StoppedNoWork,
         ] {
-            let no_work = outcome == AttemptOutcome::StoppedNoWork;
+            let no_work = outcome == GraphAttemptOutcome::StoppedNoWork;
             let mut work = node("work", pool_route("senior"));
             work.access = AccessMode::WorktreeWrite;
             work.worktree = Some(".worktrees/work".into());
@@ -2606,7 +2606,7 @@ fn attempt_numbers_increase_across_retries_and_replay_is_stable() {
             owner.observations.extend([
                 AttemptObservation::Pending { attempt_ref: None },
                 AttemptObservation::Pending { attempt_ref: None },
-                terminal(AttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]);
             while !owner.observations.is_empty() {
                 let queued = owner.observations.len();
@@ -2710,7 +2710,7 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
     .unwrap();
     assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(
-        checkpoint.nodes[0].advance_error_code.as_deref(),
+        checkpoint.nodes[0].advance_code.as_deref(),
         Some("launch_retry_exhausted")
     );
     assert_eq!(
@@ -2724,7 +2724,7 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
         checkpoint.nodes[0].attempts[0].host_refused_before_acceptance,
         "contention before acceptance must be recorded as a fact"
     );
-    let reason = checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    let reason = checkpoint.nodes[0].advance_note.as_deref().unwrap();
     assert!(
         reason.contains(&holder.to_string()),
         "blocked diagnostic must name the lock holder: {reason}"

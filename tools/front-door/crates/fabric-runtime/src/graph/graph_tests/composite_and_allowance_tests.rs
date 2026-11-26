@@ -63,8 +63,8 @@ fn quota_reroute_recomputes_composite_before_checkpoint_resume() {
     .unwrap();
     let mut owner = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::UsageLimited),
-            terminal_with_result(AttemptOutcome::Succeeded, "plan complete"),
+            terminal(GraphAttemptOutcome::UsageLimited),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "plan complete"),
         ]
         .into(),
         ..Default::default()
@@ -120,7 +120,7 @@ fn quota_reroute_recomputes_composite_before_checkpoint_resume() {
     };
     let mut resumed_owner = FakeOwner {
         observations: [terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             "plan complete",
         )]
         .into(),
@@ -161,7 +161,7 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
             AttemptObservation::Pending {
                 attempt_ref: Some("hold-running".into()),
             },
-            terminal_with_result(AttemptOutcome::Succeeded, "active before retry"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "active before retry"),
         ]
         .into(),
         ..Default::default()
@@ -231,8 +231,8 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
         serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
     let mut resumed_owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "hold complete"),
-            terminal_with_result(AttemptOutcome::Succeeded, "active member complete"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "hold complete"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "active member complete"),
         ]
         .into(),
         ..Default::default()
@@ -369,8 +369,8 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
         serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
     let mut resume_owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "hold complete"),
-            terminal_with_result(AttemptOutcome::Succeeded, "replacement complete"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "hold complete"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "replacement complete"),
         ]
         .into(),
         ..Default::default()
@@ -427,7 +427,7 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
         serde_json::from_slice(&serde_json::to_vec(&retry_checkpoint).unwrap()).unwrap();
     let mut retry_owner = FakeOwner {
         observations: [terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             "retried member",
         )]
         .into(),
@@ -458,7 +458,7 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
 
 #[test]
 fn advisory_composite_settlement_preserves_cause_and_launches_dependant() {
-    for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {
+    for outcome in [GraphAttemptOutcome::ReviewRequired, GraphAttemptOutcome::TaskFailed] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":"advisory", "nodes":[
                 {"id":"scout", "kind":"composite", "access":"read_only", "advisory":true,
@@ -469,7 +469,7 @@ fn advisory_composite_settlement_preserves_cause_and_launches_dependant() {
             ]
         })).unwrap();
         let mut owner = FakeOwner {
-            observations: VecDeque::from([terminal(outcome), terminal(AttemptOutcome::Succeeded)]),
+            observations: VecDeque::from([terminal(outcome), terminal(GraphAttemptOutcome::Succeeded)]),
             ..Default::default()
         };
         let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -489,7 +489,7 @@ fn advisory_composite_settlement_preserves_cause_and_launches_dependant() {
                 .state,
             NodeState::Succeeded
         );
-        if outcome == AttemptOutcome::TaskFailed {
+        if outcome == GraphAttemptOutcome::TaskFailed {
             assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
         } else {
             assert_eq!(scout.state, NodeState::Succeeded);
@@ -515,14 +515,14 @@ fn cumulative_allowance_counts_graph_attempts_and_survives_observation_replay() 
     advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(owner.retry_budgets, vec![Some(1)]);
     owner.retry_limit = Some(9); // Host changes cannot renew an admitted node.
-    let mut refused = terminal(AttemptOutcome::UsageLimited);
+    let mut refused = terminal(GraphAttemptOutcome::UsageLimited);
     if let AttemptObservation::Terminal { attempt_ref, .. } = &mut refused {
         *attempt_ref = Some("first".into());
     }
     owner.observations.push_back(refused);
     owner
         .observations
-        .push_back(terminal(AttemptOutcome::UsageLimited));
+        .push_back(terminal(GraphAttemptOutcome::UsageLimited));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(run.checkpoint.nodes[0].recorded_attempts().count(), 2);
@@ -556,9 +556,9 @@ fn preparation_fallback_does_not_consume_settlement_allowance() {
         ]
         .into(),
         observations: [
-            preparation_refusal("first", AttemptOutcome::UsageLimited),
-            preparation_refusal("second", AttemptOutcome::UsageLimited),
-            terminal(AttemptOutcome::Succeeded),
+            preparation_refusal("first", GraphAttemptOutcome::UsageLimited),
+            preparation_refusal("second", GraphAttemptOutcome::UsageLimited),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
@@ -595,18 +595,18 @@ fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
     // Writer predecessor committed and hit quota; its continuation succeeded with head_2.
     let writer_done = AttemptObservation::Terminal {
         attempt_ref: Some("host/writer-cont".into()),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: Some("writer".into()),
         commit: Some(head_2.clone()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };
-    let lens_done = terminal(AttemptOutcome::Succeeded);
+    let lens_done = terminal(GraphAttemptOutcome::Succeeded);
 
     let mut owner = FakeOwner {
         observations: [writer_done, lens_done].into(),
@@ -651,7 +651,7 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
             serde_json::json!({"schema_version":1,"findings":entries})
         );
         let observation = |path: &str| {
-            let mut result = terminal_with_result(AttemptOutcome::Succeeded, &text);
+            let mut result = terminal_with_result(GraphAttemptOutcome::Succeeded, &text);
             if let AttemptObservation::Terminal {
                 result_path,
                 attempt_ref,
@@ -667,7 +667,7 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
             observations: [
                 observation("/results/a"),
                 observation("/results/b"),
-                terminal(AttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]
             .into(),
             ..Default::default()
@@ -790,9 +790,9 @@ fn nested_composite_propagates_its_members_truncation_notice() {
     );
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &text),
-            terminal_with_result(AttemptOutcome::Succeeded, &text),
-            terminal(AttemptOutcome::Succeeded),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &text),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &text),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
@@ -862,7 +862,7 @@ fn composite_rejects_overlong_qualified_finding_id() {
     })).unwrap();
     let text = findings_text(&entry("").replace("F1", &"x".repeat(1024)));
     let mut owner = FakeOwner {
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, &text)].into(),
+        observations: [terminal_with_result(GraphAttemptOutcome::Succeeded, &text)].into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -875,7 +875,7 @@ fn composite_rejects_overlong_qualified_finding_id() {
         .unwrap();
     assert_eq!(composite.state, NodeState::Failed);
     assert_eq!(
-        composite.advance_error_code.as_deref(),
+        composite.advance_code.as_deref(),
         Some("composite_findings_exceed_cap")
     );
     assert_ne!(
@@ -924,8 +924,8 @@ fn identity_dispositions_preserve_large_inherited_fields() {
         .join(",");
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, &review),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&decisions)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &review),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&decisions)),
         ]
         .into(),
         ..Default::default()
@@ -941,7 +941,7 @@ fn identity_dispositions_preserve_large_inherited_fields() {
         result.state,
         NodeState::Succeeded,
         "{:?}",
-        result.advance_error
+        result.advance_note
     );
     let findings = &result.outputs.as_ref().unwrap().findings;
     assert!(canonical_len(findings) > FINDINGS_BYTES);
@@ -975,14 +975,14 @@ fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
     ] {
         let mut owner = FakeOwner {
             observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(""))),
                 terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     &findings_text(
                         &entry("").replace("\"summary\":\"s\"", "\"summary\":\"other\""),
                     ),
                 ),
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(decisions)),
             ]
             .into(),
             ..Default::default()
@@ -1000,7 +1000,7 @@ fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
         let result = &run.checkpoint.nodes[2];
         assert!(owner.prompts[2].contains("a:F1"));
         assert!(owner.prompts[2].contains("b:F1"));
-        assert_eq!(result.state, expected, "{:?}", result.advance_error);
+        assert_eq!(result.state, expected, "{:?}", result.advance_note);
         if expected == NodeState::Succeeded {
             let findings = &result.outputs.as_ref().unwrap().findings;
             assert_eq!(
@@ -1010,7 +1010,7 @@ fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
         } else {
             assert!(
                 result
-                    .advance_error
+                    .advance_note
                     .as_deref()
                     .unwrap()
                     .contains("ambiguous")
@@ -1040,7 +1040,7 @@ fn empty_review_range_stops_before_lens_launch() {
     assert!(owner.calls.is_empty());
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        run.checkpoint.nodes[0].advance_code.as_deref(),
         Some("review_empty_range")
     );
 }
@@ -1240,10 +1240,10 @@ fn composite_byte_budget_overflow_below_entry_cap_requires_verifier_proof() {
     );
     let mut observations = VecDeque::new();
     for _ in 0..count {
-        observations.push_back(terminal_with_result(AttemptOutcome::Succeeded, &text));
+        observations.push_back(terminal_with_result(GraphAttemptOutcome::Succeeded, &text));
     }
     observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: INCONCLUSIVE\n",
     ));
     let mut owner = FakeOwner {
@@ -1273,7 +1273,7 @@ fn composite_byte_budget_overflow_below_entry_cap_requires_verifier_proof() {
     assert!(composite.outputs.as_ref().unwrap().findings.len() < count);
     let verifier = &run.checkpoint.nodes[positions["verify"]];
     assert_eq!(
-        verifier.advance_error_code.as_deref(),
+        verifier.advance_code.as_deref(),
         Some("disposition_overflow_incomplete")
     );
     assert!(owner.prompts.last().unwrap().contains("DISPOSITION"));

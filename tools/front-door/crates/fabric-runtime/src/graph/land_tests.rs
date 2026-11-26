@@ -305,14 +305,14 @@ impl AttemptOwner for Owner {
         };
         Ok(AttemptObservation::Terminal {
             attempt_ref,
-            outcome: AttemptOutcome::Succeeded,
+            outcome: GraphAttemptOutcome::Succeeded,
             launched: true,
             result: result.map(Box::new),
             result_warning: None,
             result_path: None,
             branch,
             commit: commit.map(str::to_owned),
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             stop: None,
             cause: None,
         })
@@ -377,7 +377,7 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
             run.checkpoint
                 .nodes
                 .iter()
-                .map(|n| (&n.id, n.state, &n.advance_error))
+                .map(|n| (&n.id, n.state, &n.advance_note))
                 .collect::<Vec<_>>()
         );
         let fix = owner
@@ -477,7 +477,7 @@ fn bundled_deliver_repairs_findings_before_landing() {
         run.checkpoint
             .nodes
             .iter()
-            .map(|n| (&n.id, n.state, &n.advance_error))
+            .map(|n| (&n.id, n.state, &n.advance_note))
             .collect::<Vec<_>>()
     );
     let fix = owner
@@ -595,13 +595,13 @@ fn a_repair_without_a_delivered_branch_fails_before_launch() {
     assert_eq!(repair.state, NodeState::Failed);
     assert!(repair.attempts.is_empty());
     assert_eq!(
-        repair.advance_error_code.as_deref(),
+        repair.advance_code.as_deref(),
         Some("continuation_delivery_missing")
     );
     assert_eq!(owner.launches.len(), 1);
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Blocked);
-    assert_eq!(land.advance_error, None);
+    assert_eq!(land.advance_note, None);
 }
 
 #[test]
@@ -822,7 +822,7 @@ fn an_inbox_answer_of_land_never_approves_a_land() {
     assert_eq!(land.state, NodeState::Failed);
     assert!(owner.lands.is_empty(), "{:?}", owner.lands);
     assert_eq!(
-        land.advance_error_code.as_deref(),
+        land.advance_code.as_deref(),
         Some("land_answer_cannot_approve")
     );
     assert!(land.land.as_ref().unwrap().authorised_by.is_none());
@@ -860,7 +860,7 @@ fn a_hold_answer_fails_the_land_without_merging() {
     );
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Failed);
-    assert_eq!(land.advance_error_code.as_deref(), Some("land_held"));
+    assert_eq!(land.advance_code.as_deref(), Some("land_held"));
     assert!(owner.lands.is_empty());
 }
 
@@ -899,10 +899,7 @@ fn an_ask_tier_without_a_session_fails_with_guidance() {
     );
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Failed);
-    assert_eq!(
-        land.advance_error_code.as_deref(),
-        Some("land_session_missing")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_session_missing"));
     assert!(owner.lands.is_empty() && checkpoint.asks.is_empty());
 }
 
@@ -939,7 +936,7 @@ fn a_pending_land_is_observed_again_and_a_refusal_fails_the_node() {
     }
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Failed);
-    assert_eq!(land.advance_error_code.as_deref(), Some("land_refused"));
+    assert_eq!(land.advance_code.as_deref(), Some("land_refused"));
     assert_eq!(owner.lands.len(), 2);
     assert!(owner.lands.iter().all(|(_, head, _)| head == REPAIR_HEAD));
 }
@@ -1014,10 +1011,7 @@ fn a_failed_review_routed_to_land_never_calls_the_host() {
     assert!(owner.lands.is_empty());
     assert_eq!(land.state, NodeState::Failed);
     assert!(land.land.is_none());
-    assert_eq!(
-        land.advance_error_code.as_deref(),
-        Some("land_review_required")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
 }
 
 #[test]
@@ -1073,10 +1067,7 @@ fn reduced_review_requires_every_counted_member_to_judge_the_land_head() {
         );
         assert_eq!(!owner.lands.is_empty(), allowed);
         if !allowed {
-            assert_eq!(
-                land.advance_error_code.as_deref(),
-                Some("land_review_required")
-            );
+            assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
         }
     }
 }
@@ -1100,10 +1091,7 @@ fn ci_output_never_substitutes_for_review() {
     );
     assert!(owner.lands.is_empty(), "{:?}", owner.lands);
     assert_eq!(land.state, NodeState::Failed);
-    assert_eq!(
-        land.advance_error_code.as_deref(),
-        Some("land_review_required")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
 }
 
 #[test]
@@ -1139,16 +1127,13 @@ fn a_carried_over_head_lands_and_a_changed_delta_does_not() {
         let checkpoint = run(&document, &mut owner, &mut Journal::default());
         let land = node(&checkpoint, "land");
         if lands {
-            assert_eq!(land.state, NodeState::Succeeded, "{:?}", land.advance_error);
+            assert_eq!(land.state, NodeState::Succeeded, "{:?}", land.advance_note);
             assert_eq!(owner.lands.len(), 1);
             assert_eq!(owner.lands[0].1, REPAIR_HEAD);
         } else {
             assert!(owner.lands.is_empty(), "{:?}", owner.lands);
             assert_eq!(land.state, NodeState::Failed);
-            assert_eq!(
-                land.advance_error_code.as_deref(),
-                Some("land_review_required")
-            );
+            assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
         }
     }
 }
@@ -1176,10 +1161,7 @@ fn a_review_of_an_earlier_head_never_lands_a_continuation() {
     );
     assert!(owner.lands.is_empty());
     assert_eq!(land.state, NodeState::Failed);
-    assert_eq!(
-        land.advance_error_code.as_deref(),
-        Some("land_review_required")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
 
     // A reviewer pinned to the writer's commit judged H1 even when it ran
     // after the repair.
@@ -1188,10 +1170,7 @@ fn a_review_of_an_earlier_head_never_lands_a_continuation() {
     nodes[3]["depends_on"] = json!(["repair", "write"]);
     let (owner, land) = land_outcome(nodes, "VERDICT: PASS");
     assert!(owner.lands.is_empty());
-    assert_eq!(
-        land.advance_error_code.as_deref(),
-        Some("land_review_required")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
 }
 
 fn refusal(value: serde_json::Value) -> &'static str {
@@ -1288,7 +1267,7 @@ fn a_head_source_reviews_the_newest_continuation_and_lands_it() {
     let mut nodes = nodes("routine");
     nodes[3]["source"] = json!({"type":"head", "node":"write"});
     let (landed, land) = land_outcome(nodes.clone(), "VERDICT: PASS");
-    assert_eq!(land.state, NodeState::Succeeded, "{:?}", land.advance_error);
+    assert_eq!(land.state, NodeState::Succeeded, "{:?}", land.advance_note);
     assert_eq!(
         landed.lands,
         [(
@@ -1337,7 +1316,7 @@ fn a_head_source_inside_a_composite_names_an_outer_writer() {
         "depends_on":["repair"],
         "composite":{"nodes":[review], "exports":[{"node":"review", "outputs":["verdict"]}]}});
     let (owner, land) = land_outcome(nodes, "VERDICT: PASS");
-    assert_eq!(land.state, NodeState::Succeeded, "{:?}", land.advance_error);
+    assert_eq!(land.state, NodeState::Succeeded, "{:?}", land.advance_note);
     assert_eq!(owner.lands[0].1, REPAIR_HEAD);
 }
 
@@ -1370,10 +1349,7 @@ fn a_composite_verdict_binds_to_the_head_its_producer_reviewed() {
     let (owner, land) = land_outcome(nodes, "VERDICT: PASS");
     assert!(owner.lands.is_empty(), "{:?}", owner.lands);
     assert_eq!(land.state, NodeState::Failed);
-    assert_eq!(
-        land.advance_error_code.as_deref(),
-        Some("land_review_required")
-    );
+    assert_eq!(land.advance_code.as_deref(), Some("land_review_required"));
 }
 
 #[test]
@@ -1421,7 +1397,7 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
     assert!(node(&checkpoint, "accepted").gate.as_ref().unwrap().passed);
     assert_eq!(node(&checkpoint, "land").state, NodeState::Failed);
     assert_eq!(
-        node(&checkpoint, "land").advance_error_code.as_deref(),
+        node(&checkpoint, "land").advance_code.as_deref(),
         Some("land_review_required")
     );
     assert!(owner.lands.is_empty());

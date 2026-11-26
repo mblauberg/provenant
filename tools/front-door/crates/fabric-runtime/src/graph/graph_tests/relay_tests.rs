@@ -305,7 +305,7 @@ fn rich_child_attempt_controls_define_replay_identity_and_reach_the_launch() {
             AttemptObservation::Pending {
                 attempt_ref: Some("attempt-a".into()),
             },
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
@@ -326,8 +326,8 @@ fn rich_child_attempt_controls_define_replay_identity_and_reach_the_launch() {
         .unwrap();
     assert_eq!(owner.attempt_specs[launched].as_ref(), Some(&spec));
     owner.observations.extend([
-        terminal(AttemptOutcome::Succeeded),
-        terminal(AttemptOutcome::Succeeded),
+        terminal(GraphAttemptOutcome::Succeeded),
+        terminal(GraphAttemptOutcome::Succeeded),
     ]);
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
@@ -615,7 +615,7 @@ fn a_waiting_parent_yields_its_slot_to_its_child() {
     // A refused admission is terminal for the node; it has no queued state.
     assert_eq!(progress(&held, "a--fix").state, NodeState::Failed);
     assert_eq!(
-        progress(&held, "a--fix").advance_error_code.as_deref(),
+        progress(&held, "a--fix").advance_code.as_deref(),
         Some("concurrency_cap")
     );
 
@@ -748,7 +748,7 @@ fn detached_children_do_not_gate_their_parents_dependants() {
     assert!(cancelled.detached.is_empty());
 }
 
-fn settled_parent_stops_running_children(outcome: AttemptOutcome) {
+fn settled_parent_stops_running_children(outcome: GraphAttemptOutcome) {
     let (document, mut checkpoint) = live(None);
     add(&document, &mut checkpoint, "a", &child("stop", "stop")).unwrap();
     let mut keep = child("keep", "keep");
@@ -776,7 +776,7 @@ fn settled_parent_stops_running_children(outcome: AttemptOutcome) {
                 launched: true,
                 result: None,
                 attempt_ref: Some("attempt-a".into()),
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
             cause: None,
             },
@@ -830,7 +830,7 @@ fn unstarted_child_cancellation_survives_checkpoint_reload() {
         .unwrap();
     parent.state = NodeState::Failed;
     parent.attempts[0].state = AttemptState::Terminal;
-    parent.attempts[0].outcome = Some(AttemptOutcome::OtherFailure);
+    parent.attempts[0].outcome = Some(GraphAttemptOutcome::OtherFailure);
     let mut journal = MemoryJournal(Some(checkpoint));
     let mut owner = FakeOwner::default();
     advance(&document, &mut owner, &mut journal).unwrap();
@@ -1278,7 +1278,7 @@ fn successful_parent_closes_attached_children_but_not_detached_children() {
         .unwrap();
     parent.state = NodeState::Succeeded;
     parent.attempts[0].state = AttemptState::Terminal;
-    parent.attempts[0].outcome = Some(AttemptOutcome::Succeeded);
+    parent.attempts[0].outcome = Some(GraphAttemptOutcome::Succeeded);
     let mut journal = MemoryJournal(Some(checkpoint.clone()));
     relay::settle_subtrees(
         &document,
@@ -1387,23 +1387,23 @@ fn yielded_writer_parent_drains_more_children_than_the_slot_limit() {
             .find(|node| node.id == format!("a--c{index}"))
             .unwrap();
         completed.state = NodeState::Succeeded;
-        completed.advance_error_code = None;
-        completed.advance_error = None;
+        completed.advance_code = None;
+        completed.advance_note = None;
         for attempt in &mut completed.attempts {
             attempt.state = AttemptState::Terminal;
-            attempt.outcome = Some(AttemptOutcome::Succeeded);
+            attempt.outcome = Some(GraphAttemptOutcome::Succeeded);
         }
     }
 }
 
 #[test]
 fn failed_parent_stops_running_children_and_preserves_detached_subtrees() {
-    settled_parent_stops_running_children(AttemptOutcome::OtherFailure);
+    settled_parent_stops_running_children(GraphAttemptOutcome::OtherFailure);
 }
 
 #[test]
 fn successful_parent_stops_running_children_and_preserves_detached_subtrees() {
-    settled_parent_stops_running_children(AttemptOutcome::Succeeded);
+    settled_parent_stops_running_children(GraphAttemptOutcome::Succeeded);
 }
 
 #[test]
@@ -1452,7 +1452,7 @@ fn successful_final_patch_producer_leaves_its_planned_work_pending() {
         parent.state = NodeState::Succeeded;
         for attempt in &mut parent.attempts {
             attempt.state = AttemptState::Terminal;
-            attempt.outcome = Some(AttemptOutcome::Succeeded);
+            attempt.outcome = Some(GraphAttemptOutcome::Succeeded);
         }
     }
     relay::settle_subtrees(
@@ -1750,20 +1750,20 @@ fn honest_stop_continuation_replays_its_logical_parents_writer_child() {
     journal.0 = Some(checkpoint);
     owner.observations.extend([
         AttemptObservation::Terminal {
-            attempt_ref:Some("first-attempt".into()), outcome:AttemptOutcome::Succeeded, launched:true,
+            attempt_ref:Some("first-attempt".into()), outcome:GraphAttemptOutcome::Succeeded, launched:true,
             result:Some(Box::new(capture("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Continue checking\"}\n```"))),
             result_warning:None, result_path:None, branch:Some("parent".into()), commit:Some("a".repeat(40)),
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             stop: None,
         cause: None,
         },
         // The parent restarts in place, ahead of its child in plan order.
         AttemptObservation::Pending { attempt_ref:Some("continuation-attempt".into()) },
         AttemptObservation::Terminal {
-            attempt_ref:Some("child-attempt".into()), outcome:AttemptOutcome::Succeeded, launched:true,
+            attempt_ref:Some("child-attempt".into()), outcome:GraphAttemptOutcome::Succeeded, launched:true,
             result:Some(Box::new(capture("Child completed"))), result_warning:None, result_path:None,
             branch:Some("child".into()), commit:Some("a".repeat(40)),
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             stop: None,
         cause: None,
         },

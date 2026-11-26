@@ -10,8 +10,8 @@ fn cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key() {
             AttemptObservation::Pending {
                 attempt_ref: Some("host/attempt".into()),
             },
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
     };
@@ -75,7 +75,7 @@ fn resume_after_a_crash_before_the_reference_save_replays_under_the_launch_actor
     attempt.attempt_ref = None;
     let mut second = FakeOwner {
         actor: "actor-b".into(),
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
         ..FakeOwner::default()
     };
     resume(&document, &mut second, &mut journal).unwrap();
@@ -136,7 +136,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         ..Default::default()
     }]);
     let mut owner = FakeOwner {
-        observations: VecDeque::from([terminal(AttemptOutcome::TaskFailed)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::TaskFailed)]),
         ..FakeOwner::default()
     };
     let mut journal = MemoryJournal::default();
@@ -169,8 +169,8 @@ fn review_task_substitution_is_bounded_and_replays() {
             let document = graph(vec![review]);
             let mut owner = FakeOwner {
                 observations: VecDeque::from([
-                    terminal(AttemptOutcome::TaskFailed),
-                    terminal(AttemptOutcome::Succeeded),
+                    terminal(GraphAttemptOutcome::TaskFailed),
+                    terminal(GraphAttemptOutcome::Succeeded),
                 ]),
                 ..Default::default()
             };
@@ -223,7 +223,7 @@ fn lowered_substitution_limit_settles_an_unstarted_retry() {
     let document = graph(vec![review]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::TaskFailed),
+            terminal(GraphAttemptOutcome::TaskFailed),
             AttemptObservation::Pending { attempt_ref: None },
         ]),
         ..Default::default()
@@ -286,13 +286,13 @@ fn review_substitution_stops_at_the_limit_and_verifier_unblocks_synthesis() {
     for succeeds in [true, false] {
         let mut owner = FakeOwner {
             observations: VecDeque::from([
-                terminal(AttemptOutcome::TaskFailed),
+                terminal(GraphAttemptOutcome::TaskFailed),
                 terminal(if succeeds {
-                    AttemptOutcome::Succeeded
+                    GraphAttemptOutcome::Succeeded
                 } else {
-                    AttemptOutcome::TaskFailed
+                    GraphAttemptOutcome::TaskFailed
                 }),
-                terminal(AttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]),
             ..Default::default()
         };
@@ -322,9 +322,9 @@ fn verifier_preparation_substitution_requires_evidence_and_respects_limit() {
         let mut owner = FakeOwner {
             omit_fallback_evidence: !evidence,
             observations: VecDeque::from([
-                preparation_refusal("host/first", AttemptOutcome::AdapterUnavailable),
-                terminal(AttemptOutcome::Succeeded),
-                terminal(AttemptOutcome::Succeeded),
+                preparation_refusal("host/first", GraphAttemptOutcome::AdapterUnavailable),
+                terminal(GraphAttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]),
             ..Default::default()
         };
@@ -371,9 +371,9 @@ fn verifier_preparation_substitution_requires_evidence_and_respects_limit() {
     }
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            preparation_refusal("host/first", AttemptOutcome::AdapterUnavailable),
-            terminal(AttemptOutcome::TaskFailed),
-            terminal(AttemptOutcome::Succeeded),
+            preparation_refusal("host/first", GraphAttemptOutcome::AdapterUnavailable),
+            terminal(GraphAttemptOutcome::TaskFailed),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -398,22 +398,22 @@ fn review_substitute_keeps_writer_chain_exclusion() {
     review.routes = Some(vec![route("first"), route("second")]);
     let writer = AttemptObservation::Terminal {
         attempt_ref: Some("host/writer".into()),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: Some("writer".into()),
         commit: Some("3".repeat(40)),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };
     let mut owner = FakeOwner {
         observations: VecDeque::from([
             writer,
-            terminal(AttemptOutcome::TaskFailed),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::TaskFailed),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -442,7 +442,7 @@ fn review_substitute_prefers_a_new_family_but_can_use_the_same_family() {
         review.routes = Some(vec![alias.clone(), alias]);
         let mut first = done_as("host/first");
         if let AttemptObservation::Terminal { outcome, .. } = &mut first {
-            *outcome = AttemptOutcome::TaskFailed;
+            *outcome = GraphAttemptOutcome::TaskFailed;
         }
         let mut owner = FakeOwner {
             observations: VecDeque::from([first, done_as("host/second")]),
@@ -508,7 +508,7 @@ fn configured_graph_concurrency_refusal_uses_the_owner_policy() {
         .unwrap();
     assert_eq!(refused.state, NodeState::Failed);
     assert_eq!(
-        refused.advance_error_code.as_deref(),
+        refused.advance_code.as_deref(),
         Some("concurrency_cap")
     );
     assert!(refused.concurrency_warning.is_none());
@@ -563,17 +563,17 @@ fn refused_steer_successor_pauses_the_graph_for_retry() {
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some(".worktrees/writer".into());
     let document = graph(vec![writer]);
-    let mut stopped = terminal(AttemptOutcome::OtherFailure);
+    let mut stopped = terminal(GraphAttemptOutcome::OtherFailure);
     if let AttemptObservation::Terminal {
         attempt_ref,
         stop,
-        settlement_reason,
+        settlement_class,
         ..
     } = &mut stopped
     {
         *attempt_ref = Some("host/attempt".into());
         *stop = Some(provenant_records::StopCause::Steered);
-        *settlement_reason = Some(provenant_records::run::SettlementReason::Steered);
+        *settlement_class = Some(provenant_records::run::SettlementClass::Steered);
     }
     let mut owner = FakeOwner {
         observations: VecDeque::from([stopped]),
@@ -586,7 +586,7 @@ fn refused_steer_successor_pauses_the_graph_for_retry() {
     assert_eq!(run.outcome, None);
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(
-        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        run.checkpoint.nodes[0].advance_code.as_deref(),
         Some("steer_continuation_refused")
     );
     assert_eq!(owner.calls.len(), 1);

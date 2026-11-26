@@ -248,10 +248,10 @@ mod graph_writer_admission_tests {
                 Ok(
                     provenant_fabric_runtime::graph::AttemptObservation::Terminal {
                         attempt_ref: None,
-                        settlement_reason: Some(
-                            provenant_records::run::SettlementReason::Completed,
+                        settlement_class: Some(
+                            provenant_records::run::SettlementClass::Completed,
                         ),
-                        outcome: provenant_fabric_runtime::graph::AttemptOutcome::Succeeded,
+                        outcome: provenant_fabric_runtime::graph::GraphAttemptOutcome::Succeeded,
                         launched: true,
                         result: None,
                         result_warning: None,
@@ -968,7 +968,7 @@ mod graph_writer_admission_tests {
         let first = advance(&document, &mut owner, &mut journal)?;
         let node = &first.checkpoint.nodes[0];
         assert_eq!(node.state, NodeState::Failed, "{node:?}");
-        assert_ne!(node.advance_error_code.as_deref(), Some("launch_refused"));
+        assert_ne!(node.advance_code.as_deref(), Some("launch_refused"));
         assert_eq!(node.attempts.len(), 2);
         assert_eq!(node.attempts[0].key.route_index, 0);
         assert_eq!(node.attempts[1].key.route_index, 1);
@@ -984,7 +984,7 @@ mod graph_writer_admission_tests {
         let saved = graph::FileJournal::read_checkpoint(&roots.state, project, &document.graph_id)?
             .ok_or("checkpoint")?;
         assert_eq!(saved.nodes[0].state, NodeState::Failed);
-        assert_eq!(saved.nodes[0].advance_error_code, node.advance_error_code);
+        assert_eq!(saved.nodes[0].advance_code, node.advance_code);
         let operation_id = graph_operation("graph-attempt-operation", &node.attempts[0].key)?;
         let binary = BinaryRunOwner {
             factory: &factory,
@@ -1034,15 +1034,15 @@ mod graph_writer_admission_tests {
                 .all(|lane| lane.provider_launched == Some(false))
         );
         for cause in [
-            provenant_records::run::TerminalCause::DiskFloor,
-            provenant_records::run::TerminalCause::DiskObservationUnavailable,
-            provenant_records::run::TerminalCause::RetainedWriterImport,
+            provenant_records::run::CauseKind::DiskFloor,
+            provenant_records::run::CauseKind::DiskObservationUnavailable,
+            provenant_records::run::CauseKind::RetainedWriterImport,
         ] {
             let mut refused = lanes[0].clone();
-            if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } =
+            if let provenant_records::run::AttemptState::Terminal { cause, .. } =
                 &mut refused.state
             {
-                *terminal_cause = Some(cause);
+                *cause = Some(cause);
             }
             assert!(durable_launch_refusal(&[refused.clone()]).is_some());
             assert!(durable_launch_refusal(&[refused, lanes[0].clone()]).is_none());
@@ -1078,10 +1078,10 @@ mod graph_writer_admission_tests {
         // child_reason is a Preparation refusal even though its cause names
         // access policy. Persist that exact producer shape and replay it.
         let mut child_preparation = lanes[0].clone();
-        if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } =
+        if let provenant_records::run::AttemptState::Terminal { cause, .. } =
             &mut child_preparation.state
         {
-            *terminal_cause = Some(provenant_records::run::TerminalCause::AccessPolicyRefused);
+            *cause = Some(provenant_records::run::CauseKind::AccessPolicyRefused);
         }
         assert!(durable_launch_refusal(&[child_preparation.clone()]).is_none());
         let mut launched_failure = lanes[0].clone();
@@ -1091,14 +1091,14 @@ mod graph_writer_admission_tests {
         {
             *outcome = provenant_records::run::Outcome::Failed;
         }
-        launched_failure.settlement_reason = Some(provenant_records::run::SettlementReason::Failed);
+        launched_failure.settlement_class = Some(provenant_records::run::SettlementClass::Failed);
         assert!(durable_launch_refusal(&[launched_failure.clone()]).is_none());
         assert!(durable_launch_refusal(&[lanes[0].clone(), launched_failure]).is_none());
         let attempt = lanes[0].attempt_id;
-        let sealed = |cause: provenant_records::run::TerminalCause| -> Result<provenant_run::AttemptRecord, Box<dyn std::error::Error>> {
+        let sealed = |cause: provenant_records::run::CauseKind| -> Result<provenant_run::AttemptRecord, Box<dyn std::error::Error>> {
             let mut lane = lanes[0].clone();
-            if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } = &mut lane.state {
-                *terminal_cause = Some(cause);
+            if let provenant_records::run::AttemptState::Terminal { cause, .. } = &mut lane.state {
+                *cause = Some(cause);
             }
             Ok(lane)
         };
@@ -1125,7 +1125,7 @@ mod graph_writer_admission_tests {
                 reason: "HOST_DISK_ERROR_SENTINEL".into(),
                 kind,
             }];
-            let lane = sealed(provenant_records::run::TerminalCause::DiskFloor)?;
+            let lane = sealed(provenant_records::run::CauseKind::DiskFloor)?;
             let first = launch_refusal(&started, std::slice::from_ref(&lane));
             let replay = launch_refusal(&[], &[lane]);
             let Some(FacadeError::DispatchRefused { reason, .. }) = first else {
@@ -1133,7 +1133,7 @@ mod graph_writer_admission_tests {
             };
             assert!(!reason.contains("HOST_DISK_ERROR_SENTINEL"), "{reason}");
             assert!(matches!(replay, Some(FacadeError::DispatchRefused { .. })));
-            let ordinary = sealed(provenant_records::run::TerminalCause::RouteResolutionRefused)?;
+            let ordinary = sealed(provenant_records::run::CauseKind::RouteResolutionRefused)?;
             assert!(launch_refusal(&started, std::slice::from_ref(&ordinary)).is_none());
             assert!(launch_refusal(&[], &[ordinary]).is_none());
         }
@@ -1944,7 +1944,7 @@ mod result_tests {
             "schema_version": 2, "graph_id": "fixture", "plan_digest": "digest",
             "nodes": [
                 {"id":"ordinary", "state":"failed", "worktree":null,
-                 "advance_error":"repair this", "attempts":[
+                 "advance_note":"repair this", "attempts":[
                     {"launched":true,"key":{"graph_id":"fixture","node_id":"ordinary","route_index":0, "attempt": 1},
                      "route":{"alias":"first"},"state":"terminal","attempt_ref":"old","outcome":"task_failed","launch_actor":"actor"},
                     {"launched":true,"key":{"graph_id":"fixture","node_id":"ordinary","route_index":1, "attempt": 2},
@@ -2163,7 +2163,7 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[1];
         node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some("blocked by ordinary (Failed)".into());
+        node.advance_note = Some("blocked by ordinary (Failed)".into());
         assert!(
             super::graph_human(&run).contains("composite: Blocked (blocked by ordinary (Failed))")
         );
@@ -2180,7 +2180,7 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[0];
         node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some("node ordinary: the launch failed [invalid_input]: input exceeds the 1 MiB limit; check the named input field and retry".into());
+        node.advance_note = Some("node ordinary: the launch failed [invalid_input]: input exceeds the 1 MiB limit; check the named input field and retry".into());
         let human = super::graph_human(&run);
         let machine = serde_json::to_value(&run).unwrap();
         for text in [human, machine.to_string()] {
@@ -2207,7 +2207,7 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[0];
         node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some(format!(
+        node.advance_note = Some(format!(
             "node ordinary: the launch failed: [{}] {}; {}",
             diagnostic.code,
             diagnostic.next.unwrap(),
@@ -2274,7 +2274,7 @@ mod result_tests {
             .attempts
             .last_mut()
             .unwrap()
-            .outcome = Some(provenant_fabric_runtime::graph::AttemptOutcome::ReviewRequired);
+            .outcome = Some(provenant_fabric_runtime::graph::GraphAttemptOutcome::ReviewRequired);
         assert!(super::graph_human::graph_human_full(&review).contains("outcome=ReviewRequired"));
         assert!(rows[1].contains("route=none attempt=none"));
         assert!(rows[2].contains("CI waiting elapsed=12s checks=build head=abc"));
@@ -2631,8 +2631,8 @@ mod result_tests {
             detail: None,
             projection: None,
         });
-        checkpoint.nodes[0].advance_error = refusal.diagnostic().detail;
-        checkpoint.nodes[0].advance_error_code = Some("dispatch_refused".into());
+        checkpoint.nodes[0].advance_note = refusal.diagnostic().detail;
+        checkpoint.nodes[0].advance_code = Some("dispatch_refused".into());
         checkpoint.nodes[0].attempts.clear();
         let display = "node ordinary expansion paused: planner fragment invalid: invalid fragment: missing nodes; fallback expansion paused: source requires a full commit ID";
         checkpoint.set_pause(
@@ -2687,14 +2687,14 @@ mod result_tests {
                 .unwrap()
                 .contains("invalid fragment: missing nodes")
         );
-        let refusal_reason = status.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+        let refusal_reason = status.checkpoint.nodes[0].advance_note.as_deref().unwrap();
         assert!(refusal_reason.contains("setup script failed: missing pnpm"));
         assert!(refusal_reason.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
         assert!(!refusal_reason.contains("receipt"));
         assert!(status.checkpoint.nodes[0].attempts.is_empty());
         assert!(human.contains("setup script failed: missing pnpm"));
         assert!(
-            json["checkpoint"]["nodes"][0]["advance_error"]
+            json["checkpoint"]["nodes"][0]["advance_note"]
                 .as_str()
                 .unwrap()
                 .contains("setup script failed: missing pnpm")
@@ -2945,8 +2945,8 @@ mod result_tests {
                 capture.push(b"bounded producer excerpt");
                 Ok(graph::AttemptObservation::Terminal {
                     attempt_ref: producer.then(|| self.reference.clone()),
-                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
-                    outcome: graph::AttemptOutcome::Succeeded,
+                    settlement_class: Some(provenant_records::run::SettlementClass::Completed),
+                    outcome: graph::GraphAttemptOutcome::Succeeded,
                     launched: true,
                     result: Some(Box::new(capture.finish())),
                     result_warning: None,
@@ -3557,8 +3557,8 @@ mod retry_allowance_tests {
         ) -> Result<graph::AttemptObservation, Self::Error> {
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
-                outcome: graph::AttemptOutcome::Succeeded,
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: false,
                 result: None,
                 result_warning: None,
@@ -4169,9 +4169,9 @@ mod provisioned_writer_submission_tests {
         assert_eq!(
             fact.terminal_state,
             if quota {
-                provenant_records::AttemptOutcome::QuotaLimited
+                provenant_records::run::Outcome::QuotaLimited
             } else {
-                provenant_records::AttemptOutcome::Succeeded
+                provenant_records::run::Outcome::Succeeded
             }
         );
         use graph::AttemptOwner as _;

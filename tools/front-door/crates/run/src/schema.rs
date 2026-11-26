@@ -1,6 +1,6 @@
 provenant_sqlite::Schema {
     sql: include_str!("schema.sql"),
-    version: 14,
+    version: 15,
     migrations: &[
         provenant_sqlite::Migration {
             from: 12,
@@ -11,6 +11,11 @@ provenant_sqlite::Schema {
             from: 13,
             to: 14,
             sql: include_str!("migration_13_14.sql"),
+        },
+        provenant_sqlite::Migration {
+            from: 14,
+            to: 15,
+            sql: include_str!("migration_14_15.sql"),
         },
     ],
     steps: &[

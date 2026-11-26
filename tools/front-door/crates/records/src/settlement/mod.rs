@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::declaration::{DeclarationCounts, DeclarationEvidence};
 use crate::handoff::Handoff;
 use crate::run::{
-    CauseSource, Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason, TerminalCause,
-    TerminalEvidence,
+    CauseKind, CauseSource, DependantRelease, Outcome, SettlementClass, SettlementSignal,
+    TerminalBasis,
 };
 use crate::settlement::policy::{AppliedPolicy, SettlementPolicy};
 use crate::stop::Stop;
@@ -21,7 +21,7 @@ pub const SETTLEMENT_EVIDENCE_SCHEMA: u64 = 1;
 pub struct SettlementEvidence {
     pub schema_version: u64,
     pub lane: LaneRole,
-    pub host: HostVerdict,
+    pub host: HostFacts,
     pub handoff: DeclarationEvidence,
     /// Every declaration line, not just the one that settled the lane.
     #[serde(default)]
@@ -53,16 +53,16 @@ pub enum LaneRole {
 /// The holder's host phase result, before settlement classification.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct HostVerdict {
+pub struct HostFacts {
     pub outcome: Outcome,
-    pub cause: Option<TerminalCause>,
+    pub cause: Option<CauseKind>,
     pub complete: bool,
     pub result_empty: bool,
     pub reason: Option<String>,
     pub terminal_note: Option<String>,
-    pub signals: Vec<PartialSignal>,
+    pub signals: Vec<SettlementSignal>,
     pub denial: Option<String>,
-    pub stopped_handoff: Option<Handoff>,
+    pub host_handoff: Option<Handoff>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,7 +74,7 @@ pub struct CustodyFacts {
     pub cancellation_delivered: Option<bool>,
     pub import_cancelled: bool,
     pub process_exit: bool,
-    pub stall: Option<TerminalCause>,
+    pub stall: Option<CauseKind>,
     pub identity: IdentityEvidence,
 }
 
@@ -98,8 +98,8 @@ pub enum IdentityPolicyEffect {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct GitEvidence {
-    pub pinned: Option<crate::GitOid>,
-    pub head: Option<crate::GitOid>,
+    pub input_head: Option<crate::GitOid>,
+    pub writer_head: Option<crate::GitOid>,
     pub uncommitted: Option<String>,
     /// The bounded, sorted paths behind the census note. Diagnostic only:
     /// the classifier keeps deciding from `uncommitted`.
@@ -112,11 +112,11 @@ pub struct GitEvidence {
     pub primary: PrimaryCheckout,
 }
 impl GitEvidence {
-    pub fn progress(&self) -> Progress {
-        match (&self.pinned, &self.head) {
-            (Some(pinned), Some(head)) if pinned == head => Progress::Unchanged,
-            (Some(_), Some(_)) => Progress::Moved,
-            _ => Progress::Unknown,
+    pub fn head_progress(&self) -> HeadProgress {
+        match (&self.input_head, &self.writer_head) {
+            (Some(pinned), Some(head)) if pinned == head => HeadProgress::Unchanged,
+            (Some(_), Some(_)) => HeadProgress::Moved,
+            _ => HeadProgress::Unknown,
         }
     }
 }
@@ -133,7 +133,7 @@ pub enum PrimaryCheckout {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Progress {
+pub enum HeadProgress {
     Moved,
     Unchanged,
     Unknown,
@@ -143,14 +143,14 @@ pub enum Progress {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OutcomeFact {
     pub outcome: Outcome,
-    pub cause: Option<TerminalCause>,
-    pub settlement_reason: SettlementReason,
+    pub cause: Option<CauseKind>,
+    pub settlement_class: SettlementClass,
     pub stop: Option<Stop>,
-    pub source: CauseSource,
-    pub node: SettlementNodeOutcome,
-    pub terminal_evidence: TerminalEvidence,
-    pub signals: Vec<PartialSignal>,
-    pub progress: Option<Progress>,
+    pub cause_source: CauseSource,
+    pub release: DependantRelease,
+    pub terminal_basis: TerminalBasis,
+    pub signals: Vec<SettlementSignal>,
+    pub head_progress: Option<HeadProgress>,
     pub handoff: crate::handoff::HandoffResult,
     pub handoff_source: Option<HandoffSource>,
     /// Declaration counts, absent for lanes that owe no handoff.
@@ -166,11 +166,11 @@ pub struct OutcomeFact {
 #[cfg(any(test, feature = "fixture"))]
 impl SettlementEvidence {
     /// A launched, complete fixture with no declaration or Git evidence.
-    pub fn fixture(lane: LaneRole, outcome: Outcome, cause: Option<TerminalCause>) -> Self {
+    pub fn fixture(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> Self {
         Self {
             schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
             lane,
-            host: HostVerdict {
+            host: HostFacts {
                 outcome,
                 cause,
                 complete: true,
@@ -180,7 +180,7 @@ impl SettlementEvidence {
                 terminal_note: None,
                 signals: vec![],
                 denial: None,
-                stopped_handoff: None,
+                host_handoff: None,
             },
             handoff: DeclarationEvidence::Missing,
             declarations: DeclarationCounts::default(),

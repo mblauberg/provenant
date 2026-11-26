@@ -411,15 +411,15 @@ pub(super) fn graph_snapshot(
     } else {
         GraphStatus::Pending
     };
-    let advance_error = checkpoint
+    let advance_note = checkpoint
         .nodes
         .iter()
-        .find_map(|node| node.advance_error.clone());
+        .find_map(|node| node.advance_note.clone());
     GraphRun {
         status,
         outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
         checkpoint,
-        advance_error,
+        advance_note,
     }
 }
 
@@ -592,8 +592,8 @@ mod tests {
             }),
             json!({
                 "kind":"attempt","work_key":key,"state":"terminal",
-                "outcome":"rejected","terminal_cause":"handoff_refused",
-                "cause_code":"handoff_refused","result_path":null,
+                "outcome":"rejected","cause":"launch_handoff_refused",
+                "cause_code":"launch_handoff_refused","result_path":null,
                 "reason":"writer lineage: invalid run record: graph predecessor writer or source"
             }),
         ];
@@ -614,7 +614,7 @@ mod tests {
             digest.line
         );
         assert!(
-            !digest.line.contains("cause=handoff_refused"),
+            !digest.line.contains("cause=launch_handoff_refused"),
             "the refused attempt replaced the successful one: {}",
             digest.line
         );

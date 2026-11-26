@@ -29,13 +29,13 @@ fn cancellation_outcome_is_consistent(
     delivered: Option<bool>,
     identity: ProviderIdentityEvidence,
     outcome: Outcome,
-    cause: Option<TerminalCause>,
+    cause: Option<CauseKind>,
 ) -> bool {
     if delivered != Some(true) || outcome == Outcome::Cancelled {
         return true;
     }
     if identity.has_conflict() {
-        outcome == Outcome::Failed && cause == Some(TerminalCause::IdentityMismatch)
+        outcome == Outcome::Failed && cause == Some(CauseKind::IdentityMismatch)
     } else {
         identity.is_incomplete() && outcome == Outcome::Unsettled && cause.is_none()
     }
@@ -150,7 +150,7 @@ pub struct TerminalPublication<'a> {
     pub session: Option<String>,
 }
 pub(crate) struct Withdrawal<'a> {
-    pub terminal_cause: Option<TerminalCause>,
+    pub cause: Option<CauseKind>,
     pub terminal_note: Option<String>,
     pub expected: AttemptState,
     pub outcome: Outcome,
@@ -713,16 +713,11 @@ impl RunStore {
                 return Err(RunError::Conflict);
             }
             if pending.schema_version == 2 {
-                let AttemptState::Terminal {
-                    outcome,
-                    terminal_cause,
-                    ..
-                } = pending.state
-                else {
+                let AttemptState::Terminal { outcome, cause, .. } = pending.state else {
                     return Err(RunError::Conflict);
                 };
                 let owner_stopped_after_exit = outcome == Outcome::Cancelled
-                    && pending.terminal_evidence == Some(TerminalEvidence::ProcessExit)
+                    && pending.terminal_basis == Some(TerminalBasis::ProcessExit)
                     && matches!(
                         pending.cancellation_disposition,
                         Some(
@@ -740,7 +735,7 @@ impl RunStore {
                     && !owner_stopped_after_exit
                     && !stored.never_spawned
                     && stored.cancel_delivered_before_exit != Some(true)
-                    && !(pending.terminal_evidence == Some(TerminalEvidence::ImportCancellation)
+                    && !(pending.terminal_basis == Some(TerminalBasis::ImportCancellation)
                         && import_cancelled(&dir, Self::scope(&current))?))
                     || (outcome == Outcome::Cancelled
                         && !owner_stopped_after_exit
@@ -759,7 +754,7 @@ impl RunStore {
                             stored.cancel_delivered_before_exit,
                         ),
                         outcome,
-                        terminal_cause,
+                        cause,
                     )
                 {
                     return Err(RunError::Conflict);
@@ -1003,8 +998,8 @@ impl RunStore {
                 limits: None,
                 schema_version: 2, attempt_id, project_id: context.project_id, attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
                 delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, steering: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, stop_work: None, warnings: Vec::new(), verified_owner: Some(context.actor_id), session: None,
-                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, process_observation_valid: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
-                terminal_evidence: None, settlement_reason: None, progress: None, settlement_evidence: None, declarations: None, handoff_source: None, settlement_policy_applied: Vec::new(), cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
+                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, process_observation_valid: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
+                terminal_basis: None, settlement_class: None, head_progress: None, settlement_evidence: None, declarations: None, handoff_source: None, settlement_policy_applied: Vec::new(), cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                 prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: input.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                 trace: provenant_records::Trace {extra: Default::default(),
                     telemetry_context: Some(telemetry_context.clone()),
@@ -1091,7 +1086,7 @@ impl RunStore {
             Outcome::Succeeded | Outcome::ReviewRequired
         ) && (exit.never_spawned
             || (outcome_exit != Some(0)
-                && publication.fact.settlement_reason != SettlementReason::CompletedBeforeBudget))
+                && publication.fact.settlement_class != SettlementClass::CompletedBeforeBudget))
         {
             return Err(RunError::Validation("success lacks verified provider exit"));
         }
@@ -1168,7 +1163,7 @@ impl RunStore {
                 reason,
                 finished_at,
                 failure: None,
-                terminal_cause: None,
+                cause: None,
                 terminal_note: None,
             },
             call,
@@ -1207,13 +1202,13 @@ impl RunStore {
             reason,
             finished_at,
             failure,
-            terminal_cause,
+            cause,
             terminal_note,
         } = withdrawal;
         // A refusal whose producer named no cause is recorded as unrecorded,
         // never as a cause the host did not observe.
-        let terminal_cause = terminal_cause
-            .or_else(|| (outcome == Outcome::Rejected).then_some(TerminalCause::Unrecorded));
+        let cause =
+            cause.or_else(|| (outcome == Outcome::Rejected).then_some(CauseKind::Unrecorded));
         if failure.is_some()
             && !matches!(
                 expected,
@@ -1258,7 +1253,7 @@ impl RunStore {
         let attempt_dir = self.attempt_dir(id, true)?;
         // An interrupted withdrawal resumes its own sealed facts, so a retry
         // never renders a second finished_at or reason.
-        let (outcome, finished_at, reason, preparation_failure, terminal_cause, terminal_note) =
+        let (outcome, finished_at, reason, preparation_failure, cause, terminal_note) =
             match read_sealed(
                 &attempt_dir,
                 AttemptFile::TerminalPending.name(),
@@ -1276,7 +1271,7 @@ impl RunStore {
                             exit_code: None,
                             finished_at,
                             reason,
-                            terminal_cause,
+                            cause,
                             terminal_note,
                             ..
                         } if saved.attempt_id == id
@@ -1291,7 +1286,7 @@ impl RunStore {
                                 finished_at,
                                 reason,
                                 saved.preparation_failure,
-                                terminal_cause,
+                                cause,
                                 terminal_note,
                             )
                         }
@@ -1303,14 +1298,14 @@ impl RunStore {
                     finished_at,
                     Some(reason.chars().take(256).collect()),
                     failure,
-                    terminal_cause,
+                    cause,
                     terminal_note,
                 ),
             };
         old.preparation_failure = preparation_failure;
         let safe_state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause,
+            cause,
             terminal_note: terminal_note.clone(),
             stop: None,
             outcome,
@@ -1323,22 +1318,22 @@ impl RunStore {
             .unwrap_or_default();
         let refusal_result = provenant_core::bounded_line(&raw_refusal, 256);
         use provenant_records::settlement::{
-            CustodyFacts, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
+            CustodyFacts, HostFacts, IdentityEvidence, IdentityPolicyEffect, LaneRole,
             SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence, classify::settle,
         };
         let evidence = SettlementEvidence {
             schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
             lane: LaneRole::Reader,
-            host: HostVerdict {
+            host: HostFacts {
                 outcome,
-                cause: terminal_cause,
+                cause: cause,
                 complete: true,
                 result_empty: false,
                 reason,
                 terminal_note,
                 signals: Vec::new(),
                 denial: None,
-                stopped_handoff: None,
+                host_handoff: None,
             },
             handoff: provenant_records::declaration::DeclarationEvidence::Missing,
             declarations: Default::default(),
@@ -1657,7 +1652,7 @@ impl RunStore {
         .permits_success(&publication.fact.signals);
         let identity_permitted = identity_verified
             || (publication.fact.outcome == Outcome::ReviewRequired
-                && publication.fact.cause == Some(TerminalCause::IdentityMismatch));
+                && publication.fact.cause == Some(CauseKind::IdentityMismatch));
         if matches!(
             publication.fact.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired
@@ -1677,7 +1672,7 @@ impl RunStore {
         next.applied_route = publication.applied_route.clone();
         next.observed_route = publication.observed_route.clone();
         next.usage = publication.usage.clone();
-        next.partial_signals.clone_from(&publication.fact.signals);
+        next.signals.clone_from(&publication.fact.signals);
         next.session = publication.session.clone();
         next.result = Some(ArtifactRecord {
             extra: Default::default(),
@@ -1691,7 +1686,7 @@ impl RunStore {
             && import_cancelled(&self.attempt_dir(id, false)?, Self::scope(&old))?;
         next.state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: publication.fact.cause,
+            cause: publication.fact.cause,
             terminal_note: publication
                 .fact
                 .terminal_note
@@ -1704,9 +1699,9 @@ impl RunStore {
             reason: publication.fact.reason.clone(),
         };
         next.schema_version = 2;
-        next.terminal_evidence = Some(publication.fact.terminal_evidence.clone());
-        next.settlement_reason = Some(publication.fact.settlement_reason);
-        next.progress = publication.fact.progress.clone();
+        next.terminal_basis = Some(publication.fact.terminal_basis.clone());
+        next.settlement_class = Some(publication.fact.settlement_class);
+        next.head_progress = publication.fact.head_progress.clone();
         next.settlement_evidence = publication.evidence;
         next.declarations = publication.fact.declarations;
         next.handoff_source = publication.fact.handoff_source;
@@ -1718,7 +1713,7 @@ impl RunStore {
         if import_cancellation {
             next.cancellation_disposition = Some(CancellationDisposition::ImportEffective);
         } else if publication.fact.outcome == Outcome::Cancelled
-            && publication.fact.cause != Some(TerminalCause::Steered)
+            && publication.fact.cause != Some(CauseKind::Steered)
             && ((!launched && decision == TerminalDecision::Ordinary)
                 || cancellation_delivered == Some(true))
         {
@@ -1733,7 +1728,7 @@ impl RunStore {
                             == old.verified_owner.unwrap_or(self.context.actor_id) =>
                 {
                     next.cancellation_disposition =
-                        Some(if publication.fact.cause == Some(TerminalCause::Steered) {
+                        Some(if publication.fact.cause == Some(CauseKind::Steered) {
                             CancellationDisposition::Unknown
                         } else {
                             match cancellation_delivered {
@@ -1942,14 +1937,14 @@ impl RunStore {
         };
         let revision = old.revision;
         use provenant_records::settlement::{
-            CustodyFacts, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
+            CustodyFacts, HostFacts, IdentityEvidence, IdentityPolicyEffect, LaneRole,
             SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence, classify::settle,
         };
         let bounded_reason = provenant_core::bounded_line(reason, 4096);
         let evidence = SettlementEvidence {
             schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
             lane: LaneRole::Reader,
-            host: HostVerdict {
+            host: HostFacts {
                 outcome: Outcome::Cancelled,
                 cause: None,
                 complete: true,
@@ -1958,7 +1953,7 @@ impl RunStore {
                 terminal_note: None,
                 signals: Vec::new(),
                 denial: None,
-                stopped_handoff: None,
+                host_handoff: None,
             },
             handoff: provenant_records::declaration::DeclarationEvidence::Missing,
             declarations: Default::default(),
@@ -2039,13 +2034,13 @@ impl RunStore {
         next.revision = old.revision.checked_add(1).ok_or(RunError::Conflict)?;
         crate::launch::mark_admission_release_pending(&mut next)?;
         next.schema_version = 2;
-        next.terminal_evidence = Some(TerminalEvidence::Lost {
+        next.terminal_basis = Some(TerminalBasis::Lost {
             reason: reason.into(),
         });
-        next.settlement_reason = Some(SettlementReason::Lost);
+        next.settlement_class = Some(SettlementClass::Lost);
         next.state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: Outcome::Lost,

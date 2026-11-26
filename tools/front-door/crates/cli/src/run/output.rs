@@ -858,7 +858,7 @@ fn output_read(
         true,
     );
     if let (Some(data), Some(row)) = (data.as_object_mut(), json!(projected).as_object()) {
-        data.remove("settlement_reason");
+        data.remove("settlement_class");
         if let Some(grants) = data.get_mut("grants").and_then(Value::as_object_mut) {
             for field in ["write_grants", "read_only_writable"] {
                 if let Some(value) = row.get(field) {
@@ -1068,7 +1068,7 @@ fn output_read_part(
             "attempt_id": id,
             "state": state,
             "reason": reason,
-            "settlement_reason": record.settlement_reason,
+            "settlement_class": record.settlement_class,
             "part": format!("{:?}", command.part).to_lowercase(),
             "offset": chunk.offset,
             "next_offset": chunk.next_offset,

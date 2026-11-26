@@ -1002,8 +1002,8 @@ mod launch_report_tests {
     #[test]
     fn launch_report_distinguishes_refusal_mixed_and_fallback() {
         let rows = vec![
-            json!({"kind":"attempt", "attempt_id":"host/one", "settlement_reason":"pre_launch_refusal", "preparation_failure":"auth_required"}),
-            json!({"kind":"attempt", "attempt_id":"host/two", "settlement_reason":"pre_launch_refusal", "preparation_failure":"usage_limited"}),
+            json!({"kind":"attempt", "attempt_id":"host/one", "settlement_class":"pre_launch_refusal", "preparation_failure":"auth_required"}),
+            json!({"kind":"attempt", "attempt_id":"host/two", "settlement_class":"pre_launch_refusal", "preparation_failure":"usage_limited"}),
         ];
         let attempt = |id: &str, launched: bool| json!({"attempt_ref":id,"launched":launched});
         let mut all = json!({"status":"complete","outcome":"failed","checkpoint":{"nodes":[{"attempts":[attempt("host/one", false)]},{"attempts":[attempt("host/two", false)]}]}});
@@ -1061,7 +1061,7 @@ mod launch_report_tests {
 fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
     let refusals: Vec<_> = rows
         .iter()
-        .filter(|row| row["kind"] == "attempt" && row["settlement_reason"] == "pre_launch_refusal")
+        .filter(|row| row["kind"] == "attempt" && row["settlement_class"] == "pre_launch_refusal")
         .cloned()
         .collect();
     if refusals.is_empty() {

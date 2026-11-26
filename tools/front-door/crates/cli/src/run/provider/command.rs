@@ -15,10 +15,10 @@ fn unavailable(message: String) -> PrepareError {
 /// operator's own `argv[0]`, not the OS error, which may echo other paths.
 fn executable_unavailable(program: &str) -> PrepareError {
     PrepareError::Refusal {
-        message: provenant_records::run::TerminalCause::CommandUnavailable
+        message: provenant_records::run::CauseKind::CommandUnavailable
             .detail()
             .into(),
-        cause: provenant_records::run::TerminalCause::CommandUnavailable,
+        cause: provenant_records::run::CauseKind::CommandUnavailable,
         fallback_outcome: Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
         note: Some(format!(
             "executable {}",
@@ -583,10 +583,7 @@ mod refusal_tests {
         else {
             unreachable!();
         };
-        assert_eq!(
-            cause,
-            provenant_records::run::TerminalCause::CommandUnavailable
-        );
+        assert_eq!(cause, provenant_records::run::CauseKind::CommandUnavailable);
         assert_eq!(message, cause.detail());
         assert!(message.contains("domains.fabric.commands"));
         assert_eq!(note.as_deref(), Some("executable fixture-tool"));

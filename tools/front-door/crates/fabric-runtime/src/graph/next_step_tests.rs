@@ -148,13 +148,13 @@ fn document(access: &str, on_stop: serde_json::Value) -> GraphDocument {
 
 fn terminal(
     reference: &str,
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     stop: Option<StopCause>,
     result: Option<&str>,
 ) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some(reference.into()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         outcome,
         launched: true,
         result: result.map(|text| {
@@ -174,7 +174,7 @@ fn terminal(
 }
 
 fn done(reference: &str) -> AttemptObservation {
-    terminal(reference, AttemptOutcome::Succeeded, None, None)
+    terminal(reference, GraphAttemptOutcome::Succeeded, None, None)
 }
 
 /// Small: final handoff status, committed work and the host's no-work evidence
@@ -191,9 +191,9 @@ fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
         let mut observation = terminal(
             "a/1",
             if status.is_some() {
-                AttemptOutcome::Succeeded
+                GraphAttemptOutcome::Succeeded
             } else {
-                AttemptOutcome::StoppedNoWork
+                GraphAttemptOutcome::StoppedNoWork
             },
             None,
             text.as_deref(),
@@ -211,16 +211,16 @@ fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
             assert_eq!(progress.state, NodeState::Succeeded);
             assert_eq!(
                 progress.attempts[0].outcome,
-                Some(AttemptOutcome::Succeeded)
+                Some(GraphAttemptOutcome::Succeeded)
             );
             assert!(run.checkpoint.pause.is_none());
         } else {
             assert_eq!(
                 progress.attempts[0].outcome,
                 Some(if status.is_some() {
-                    AttemptOutcome::DeclaredStop
+                    GraphAttemptOutcome::DeclaredStop
                 } else {
-                    AttemptOutcome::StoppedNoWork
+                    GraphAttemptOutcome::StoppedNoWork
                 })
             );
             assert!(run.checkpoint.pause.is_some());
@@ -229,7 +229,7 @@ fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
                 assert_eq!(progress.attempts[0].stop, Some(StopCause::Blocked));
                 assert!(
                     progress
-                        .advance_error
+                        .advance_note
                         .as_deref()
                         .unwrap()
                         .contains("missing capability")
@@ -255,7 +255,7 @@ fn retry_of_a_declared_stop_preserves_a_valid_checkpoint() {
         let mut owner = Owner {
             observations: [terminal(
                 "a/1",
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 None,
                 Some(&text),
             )]
@@ -304,7 +304,7 @@ fn settled_review_required_proceeds_without_acknowledgement() {
     document.nodes.push(dependent);
     let mut owner = Owner {
         observations: [
-            terminal("a/1", AttemptOutcome::ReviewRequired, None, None),
+            terminal("a/1", GraphAttemptOutcome::ReviewRequired, None, None),
             done("b/1"),
         ]
         .into(),
@@ -321,7 +321,7 @@ fn settled_review_required_proceeds_without_acknowledgement() {
     );
     assert_eq!(
         run.checkpoint.nodes[0].attempts[0].outcome,
-        Some(AttemptOutcome::ReviewRequired)
+        Some(GraphAttemptOutcome::ReviewRequired)
     );
     assert_eq!(
         advance(&document, &mut owner, &mut journal)
@@ -339,7 +339,9 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
         let document = document("worktree_write", serde_json::Value::Null);
         let mut failed = terminal(
             "a/1",
-            AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure),
+            GraphAttemptOutcome::PreparationRefused(
+                provenant_records::run::CauseKind::SpawnFailure,
+            ),
             Some(StopCause::SpawnFailure),
             None,
         );
@@ -374,7 +376,7 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
             !progress
                 .attempts
                 .iter()
-                .any(|attempt| attempt.outcome == Some(AttemptOutcome::TaskFailed))
+                .any(|attempt| attempt.outcome == Some(GraphAttemptOutcome::TaskFailed))
         );
     }
 }
@@ -385,11 +387,15 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
 fn stalled_provider_retry_advances_but_fail_policy_does_not() {
     for (outcome, expected_routes, expected_state) in [
         (
-            AttemptOutcome::ProviderStalledRetry,
+            GraphAttemptOutcome::ProviderStalledRetry,
             vec!["first", "second"],
             NodeState::Succeeded,
         ),
-        (AttemptOutcome::TaskFailed, vec!["first"], NodeState::Failed),
+        (
+            GraphAttemptOutcome::TaskFailed,
+            vec!["first"],
+            NodeState::Failed,
+        ),
     ] {
         let document = document("worktree_write", serde_json::Value::Null);
         let mut owner = Owner {
@@ -399,7 +405,7 @@ fn stalled_provider_retry_advances_but_fail_policy_does_not() {
         let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
         assert_eq!(adapters(&owner), expected_routes);
         assert_eq!(run.checkpoint.nodes[0].state, expected_state);
-        if outcome == AttemptOutcome::ProviderStalledRetry {
+        if outcome == GraphAttemptOutcome::ProviderStalledRetry {
             assert_eq!(owner.worktrees[0], owner.worktrees[1]);
         }
     }
@@ -428,7 +434,7 @@ fn a_transient_stop_retries_once_on_its_route_then_takes_a_new_route() {
     let crash = |reference| {
         terminal(
             reference,
-            AttemptOutcome::OtherFailure,
+            GraphAttemptOutcome::OtherFailure,
             Some(StopCause::ProcessCrash),
             None,
         )
@@ -466,7 +472,7 @@ fn a_depleted_writer_moves_to_a_new_route_at_once_in_its_worktree() {
         let document = document("worktree_write", serde_json::Value::Null);
         let mut owner = Owner {
             observations: [
-                terminal("a/1", AttemptOutcome::OtherFailure, Some(cause), Some("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Work remains\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}\n```")),
+                terminal("a/1", GraphAttemptOutcome::OtherFailure, Some(cause), Some("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Work remains\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}\n```")),
                 done("b/1"),
             ]
             .into(),
@@ -489,7 +495,7 @@ fn a_writer_that_lost_its_lane_token_continues_from_its_handoff_on_a_new_route()
         observations: [
             terminal(
                 "a/1",
-                AttemptOutcome::TaskFailed,
+                GraphAttemptOutcome::TaskFailed,
                 Some(StopCause::LaneTokenLost),
                 Some(handoff),
             ),
@@ -522,7 +528,7 @@ fn a_stopped_writer_restarts_when_handoff_holds_a_known_credential() {
         observations: [
             terminal(
                 "a/1",
-                AttemptOutcome::TaskFailed,
+                GraphAttemptOutcome::TaskFailed,
                 Some(StopCause::LaneTokenLost),
                 Some(&handoff),
             ),
@@ -550,7 +556,7 @@ fn on_stop_sends_a_stop_to_the_chair_and_unproved_custody_always_goes_there() {
         let document = document("worktree_write", on_stop);
         let mut owner = Owner {
             observations: [
-                terminal("a/1", AttemptOutcome::OtherFailure, Some(cause), None),
+                terminal("a/1", GraphAttemptOutcome::OtherFailure, Some(cause), None),
                 done("b/1"),
             ]
             .into(),
@@ -571,7 +577,7 @@ fn on_stop_moves_a_chair_cause_to_a_new_route() {
         observations: [
             terminal(
                 "a/1",
-                AttemptOutcome::OtherFailure,
+                GraphAttemptOutcome::OtherFailure,
                 Some(StopCause::Deadline),
                 None,
             ),
@@ -597,7 +603,7 @@ fn restarts_stop_at_the_graph_wide_continuation_budget() {
         observations: [
             terminal(
                 "a/1",
-                AttemptOutcome::OtherFailure,
+                GraphAttemptOutcome::OtherFailure,
                 Some(StopCause::UsageLimited),
                 None,
             ),
@@ -748,7 +754,7 @@ fn ladder_choices(checkpoint: &GraphCheckpoint) -> Vec<patch::LadderChoice> {
 fn limited(reference: &str) -> AttemptObservation {
     terminal(
         reference,
-        AttemptOutcome::OtherFailure,
+        GraphAttemptOutcome::OtherFailure,
         Some(StopCause::UsageLimited),
         None,
     )
@@ -860,7 +866,12 @@ fn stopped_early_handoff(remaining: &[&str]) -> String {
 /// A writer round that declares `stopped_early` with the given head.
 fn stopped_round(reference: &str, remaining: &[&str], commit: char) -> AttemptObservation {
     let handoff = stopped_early_handoff(remaining);
-    let mut observation = terminal(reference, AttemptOutcome::Succeeded, None, Some(&handoff));
+    let mut observation = terminal(
+        reference,
+        GraphAttemptOutcome::Succeeded,
+        None,
+        Some(&handoff),
+    );
     if let AttemptObservation::Terminal { commit: head, .. } = &mut observation {
         *head = Some(commit.to_string().repeat(40));
     }
@@ -896,11 +907,11 @@ fn a_recoverable_stop_on_a_single_route_continues_on_the_same_route() {
         let document = single_route_document(serde_json::Value::Null);
         let handoff = stopped_early_handoff(&["Finish the renderer"]);
         let stopped = if cause == StopCause::StoppedEarly {
-            terminal("a/1", AttemptOutcome::Succeeded, None, Some(&handoff))
+            terminal("a/1", GraphAttemptOutcome::Succeeded, None, Some(&handoff))
         } else {
             terminal(
                 "a/1",
-                AttemptOutcome::TaskFailed,
+                GraphAttemptOutcome::TaskFailed,
                 Some(cause),
                 Some(&handoff),
             )
@@ -1077,7 +1088,7 @@ fn blocked_handoff(blocked_on: Option<&str>) -> String {
 fn blocked_round(reference: &str, blocked_on: Option<&str>) -> AttemptObservation {
     terminal(
         reference,
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         None,
         Some(&blocked_handoff(blocked_on)),
     )
@@ -1221,7 +1232,7 @@ fn stopped_no_work_default_pauses_and_the_node_overrides_it() {
     let stopped = || {
         terminal(
             "a/1",
-            AttemptOutcome::StoppedNoWork,
+            GraphAttemptOutcome::StoppedNoWork,
             Some(StopCause::StoppedNoWork),
             Some(&handoff),
         )

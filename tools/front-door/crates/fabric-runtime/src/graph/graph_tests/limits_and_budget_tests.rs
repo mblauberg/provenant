@@ -8,14 +8,14 @@ fn usage_fetch_failure_is_unknown_and_does_not_wedge_graph() {
     ]);
     let observation = || AttemptObservation::Terminal {
         attempt_ref: Some("host/attempt".into()),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: None,
         commit: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };
@@ -70,14 +70,14 @@ fn cost_unknown_reason_is_recorded() {
     let mut owner = FakeOwner {
         observations: VecDeque::from([AttemptObservation::Terminal {
             attempt_ref: Some("host/attempt".into()),
-            outcome: AttemptOutcome::Succeeded,
+            outcome: GraphAttemptOutcome::Succeeded,
             launched: true,
             result: None,
             result_warning: None,
             result_path: None,
             branch: None,
             commit: None,
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             stop: None,
         cause: None,
         }]),
@@ -119,8 +119,8 @@ fn document_limits_are_ignored_with_a_warning() {
         &document,
         &mut FakeOwner {
             observations: VecDeque::from([
-                terminal(AttemptOutcome::Succeeded),
-                terminal(AttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]),
             ..Default::default()
         },
@@ -154,8 +154,8 @@ fn settled_graph_never_saves_a_new_structural_pause() {
     ]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -209,8 +209,8 @@ fn structural_limit_refuses_without_saving_and_host_limit_change_admits() {
     };
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -273,14 +273,14 @@ fn resumed_writer_settles_and_reports_head_under_structural_pause() {
 
     let writer_done = AttemptObservation::Terminal {
         attempt_ref: Some("host/writer".into()),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: Some("writer".into()),
         commit: Some(final_head.clone()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };
@@ -381,14 +381,14 @@ fn final_budget_exhaustion_still_delivers() {
     let mut owner = FakeOwner {
         observations: VecDeque::from([AttemptObservation::Terminal {
             attempt_ref: Some("host/attempt".into()),
-            outcome: AttemptOutcome::Succeeded,
+            outcome: GraphAttemptOutcome::Succeeded,
             launched: true,
             result: None,
             result_warning: None,
             result_path: None,
             branch: None,
             commit: None,
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             stop: None,
         cause: None,
         }]),
@@ -433,14 +433,14 @@ fn budget_pause_stops_admission_and_extension_resumes() {
     };
     let observation = || AttemptObservation::Terminal {
         attempt_ref: Some("host/attempt".into()),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: None,
         commit: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };
@@ -484,14 +484,14 @@ fn unknown_usage_warns_or_pauses_and_events_are_idempotent() {
     ]);
     let observation = || AttemptObservation::Terminal {
         attempt_ref: Some("host/attempt".into()),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: None,
         commit: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };
@@ -563,14 +563,14 @@ fn graph_wall_budget_sums_provider_time_and_preserves_partial_lower_bound() {
     let mut owner = FakeOwner {
         observations: VecDeque::from([AttemptObservation::Terminal {
             attempt_ref: Some("host/attempt".into()),
-            outcome: AttemptOutcome::Succeeded,
+            outcome: GraphAttemptOutcome::Succeeded,
             launched: true,
             result: None,
             result_warning: None,
             result_path: None,
             branch: None,
             commit: None,
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             stop: None,
         cause: None,
         }]),
@@ -632,8 +632,8 @@ fn node_titles_are_validated_and_sent_to_attempts_and_status() {
     let document = graph(vec![named, defaulted]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
     };

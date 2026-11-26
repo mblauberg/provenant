@@ -7,8 +7,8 @@ use provenant_records::{
     declaration::DeclarationEvidence,
     run::Outcome,
     settlement::{
-        CustodyFacts, GitEvidence, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
-        PrimaryCheckout, Progress, SETTLEMENT_EVIDENCE_SCHEMA,
+        CustodyFacts, GitEvidence, HeadProgress, HostFacts, IdentityEvidence, IdentityPolicyEffect,
+        LaneRole, PrimaryCheckout, SETTLEMENT_EVIDENCE_SCHEMA,
     },
 };
 
@@ -22,7 +22,7 @@ fn evidence(pinned: Option<GitOid>, head: Option<GitOid>) -> SettlementEvidence 
     SettlementEvidence {
         schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
         lane: LaneRole::ModelWriter,
-        host: HostVerdict {
+        host: HostFacts {
             outcome: Outcome::Succeeded,
             cause: None,
             complete: true,
@@ -31,13 +31,13 @@ fn evidence(pinned: Option<GitOid>, head: Option<GitOid>) -> SettlementEvidence 
             terminal_note: None,
             signals: vec![],
             denial: None,
-            stopped_handoff: None,
+            host_handoff: None,
         },
         handoff: DeclarationEvidence::Missing,
         declarations: Default::default(),
         git: Some(GitEvidence {
-            pinned,
-            head,
+            input_head: pinned,
+            writer_head: head,
             uncommitted: None,
             uncommitted_paths: Vec::new(),
             pushed_head: None,
@@ -100,7 +100,7 @@ fn pin_and_head_decide_progress() -> TestResult {
     let git = evidence(Some(base), Some(head))
         .git
         .expect("writer evidence");
-    assert_eq!(git.progress(), Progress::Moved);
+    assert_eq!(git.head_progress(), HeadProgress::Moved);
 
     let temp = tempfile::tempdir()?;
     let dir = Directory::open_anchor(temp.path())?;
@@ -111,7 +111,7 @@ fn pin_and_head_decide_progress() -> TestResult {
     let git = evidence(Some(base), Some(base))
         .git
         .expect("writer evidence");
-    assert_eq!(git.progress(), Progress::Unchanged);
+    assert_eq!(git.head_progress(), HeadProgress::Unchanged);
     Ok(())
 }
 
@@ -124,7 +124,7 @@ fn missing_pin_is_unknown() -> TestResult {
     let git = evidence(None, Some(oid(0x33)))
         .git
         .expect("writer evidence");
-    assert_eq!(git.progress(), Progress::Unknown);
+    assert_eq!(git.head_progress(), HeadProgress::Unknown);
     Ok(())
 }
 
@@ -190,10 +190,10 @@ fn restart_cannot_change_the_sealed_pin() -> TestResult {
     let (kept, kept_digest) = seal_evidence(&dir, &evidence(Some(oid(0xcc)), Some(oid(0xdd))))?;
     assert_eq!(kept, sealed);
     assert_eq!(kept_digest, digest);
-    assert_eq!(kept.git.expect("writer evidence").pinned, Some(base));
+    assert_eq!(kept.git.expect("writer evidence").input_head, Some(base));
     assert_eq!(
-        kept.git.expect("writer evidence").progress(),
-        Progress::Moved
+        kept.git.expect("writer evidence").head_progress(),
+        HeadProgress::Moved
     );
     Ok(())
 }

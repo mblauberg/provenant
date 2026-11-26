@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::provenance::{Layer, Precedence, Source, Sourced};
-use crate::run::PartialSignal;
+use crate::run::SettlementSignal;
 
 /// Settlement knobs, lowest layer first. Host beats the default, project beats
 /// host and a route's model policy beats both.
@@ -97,7 +97,7 @@ pub struct RouteSettlement {
 /// that chose it. Built only inside the classifier.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppliedPolicy {
-    pub signal: PartialSignal,
+    pub signal: SettlementSignal,
     pub action: SignalAction,
     pub source: Source,
 }

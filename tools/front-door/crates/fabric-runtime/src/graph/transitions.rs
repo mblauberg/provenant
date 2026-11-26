@@ -302,7 +302,7 @@ pub(super) fn apply_attempt_observation(
                 branch,
                 commit,
                 stop,
-                settlement_reason,
+                settlement_class,
                 cause,
             } => {
                 let mut result = result;
@@ -371,7 +371,7 @@ pub(super) fn apply_attempt_observation(
                 let stopped_without_reply = result.is_none()
                     && matches!(
                         outcome,
-                        AttemptOutcome::DeclaredStop | AttemptOutcome::StoppedNoWork
+                        GraphAttemptOutcome::DeclaredStop | GraphAttemptOutcome::StoppedNoWork
                     );
                 let review_contract_error = if stopped_without_reply {
                     None
@@ -413,7 +413,7 @@ pub(super) fn apply_attempt_observation(
                         .warnings
                         .retain(|warning| !warning.starts_with(FINDINGS_INVALID));
                 }
-                if outcome == AttemptOutcome::UsageLimited {
+                if outcome == GraphAttemptOutcome::UsageLimited {
                     outputs.findings_available = Some(false);
                     outputs
                         .warnings
@@ -485,18 +485,18 @@ pub(super) fn apply_attempt_observation(
                 let malformed = result
                     .as_ref()
                     .is_some_and(|capture| capture.handoff.is_err());
-                let settlement_reason = if malformed
+                let settlement_class = if malformed
                     && matches!(
                         outcome,
-                        AttemptOutcome::Succeeded
-                            | AttemptOutcome::ReviewRequired
-                            | AttemptOutcome::DeclaredStop
-                            | AttemptOutcome::StoppedNoWork
+                        GraphAttemptOutcome::Succeeded
+                            | GraphAttemptOutcome::ReviewRequired
+                            | GraphAttemptOutcome::DeclaredStop
+                            | GraphAttemptOutcome::StoppedNoWork
                     ) {
                     attempt.stop = Some(provenant_records::StopCause::HandoffMalformed);
-                    Some(provenant_records::run::SettlementReason::HandoffMalformed)
+                    Some(provenant_records::run::SettlementClass::HandoffMalformed)
                 } else {
-                    settlement_reason
+                    settlement_class
                 };
                 let review_result = node.access == AccessMode::ReadOnly
                     && template::review_node(node)
@@ -517,43 +517,43 @@ pub(super) fn apply_attempt_observation(
                     .and_then(Option::as_ref);
                 let outcome = if matches!(
                     outcome,
-                    AttemptOutcome::Succeeded
-                        | AttemptOutcome::ReviewRequired
-                        | AttemptOutcome::DeclaredStop
-                        | AttemptOutcome::StoppedNoWork
+                    GraphAttemptOutcome::Succeeded
+                        | GraphAttemptOutcome::ReviewRequired
+                        | GraphAttemptOutcome::DeclaredStop
+                        | GraphAttemptOutcome::StoppedNoWork
                 ) && disposition_error.is_some()
                 {
-                    AttemptOutcome::TaskFailed
-                } else if outcome == AttemptOutcome::DeclaredStop && review_result && !warned {
-                    AttemptOutcome::Succeeded
+                    GraphAttemptOutcome::TaskFailed
+                } else if outcome == GraphAttemptOutcome::DeclaredStop && review_result && !warned {
+                    GraphAttemptOutcome::Succeeded
                 } else if !warned
                     && launched
                     && node.access == AccessMode::WorktreeWrite
                     && matches!(
                         outcome,
-                        AttemptOutcome::StoppedNoWork | AttemptOutcome::DeclaredStop
+                        GraphAttemptOutcome::StoppedNoWork | GraphAttemptOutcome::DeclaredStop
                     )
                 {
                     // The projected stop decides the code and the note; refs
                     // and pushes no longer revise a settled outcome. One rule
                     // for every writer stop: restart in place on the retained
                     // worktree, or return to the chair (see `next_step`).
-                    progress.advance_error_code = outcome.advance_code().map(str::to_owned);
-                    progress.advance_error = Some(
+                    progress.advance_code = outcome.advance_code().map(str::to_owned);
+                    progress.advance_note = Some(
                         if let Some(handoff) = handoff.filter(|handoff| {
                             handoff.status == provenant_records::handoff::HandoffStatus::Blocked
                         }) {
-                            bounded(&handoff.note, MAX_ADVANCE_ERROR_BYTES)
-                        } else if outcome == AttemptOutcome::StoppedNoWork {
+                            bounded(&handoff.note, MAX_ADVANCE_NOTE_BYTES)
+                        } else if outcome == GraphAttemptOutcome::StoppedNoWork {
                             "writer stopped with no work: no new commit".into()
                         } else {
                             "writer stopped before finishing".into()
                         },
                     );
                     outcome
-                } else if warned || outcome == AttemptOutcome::DeclaredStop {
-                    AttemptOutcome::OtherFailure
-                } else if outcome == AttemptOutcome::Succeeded
+                } else if warned || outcome == GraphAttemptOutcome::DeclaredStop {
+                    GraphAttemptOutcome::OtherFailure
+                } else if outcome == GraphAttemptOutcome::Succeeded
                     && (!review_result
                         && node.required_verdict.is_some()
                         && !(plans::writer(node)
@@ -565,7 +565,7 @@ pub(super) fn apply_attempt_observation(
                             .is_some_and(|capture| capture.matched_required)
                         || disposition_error.is_some())
                 {
-                    AttemptOutcome::TaskFailed
+                    GraphAttemptOutcome::TaskFailed
                 } else {
                     outcome
                 };
@@ -574,11 +574,11 @@ pub(super) fn apply_attempt_observation(
                 if warned || disposition_error.is_some() {
                     attempt.stop = None;
                 }
-                if outcome == AttemptOutcome::TaskFailed
+                if outcome == GraphAttemptOutcome::TaskFailed
                     && let Some((code, reason)) = disposition_error
                 {
-                    progress.advance_error_code = Some(code.into());
-                    progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+                    progress.advance_code = Some(code.into());
+                    progress.advance_note = Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
                 }
                 if node.access == AccessMode::WorktreeWrite {
                     progress.blocked = result.as_ref().is_some_and(|capture| {
@@ -604,22 +604,21 @@ pub(super) fn apply_attempt_observation(
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
-                let node_outcome = settlement_reason
-                    .map(|reason| reason.node_outcome(attempt.stop))
-                    .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed);
+                let release = settlement_class
+                    .map(|reason| reason.release(attempt.stop))
+                    .unwrap_or(provenant_records::run::DependantRelease::Hold);
                 let outcome = if matches!(
                     outcome,
-                    AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired
-                ) && node_outcome
-                    == provenant_records::run::SettlementNodeOutcome::Failed
+                    GraphAttemptOutcome::Succeeded | GraphAttemptOutcome::ReviewRequired
+                ) && release == provenant_records::run::DependantRelease::Hold
                 {
-                    AttemptOutcome::OtherFailure
+                    GraphAttemptOutcome::OtherFailure
                 } else {
                     outcome
                 };
                 attempt.outcome = Some(outcome);
                 match outcome {
-                    AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired => {
+                    GraphAttemptOutcome::Succeeded | GraphAttemptOutcome::ReviewRequired => {
                         progress.state = NodeState::Succeeded;
                         if node.access == AccessMode::ReadOnly && template::review_node(node) {
                             let head_oid = match &review_range {
@@ -723,11 +722,11 @@ pub(super) fn apply_attempt_observation(
                         }
                         false
                     }
-                    AttemptOutcome::AuthRequired
-                    | AttemptOutcome::UsageLimited
-                    | AttemptOutcome::AdapterUnavailable
-                    | AttemptOutcome::PreparationRefused(_)
-                    | AttemptOutcome::Unclassified => {
+                    GraphAttemptOutcome::AuthRequired
+                    | GraphAttemptOutcome::UsageLimited
+                    | GraphAttemptOutcome::AdapterUnavailable
+                    | GraphAttemptOutcome::PreparationRefused(_)
+                    | GraphAttemptOutcome::Unclassified => {
                         if let Some(retry) = fallback_evidence_retry.clone() {
                             progress.fallback_evidence_retry = Some(retry);
                             progress.state = NodeState::Running;
@@ -762,7 +761,7 @@ pub(super) fn apply_attempt_observation(
                             }
                         }
                     }
-                    AttemptOutcome::ProviderStalledRetry => {
+                    GraphAttemptOutcome::ProviderStalledRetry => {
                         let review_limit_reached = review_preparation_substitution(node, attempt)
                             && progress
                                 .attempts
@@ -790,14 +789,14 @@ pub(super) fn apply_attempt_observation(
                             }
                         }
                     }
-                    AttemptOutcome::DeadlineExceeded => {
-                        progress.advance_error_code = Some("deadline_exceeded".into());
-                        progress.advance_error =
+                    GraphAttemptOutcome::DeadlineExceeded => {
+                        progress.advance_code = Some("deadline_exceeded".into());
+                        progress.advance_note =
                             Some("node deadline exceeded; lane was cancelled".into());
                         progress.state = NodeState::Failed;
                         false
                     }
-                    AttemptOutcome::TaskFailed
+                    GraphAttemptOutcome::TaskFailed
                         if review_substitution(node, attempt)
                             && route_index + 1 < node.routes.len()
                             && progress
@@ -808,25 +807,25 @@ pub(super) fn apply_attempt_observation(
                                 < limits.review_substitutions =>
                     {
                         progress.outputs = None;
-                        progress.advance_error = None;
-                        progress.advance_error_code = None;
+                        progress.advance_note = None;
+                        progress.advance_code = None;
                         progress.advance_owner_code = None;
                         progress.state = NodeState::Running;
                         true
                     }
-                    AttemptOutcome::TaskFailed
-                    | AttemptOutcome::OtherFailure
-                    | AttemptOutcome::DeclaredStop
-                    | AttemptOutcome::StoppedNoWork => {
+                    GraphAttemptOutcome::TaskFailed
+                    | GraphAttemptOutcome::OtherFailure
+                    | GraphAttemptOutcome::DeclaredStop
+                    | GraphAttemptOutcome::StoppedNoWork => {
                         let is_merge_conflict = result_warning.as_ref().is_some_and(|w| {
                             w.contains("integration_conflict") || w.contains("merge conflict")
                         });
                         if is_merge_conflict {
                             progress.state = NodeState::Blocked;
-                            progress.advance_error_code = Some("merge_conflict".into());
-                            progress.advance_error = result_warning
+                            progress.advance_code = Some("merge_conflict".into());
+                            progress.advance_note = result_warning
                                 .as_ref()
-                                .map(|w| bounded(w, MAX_ADVANCE_ERROR_BYTES));
+                                .map(|w| bounded(w, MAX_ADVANCE_NOTE_BYTES));
                         } else {
                             progress.state = NodeState::Failed;
                         }
@@ -952,8 +951,8 @@ pub(super) fn initial_checkpoint(
                 cancelled_from: None,
                 wait_reason: None,
                 skip_reason: when::skip_reason(&node.when),
-                advance_error: None,
-                advance_error_code: None,
+                advance_note: None,
+                advance_code: None,
                 advance_owner_code: None,
                 launch_retry: None,
                 fallback_evidence_retry: None,
@@ -977,13 +976,13 @@ pub(super) fn writer_binding_failed(progress: &mut NodeProgress, _id: &str, reas
 }
 
 pub(super) fn retry_exhausted(progress: &mut NodeProgress, reason: &str) {
-    progress.advance_error_code = Some("launch_retry_exhausted".into());
-    progress.advance_error = Some(bounded(
+    progress.advance_code = Some("launch_retry_exhausted".into());
+    progress.advance_note = Some(bounded(
         &format!(
             "node {}: the launch failed: {reason}",
             provenant_records::diagnostic::safe_text(&progress.id)
         ),
-        MAX_ADVANCE_ERROR_BYTES,
+        MAX_ADVANCE_NOTE_BYTES,
     ));
     progress.state = NodeState::Blocked;
     progress.last_launch_retry = progress.launch_retry.take().map(|mut retry| {
@@ -1428,7 +1427,7 @@ fn attribute_blocker(
     if node.condition.is_some()
         || node.composite.is_some()
         || node.land.is_some()
-        || checkpoint.nodes[node_index].advance_error.is_some()
+        || checkpoint.nodes[node_index].advance_note.is_some()
     {
         return false;
     }
@@ -1440,9 +1439,8 @@ fn attribute_blocker(
         .find(|parent| matches!(parent.state, NodeState::Failed | NodeState::Blocked));
     if let Some(parent) = blocker {
         let reason = format!("blocked by {} ({:?})", parent.id, parent.state);
-        checkpoint.nodes[node_index].advance_error =
-            Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-        checkpoint.nodes[node_index].advance_error_code = Some("upstream_blocked".into());
+        checkpoint.nodes[node_index].advance_note = Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
+        checkpoint.nodes[node_index].advance_code = Some("upstream_blocked".into());
         true
     } else {
         false
@@ -1590,10 +1588,10 @@ pub(super) fn node_action<'a>(
         if state != NodeState::Blocked
             && state != NodeState::Pending
             && changed
-            && checkpoint.nodes[index].advance_error_code.as_deref() == Some("upstream_blocked")
+            && checkpoint.nodes[index].advance_code.as_deref() == Some("upstream_blocked")
         {
-            checkpoint.nodes[index].advance_error = None;
-            checkpoint.nodes[index].advance_error_code = None;
+            checkpoint.nodes[index].advance_note = None;
+            checkpoint.nodes[index].advance_code = None;
         }
         if changed {
             checkpoint.nodes[index].state = state;
@@ -1665,11 +1663,11 @@ fn recovery_pending(checkpoint: &GraphCheckpoint) -> bool {
         || !checkpoint.cancelled
             && checkpoint.nodes.iter().any(|node| {
                 node.state == NodeState::Blocked
-                    && node.advance_error_code.as_deref() == Some("steer_continuation_refused")
+                    && node.advance_code.as_deref() == Some("steer_continuation_refused")
             })
         || checkpoint.nodes.iter().any(|node| {
             node.state == NodeState::Failed
-                && node.advance_error_code.as_deref() == Some("review_verdict_invalid")
+                && node.advance_code.as_deref() == Some("review_verdict_invalid")
                 && node.review_verdict_correction_refused.is_none()
                 && !checkpoint
                     .expansions
@@ -1811,15 +1809,15 @@ pub(super) fn graph_run(checkpoint: GraphCheckpoint) -> GraphRun {
     } else {
         GraphStatus::Pending
     };
-    let advance_error = checkpoint
+    let advance_note = checkpoint
         .nodes
         .iter()
-        .find_map(|node| node.advance_error.clone());
+        .find_map(|node| node.advance_note.clone());
     GraphRun {
         status,
         outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
         checkpoint,
-        advance_error,
+        advance_note,
     }
 }
 
@@ -2091,31 +2089,31 @@ mod tests {
         // process owner or storage implementation to accidentally depend on.
         for (outcome, contract, expected_state, expected_outcome, again) in [
             (
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 None,
                 NodeState::Succeeded,
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 false,
             ),
             (
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 Some("VERDICT: PASS"),
                 NodeState::Failed,
-                AttemptOutcome::TaskFailed,
+                GraphAttemptOutcome::TaskFailed,
                 false,
             ),
             (
-                AttemptOutcome::AuthRequired,
+                GraphAttemptOutcome::AuthRequired,
                 None,
                 NodeState::Failed,
-                AttemptOutcome::AuthRequired,
+                GraphAttemptOutcome::AuthRequired,
                 false,
             ),
             (
-                AttemptOutcome::DeadlineExceeded,
+                GraphAttemptOutcome::DeadlineExceeded,
                 None,
                 NodeState::Failed,
-                AttemptOutcome::DeadlineExceeded,
+                GraphAttemptOutcome::DeadlineExceeded,
                 false,
             ),
         ] {
@@ -2145,7 +2143,7 @@ mod tests {
                     branch: None,
                     commit: None,
                     stop: None,
-                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                     cause: None,
                 },
                 ObservationFacts {
@@ -2170,11 +2168,8 @@ mod tests {
             assert_eq!(progress.attempts[0].input_manifest, recorded.input_manifest);
             assert_eq!(checkpoint.extra["future_graph"], true);
             assert_eq!(progress.extra["future_node"], true);
-            if expected_outcome == AttemptOutcome::DeadlineExceeded {
-                assert_eq!(
-                    progress.advance_error_code.as_deref(),
-                    Some("deadline_exceeded")
-                );
+            if expected_outcome == GraphAttemptOutcome::DeadlineExceeded {
+                assert_eq!(progress.advance_code.as_deref(), Some("deadline_exceeded"));
             }
         }
     }
@@ -2213,7 +2208,7 @@ mod tests {
         let attempt_id = provenant_core::AttemptId::from_bytes([7; 16]);
         let observation = AttemptObservation::Terminal {
             attempt_ref: Some(format!("fixture/{attempt_id}")),
-            outcome: AttemptOutcome::Succeeded,
+            outcome: GraphAttemptOutcome::Succeeded,
             launched: true,
             result: Some(Box::new(capture.finish())),
             result_warning: None,
@@ -2221,7 +2216,7 @@ mod tests {
             branch: None,
             commit: Some(base.clone()),
             stop: None,
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             cause: None,
         };
         apply_attempt_observation(
@@ -2277,28 +2272,28 @@ mod tests {
         .unwrap();
         for (outcome, commit, handoff, expected_code, expected_note) in [
             (
-                AttemptOutcome::DeclaredStop,
+                GraphAttemptOutcome::DeclaredStop,
                 Some(head),
                 None,
-                Some("writer_declared_stop"),
+                Some("declared_stop"),
                 None,
             ),
             (
-                AttemptOutcome::DeclaredStop,
+                GraphAttemptOutcome::DeclaredStop,
                 Some(base),
                 None,
-                Some("writer_declared_stop"),
+                Some("declared_stop"),
                 None,
             ),
             (
-                AttemptOutcome::StoppedNoWork,
+                GraphAttemptOutcome::StoppedNoWork,
                 Some(head),
                 None,
                 Some("stopped_no_work"),
                 None,
             ),
             (
-                AttemptOutcome::StoppedNoWork,
+                GraphAttemptOutcome::StoppedNoWork,
                 None,
                 None,
                 Some("stopped_no_work"),
@@ -2306,18 +2301,18 @@ mod tests {
             ),
             // Pushed refs and a done declaration no longer close the node.
             (
-                AttemptOutcome::DeclaredStop,
+                GraphAttemptOutcome::DeclaredStop,
                 Some(head),
                 Some(done.clone()),
-                Some("writer_declared_stop"),
+                Some("declared_stop"),
                 None,
             ),
             // A blocked declaration travels with its note whatever the refs.
             (
-                AttemptOutcome::DeclaredStop,
+                GraphAttemptOutcome::DeclaredStop,
                 Some(head),
                 Some(blocked.clone()),
-                Some("writer_declared_stop"),
+                Some("declared_stop"),
                 Some("waiting on owner"),
             ),
         ] {
@@ -2348,7 +2343,7 @@ mod tests {
                     branch: None,
                     commit: commit.map(str::to_owned),
                     stop: None,
-                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                     cause: None,
                 },
                 ObservationFacts {
@@ -2364,7 +2359,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                checkpoint.nodes[0].advance_error_code.as_deref(),
+                checkpoint.nodes[0].advance_code.as_deref(),
                 expected_code,
                 "outcome={outcome:?} commit={commit:?}"
             );
@@ -2375,7 +2370,7 @@ mod tests {
             );
             if let Some(note) = expected_note {
                 assert_eq!(
-                    checkpoint.nodes[0].advance_error.as_deref(),
+                    checkpoint.nodes[0].advance_note.as_deref(),
                     Some(note),
                     "outcome={outcome:?} commit={commit:?}"
                 );
@@ -2395,7 +2390,7 @@ mod tests {
             &limits,
             AttemptObservation::Terminal {
                 attempt_ref: Some("host/handoff-missing".into()),
-                outcome: AttemptOutcome::ReviewRequired,
+                outcome: GraphAttemptOutcome::ReviewRequired,
                 launched: true,
                 result: None,
                 result_warning: None,
@@ -2403,7 +2398,7 @@ mod tests {
                 branch: None,
                 commit: None,
                 stop: Some(provenant_records::StopCause::HandoffMissing),
-                settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+                settlement_class: Some(provenant_records::run::SettlementClass::HandoffMissing),
                 cause: None,
             },
             ObservationFacts {
@@ -2423,7 +2418,7 @@ mod tests {
         assert_eq!(progress.state, NodeState::Failed);
         assert_eq!(
             progress.attempts[0].outcome,
-            Some(AttemptOutcome::OtherFailure)
+            Some(GraphAttemptOutcome::OtherFailure)
         );
     }
 
@@ -2470,7 +2465,7 @@ mod tests {
         let attempt = &mut progress.attempts[0];
         attempt.state = AttemptState::Terminal;
         attempt.launched = false;
-        attempt.outcome = Some(AttemptOutcome::AuthRequired);
+        attempt.outcome = Some(GraphAttemptOutcome::AuthRequired);
         attempt.attempt_ref = Some("host/attempt".into());
         assert_eq!(
             next_attempt_transition(node, progress, &limits, None, &observed),
@@ -2509,7 +2504,7 @@ mod tests {
         ));
         assert_eq!(checkpoint.nodes[0].state, NodeState::Failed);
         assert_eq!(
-            checkpoint.nodes[0].advance_error_code.as_deref(),
+            checkpoint.nodes[0].advance_code.as_deref(),
             Some("integration_head_moved")
         );
         plan.nodes[0].inputs.push(GraphInput {
@@ -2527,7 +2522,7 @@ mod tests {
             limits.node_prompt_bytes
         ));
         assert_eq!(
-            checkpoint.nodes[0].advance_error_code.as_deref(),
+            checkpoint.nodes[0].advance_code.as_deref(),
             Some("upstream_outputs_too_large")
         );
     }
@@ -2553,7 +2548,7 @@ mod tests {
             &limits,
             AttemptObservation::Terminal {
                 attempt_ref: Some("host/no-work".into()),
-                outcome: AttemptOutcome::StoppedNoWork,
+                outcome: GraphAttemptOutcome::StoppedNoWork,
                 launched: true,
                 result: None,
                 result_warning: None,
@@ -2561,8 +2556,8 @@ mod tests {
                 branch: None,
                 commit: None,
                 stop: Some(provenant_records::StopCause::StoppedNoWork),
-                settlement_reason: Some(provenant_records::run::SettlementReason::DeclaredStop),
-                cause: Some(provenant_records::run::TerminalCause::StoppedNoWork),
+                settlement_class: Some(provenant_records::run::SettlementClass::DeclaredStop),
+                cause: Some(provenant_records::run::CauseKind::StoppedNoWork),
             },
             ObservationFacts {
                 route_index: 0,
@@ -2579,11 +2574,11 @@ mod tests {
         let attempt = &checkpoint.nodes[0].attempts[0];
         assert_eq!(
             attempt.cause,
-            Some(provenant_records::run::TerminalCause::StoppedNoWork)
+            Some(provenant_records::run::CauseKind::StoppedNoWork)
         );
-        assert_eq!(attempt.outcome, Some(AttemptOutcome::StoppedNoWork));
+        assert_eq!(attempt.outcome, Some(GraphAttemptOutcome::StoppedNoWork));
         assert_eq!(
-            checkpoint.nodes[0].advance_error_code.as_deref(),
+            checkpoint.nodes[0].advance_code.as_deref(),
             Some("stopped_no_work")
         );
         let status = serde_json::to_value(&checkpoint).unwrap();

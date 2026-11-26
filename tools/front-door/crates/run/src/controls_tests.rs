@@ -96,7 +96,7 @@ fn interrupted_writer_preparation_projects_typed_rejection()
     assert!(store.writer_fences()?.is_empty());
     let terminal = store.record(id, &call)?;
     let AttemptState::Terminal {
-        terminal_cause,
+        cause,
         terminal_note,
         outcome,
         ..
@@ -105,12 +105,12 @@ fn interrupted_writer_preparation_projects_typed_rejection()
         return Err("interrupted preparation did not settle".into());
     };
     assert_eq!(*outcome, Outcome::Rejected);
-    assert_eq!(*terminal_cause, Some(TerminalCause::HandoffRefused));
+    assert_eq!(*cause, Some(CauseKind::LaunchHandoffRefused));
     assert_eq!(*terminal_note, None);
     let projected = provenant_records::wire::lane::LaneRow::project(&terminal, Default::default());
     assert_eq!(
         projected.reason.as_deref(),
-        Some(TerminalCause::HandoffRefused.detail())
+        Some(CauseKind::LaunchHandoffRefused.detail())
     );
     Ok(())
 }
@@ -606,7 +606,7 @@ fn steered_claude_without_a_session_starts_a_fresh_turn() -> TestResult {
         store.record(id, &call)?.state,
         AttemptState::Terminal {
             outcome: Outcome::Uncommitted,
-            terminal_cause: None,
+            cause: None,
             ..
         }
     ));
@@ -738,7 +738,7 @@ fn steer_replays_are_idempotent_and_natural_settlement_adopts_all_intents() -> T
         running.state,
         AttemptState::Terminal {
             outcome: Outcome::Uncommitted,
-            terminal_cause: None,
+            cause: None,
             ..
         }
     ));
@@ -1301,7 +1301,7 @@ fn terminal_proof_revises_live_resume_without_losing_acknowledgement() -> TestRe
                     exit.cancel_delivered_before_exit = Some(true);
                     exit.provider_identity_eof_fragment = true;
                     publication.fact.outcome = Outcome::Cancelled;
-                    publication.fact.cause = Some(TerminalCause::Steered);
+                    publication.fact.cause = Some(CauseKind::Steered);
                     publication.result = "continued attempt stopped before session proof";
                     publication.session = None;
                     (
@@ -1312,7 +1312,7 @@ fn terminal_proof_revises_live_resume_without_losing_acknowledgement() -> TestRe
                 Case::MismatchedSession => {
                     exit.provider_identity_conflict = true;
                     publication.fact.outcome = Outcome::Failed;
-                    publication.fact.cause = Some(TerminalCause::IdentityMismatch);
+                    publication.fact.cause = Some(CauseKind::IdentityMismatch);
                     publication.result = "provider session did not match its continuation";
                     publication.fact.complete = false;
                     publication.session = Some("different-session".into());
@@ -1324,7 +1324,7 @@ fn terminal_proof_revises_live_resume_without_losing_acknowledgement() -> TestRe
                 Case::LiveThenTerminalMismatch => {
                     exit.provider_identity_conflict = true;
                     publication.fact.outcome = Outcome::Failed;
-                    publication.fact.cause = Some(TerminalCause::IdentityMismatch);
+                    publication.fact.cause = Some(CauseKind::IdentityMismatch);
                     publication.result = "terminal session contradicted live acknowledgement";
                     publication.fact.complete = false;
                     publication.session = Some("different-session".into());
@@ -1362,7 +1362,7 @@ fn terminal_proof_revises_live_resume_without_losing_acknowledgement() -> TestRe
                     exit.provider_identity_eof_fragment = true;
                     publication.fact.outcome = Outcome::Cancelled;
                     publication.fact.cause = matches!(case, Case::LiveThenTerminalSteeredEof)
-                        .then_some(TerminalCause::Steered);
+                        .then_some(CauseKind::Steered);
                     publication.fact.reason = Some(
                         "confirmed intentional stop ended at an incomplete final frame".into(),
                     );
@@ -1394,7 +1394,7 @@ fn terminal_proof_revises_live_resume_without_losing_acknowledgement() -> TestRe
                     exit.provider_identity_eof_fragment = true;
                     exit.provider_identity_conflict = true;
                     publication.fact.outcome = Outcome::Failed;
-                    publication.fact.cause = Some(TerminalCause::IdentityMismatch);
+                    publication.fact.cause = Some(CauseKind::IdentityMismatch);
                     publication.result = "provider identity conflicted before the final fragment";
                     publication.fact.complete = false;
                     publication.session = Some("fixture-session".into());
@@ -1491,7 +1491,7 @@ fn sealed_live_identity_conflict_fences_a_queued_successor() -> TestResult {
             true,
             false,
             Outcome::Failed,
-            Some(TerminalCause::IdentityMismatch),
+            Some(CauseKind::IdentityMismatch),
         );
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
@@ -1535,7 +1535,7 @@ fn sealed_live_identity_conflict_fences_a_queued_successor() -> TestResult {
             finished.state,
             AttemptState::Terminal {
                 outcome: actual_outcome,
-                terminal_cause: actual_cause,
+                cause: actual_cause,
                 ..
             } if actual_outcome == outcome && actual_cause == cause
         ));
@@ -1575,7 +1575,7 @@ fn eof_fragment_only_continues_after_a_confirmed_intentional_stop() -> TestResul
             false,
             false,
             Outcome::Cancelled,
-            Some(TerminalCause::Steered),
+            Some(CauseKind::Steered),
             true,
         ),
         (
@@ -1611,7 +1611,7 @@ fn eof_fragment_only_continues_after_a_confirmed_intentional_stop() -> TestResul
             false,
             true,
             Outcome::Cancelled,
-            Some(TerminalCause::Steered),
+            Some(CauseKind::Steered),
             true,
         ),
         (
@@ -1620,7 +1620,7 @@ fn eof_fragment_only_continues_after_a_confirmed_intentional_stop() -> TestResul
             true,
             false,
             Outcome::Failed,
-            Some(TerminalCause::IdentityMismatch),
+            Some(CauseKind::IdentityMismatch),
             false,
         ),
     ];
@@ -1722,7 +1722,7 @@ fn eof_fragment_only_continues_after_a_confirmed_intentional_stop() -> TestResul
             finished.state,
             AttemptState::Terminal {
                 outcome: actual_outcome,
-                terminal_cause: actual_cause,
+                cause: actual_cause,
                 ..
             } if actual_outcome == outcome && actual_cause == cause
         ));
@@ -2022,7 +2022,7 @@ fn explicit_cancel_after_delivered_steer_keeps_the_stop_and_blocks_successor() -
     crate::dispatch_tests::seal_exit(&store, &exit)?;
     let mut publication = crate::tests::publication();
     publication.fact.outcome = Outcome::Cancelled;
-    publication.fact.cause = Some(TerminalCause::Steered);
+    publication.fact.cause = Some(CauseKind::Steered);
     publication.resolved_route = Some(route.clone());
     publication.applied_route = Some(route.clone());
     publication.observed_route = Some(route);
@@ -2037,7 +2037,7 @@ fn explicit_cancel_after_delivered_steer_keeps_the_stop_and_blocks_successor() -
         terminal.state,
         AttemptState::Terminal {
             outcome: Outcome::Cancelled,
-            terminal_cause: Some(TerminalCause::Steered),
+            cause: Some(CauseKind::Steered),
             ..
         }
     ));
@@ -2238,10 +2238,7 @@ fn stop_settles_a_sealed_running_attempt_without_a_holder() -> TestResult {
         ),
         "stop must settle a vanished provider as cancelled: {settled:?}"
     );
-    assert_eq!(
-        settled.terminal_evidence,
-        Some(TerminalEvidence::ProcessExit)
-    );
+    assert_eq!(settled.terminal_basis, Some(TerminalBasis::ProcessExit));
     assert_eq!(
         settled.cancellation_disposition,
         Some(CancellationDisposition::Unknown),
@@ -2386,7 +2383,7 @@ fn writer_lock_contention_waits_without_blocking_settlement() -> TestResult {
         );
     }
     let reason = diagnostic()?;
-    assert!(!reason.contains("settlement blocked"), "{reason}");
+    assert!(!reason.contains("settlement held"), "{reason}");
     assert!(reason.contains("retry pending"), "{reason}");
     assert!(reason.contains("held by attempt X"), "{reason}");
     // A real failure still spends the budget and blocks at the limit.
@@ -2398,7 +2395,7 @@ fn writer_lock_contention_waits_without_blocking_settlement() -> TestResult {
     for _ in 0..crate::settlement::LIMIT {
         store.track_reconcile_progress(id, failed.clone(), &call);
     }
-    assert!(diagnostic()?.contains("settlement blocked"));
+    assert!(diagnostic()?.contains("settlement held"));
     Ok(())
 }
 

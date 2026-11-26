@@ -49,8 +49,7 @@ pub mod warning;
 
 pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
-    AttemptFact, AttemptOutcome, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact,
-    TranscriptRef, Usage,
+    AttemptFact, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact, TranscriptRef, Usage,
 };
 pub use attempt_file::{AttemptFile, AttemptFileClass};
 pub use canonical::{

@@ -10,7 +10,7 @@ use provenant_records::{
     CanonicalV1,
     declaration::{
         DECLARATION_SCHEMA, DeclarationCounts, DeclarationError, DeclarationEvidence,
-        DeclarationInput, DeclarationLimit, DeclarationReceipt, JournalLine,
+        DeclarationInput, DeclarationLimit, DeclarationLine, DeclarationReceipt,
         MAX_DECLARATION_JOURNAL_BYTES, SealedDeclaration,
     },
     handoff::{Handoff, HandoffError},
@@ -36,7 +36,7 @@ struct JournalState {
 }
 
 impl JournalState {
-    fn from_lines(lines: &[JournalLine]) -> Self {
+    fn from_lines(lines: &[DeclarationLine]) -> Self {
         let mut state = Self {
             next_sequence: 1,
             closed: false,
@@ -46,7 +46,7 @@ impl JournalState {
         };
         for line in lines {
             match line {
-                JournalLine::Accepted(sealed) => {
+                DeclarationLine::Accepted(sealed) => {
                     state.next_sequence = state.next_sequence.max(sealed.sequence + 1);
                     state.seen.insert(
                         sealed.request_id.clone(),
@@ -64,7 +64,7 @@ impl JournalState {
                     );
                     state.accepted = Some(sealed.clone());
                 }
-                JournalLine::Rejected {
+                DeclarationLine::Rejected {
                     sequence,
                     request_id,
                     digest,
@@ -77,7 +77,7 @@ impl JournalState {
                     );
                     state.last_error = Some(error.clone());
                 }
-                JournalLine::Closed => state.closed = true,
+                DeclarationLine::Closed => state.closed = true,
             }
         }
         state
@@ -97,13 +97,13 @@ impl JournalState {
 
     /// Counts over every line, not just the one that settles the lane: a
     /// rejected submission followed by an accepted one reports both.
-    fn counts(lines: &[JournalLine]) -> DeclarationCounts {
+    fn counts(lines: &[DeclarationLine]) -> DeclarationCounts {
         let mut counts = DeclarationCounts::default();
         for line in lines {
             match line {
-                JournalLine::Accepted(_) => counts.accepted += 1,
-                JournalLine::Rejected { .. } => counts.rejected += 1,
-                JournalLine::Closed => {}
+                DeclarationLine::Accepted(_) => counts.accepted += 1,
+                DeclarationLine::Rejected { .. } => counts.rejected += 1,
+                DeclarationLine::Closed => {}
             }
         }
         counts
@@ -124,7 +124,7 @@ fn try_declaration_lock(attempt: &Directory) -> provenant_os::fs::Result<LockGua
     result
 }
 
-fn read_lines(attempt: &Directory) -> Result<Vec<JournalLine>> {
+fn read_lines(attempt: &Directory) -> Result<Vec<DeclarationLine>> {
     let bytes = match attempt.read_bounded(OsStr::new(JOURNAL), MAX_DECLARATION_JOURNAL_BYTES) {
         Ok(bytes) => bytes,
         Err(error) if error.is_not_found() => return Ok(Vec::new()),
@@ -140,7 +140,7 @@ fn read_lines(attempt: &Directory) -> Result<Vec<JournalLine>> {
         .collect()
 }
 
-fn encoded_line(line: &JournalLine) -> Result<Vec<u8>> {
+fn encoded_line(line: &DeclarationLine) -> Result<Vec<u8>> {
     let mut bytes = CanonicalV1::bytes(line)?.as_bytes().to_vec();
     bytes.push(b'\n');
     Ok(bytes)
@@ -148,7 +148,7 @@ fn encoded_line(line: &JournalLine) -> Result<Vec<u8>> {
 
 /// Append one already-admitted line. The caller owns the configurable bound
 /// check; the host's own `Closed` line is always small enough to append.
-fn append_line(attempt: &Directory, line: &JournalLine) -> Result<()> {
+fn append_line(attempt: &Directory, line: &DeclarationLine) -> Result<()> {
     let bytes = encoded_line(line)?;
     let mut file = attempt.open_append(OsStr::new(JOURNAL))?;
     file.write_all(&bytes)?;
@@ -212,7 +212,7 @@ impl RunStore {
         let handoff = match Handoff::from_json(&payload_bytes) {
             Ok(handoff) => handoff,
             Err(error) => {
-                let line = JournalLine::Rejected {
+                let line = DeclarationLine::Rejected {
                     sequence,
                     request_id: input.request_id.clone(),
                     digest,
@@ -224,7 +224,7 @@ impl RunStore {
                 return Err(DeclarationError::Invalid(error));
             }
         };
-        let line = JournalLine::Accepted(SealedDeclaration {
+        let line = DeclarationLine::Accepted(SealedDeclaration {
             schema_version: DECLARATION_SCHEMA,
             sequence,
             request_id: input.request_id.clone(),
@@ -253,7 +253,7 @@ impl RunStore {
         let lines = read_lines(attempt)?;
         let state = JournalState::from_lines(&lines);
         if !state.closed {
-            append_line(attempt, &JournalLine::Closed)?;
+            append_line(attempt, &DeclarationLine::Closed)?;
         }
         Ok((state.evidence(), JournalState::counts(&lines)))
     }

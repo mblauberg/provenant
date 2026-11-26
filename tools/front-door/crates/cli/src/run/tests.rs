@@ -245,10 +245,7 @@ fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
         false,
     )?;
     assert_eq!(decoded.session.as_deref(), Some("s1"));
-    assert_ne!(
-        decoded.terminal_cause,
-        Some(run::TerminalCause::IdentityMismatch)
-    );
+    assert_ne!(decoded.cause, Some(run::CauseKind::IdentityMismatch));
 
     let wrong_model = concat!(
         r#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#,
@@ -266,10 +263,7 @@ fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
         Path::new("/nonexistent"),
         false,
     )?;
-    assert_eq!(
-        mismatch.terminal_cause,
-        Some(run::TerminalCause::IdentityMismatch)
-    );
+    assert_eq!(mismatch.cause, Some(run::CauseKind::IdentityMismatch));
     Ok(())
 }
 
@@ -307,10 +301,7 @@ fn resumed_provider_requires_matching_observed_session() -> Result<(), Box<dyn s
         "{\"event\":\"result\",\"result\":{\"conversation_id\":\"fresh-session\",\"status\":\"SUCCESS\",\"response\":\"continued\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n"
     );
     let decoded = decode(fresh.as_bytes())?;
-    assert_eq!(
-        decoded.terminal_cause,
-        Some(run::TerminalCause::IdentityMismatch)
-    );
+    assert_eq!(decoded.cause, Some(run::CauseKind::IdentityMismatch));
 
     let missing = br#"{"event":"result","result":{"conversation_id":"","status":"SUCCESS","response":"continued","usage":{"input_tokens":1,"output_tokens":1}}}"#;
     let decoded = decode(missing)?;
@@ -322,10 +313,7 @@ fn resumed_provider_requires_matching_observed_session() -> Result<(), Box<dyn s
         "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"fresh-session\",\"step_type\":\"agent_response\",\"text_delta\":\"continued\"}}\n"
     );
     let decoded = decode(conflict.as_bytes())?;
-    assert_eq!(
-        decoded.terminal_cause,
-        Some(run::TerminalCause::IdentityMismatch)
-    );
+    assert_eq!(decoded.cause, Some(run::CauseKind::IdentityMismatch));
     Ok(())
 }
 

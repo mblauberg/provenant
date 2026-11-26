@@ -1194,7 +1194,7 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
                     &record.state,
                     provenant_run::AttemptState::Terminal {
                         outcome: provenant_run::Outcome::Uncommitted,
-                        terminal_cause: None,
+                        cause: None,
                         ..
                     }
                 ),
@@ -2207,7 +2207,7 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     if !cfg!(target_os = "macos") {
         assert_eq!(lane["state"], "rejected", "{lane}");
         assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
-        assert_eq!(lane["terminal_cause"], "unsupported_platform", "{lane}");
+        assert_eq!(lane["cause"], "unsupported_platform", "{lane}");
         assert!(lane["started_at"].is_null(), "{lane}");
         assert!(lane["applied_route"].is_null(), "{lane}");
         assert!(account.join("refreshed").exists());
@@ -2441,7 +2441,7 @@ fn writer_fixture_diagnostics(rig: &TestRig) -> String {
                         serde_json::from_slice::<Value>(&bytes).ok().map(|value| {
                             json!({
                                 "state":value["state"], "outcome":value["outcome"],
-                                "reason":value["reason"], "terminal_cause":value["terminal_cause"]
+                                "reason":value["reason"], "cause":value["cause"]
                             })
                             .to_string()
                         })
@@ -2925,7 +2925,7 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             .find(|node| node["id"] == "writer")
             .ok_or("writer")?;
         assert_eq!(
-            writer["advance_error_code"], "writer_binding_unavailable",
+            writer["advance_code"], "writer_binding_unavailable",
             "{response}"
         );
         assert_eq!(writer["attempts"], json!([]), "{response}");
@@ -2933,12 +2933,12 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             response["error"]["code"],
             writer["advance_owner_code"]
                 .as_str()
-                .or_else(|| writer["advance_error_code"].as_str())
+                .or_else(|| writer["advance_code"].as_str())
                 .ok_or("code")?,
             "{response}"
         );
         assert_eq!(
-            response["error"]["message"], writer["advance_error"],
+            response["error"]["message"], writer["advance_note"],
             "{response}"
         );
     }
@@ -3398,7 +3398,7 @@ fn seed_composite_output_graph_with_gate(
 ) -> Result {
     use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
     use provenant_fabric_runtime::graph::{
-        AccessMode, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner, FileJournal,
+        AccessMode, AttemptKey, AttemptObservation, AttemptOwner, FileJournal, GraphAttemptOutcome,
         GraphDocument, GraphExecution, GraphRoute, NodeInput, Replay,
     };
     use provenant_os::clock::SystemClock;
@@ -3438,14 +3438,14 @@ fn seed_composite_output_graph_with_gate(
             result.push(self.response.as_bytes());
             Ok(AttemptObservation::Terminal {
                 attempt_ref: Some(format!("{}/{}", self.host, attempt_id)),
-                outcome: AttemptOutcome::Succeeded,
+                outcome: GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(result.finish())),
                 result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
                 cause: None,
             })
@@ -3780,7 +3780,7 @@ fn persisted_attempt_with(
         running.resolved_route = None;
         running.state = provenant_run::AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: provenant_run::Outcome::Lost,
@@ -3789,7 +3789,7 @@ fn persisted_attempt_with(
             reason: Some("lost before recording a route".into()),
         };
         // Version 2 records carry the evidence that justifies the decision.
-        running.terminal_evidence = Some(provenant_run::TerminalEvidence::Lost {
+        running.terminal_basis = Some(provenant_run::TerminalBasis::Lost {
             reason: "lost before recording a route".into(),
         });
         let bytes = CanonicalV1::bytes(&running)?.as_bytes().to_vec();
@@ -5289,10 +5289,10 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
             json!({"preparation_refused": "unregistered_account"}),
             "{node}"
         );
-        assert_eq!(node["advance_error_code"], "preparation_refused", "{node}");
+        assert_eq!(node["advance_code"], "preparation_refused", "{node}");
         assert_eq!(
-            node["advance_error"],
-            provenant_records::run::TerminalCause::UnregisteredAccount.detail(),
+            node["advance_note"],
+            provenant_records::run::CauseKind::UnregisteredAccount.detail(),
             "{node}"
         );
     }
@@ -6357,10 +6357,12 @@ fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() ->
             );
         } else {
             assert_eq!(lane["state"], "succeeded", "{lane}");
-            assert!(lane["terminal_cause"].is_null(), "{lane}");
-            let warnings: Vec<provenant_records::run::PartialSignal> =
-                serde_json::from_value(lane["partial_signals"].clone())?;
-            assert!(warnings.contains(&provenant_records::run::PartialSignal::IdentityUnobserved));
+            assert!(lane["cause"].is_null(), "{lane}");
+            let warnings: Vec<provenant_records::run::SettlementSignal> =
+                serde_json::from_value(lane["signals"].clone())?;
+            assert!(
+                warnings.contains(&provenant_records::run::SettlementSignal::IdentityUnobserved)
+            );
             assert!(lane["observed_route"].is_null(), "{lane}");
             assert!(
                 lane["transcript"]["session"]

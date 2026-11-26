@@ -1110,8 +1110,8 @@ pub fn peer(
                 }
             }
             PeerAction::SessionHandoff { input, .. } => PeerResult::SessionHandoff {
-                data: crate::handoff::receive(
-                    &crate::handoff::Target {
+                data: crate::session_handoff::receive(
+                    &crate::session_handoff::Target {
                         context,
                         home: &home,
                         cwd: &cwd,

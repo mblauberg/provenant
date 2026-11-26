@@ -1829,7 +1829,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 && matches!(
                     &record.state,
                     provenant_records::run::AttemptState::Terminal {
-                        terminal_cause: Some(provenant_records::run::TerminalCause::SpawnFailure),
+                        cause: Some(provenant_records::run::CauseKind::SpawnFailure),
                         ..
                     }
                 ))
@@ -2900,7 +2900,7 @@ impl BoundGraphOwner<'_> {
         replay: provenant_fabric_runtime::graph::Replay<'_>,
         refusal: Option<&GraphRefusalScope>,
     ) -> Result<StartedAttempt, FacadeError> {
-        use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
+        use provenant_fabric_runtime::graph::{AttemptObservation, GraphAttemptOutcome};
         let operation_id = graph_operation("graph-attempt-operation", key)?;
         let cancel = self.cancel;
         let blocked = |owner: &BinaryRunOwner<'_>| -> Result<Option<String>, FacadeError> {
@@ -3227,7 +3227,7 @@ impl BoundGraphOwner<'_> {
         {
             return Ok(StartedAttempt::Refused(AttemptObservation::Terminal {
                 attempt_ref: None,
-                outcome: AttemptOutcome::AdapterUnavailable,
+                outcome: GraphAttemptOutcome::AdapterUnavailable,
                 launched: false,
                 result: None,
                 result_warning: None,
@@ -3235,7 +3235,7 @@ impl BoundGraphOwner<'_> {
                 branch: None,
                 commit: None,
                 stop: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::PreLaunchRefusal),
+                settlement_class: Some(provenant_records::run::SettlementClass::PreLaunchRefusal),
                 cause: None,
             }));
         }
@@ -4088,7 +4088,7 @@ impl BoundGraphOwner<'_> {
         expected_origin: provenant_records::WorkKey,
         facts: TerminalFacts<'_>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, FacadeError> {
-        use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
+        use provenant_fabric_runtime::graph::{AttemptObservation, GraphAttemptOutcome};
         let TerminalFacts {
             required_verdict,
             deadline_seconds,
@@ -4146,7 +4146,7 @@ impl BoundGraphOwner<'_> {
                     .map(|(_, receipt)| receipt)
                     .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
-                let preparation_cause = attempt.state.terminal_cause();
+                let preparation_cause = attempt.state.cause();
                 // The sealed stop, else the cause the outcome names.
                 let stop = attempt
                     .state
@@ -4237,7 +4237,7 @@ impl BoundGraphOwner<'_> {
                     launched,
                     attempt_ref: reference,
                     outcome: if result_warning.is_some() {
-                        AttemptOutcome::OtherFailure
+                        GraphAttemptOutcome::OtherFailure
                     } else if outcome == Outcome::Succeeded
                         && effective_delivery.is_some_and(|delivery| {
                             matches!(
@@ -4247,15 +4247,15 @@ impl BoundGraphOwner<'_> {
                             )
                         })
                     {
-                        AttemptOutcome::OtherFailure
+                        GraphAttemptOutcome::OtherFailure
                     } else if outcome == Outcome::TimedOut
                         && deadline_seconds.is_some()
-                        && preparation_cause != Some(provenant_records::run::TerminalCause::TokenBudget)
+                        && preparation_cause != Some(provenant_records::run::CauseKind::TokenBudget)
                     {
-                        AttemptOutcome::DeadlineExceeded
+                        GraphAttemptOutcome::DeadlineExceeded
                     } else {
                         provenant_records::settlement::project::graph_outcome(&attempt)
-                            .unwrap_or(AttemptOutcome::OtherFailure)
+                            .unwrap_or(GraphAttemptOutcome::OtherFailure)
                     },
                     result,
                     result_warning,
@@ -4283,8 +4283,8 @@ impl BoundGraphOwner<'_> {
                         source_commit.map(str::to_owned)
                     },
                     stop,
-                    settlement_reason: attempt.settlement_reason,
-                    cause: attempt.state.terminal_cause(),
+                    settlement_class: attempt.settlement_class,
+                    cause: attempt.state.cause(),
                 })
             }
             _ => Ok(AttemptObservation::Pending {
@@ -4732,13 +4732,13 @@ mod journal_error_tests {
             // invalid-input refusals from the launch owner.
             if scenario == "same-head" {
                 assert_eq!(
-                    review.advance_error_code.as_deref(),
+                    review.advance_code.as_deref(),
                     Some("review_empty_range"),
                     "{scenario}: {result:?} {checkpoint:?}"
                 );
             } else {
                 assert_eq!(
-                    review.advance_error_code.as_deref(),
+                    review.advance_code.as_deref(),
                     Some("launch_refused"),
                     "{scenario}: {result:?} {checkpoint:?}"
                 );

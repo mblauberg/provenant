@@ -18,7 +18,7 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
     let result = advance(&document, &mut owner, &mut journal).unwrap();
     let progress = &result.checkpoint.nodes[0];
     assert_eq!(progress.state, NodeState::Blocked);
-    let reason = progress.advance_error.as_deref().unwrap();
+    let reason = progress.advance_note.as_deref().unwrap();
     assert!(reason.contains("invalid_input"));
     assert!(reason.contains("schema_version"));
     assert!(reason.contains("check the named input field"));
@@ -35,7 +35,7 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
         ..Default::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    let reason = run.checkpoint.nodes[0].advance_note.as_deref().unwrap();
     assert!(reason.contains("invalid_input"));
     assert!(reason.contains("check the input"));
 }
@@ -57,7 +57,7 @@ fn admitted_invalid_launch_reports_input_failure_reason() {
         let run = advance(&document, &mut owner, &mut journal).unwrap();
         let node = &run.checkpoint.nodes[0];
         assert_eq!(node.state, NodeState::Blocked);
-        let reason = node.advance_error.as_deref().unwrap();
+        let reason = node.advance_note.as_deref().unwrap();
         assert!(reason.contains("invalid_input"));
         assert!(reason.contains("input"));
         assert!(reason.contains(expected));
@@ -96,12 +96,12 @@ fn admitted_launch_projects_typed_prompt_field_and_limit() {
         &mut journal,
     )
     .unwrap();
-    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    let reason = run.checkpoint.nodes[0].advance_note.as_deref().unwrap();
     assert!(reason.contains("task.prompt"));
     assert!(reason.contains("1048576"));
     assert!(reason.contains("retry"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
-    assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+    assert!(reason.len() <= MAX_ADVANCE_NOTE_BYTES);
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn memory_pressure_launch_refusal_names_source_and_action() {
         &mut journal,
     )
     .unwrap();
-    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    let reason = run.checkpoint.nodes[0].advance_note.as_deref().unwrap();
     assert!(reason.contains("memory_pressure_threshold"));
     assert!(reason.contains("shipped default"));
     assert!(reason.contains("reduce host memory pressure"));
@@ -160,7 +160,7 @@ fn confinement_refusal_carries_rule_and_path_into_the_node_result() {
         node.advance_owner_code.as_deref(),
         Some("confinement_refused")
     );
-    let reason = node.advance_error.as_deref().unwrap();
+    let reason = node.advance_note.as_deref().unwrap();
     assert!(reason.contains("confinement rule"), "{reason}");
     assert!(reason.contains("peer_project_unprojectable"), "{reason}");
     assert!(reason.contains("/fixture/scratch/project/.git"), "{reason}");
@@ -249,7 +249,7 @@ fn unreadable_launch_input_keeps_io_code_and_safe_reason() {
     }
     let node = &journal.0.as_ref().unwrap().nodes[0];
     assert_eq!(node.state, NodeState::Blocked);
-    let reason = node.advance_error.as_deref().unwrap();
+    let reason = node.advance_note.as_deref().unwrap();
     assert!(reason.contains("input could not be read"));
     assert!(reason.contains("io"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
@@ -289,7 +289,7 @@ fn launch_projection_omits_untrusted_error_sources() {
         assert!(!reason.contains("TOKEN_SENTINEL"));
         assert!(!reason.contains("/private/host"));
         assert!(!reason.chars().any(char::is_control));
-        assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+        assert!(reason.len() <= MAX_ADVANCE_NOTE_BYTES);
     }
 }
 
@@ -319,14 +319,14 @@ fn launch_invalid_field_matrix_preserves_local_facts() {
         )
         .unwrap();
         let reason = journal.0.as_ref().unwrap().nodes[0]
-            .advance_error
+            .advance_note
             .as_deref()
             .unwrap();
         if expected.is_none() {
             assert!(reason.contains("TOKEN_SENTINEL"), "{reason}");
         }
         assert!(!reason.chars().any(char::is_control));
-        assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+        assert!(reason.len() <= MAX_ADVANCE_NOTE_BYTES);
         if let Some(field) = expected {
             assert!(reason.contains(field) && reason.contains("17"), "{reason}");
         }
@@ -391,7 +391,7 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
                 .as_deref()
                 .unwrap()
         } else {
-            progress.advance_error.as_deref().unwrap()
+            progress.advance_note.as_deref().unwrap()
         };
         assert!(reason.contains(condition), "{reason}");
         assert!(!reason.contains("TOKEN_SENTINEL"));
@@ -468,12 +468,12 @@ fn writer_binding_failure_persists_only_the_safe_projection() {
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    let reason = run.checkpoint.nodes[0].advance_note.as_deref().unwrap();
     assert!(reason.contains("io"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(!reason.contains("/private/host"));
     assert!(!reason.chars().any(char::is_control));
-    assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+    assert!(reason.len() <= MAX_ADVANCE_NOTE_BYTES);
 
     let mut writer = node("writer", route("first"));
     writer.access = AccessMode::WorktreeWrite;
@@ -494,7 +494,7 @@ fn writer_binding_failure_persists_only_the_safe_projection() {
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    let reason = run.checkpoint.nodes[0].advance_note.as_deref().unwrap();
     assert!(reason.contains("uncommitted"));
     assert!(reason.contains("commit"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
@@ -524,7 +524,7 @@ fn failed_parent_waits_for_sibling_before_blocking_join() {
     let document = graph(vec![first, second, join]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::TaskFailed),
+            terminal(GraphAttemptOutcome::TaskFailed),
             AttemptObservation::Pending { attempt_ref: None },
         ]),
         ..Default::default()
@@ -542,7 +542,7 @@ fn failed_parent_waits_for_sibling_before_blocking_join() {
     );
     owner
         .observations
-        .push_back(terminal(AttemptOutcome::Succeeded));
+        .push_back(terminal(GraphAttemptOutcome::Succeeded));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(
         run.checkpoint
@@ -618,8 +618,8 @@ fn launched_reader_stop_restart_replays_file_checkpoint_without_new_work() {
         .unwrap();
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::UsageLimited),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::UsageLimited),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -669,16 +669,16 @@ fn untyped_launch_refusal_persists_reason_without_an_attempt() {
             .iter()
             .all(|attempt| attempt.host_refused_before_acceptance)
     );
-    let reason = node.advance_error.as_deref().unwrap();
+    let reason = node.advance_note.as_deref().unwrap();
     assert!(reason.contains("worktree setup failed: missing dependency"));
     assert!(reason.contains(secret));
     assert!(!reason.contains("receipt"));
     // Re-read the persisted checkpoint as a later status request does.
     let encoded = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
     let retained: GraphCheckpoint = serde_json::from_slice(&encoded).unwrap();
-    assert_eq!(retained.nodes[0].advance_error, node.advance_error);
+    assert_eq!(retained.nodes[0].advance_note, node.advance_note);
     let later = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(later.checkpoint.nodes[0].advance_error, node.advance_error);
+    assert_eq!(later.checkpoint.nodes[0].advance_note, node.advance_note);
 }
 
 // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
@@ -695,8 +695,8 @@ fn order_only_edge_waits_for_failure_without_hiding_it() {
     });
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::TaskFailed),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::TaskFailed),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -761,7 +761,7 @@ fn failed_creation_base_settles_the_node_as_failed_for_wait() {
         assert!(progress.attempts.is_empty(), "no attempt was ever launched");
         assert!(
             progress
-                .advance_error
+                .advance_note
                 .as_deref()
                 .is_some_and(|reason| reason.contains("invalid_input")
                     || reason.contains("unresolvable base")),

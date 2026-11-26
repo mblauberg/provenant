@@ -134,13 +134,13 @@ fn stall_stop_cause(
     stop: Option<StopReason>,
     cancelled: bool,
     marker: &serde_json::Value,
-) -> Option<TerminalCause> {
+) -> Option<CauseKind> {
     if cancelled || stop != Some(StopReason::SupervisorSignal) {
         return None;
     }
     match marker["policy"].as_str() {
-        Some("retry") => Some(TerminalCause::ProviderStalledRetry),
-        Some("fail") => Some(TerminalCause::ProviderStalled),
+        Some("retry") => Some(CauseKind::ProviderStalledRetry),
+        Some("fail") => Some(CauseKind::ProviderStalled),
         _ => None,
     }
 }
@@ -192,7 +192,7 @@ fn provider_identity(
                 exit.stop_reason,
                 Some(StopReason::ExplicitCancellation | StopReason::Steered)
             ))
-        && decoded.terminal_cause != Some(TerminalCause::IdentityMismatch);
+        && decoded.cause != Some(CauseKind::IdentityMismatch);
     IdentityEvidence {
         conflict: exit.provider_identity_conflict,
         incomplete,
@@ -241,7 +241,7 @@ fn apply_route_identity(
     match crate::reader::route_identity(resolved, applied, observed) {
         crate::reader::RouteIdentity::Observed => {}
         crate::reader::RouteIdentity::Unobserved => {
-            fact.signals.push(PartialSignal::IdentityUnobserved);
+            fact.signals.push(SettlementSignal::IdentityUnobserved);
         }
         crate::reader::RouteIdentity::Mismatch => match committed_head {
             Some(head) => {
@@ -251,7 +251,7 @@ fn apply_route_identity(
                     route_identity_label(applied),
                 );
                 fact.outcome = Outcome::ReviewRequired;
-                fact.cause = Some(TerminalCause::IdentityMismatch);
+                fact.cause = Some(CauseKind::IdentityMismatch);
                 fact.reason = Some(match fact.reason.take() {
                     Some(reason) => format!("{reason}; {warning}"),
                     None => warning,
@@ -265,8 +265,8 @@ fn apply_route_identity(
             }
             None => {
                 fact.outcome = Outcome::Failed;
-                fact.cause = Some(TerminalCause::IdentityMismatch);
-                fact.reason = Some(TerminalCause::IdentityMismatch.detail().into());
+                fact.cause = Some(CauseKind::IdentityMismatch);
+                fact.reason = Some(CauseKind::IdentityMismatch.detail().into());
             }
         },
     }
@@ -298,7 +298,7 @@ mod identity_policy_tests {
             exit.provider_identity_evidence_incomplete = true;
             exit.provider_identity_conflict = conflict;
             let decoded = Decoded {
-                terminal_cause: None,
+                cause: None,
                 outcome: Outcome::Succeeded,
                 result: "valid result".into(),
                 complete: true,
@@ -306,7 +306,7 @@ mod identity_policy_tests {
                 usage: UsageRecord::default(),
                 session: Some("session".into()),
                 reason: None,
-                partial_signals: vec![],
+                signals: vec![],
             };
             let evidence = provider_identity(&exit, &decoded, &policy);
             assert_eq!(evidence.conflict, conflict);
@@ -362,7 +362,7 @@ mod identity_policy_tests {
                 committed,
             );
             assert_eq!(fact.outcome, expected);
-            assert_eq!(fact.cause, Some(TerminalCause::IdentityMismatch));
+            assert_eq!(fact.cause, Some(CauseKind::IdentityMismatch));
             let reason = fact.reason.as_deref().ok_or("mismatch reason")?;
             if committed.is_some() {
                 assert!(reason.contains("fixture/model"), "{reason}");
@@ -372,7 +372,7 @@ mod identity_policy_tests {
             } else {
                 // No verified moved head: the fatal decision and its fixed
                 // detail are unchanged.
-                assert_eq!(reason, TerminalCause::IdentityMismatch.detail());
+                assert_eq!(reason, CauseKind::IdentityMismatch.detail());
             }
         }
         Ok(())
@@ -610,7 +610,7 @@ mod identity_policy_tests {
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
         let AttemptState::Terminal {
             outcome,
-            terminal_cause,
+            cause,
             reason,
             ..
         } = &finished.state
@@ -618,7 +618,7 @@ mod identity_policy_tests {
             return Err("first settlement must be terminal".into());
         };
         assert_eq!(*outcome, Outcome::ReviewRequired, "reason: {reason:?}");
-        assert_eq!(*terminal_cause, Some(TerminalCause::IdentityMismatch));
+        assert_eq!(*cause, Some(CauseKind::IdentityMismatch));
         let reason = reason.as_deref().ok_or("mismatch reason")?;
         assert!(reason.contains("fixture/model"), "{reason}");
         assert!(reason.contains("fixture/other"), "{reason}");
@@ -1246,7 +1246,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             return Err(custody_error(RunError::Contention));
         }
         if recovery.is_none() {
-            crate::settlement::clear_blocked(attempt, exit.scope).map_err(custody_error)?;
+            crate::settlement::clear_held(attempt, exit.scope).map_err(custody_error)?;
         }
         Ok(())
     }
@@ -1713,7 +1713,7 @@ impl RunStore {
                 .as_ref()
                 .ok_or(RunError::Validation("pending import lacks writer"))?;
             let cancel = driver.cancellation();
-            let budget_stop = record.state.terminal_cause() == Some(TerminalCause::TokenBudget);
+            let budget_stop = record.state.cause() == Some(CauseKind::TokenBudget);
             let preservation_stop = crate::settlement::PreservationStop::from_terminal_record(
                 attempt,
                 &record,
@@ -1845,7 +1845,7 @@ impl RunStore {
             &record.state,
             AttemptState::Terminal {
                 outcome: Outcome::ReviewRequired,
-                terminal_cause: Some(TerminalCause::TokenBudget),
+                cause: Some(CauseKind::TokenBudget),
                 ..
             }
         );
@@ -1973,13 +1973,13 @@ impl RunStore {
             call.clock,
         )?;
         let record = self.record(id, call)?;
-        let (outcome, terminal_cause, finished_at) = match &record.state {
+        let (outcome, cause, finished_at) = match &record.state {
             AttemptState::Terminal {
                 outcome,
-                terminal_cause,
+                cause,
                 finished_at,
                 ..
-            } => (*outcome, *terminal_cause, *finished_at),
+            } => (*outcome, *cause, *finished_at),
             _ => return Ok(None),
         };
         let intents = self.steer_intent(id, call)?;
@@ -2004,9 +2004,9 @@ impl RunStore {
         // follow-up: creating one after success hides the successful attempt
         // behind a successor that never launches and fails at preparation
         // (#3987). Explicit stops and other terminal failures never continue.
-        let natural_settlement = terminal_cause.is_none()
-            && matches!(outcome, Outcome::ReviewRequired | Outcome::Uncommitted);
-        if terminal_cause != Some(TerminalCause::Steered) && !natural_settlement {
+        let natural_settlement =
+            cause.is_none() && matches!(outcome, Outcome::ReviewRequired | Outcome::Uncommitted);
+        if cause != Some(CauseKind::Steered) && !natural_settlement {
             self.record_steer_not_continued(
                 id,
                 provenant_records::run::SteeringCause::TerminalStop,
@@ -2015,7 +2015,7 @@ impl RunStore {
             return Ok(None);
         }
         let policy = self.resume_policy(id, call)?;
-        self.check_steer_session(&record, terminal_cause, fresh_with_handoff, call, &policy)?;
+        self.check_steer_session(&record, cause, fresh_with_handoff, call, &policy)?;
         let previous_context = record
             .context
             .as_ref()
@@ -2158,7 +2158,7 @@ impl RunStore {
     fn check_steer_session(
         &self,
         record: &AttemptRecord,
-        terminal_cause: Option<TerminalCause>,
+        cause: Option<CauseKind>,
         fresh_with_handoff: bool,
         call: &Request<'_>,
         _policy: &provenant_records::policy::Policy,
@@ -2177,8 +2177,7 @@ impl RunStore {
             return Err(RunError::SteerSessionUnavailable);
         }
         let ready = self.steer_session_ready(id, call)?;
-        if terminal_cause == Some(TerminalCause::Steered) && ready.is_none() && !fresh_with_handoff
-        {
+        if cause == Some(CauseKind::Steered) && ready.is_none() && !fresh_with_handoff {
             return Err(RunError::SteerSessionUnavailable);
         }
         if let Some(ready) = ready {
@@ -2822,7 +2821,7 @@ impl RunStore {
         let mut uncommitted: Option<String> = None;
         let mut uncommitted_paths: Vec<String> = Vec::new();
         let mut primary = provenant_records::settlement::PrimaryCheckout::NotChecked;
-        let mut stopped_handoff: Option<provenant_records::handoff::Handoff> = None;
+        let mut host_handoff: Option<provenant_records::handoff::Handoff> = None;
         // A late request alone cannot invalidate a verified clean exit. If the
         // current guardian could not establish ordering, its receipt stays unknown.
         let steered = exit.stop_reason == Some(StopReason::Steered)
@@ -2850,14 +2849,14 @@ impl RunStore {
         let mut decoded = match (&record.applied_route, exit.never_spawned) {
             // Cancelled before spawn; keep the guardian's own reason too.
             (_, true) if cancelled => Decoded {
-                terminal_cause: None,
+                cause: None,
                 outcome: Outcome::Cancelled,
                 result: String::new(),
                 complete: true,
                 observed_route: None,
                 usage: UsageRecord::default(),
                 session: None,
-                partial_signals: Vec::new(),
+                signals: Vec::new(),
                 reason: Some(format!(
                     "cancelled before start: {}",
                     exit.warnings
@@ -2866,14 +2865,14 @@ impl RunStore {
                 )),
             },
             (_, true) => Decoded {
-                terminal_cause: Some(TerminalCause::SpawnFailure),
+                cause: Some(CauseKind::SpawnFailure),
                 outcome: Outcome::Rejected,
                 result: String::new(),
                 complete: true,
                 observed_route: None,
                 usage: UsageRecord::default(),
                 session: None,
-                partial_signals: Vec::new(),
+                signals: Vec::new(),
                 reason: Some(
                     exit.warnings
                         .first()
@@ -2939,7 +2938,7 @@ impl RunStore {
             && exit.stop_reason.is_none()
             && matches!(exit.termination, Some(Termination::Signal(_)))
         {
-            decoded.terminal_cause = Some(TerminalCause::ProcessCrash);
+            decoded.cause = Some(CauseKind::ProcessCrash);
         }
         // The declaration journal is the only handoff channel. Provider prose,
         // fences and turn boundaries are never read here.
@@ -3022,7 +3021,7 @@ impl RunStore {
             // result the host retained, so seal the substitution complete.
             // A non-empty but truncated answer never enters here: its decoded
             // completeness stands, and the later gate rejects it as success.
-            decoded.terminal_cause = None;
+            decoded.cause = None;
             if let Some(handoff) = &handoff {
                 decoded.result = handoff.fenced();
             }
@@ -3113,7 +3112,7 @@ impl RunStore {
             && (decoded.outcome == Outcome::TimedOut
                 || exit.termination != Some(Termination::Exit(0)))
         {
-            decoded.terminal_cause = Some(TerminalCause::TokenBudget);
+            decoded.cause = Some(CauseKind::TokenBudget);
             let budget = record.limits.as_ref().and_then(|l| l.token_budget.as_ref());
             let limit = format!(
                 "token budget reached: provider stopped after passing {} tokens (source: {})",
@@ -3133,17 +3132,17 @@ impl RunStore {
             && handoff_error.is_none()
         {
             decoded.outcome = Outcome::ReviewRequired;
-            let stopped = stopped_handoff(
+            let stopped = make_host_handoff(
                 handoff.take(),
                 "Token target crossed; a same-session budget wrap-up is pending.",
             );
             let blocked = stopped.status == provenant_records::handoff::HandoffStatus::Blocked;
             if blocked {
-                decoded.terminal_cause = Some(TerminalCause::Blocked);
+                decoded.cause = Some(CauseKind::Blocked);
             }
             decoded.result = stopped.fenced();
             decoded.complete = true;
-            stopped_handoff = Some(stopped);
+            host_handoff = Some(stopped);
             decoded.reason = Some(if blocked {
                 "token budget crossed; the writer's handoff is blocked, so read its blocked_on and note before continuing".into()
             } else {
@@ -3367,7 +3366,7 @@ impl RunStore {
                             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
                         ) {
                             decoded.outcome = Outcome::Failed;
-                            decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
+                            decoded.cause = Some(CauseKind::SettlementFailure);
                         }
                         let restored = self.unpublish_worktree(attempt, writer, record.project_id);
                         let restored = if restored.is_empty() {
@@ -3413,7 +3412,7 @@ impl RunStore {
                     };
                     seal_import_refusal(attempt, exit.scope, &writer.worktree, &reason)?;
                     decoded.outcome = Outcome::Failed;
-                    decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
+                    decoded.cause = Some(CauseKind::SettlementFailure);
                     decoded.reason = Some(reason);
                 }
                 _ if refused => {}
@@ -3563,7 +3562,7 @@ impl RunStore {
                 }
             }
             if completed_budget_handoff && decoded.outcome == Outcome::Failed {
-                decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
+                decoded.cause = Some(CauseKind::SettlementFailure);
             }
         } else if task.writer.is_none() {
             let archive =
@@ -3651,21 +3650,21 @@ impl RunStore {
             );
             decoded.complete = true;
             decoded.outcome = Outcome::ReviewRequired;
-            decoded.terminal_cause = Some(TerminalCause::ContextHandoff);
-            decoded.reason = Some(TerminalCause::ContextHandoff.detail().into());
-            stopped_handoff = Some(stopped);
+            decoded.cause = Some(CauseKind::ContextHandoff);
+            decoded.reason = Some(CauseKind::ContextHandoff.detail().into());
+            host_handoff = Some(stopped);
         }
         // A writer whose launch-time token copy was lost settles the same way:
         // a declared stop on its latest handoff, continued on a new token. The
         // successor's launch re-probes the account, so a login that really
         // lapsed refuses it there as `account_login_required`.
         if decoded.outcome == Outcome::AuthRequired
-            && decoded.terminal_cause == Some(TerminalCause::LaneTokenLost)
+            && decoded.cause == Some(CauseKind::LaneTokenLost)
             && handoff_error.is_none()
             && task.writer.is_some()
             && !cancelled
         {
-            let stopped = stopped_handoff(
+            let stopped = make_host_handoff(
                 handoff.take(),
                 "The lane's access token was lost before it recorded a progress handoff; inspect the branch and worktree.",
             );
@@ -3675,7 +3674,7 @@ impl RunStore {
             );
             decoded.complete = true;
             decoded.outcome = Outcome::ReviewRequired;
-            stopped_handoff = Some(stopped);
+            host_handoff = Some(stopped);
         }
         let answer_limit = RESULT_LIMIT as usize;
         if decoded.result.len() > answer_limit {
@@ -3693,7 +3692,7 @@ impl RunStore {
             } else if !decoded.complete {
                 decoded.outcome = Outcome::Failed;
                 if completed_budget_handoff {
-                    decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
+                    decoded.cause = Some(CauseKind::SettlementFailure);
                 }
                 decoded.reason = Some("provider result is empty or incomplete".into());
             }
@@ -3761,24 +3760,24 @@ impl RunStore {
         let evidence = provenant_records::settlement::SettlementEvidence {
             schema_version: provenant_records::settlement::SETTLEMENT_EVIDENCE_SCHEMA,
             lane,
-            host: provenant_records::settlement::HostVerdict {
+            host: provenant_records::settlement::HostFacts {
                 outcome: decoded.outcome,
-                cause: decoded.terminal_cause,
+                cause: decoded.cause,
                 complete: decoded.complete,
                 result_empty,
                 reason: decoded.reason.clone(),
                 terminal_note: terminal_note.clone(),
-                signals: decoded.partial_signals.clone(),
+                signals: decoded.signals.clone(),
                 denial: denial
                     .as_ref()
                     .map(|denial| denial.diagnostic().to_string()),
-                stopped_handoff: stopped_handoff.clone(),
+                host_handoff: host_handoff.clone(),
             },
             handoff: declared,
             declarations: declaration_counts,
             git: (task.writer.is_some()).then(|| provenant_records::settlement::GitEvidence {
-                pinned: crate::evidence::launch_pin(attempt)?,
-                head: crate::evidence::terminal_head(attempt)?,
+                input_head: crate::evidence::launch_pin(attempt)?,
+                writer_head: crate::evidence::terminal_head(attempt)?,
                 uncommitted: uncommitted.clone(),
                 uncommitted_paths: uncommitted_paths.clone(),
                 pushed_head,
@@ -3795,10 +3794,10 @@ impl RunStore {
                     .as_ref()
                     .filter(|_| {
                         !matches!(
-                            decoded.terminal_cause,
+                            decoded.cause,
                             Some(
-                                TerminalCause::IdentityMismatch
-                                    | TerminalCause::ProviderCaptureDefect { .. }
+                                CauseKind::IdentityMismatch
+                                    | CauseKind::ProviderCaptureDefect { .. }
                             )
                         )
                     })
@@ -3822,8 +3821,8 @@ impl RunStore {
         {
             let observed_route = decoded.observed_route.clone();
             let committed_head = if matches!(
-                fact.progress,
-                Some(provenant_records::settlement::Progress::Moved)
+                fact.head_progress,
+                Some(provenant_records::settlement::HeadProgress::Moved)
             ) {
                 crate::evidence::terminal_head(attempt)?
             } else {
@@ -4009,7 +4008,7 @@ pub(crate) fn seal_manifest(
 fn context_handoff(
     progress: Option<provenant_records::handoff::Handoff>,
 ) -> provenant_records::handoff::Handoff {
-    stopped_handoff(
+    make_host_handoff(
         progress,
         "Stopped at the context handoff threshold before the lane recorded a progress handoff; inspect the branch and worktree.",
     )
@@ -4017,7 +4016,7 @@ fn context_handoff(
 
 /// The lane's latest unfinished progress handoff, or a stopped-early one
 /// carrying `missing` when it recorded none.
-fn stopped_handoff(
+fn make_host_handoff(
     progress: Option<provenant_records::handoff::Handoff>,
     missing: &str,
 ) -> provenant_records::handoff::Handoff {
@@ -4454,7 +4453,7 @@ mod budget_result_tests {
         );
         assert_eq!(
             stall_stop_cause(Some(StopReason::SupervisorSignal), false, &marker),
-            Some(TerminalCause::ProviderStalledRetry)
+            Some(CauseKind::ProviderStalledRetry)
         );
     }
 
@@ -5302,19 +5301,19 @@ mod settlement_5a_tests {
         )
         .with_answer(Some(crate::dispatch_tests::DONE_ANSWER.into()), Some(true));
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
-        let AttemptState::Terminal { terminal_cause, .. } = &finished.state else {
+        let AttemptState::Terminal { cause, .. } = &finished.state else {
             return Err("writer must settle".into());
         };
         assert_eq!(
-            *terminal_cause,
-            Some(TerminalCause::Blocked),
+            *cause,
+            Some(CauseKind::Blocked),
             "pushed work must stay blocked: {:?}",
             finished.state
         );
-        assert_ne!(*terminal_cause, Some(TerminalCause::StoppedNoWork));
+        assert_ne!(*cause, Some(CauseKind::StoppedNoWork));
         assert_eq!(
-            finished.progress,
-            Some(provenant_records::settlement::Progress::Moved)
+            finished.head_progress,
+            Some(provenant_records::settlement::HeadProgress::Moved)
         );
         Ok(())
     }
@@ -5361,7 +5360,7 @@ mod settlement_5a_tests {
         let again = store.finish(id, &attempt, &observed, &fake, &request)?;
         let AttemptState::Terminal {
             outcome: first_outcome,
-            terminal_cause: first_cause,
+            cause: first_cause,
             reason: first_reason,
             ..
         } = &first.state
@@ -5370,7 +5369,7 @@ mod settlement_5a_tests {
         };
         let AttemptState::Terminal {
             outcome,
-            terminal_cause,
+            cause,
             reason,
             ..
         } = &again.state
@@ -5378,9 +5377,9 @@ mod settlement_5a_tests {
             return Err("re-drive must settle".into());
         };
         assert_eq!(outcome, first_outcome);
-        assert_eq!(terminal_cause, first_cause);
+        assert_eq!(cause, first_cause);
         assert_eq!(reason, first_reason);
-        assert_eq!(again.settlement_reason, first.settlement_reason);
+        assert_eq!(again.settlement_class, first.settlement_class);
         assert_eq!(again.settlement_evidence, Some(digest));
         assert_eq!(
             crate::evidence::read_evidence(&attempt)?.map(|(_, digest)| digest),

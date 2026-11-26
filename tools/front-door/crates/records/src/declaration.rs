@@ -1,7 +1,7 @@
 //! Declaration journal wire types and errors.
 use serde::{Deserialize, Serialize};
 
-pub const DECLARATION_JOURNAL_BYTES: u64 = 1 << 20;
+pub const DEFAULT_DECLARATION_JOURNAL_BYTES: u64 = 1 << 20;
 /// Ceiling of the configurable bound: a journal can never grow past this even
 /// when an operator raises `domains.run.handoff_journal_bytes`.
 pub const MAX_DECLARATION_JOURNAL_BYTES: u64 = 16 << 20;
@@ -20,7 +20,7 @@ pub struct DeclarationLimit {
 impl DeclarationLimit {
     pub fn shipped() -> Self {
         Self {
-            journal_bytes: DECLARATION_JOURNAL_BYTES,
+            journal_bytes: DEFAULT_DECLARATION_JOURNAL_BYTES,
             key: "domains.run.handoff_journal_bytes".into(),
             source: "compiled defaults".into(),
         }
@@ -50,7 +50,7 @@ pub struct SealedDeclaration {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum JournalLine {
+pub enum DeclarationLine {
     Accepted(SealedDeclaration),
     Rejected {
         sequence: u64,

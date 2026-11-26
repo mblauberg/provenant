@@ -148,10 +148,10 @@ fn checkpoint_is_live(checkpoint: &GraphCheckpoint) -> bool {
 fn classify_launch(result: &Value) -> Result<(), LaunchError> {
     if result["status"] == "paused"
         || result["outcome"] == "failed"
-        || result["advance_error"].is_string()
+        || result["advance_note"].is_string()
     {
         let reason = result
-            .get("advance_error")
+            .get("advance_note")
             .and_then(Value::as_str)
             .or_else(|| {
                 result
@@ -165,7 +165,7 @@ fn classify_launch(result: &Value) -> Result<(), LaunchError> {
                     .and_then(|nodes| {
                         nodes
                             .iter()
-                            .find_map(|node| node.get("advance_error").and_then(Value::as_str))
+                            .find_map(|node| node.get("advance_note").and_then(Value::as_str))
                     })
             });
         let attempt_reason = result
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn terminal_failure_replay_retires_generation() {
         use provenant_fabric_runtime::graph::{
-            self, AccessMode, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner,
+            self, AccessMode, AttemptKey, AttemptObservation, AttemptOwner, GraphAttemptOutcome,
             GraphDocument, GraphJournal, GraphRoute, NodeInput, Replay,
         };
         use std::{collections::HashMap, convert::Infallible};
@@ -459,14 +459,14 @@ mod tests {
             ) -> Result<AttemptObservation, Infallible> {
                 Ok(AttemptObservation::Terminal {
                     attempt_ref: Some("attempt".into()),
-                    outcome: AttemptOutcome::TaskFailed,
+                    outcome: GraphAttemptOutcome::TaskFailed,
                     launched: true,
                     result: None,
                     result_warning: None,
                     result_path: None,
                     branch: None,
                     commit: None,
-                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                     stop: None,
                     cause: None,
                 })

@@ -986,7 +986,7 @@ fn refused_before_launch(progress: &NodeProgress) -> bool {
     // a transport retry that may have left a live guardian. Use the same
     // classifier the disposition used to record the fact, never a third copy
     // of the contention list and never generic `busy`.
-    let settled = match progress.advance_error_code.as_deref() {
+    let settled = match progress.advance_code.as_deref() {
         Some("launch_refused") => true,
         Some("launch_retry_exhausted") => progress
             .advance_owner_code

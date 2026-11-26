@@ -9,7 +9,7 @@ fn row() -> LaneRow {
         git_import_failure: None,
         stop_work: None,
         warnings: None,
-        terminal_cause: None,
+        cause: None,
         project_id: "9".repeat(32),
         graph: "g".into(),
         node: "n".into(),
@@ -43,7 +43,7 @@ fn row() -> LaneRow {
         runtime_deadline: Value::Null,
         overdue: Some(false),
         stale: Some(false),
-        partial_signals: json!([]),
+        signals: json!([]),
         usage: json!({}),
         delivery_id: None,
         write_grants: Some(json!([])),
@@ -119,7 +119,7 @@ fn lane_rows_validate_with_and_without_optional_members() {
     full.state = "terminal".into();
     full.retry_of = Some("3".repeat(32));
     full.superseded_by = Some("4".repeat(32));
-    full.cause = Some(crate::run::SettlementReason::DeclaredStop);
+    full.cause = Some(crate::run::SettlementClass::DeclaredStop);
     full.exit_code = Some(0);
     full.reason = Some("done".into());
     full.settlement = Some(LaneSettlement {
@@ -185,11 +185,11 @@ fn lane_rows_validate_with_and_without_optional_members() {
         "session_proof_incomplete"
     );
     for cause in [
-        crate::run::TerminalCause::Steered,
-        crate::run::TerminalCause::EmptyWriterResult,
-        crate::run::TerminalCause::ProviderCaptureDefect { line: 52 },
+        crate::run::CauseKind::Steered,
+        crate::run::CauseKind::EmptyWriterResult,
+        crate::run::CauseKind::ProviderCaptureDefect { line: 52 },
     ] {
-        full.terminal_cause = Some(cause);
+        full.cause = Some(cause);
         accepted(&schema, &full);
     }
 }
@@ -524,7 +524,7 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         attempt_id: id,
         found: cancel::ReconciledWire::Settling {
             phase: "delivering".into(),
-            blocking_reason: None,
+            held_reason: None,
         },
     }]);
     data.lanes = Some(vec![row()]);

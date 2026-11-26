@@ -36,7 +36,7 @@ fn node_attempt_spec_reaches_the_launch() {
     let mut lane = node("lane", route("first"));
     lane.attempt = Some(spec.clone());
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let run = advance(
@@ -58,7 +58,7 @@ fn node_attempt_spec_reaches_the_launch() {
     let mut lane = node("lane", route("first"));
     lane.attempt = Some(AttemptSpec::default());
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     advance(
@@ -119,7 +119,7 @@ fn node_capabilities_preserve_inheritance_and_explicit_empty() {
             serde_json::from_value(serde_json::to_value(&lane).unwrap()).unwrap();
         assert_eq!(roundtrip.capabilities, capabilities);
         let mut owner = FakeOwner {
-            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
             ..Default::default()
         };
         advance(
@@ -140,7 +140,7 @@ fn graph_skill_location_requirement_reaches_the_lane() {
         let encoded = serde_json::to_value(&lane).unwrap();
         let decoded: GraphNode = serde_json::from_value(encoded).unwrap();
         let mut owner = FakeOwner {
-            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
             ..Default::default()
         };
         advance(
@@ -158,7 +158,7 @@ fn node_deadline_is_forwarded_to_the_lane_run() {
     let mut lane = node("lane", route("first"));
     lane.deadline_seconds = Some(7);
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::DeadlineExceeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::DeadlineExceeded)].into(),
         ..Default::default()
     };
     let run = advance(
@@ -170,12 +170,12 @@ fn node_deadline_is_forwarded_to_the_lane_run() {
     assert_eq!(owner.deadlines, vec![Some(7)]);
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        run.checkpoint.nodes[0].advance_code.as_deref(),
         Some("deadline_exceeded")
     );
     assert_eq!(
         run.checkpoint.nodes[0].attempts[0].outcome,
-        Some(AttemptOutcome::DeadlineExceeded)
+        Some(GraphAttemptOutcome::DeadlineExceeded)
     );
 }
 
@@ -192,19 +192,19 @@ fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
     write.worktree = Some(".worktrees/write".into());
     let writer_done = AttemptObservation::Terminal {
         attempt_ref: Some("host/7".into()),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: Some("writer".into()),
         commit: Some("3".repeat(40)),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
     cause: None,
     };
     let mut owner = FakeOwner {
-        observations: [writer_done, terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [writer_done, terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let run = advance(
@@ -224,7 +224,7 @@ fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
     let mut unsourced = node("lone", route("first"));
     unsourced.distinct_from = Some(DistinctFrom::Writer);
     let mut lone = FakeOwner {
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     advance(
@@ -302,7 +302,7 @@ fn alias_retry_receives_the_prior_model() {
         outcome, launched, ..
     } = &mut limited
     {
-        *outcome = AttemptOutcome::UsageLimited;
+        *outcome = GraphAttemptOutcome::UsageLimited;
         *launched = false;
     }
     let mut owner = FakeOwner {
@@ -483,7 +483,7 @@ fn panel_with_one_usage_limited_member_reaches_synthesis() {
         outcome, launched, ..
     } = &mut limited
     {
-        *outcome = AttemptOutcome::UsageLimited;
+        *outcome = GraphAttemptOutcome::UsageLimited;
         *launched = false;
     }
     let mut owner = FakeOwner {
@@ -659,7 +659,7 @@ fn retry_start_clears_previous_family_snapshot_before_saving() {
         outcome, launched, ..
     } = &mut limited
     {
-        *outcome = AttemptOutcome::UsageLimited;
+        *outcome = GraphAttemptOutcome::UsageLimited;
         *launched = false;
     }
     let mut owner = FakeOwner {
@@ -786,14 +786,14 @@ fn a_required_separation_is_passed_to_the_router_and_recorded_when_refused() {
             done_as("h/3"),
             AttemptObservation::Terminal {
                 attempt_ref: Some("h/4".into()),
-                outcome: AttemptOutcome::AdapterUnavailable,
+                outcome: GraphAttemptOutcome::AdapterUnavailable,
                 launched: false,
                 result: None,
                 result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
             cause: None,
             },

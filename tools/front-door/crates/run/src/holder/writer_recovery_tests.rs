@@ -1371,9 +1371,9 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 finished.state,
                 AttemptState::Terminal {
                     outcome: Outcome::Cancelled,
-                    terminal_cause,
+                    cause,
                     ..
-                } if terminal_cause == steered.then_some(TerminalCause::Steered)
+                } if cause == steered.then_some(CauseKind::Steered)
             ));
             let (child, warnings) =
                 provenant_records::warning::capture(|| store.prepare_steer_continuation(id, &call));
@@ -1474,15 +1474,10 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         }
         if blocked {
             // A blocked writer seals one typed stop.
-            let AttemptState::Terminal {
-                terminal_cause,
-                stop,
-                ..
-            } = &finished.state
-            else {
+            let AttemptState::Terminal { cause, stop, .. } = &finished.state else {
                 panic!("not terminal")
             };
-            assert_eq!(*terminal_cause, Some(TerminalCause::Blocked));
+            assert_eq!(*cause, Some(CauseKind::Blocked));
             let stop = stop.as_ref().ok_or("stop")?;
             assert_eq!(stop.cause(), provenant_records::StopCause::Blocked);
             assert_eq!(stop.note(), Some(note));
@@ -1505,8 +1500,8 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             if !dirty {
                 assert_eq!(*outcome, Outcome::Succeeded);
                 assert_eq!(
-                    finished.settlement_reason,
-                    Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+                    finished.settlement_class,
+                    Some(provenant_records::run::SettlementClass::CompletedBeforeBudget)
                 );
                 continue;
             }
@@ -1531,11 +1526,11 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             continue;
         }
         assert_eq!(
-            finished.settlement_reason,
-            Some(provenant_records::run::SettlementReason::DeclaredStop)
+            finished.settlement_class,
+            Some(provenant_records::run::SettlementClass::DeclaredStop)
         );
         let AttemptState::Terminal {
-            terminal_cause,
+            cause,
             outcome,
             reason,
             ..
@@ -1544,15 +1539,9 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             panic!("not terminal")
         };
         assert_eq!(*outcome, Outcome::ReviewRequired);
-        assert_eq!(
-            *terminal_cause,
-            (!changed).then_some(TerminalCause::StoppedNoWork)
-        );
+        assert_eq!(*cause, (!changed).then_some(CauseKind::StoppedNoWork));
         let row = LaneRow::project(&finished, LaneProjectionFacts::default());
-        assert_eq!(
-            row.terminal_cause,
-            (!changed).then_some(TerminalCause::StoppedNoWork)
-        );
+        assert_eq!(row.cause, (!changed).then_some(CauseKind::StoppedNoWork));
         assert!(
             !reason
                 .as_deref()
@@ -1564,15 +1553,15 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             assert!(reason.as_deref().unwrap().contains("no new commit"));
             assert_eq!(
                 LaneRow::state_and_label(&finished.state).1.as_deref(),
-                Some(TerminalCause::StoppedNoWork.reason())
+                Some(CauseKind::StoppedNoWork.reason())
             );
             assert_eq!(
                 row.reason.as_deref(),
-                Some(TerminalCause::StoppedNoWork.detail())
+                Some(CauseKind::StoppedNoWork.detail())
             );
             assert_eq!(
                 row.settlement.unwrap().reason.as_deref(),
-                Some(TerminalCause::StoppedNoWork.detail())
+                Some(CauseKind::StoppedNoWork.detail())
             );
         }
     }
@@ -1721,12 +1710,12 @@ fn empty_committed_writer_requires_review_and_controls_fail()
             } else {
                 assert!(reason.as_deref().unwrap().contains(NO_HANDOFF_REASON));
                 assert_eq!(
-                    finished.settlement_reason,
-                    Some(provenant_records::run::SettlementReason::HandoffMissing)
+                    finished.settlement_class,
+                    Some(provenant_records::run::SettlementClass::HandoffMissing)
                 );
                 assert_eq!(
-                    finished.partial_signals,
-                    [provenant_records::run::PartialSignal::HandoffMissing]
+                    finished.signals,
+                    [provenant_records::run::SettlementSignal::HandoffMissing]
                 );
                 let AttemptState::Terminal { stop, .. } = &finished.state else {
                     panic!("attempt must be terminal");
@@ -1745,10 +1734,10 @@ fn empty_committed_writer_requires_review_and_controls_fail()
                 );
                 assert_eq!(
                     finished
-                        .settlement_reason
+                        .settlement_class
                         .unwrap()
-                        .node_outcome(Some(stop.cause())),
-                    provenant_records::run::SettlementNodeOutcome::Failed
+                        .release(Some(stop.cause())),
+                    provenant_records::run::DependantRelease::Hold
                 );
                 assert_eq!(
                     read_sealed(&attempt, "result.md", RESULT_LIMIT)?.as_deref(),
@@ -1779,7 +1768,7 @@ fn empty_committed_writer_requires_review_and_controls_fail()
 fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
-    use provenant_records::run::{PartialSignal, SettlementReason};
+    use provenant_records::run::{SettlementClass, SettlementSignal};
 
     const DIRTY: &str = "left-uncommitted.txt";
     for (answer, empty) in [("", true), ("Work remains in the renderer.", false)] {
@@ -1878,10 +1867,10 @@ fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
         )?;
         assert_eq!(terminal.head, launch.base, "recorded head");
         assert_eq!(
-            finished.partial_signals,
+            finished.signals,
             [
-                PartialSignal::HandoffMissing,
-                PartialSignal::UncommittedWork
+                SettlementSignal::HandoffMissing,
+                SettlementSignal::UncommittedWork
             ]
         );
         let stop = stop.as_ref().ok_or("typed stop")?;
@@ -1898,8 +1887,8 @@ fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
         if empty {
             assert!(reason.contains(EMPTY_WRITER_REASON), "{reason}");
             assert_eq!(
-                finished.settlement_reason,
-                Some(SettlementReason::EmptyResult)
+                finished.settlement_class,
+                Some(SettlementClass::EmptyResult)
             );
             assert_eq!(stop.cause(), provenant_records::StopCause::EmptyResult);
             // run.md "What follows a stop": `empty_result` allows one fresh
@@ -1918,8 +1907,8 @@ fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
                 "missing handoff not named: {reason}"
             );
             assert_eq!(
-                finished.settlement_reason,
-                Some(SettlementReason::HandoffMissing)
+                finished.settlement_class,
+                Some(SettlementClass::HandoffMissing)
             );
             assert_eq!(stop.cause(), provenant_records::StopCause::HandoffMissing);
             assert_eq!(next, provenant_records::NextStep::Chair, "{reason}");
@@ -2090,7 +2079,7 @@ fn writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff()
     let fake = crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::Failed));
     let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
     let AttemptState::Terminal {
-        terminal_cause,
+        cause,
         outcome,
         reason,
         ..
@@ -2099,11 +2088,11 @@ fn writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff()
         panic!("attempt must be terminal");
     };
     assert_eq!(*outcome, Outcome::ReviewRequired, "reason: {reason:?}");
-    assert_eq!(*terminal_cause, Some(TerminalCause::ContextHandoff));
+    assert_eq!(*cause, Some(CauseKind::ContextHandoff));
     // Only a declared stop: the owner maps this to the graph's restart.
     assert_eq!(
-        finished.partial_signals,
-        vec![provenant_records::run::PartialSignal::DeclaredStop]
+        finished.signals,
+        vec![provenant_records::run::SettlementSignal::DeclaredStop]
     );
     let result =
         String::from_utf8(read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?)?;
@@ -2242,10 +2231,10 @@ fn writer_that_lost_its_lane_token_settles_on_its_handoff()
         };
         let mut fake =
             crate::dispatch_tests::Fake::with_observed(Some(route()), Some(provider_outcome));
-        fake.terminal_cause = Some(TerminalCause::LaneTokenLost);
+        fake.cause = Some(CauseKind::LaneTokenLost);
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
         let AttemptState::Terminal {
-            terminal_cause,
+            cause,
             stop,
             outcome,
             reason,
@@ -2261,7 +2250,7 @@ fn writer_that_lost_its_lane_token_settles_on_its_handoff()
         };
         assert_eq!(*outcome, expected_outcome, "reason: {reason:?}");
         if host_outcome == Outcome::AuthRequired {
-            assert_eq!(*terminal_cause, Some(TerminalCause::LaneTokenLost));
+            assert_eq!(*cause, Some(CauseKind::LaneTokenLost));
         }
         let stop = stop.as_ref().ok_or("stop")?;
         let expected_stop = match host_outcome {
@@ -2838,7 +2827,7 @@ fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std
         }),
     );
     if matches!(case, BudgetStopCase::WrapUpBlocked) {
-        let mut blocked = stopped_handoff(None, "Owner decision required before continuing.");
+        let mut blocked = make_host_handoff(None, "Owner decision required before continuing.");
         blocked.status = provenant_records::handoff::HandoffStatus::Blocked;
         fake.answer = Some(blocked.fenced());
     }
@@ -2953,7 +2942,7 @@ fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std
         return Ok(());
     }
     let AttemptState::Terminal {
-        terminal_cause,
+        cause,
         outcome,
         reason,
         ..
@@ -2962,7 +2951,7 @@ fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std
         panic!("attempt must be terminal");
     };
     assert_eq!(outcome, Outcome::TimedOut, "reason: {reason:?}");
-    assert_eq!(terminal_cause, Some(TerminalCause::TokenBudget));
+    assert_eq!(cause, Some(CauseKind::TokenBudget));
     let reason_text = reason.expect("terminal attempt has reason");
     assert!(
         reason_text.contains("token budget reached: provider stopped after passing"),
@@ -3201,8 +3190,8 @@ fn settlement_import_cancellation_preserves_provider_exit_ordering()
             matches!(record.record.state, AttemptState::Terminal {outcome: Outcome::Cancelled, reason: Some(ref reason), ..} if reason == "cancelled during Git import")
         );
         assert_eq!(
-            record.record.terminal_evidence,
-            Some(TerminalEvidence::ImportCancellation)
+            record.record.terminal_basis,
+            Some(TerminalBasis::ImportCancellation)
         );
         assert_eq!(
             record.record.cancellation_disposition,
@@ -3330,10 +3319,7 @@ fn never_spawned_exit_survives_cancel_during_import()
         assert!(
             matches!(record.state, AttemptState::Terminal { outcome, .. } if outcome == expected)
         );
-        assert_eq!(
-            record.terminal_evidence,
-            Some(TerminalEvidence::ProcessExit)
-        );
+        assert_eq!(record.terminal_basis, Some(TerminalBasis::ProcessExit));
         assert_eq!(record.provider_launched, Some(false));
         assert!(read_sealed(&attempt, "import-cancelled.json", RECORD_LIMIT)?.is_none());
     }

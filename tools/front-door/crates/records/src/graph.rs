@@ -1,5 +1,5 @@
 //! Shared graph state vocabulary used by runtime records and peer projections.
-use crate::run::TerminalCause;
+use crate::run::CauseKind;
 use serde::{Deserialize, Serialize};
 
 /// Stable identity for one graph route attempt.
@@ -57,7 +57,7 @@ pub enum AttemptState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AttemptOutcome {
+pub enum GraphAttemptOutcome {
     Succeeded,
     TaskFailed,
     /// A settled provider stall explicitly requested the next route.
@@ -69,12 +69,12 @@ pub enum AttemptOutcome {
     AuthRequired,
     UsageLimited,
     AdapterUnavailable,
-    PreparationRefused(TerminalCause),
+    PreparationRefused(CauseKind),
     DeadlineExceeded,
     Unclassified,
 }
 
-impl AttemptOutcome {
+impl GraphAttemptOutcome {
     /// The advance code settlement owns, if this outcome has one. The two
     /// declared-stop outcomes are the only settlement-derived codes; every
     /// other advance code comes from the owner or a launch refusal. Keeping the
@@ -82,7 +82,7 @@ impl AttemptOutcome {
     /// lists the same two codes).
     pub const fn advance_code(self) -> Option<&'static str> {
         match self {
-            Self::DeclaredStop => Some("writer_declared_stop"),
+            Self::DeclaredStop => Some("declared_stop"),
             Self::StoppedNoWork => Some("stopped_no_work"),
             _ => None,
         }
@@ -128,11 +128,14 @@ mod tests {
             .split_whitespace()
             .filter_map(|word| word.strip_prefix('`').and_then(|w| w.strip_suffix('`')))
             .collect();
-        let owned: BTreeSet<&str> = [AttemptOutcome::DeclaredStop, AttemptOutcome::StoppedNoWork]
-            .into_iter()
-            .filter_map(AttemptOutcome::advance_code)
-            .collect();
+        let owned: BTreeSet<&str> = [
+            GraphAttemptOutcome::DeclaredStop,
+            GraphAttemptOutcome::StoppedNoWork,
+        ]
+        .into_iter()
+        .filter_map(GraphAttemptOutcome::advance_code)
+        .collect();
         assert_eq!(documented, owned);
-        assert_eq!(AttemptOutcome::Succeeded.advance_code(), None);
+        assert_eq!(GraphAttemptOutcome::Succeeded.advance_code(), None);
     }
 }

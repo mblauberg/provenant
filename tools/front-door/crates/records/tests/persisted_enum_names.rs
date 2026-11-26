@@ -18,11 +18,11 @@ use provenant_records::{
         Workload,
     },
     run::{
-        AccountSource, AttemptState, CancellationDisposition, CauseSource, ChildWait,
-        EffectDisposition, LaneAccess, OriginReceipt, Outcome, PartialSignal, PathScope,
-        PreparationFailure, RepositoryAdmissionPhase, RequestedRoute, SandboxFloorStrength,
-        SettlementEffect, SettlementReason, SkipKind, StopWorkPush, StopWorkTrigger, TerminalCause,
-        TerminalEvidence, UserSkillsMode, WriteGrantLimitOrigin, WriteSource, WriterDeliveryStage,
+        AccountSource, AttemptState, CancellationDisposition, CauseKind, CauseSource, ChildWait,
+        EffectDisposition, LaneAccess, OriginReceipt, Outcome, PathScope, PreparationFailure,
+        RepositoryAdmissionPhase, RequestedRoute, SandboxFloorStrength, SettlementClass,
+        SettlementEffect, SettlementSignal, SkipKind, StopWorkPush, StopWorkTrigger, TerminalBasis,
+        UserSkillsMode, WriteGrantLimitOrigin, WriteSource, WriterDeliveryStage,
         WriterDeliveryState,
     },
     stop::StopCause,
@@ -198,8 +198,8 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "unclassified",
         ],
     )?;
-    assert_unit_names::<TerminalCause>(
-        "TerminalCause",
+    assert_unit_names::<CauseKind>(
+        "CauseKind",
         &[
             "source_view_refused",
             "project_binding_directory_unsafe",
@@ -212,7 +212,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "cloud_placement_removed",
             "write_grants_refused",
             "worktree_busy",
-            "handoff_refused",
+            "launch_handoff_refused",
             "preparation_refused",
             "retained_writer_import",
             "unsupported_platform",
@@ -237,8 +237,8 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "unrecorded",
         ],
     )?;
-    assert_external_names::<TerminalCause>(
-        "TerminalCause",
+    assert_external_names::<CauseKind>(
+        "CauseKind",
         &[
             (
                 "writer_pin_mismatch",
@@ -250,8 +250,8 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             ),
         ],
     )?;
-    assert_tagged::<TerminalEvidence>(
-        "TerminalEvidence",
+    assert_tagged::<TerminalBasis>(
+        "TerminalBasis",
         "kind",
         &[
             ("process_exit", json!({"kind": "process_exit"})),
@@ -271,8 +271,8 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             ("lost", json!({"kind": "lost", "reason": "fixture"})),
         ],
     )?;
-    assert_unit_names::<PartialSignal>(
-        "PartialSignal",
+    assert_unit_names::<SettlementSignal>(
+        "SettlementSignal",
         &[
             "identity_unobserved",
             "handoff_missing",
@@ -327,9 +327,9 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "delivery",
         ],
     )?;
-    assert_all_names::<SettlementReason>(
-        "SettlementReason",
-        SettlementReason::ALL,
+    assert_all_names::<SettlementClass>(
+        "SettlementClass",
+        SettlementClass::ALL,
         &[
             "completed",
             "completed_before_budget",
