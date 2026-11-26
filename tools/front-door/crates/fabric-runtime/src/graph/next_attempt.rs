@@ -460,7 +460,7 @@ pub(crate) fn fallback_candidate(
 
 /// The stop class that decides a route fallback. A host refusal before launch
 /// is a route that cannot serve the node, whatever refused it.
-fn fallback_cause(outcome: GraphAttemptOutcome) -> Option<provenant_records::StopCause> {
+pub(super) fn fallback_cause(outcome: GraphAttemptOutcome) -> Option<provenant_records::StopCause> {
     use provenant_records::StopCause;
     match outcome {
         GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),

@@ -877,22 +877,7 @@ pub(super) fn settlement_fallback_decision(
     // takes the cause default, while an explicit, non-pinned node override
     // still controls the next step. Launched stops use the retry-aware rule
     // in decide(); there is no same-route retry to spend before launch.
-    let cause = match outcome {
-        GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
-        GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        GraphAttemptOutcome::ModelUnavailable => Some(StopCause::ModelUnavailable),
-        GraphAttemptOutcome::PreparationRefused(
-            provenant_records::run::CauseKind::SpawnFailure,
-        ) => Some(StopCause::SpawnFailure),
-        GraphAttemptOutcome::PreparationRefused(
-            provenant_records::run::CauseKind::PreparationRefused,
-        ) => Some(StopCause::PreparationRefused),
-        GraphAttemptOutcome::AdapterUnavailable | GraphAttemptOutcome::PreparationRefused(_) => {
-            Some(StopCause::AdapterUnavailable)
-        }
-        GraphAttemptOutcome::Unclassified => Some(StopCause::Unclassified),
-        _ => None,
-    };
+    let cause = stop.or_else(|| next_attempt::fallback_cause(outcome));
     let custody_released = live_fallback_allowed(outcome, launched, fallback_evidence);
     let step = cause.map(|cause| {
         if !custody_released {

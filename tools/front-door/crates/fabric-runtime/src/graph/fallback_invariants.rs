@@ -91,6 +91,46 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
     }
 }
 
+#[test]
+fn sealed_chair_only_preparation_stop_never_advances_to_another_route() {
+    use provenant_records::StopCause;
+    use provenant_records::run::{PreparationFailure, TerminalCause};
+
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"g", "nodes":[{
+            "id":"n", "prompt":"work", "access":"read_only",
+            "routes":[{"adapter":"a","model":"a/m"},{"adapter":"b","model":"b/m"}]
+        }]
+    }))
+    .unwrap();
+    let (plan, _) = validate_plan(&document).unwrap();
+    let decision = next_step::settlement_fallback_decision(
+        &plan.nodes[0],
+        0,
+        AttemptOutcome::PreparationRefused(TerminalCause::UnsupportedPlatform),
+        Some(StopCause::UnsupportedPlatform),
+        false,
+        FallbackEvidence {
+            preparation: Some(PreparationFallbackEvidence {
+                failure: PreparationFailure::AdapterUnavailable,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+            }),
+            unreadable: false,
+            review_limit_reached: false,
+            cause: None,
+            skipped_accounts: &[],
+        },
+    );
+    assert!(matches!(
+        decision,
+        SettlementFallback::Fail {
+            code: Some("on_stop_held"),
+            ..
+        }
+    ));
+}
+
 /// A cause the work can recover on its own route keeps its own identity: a
 /// pinned read-only node never reports a lost lane token (or any other
 /// same-route cause) as an authentication failure or a pinned-route dead end.
