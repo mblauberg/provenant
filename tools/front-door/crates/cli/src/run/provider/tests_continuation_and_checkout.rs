@@ -125,7 +125,6 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         head: Some(predecessor_head.clone()),
         source_head: Some(source_head.clone()),
         base_ref: None,
-        subject: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model { required_family: None,

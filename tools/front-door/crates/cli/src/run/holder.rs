@@ -1508,7 +1508,6 @@ mod tests {
                     head: None,
                     source_head: None,
                     base_ref: None,
-                    subject: None,
                     prompt_digest: CanonicalV1::file_digest(b"child"),
                     route: run::RequestedRoute::Model {
                         required_family: None,

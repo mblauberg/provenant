@@ -19,7 +19,6 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
             head: None,
             source_head: None,
             base_ref: None,
-            subject: None,
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(full.as_bytes()),
             route: run::RequestedRoute::Model {
@@ -575,7 +574,6 @@ fn local_login_preparation_booking_survives_ordinary_quota_tick()
         head: None,
         source_head: None,
         base_ref: None,
-        subject: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model {
@@ -1040,7 +1038,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         head: None,
         source_head: None,
         base_ref: None,
-        subject: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model {
@@ -1486,7 +1483,6 @@ fn opencode_signout_expires_then_prepares_with_an_unverified_warning()
         head: None,
         source_head: None,
         base_ref: None,
-        subject: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model {
@@ -1766,7 +1762,6 @@ fn prepare_with_partial_account_estimates(
         head: None,
         source_head: None,
         base_ref: None,
-        subject: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model {

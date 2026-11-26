@@ -3967,6 +3967,54 @@ mod tests {
     }
 
     #[test]
+    fn run_request_carries_head_only_and_keeps_a_peer_subject_in_extra()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let task = TaskRequest {
+            context: None,
+            extra: Default::default(),
+            limit_extensions: Default::default(),
+            build_heavy: false,
+            title: None,
+            profile: HarnessProfile::default(),
+            prompt_digest: CanonicalV1::file_digest(b"head only"),
+            head: Some("abc".into()),
+            source_head: None,
+            base: None,
+            fixture: None,
+            base_ref: None,
+            route: RequestedRoute::Named {
+                extra: Default::default(),
+                required_family: None,
+                name: "junior".into(),
+                effort: None,
+            },
+            account: None,
+            authority_digest: Digest::from_bytes([7; 32]),
+            writer: None,
+            deliver: None,
+            provider_timeout_seconds: 60,
+            delivery_id: None,
+            access: LaneAccessRequest::default(),
+        };
+        let wire = serde_json::to_value(&task)?;
+        assert_eq!(wire["head"], serde_json::json!("abc"));
+        assert!(
+            wire.get("subject").is_none(),
+            "the run request carries head, not a duplicate subject"
+        );
+
+        // A peer that still declares subject keeps it as an unrecognised field.
+        let mut peer_wire = wire;
+        peer_wire["subject"] = serde_json::json!({"kind": "commit"});
+        let decoded: TaskRequest = serde_json::from_value(peer_wire)?;
+        assert_eq!(
+            decoded.extra.get("subject"),
+            Some(&serde_json::json!({"kind": "commit"}))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn writer_custody_project_round_trips_and_rejects_malformed_values()
     -> Result<(), Box<dyn std::error::Error>> {
         let request = WriterRequest {

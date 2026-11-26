@@ -25,7 +25,7 @@ pub(crate) enum ReadPlan {
 }
 
 /// The one subject, base and read policy resolved for a graph at admission.
-pub(crate) struct SubjectAdmission {
+pub(super) struct SubjectAdmission {
     pub subject: Option<PinnedSubject>,
     pub writer_base: Option<provenant_core::GitOid>,
     pub read: ReadPlan,

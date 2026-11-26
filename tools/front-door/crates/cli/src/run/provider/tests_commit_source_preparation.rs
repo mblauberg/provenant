@@ -93,7 +93,6 @@ impl CommitSourcePreparation {
             head: Some(head),
             source_head: None,
             base_ref: None,
-            subject: None,
             profile: provenant_records::run::HarnessProfile {
                 knobs: [("lanes.access".into(), serde_json::json!("isolated"))].into(),
                 knob_sources: [(
