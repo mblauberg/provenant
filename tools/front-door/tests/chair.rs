@@ -210,9 +210,33 @@ fn state_dir_registrations_drive_quota_and_chair_without_agents_config() -> Resu
 }
 
 fn hook(rig: &TestRig, start: bool, session: &str) -> Result<provenant_os::exec::ExecOutcome> {
-    rig.execute(std::path::Path::new(env!("CARGO_BIN_EXE_provenant")), &["hook", "claude", if start {"chair-start"} else {"chair-prompt"}], Some(&serde_json::to_vec(&json!({
-        "hook_event_name":if start {"SessionStart"} else {"UserPromptSubmit"}, "session_id":session,"cwd":rig.project,"transcript_path":rig.root.join("transcript.jsonl"),"prompt":"PRIVATE PROMPT MUST NOT BE STORED"
-    }))?))
+    hook_with_marker(rig, start, session, None)
+}
+fn hook_with_marker(
+    rig: &TestRig,
+    start: bool,
+    session: &str,
+    marker: Option<(&str, &str)>,
+) -> Result<provenant_os::exec::ExecOutcome> {
+    let mut payload = json!({
+        "hook_event_name": if start {"SessionStart"} else {"UserPromptSubmit"},
+        "session_id": session,
+        "cwd": rig.project,
+        "transcript_path": rig.root.join("transcript.jsonl"),
+        "prompt": "PRIVATE PROMPT MUST NOT BE STORED"
+    });
+    if let Some((key, value)) = marker {
+        payload[key] = json!(value);
+    }
+    rig.execute(
+        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "hook",
+            "claude",
+            if start { "chair-start" } else { "chair-prompt" },
+        ],
+        Some(&serde_json::to_vec(&payload)?),
+    )
 }
 #[test]
 fn chair_start_records_verified_identity_without_a_pending_handoff() -> Result {
@@ -452,6 +476,119 @@ fn chair_prompt_checkpoints_falls_back_stops_and_resumes_once() -> Result {
         .ok_or("resume context")?;
     assert!(context.contains("old") && context.contains(checkpoint));
     assert!(hook(&rig, true, "newer")?.stdout.bytes.is_empty());
+    Ok(())
+}
+
+#[test]
+fn native_subagent_session_start_receives_no_checkpoint_or_custody() -> Result {
+    let mut rig = configured()?;
+    // Prepare a pending handoff with custody text, exactly as a resumed chair
+    // session would find it. A normal SessionStart injects both the handoff and
+    // the checkpoint; a native subagent must receive neither.
+    let source_text = rig.root.join("source-handoff.md");
+    fs::write(&source_text, "Chair notes: user approved #1829 only.")?;
+    let saved = rig.command(&[
+        "workflow",
+        "session",
+        "save",
+        "custody-source",
+        "--file",
+        source_text.to_str().ok_or("path")?,
+    ])?;
+    assert_eq!(code(&saved), 0);
+    let plan = rig.command(&[
+        "chair",
+        "switch",
+        "--session-id",
+        "custody-source",
+        "--dry-run",
+        "--json",
+    ])?;
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout.bytes)?;
+    let checkpoint = plan["data"]["checkpoint"].as_str().ok_or("checkpoint")?;
+    assert_eq!(code(&hook(&rig, false, "custody-source")?), 0);
+    let target_text = rig.root.join("target-handoff.md");
+    fs::write(&target_text, "Chair notes: subagents must not see this.")?;
+    let saved = rig.command(&[
+        "workflow",
+        "session",
+        "save",
+        "subagent-target",
+        "--file",
+        target_text.to_str().ok_or("path")?,
+    ])?;
+    assert_eq!(code(&saved), 0);
+    // The switching target is now the serving account, so an ordinary new
+    // session can consume the pending handoff.
+    rig.env.retain(|(key, _)| key != "CLAUDE_CONFIG_DIR");
+    rig.env.push((
+        "CLAUDE_CONFIG_DIR".into(),
+        rig.root.join("spare's account").into_os_string(),
+    ));
+    let session_start = |marker: Option<(&str, &str)>| -> Result<provenant_os::exec::ExecOutcome> {
+        let mut payload = json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "subagent-target",
+            "cwd": rig.project,
+            "source": "startup"
+        });
+        if let Some((key, value)) = marker {
+            payload[key] = json!(value);
+        }
+        rig.execute(
+            std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["hook", "claude", "session-start"],
+            Some(&serde_json::to_vec(&payload)?),
+        )
+    };
+
+    for marker in [
+        ("agent_id", "agent-abc123"),
+        ("agent_transcript_path", "/tmp/agent-transcript.jsonl"),
+    ] {
+        let chair = hook_with_marker(&rig, true, "subagent-target", Some(marker))?;
+        assert_eq!(code(&chair), 0, "chair-start with {marker:?}");
+        assert!(chair.stdout.bytes.is_empty(), "chair-start with {marker:?}");
+        assert!(chair.stderr.bytes.is_empty(), "chair-start with {marker:?}");
+        let advisory = session_start(Some(marker))?;
+        assert_eq!(code(&advisory), 0, "session-start with {marker:?}");
+        assert!(
+            advisory.stdout.bytes.is_empty(),
+            "session-start with {marker:?}"
+        );
+        assert!(
+            advisory.stderr.bytes.is_empty(),
+            "session-start with {marker:?}"
+        );
+    }
+    // The guard returns before chair attribution as well as before the text.
+    let usage = fs::read_to_string(rig.state.join("usage.jsonl")).unwrap_or_default();
+    let attributed = usage
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(|event| event["kind"] == "chair.session" && event["session"] == "subagent-target");
+    assert!(
+        !attributed,
+        "a subagent SessionStart recorded chair attribution"
+    );
+
+    // `agent_type` is also present for a top-level `claude --agent` session.
+    // It must retain chair context and consume the handoff.
+    let top_level_agent = ("agent_type", "custom-chair");
+    let chair = hook_with_marker(&rig, true, "subagent-target", Some(top_level_agent))?;
+    let value: serde_json::Value = serde_json::from_slice(&chair.stdout.bytes)?;
+    let context = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .ok_or("chair context")?;
+    assert!(context.contains("custody-source") && context.contains(checkpoint));
+    let advisory = session_start(Some(top_level_agent))?;
+    let value: serde_json::Value = serde_json::from_slice(&advisory.stdout.bytes)?;
+    let text = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .ok_or("checkpoint context")?;
+    assert!(text.contains("subagents must not see this."), "{text}");
+    let consumed = hook(&rig, true, "subagent-target")?;
+    assert!(consumed.stdout.bytes.is_empty(), "handoff was not consumed");
     Ok(())
 }
 #[test]

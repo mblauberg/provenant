@@ -1926,6 +1926,100 @@ fn a_steer_to_a_running_lane_queues_the_turn_without_stopping_the_attempt() -> T
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#session-ready-steering
+// Invariant: `--now` requests a Steered stop only once a durable session
+// exists; the queued default never interrupts, in either session state.
+#[test]
+fn steer_now_interrupts_only_with_a_durable_session() -> TestResult {
+    use provenant_supervisor::census::ProcessObservation;
+
+    for with_session in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let route = running
+            .applied_route
+            .as_ref()
+            .ok_or("applied route")?
+            .clone();
+
+        if with_session {
+            let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+                ProcessObservation::Present(fact) if !fact.zombie => {
+                    provenant_os::capture::CaptureSourceIdentity {
+                        attempt: id.to_string(),
+                        generation: RunStore::scope(&running).generation,
+                        boot: fact.identity.boot,
+                        pid: fact.identity.pid,
+                        native_start: fact.identity.native_start,
+                    }
+                }
+                observation => {
+                    return Err(
+                        format!("test process identity unavailable: {observation:?}").into(),
+                    );
+                }
+            };
+            assert!(store.record_provider_session_ready(
+                id,
+                &route,
+                "fixture-session",
+                &source,
+                &call
+            )?);
+            assert!(store.steer_session_available(id, &call)?);
+        } else {
+            assert!(!store.steer_session_available(id, &call)?);
+        }
+
+        // The default still queues without a stop even when a session is live.
+        let queued = OperationId::parse(&format!("steer-queued-{with_session}"))?;
+        assert!(matches!(
+            store.steer(id, queued, "next turn", &call)?,
+            SteerReceipt::Queued { .. }
+        ));
+        let attempt = store.attempt_dir(id, false)?;
+        let scope = RunStore::scope(&store.record(id, &call)?);
+        assert!(matches!(
+            custody::read_stop_intent(&attempt, scope)?,
+            custody::StopIntentState::Absent
+        ));
+
+        let now = OperationId::parse(&format!("steer-now-{with_session}"))?;
+        assert!(matches!(
+            store.steer_now(id, now, "interrupt and resume", &call)?,
+            SteerReceipt::Queued { .. }
+        ));
+        match custody::read_stop_intent(&attempt, scope)? {
+            custody::StopIntentState::Requested(intent) if with_session => {
+                assert_eq!(intent.reason, StopReason::Steered);
+            }
+            custody::StopIntentState::Absent if !with_session => {}
+            other => return Err(format!("unexpected stop intent: {other:?}").into()),
+        }
+        assert!(
+            matches!(store.record(id, &call)?.state, AttemptState::Running { .. }),
+            "the interrupt is a request; settlement owns the transition"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn explicit_cancel_after_delivered_steer_keeps_the_stop_and_blocks_successor() -> TestResult {
     use provenant_supervisor::census::ProcessObservation;

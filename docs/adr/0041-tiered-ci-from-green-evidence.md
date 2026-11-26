@@ -27,8 +27,8 @@ commit, carry coverage forward per suite from that commit or from the same
 pull request's previous green head, and narrow Linux Rust tests to the
 affected crates and their reverse dependencies. macOS Clippy, native macOS
 tests and the macOS release smoke are main-tier: they run on a pull request only when their
-declared paths change, when the `ci:full` label is present, or on a dispatch
-with `tier=full`. Every push to `main` runs everything. A failed `main` run
+declared paths change, when `ci:full` or `ci:macos` is present, or on any
+dispatch. A full dispatch runs all suites. Every push to `main` runs everything. A failed `main` run
 opens or updates one `ci:red-main` issue; the next green run closes it.
 
 ## Alternatives and consequences
@@ -61,9 +61,9 @@ cannot be tested; the manifest is checked against the workflow by
 
 Deferring macOS suites means a pull request can merge with a macOS-only
 regression that `main` then catches and the red-main issue reports. The
-pull-request paths of each main-tier suite name its platform crates, so the
-remaining exposure is a macOS-only compile or behaviour slip outside those
-paths. macOS Clippy moved to the main tier after a measurement on 18 Nov
+pull-request paths include platform-specific files and native test inputs; a
+check catches uncovered macOS cfg. Cross-platform changes can still cause a
+macOS-only compile or behaviour slip outside those paths. macOS Clippy moved to the main tier after a measurement on 18 Nov
 2026: 24 macOS jobs were queued and no Linux job was, and on a single pull
 request run the Linux jobs started within a minute while macOS Clippy waited
 17 minutes and the macOS archive 25. The five macOS slots, not Linux job count

@@ -58,6 +58,7 @@
       "cargo_target_idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "30d", "effect": "Collect a managed Cargo target (target or target-lint in a legacy private lane cache or a shared cache) when nothing under it was written for this long, whatever lanes.cargo_cache_max allows; a target held by a Cargo lock or live lane is always kept. The value and source appear in GC output"},
       "schedule": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Run the daily scheduled sweep. false also skips admission collection; completion cleanup and landing cleanup still run"},
       "idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "6h", "effect": "Idle age for settled attempt scratch, unowned artifacts and standalone caches; a busy or unreleased attempt is always kept"},
+      "attempt_scratch_max": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB; 0 disables the cap", "default": "2G", "effect": "Per-attempt scratch size above which GC collects that attempt's scratch once it is settled, without waiting out gc.idle. A bounded observation that cannot measure the tree keeps it. The effective value and source appear in GC output"},
       "sweep_budget": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "5m", "effect": "Maximum wall time for one GC pass; the saved retention class and candidate cursor resume on the next pass, and the effective value and source appear in GC output"},
       "free_floor": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB", "default": "1% of the state volume, capped at 5 GiB", "effect": "Advisory free-space floor for admission, new builds and pressure collection; below it GC removes further eligible caches oldest first"},
       "critical_free": {"type": "size", "allowed": "same syntax as free_floor; 0B disables the critical decision", "default": "2G", "effect": "Critical free space for dispatch and new builds. Below free_floor, warn and proceed. Both effective thresholds and sources are reported."},
@@ -819,6 +820,7 @@
   "domain_steer_settings": {
     "path": "domains.fabric.steer",
     "settings": {
+      "delivery": {"type": "enum", "effect": "How a steer reaches a running attempt: queued delivers at the next turn boundary without interrupting (the default); now requests a session-preserving restart through --now or this host default. provenant steer --explain shows the effective value and its source."},
       "fallback": {"type": "enum", "effect": "What to do when a stopped session is unavailable: start fresh with a handoff or refuse."},
       "restart_spacing_ms": {"type": "int", "allowed": "0 to 600000 milliseconds", "min": 0, "max": 600000, "default": "2000", "effect": "Minimum spacing between steer restarts; 0 disables the stagger."}
     }
@@ -1089,8 +1091,8 @@
       "host_only": true,
       "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/preparation.rs, tools/front-door/crates/config/src/cache_budget.rs, tools/front-door/crates/run/src/build_dir_gc.rs, tools/front-door/crates/run/src/writer.rs, tools/front-door/src/worktrees.rs",
-      "effect": "Limit allocated bytes across private lane and shared Cargo targets. Accept a byte size or whole-volume percentage; the default is 10% of the cache volume. Set for the host under [knobs]. Per-lane overrides are ignored. At launch and during GC, least-recently-used targets are reclaimed when no live attempt or Cargo build lock holds them. Effective size and source appear in launch warnings and GC reports.",
-      "trade_off": "A lower cap reclaims warm build output sooner; locked targets stay protected and the launch proceeds with a warning when the cap cannot be met."
+      "effect": "Limit allocated bytes across private lane and shared Cargo targets. Accept a byte size or whole-volume percentage; the default is 10% of the cache volume. Set for the host under [knobs]. Per-lane overrides are ignored. During GC, least-recently-used targets are reclaimed when no live attempt or Cargo build lock holds them; lane launches no longer evict or create lane caches. Effective size and source appear in GC reports.",
+      "trade_off": "A lower cap reclaims warm build output sooner in the next GC pass; locked targets stay protected and a pass that cannot measure a target keeps it."
     },
     "lanes.ci_scope": {
       "type": "enum",

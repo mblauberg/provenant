@@ -417,7 +417,13 @@ fn prepared_git_binding_is_not_ambient_for_every_adapter() -> Result<(), Provide
                 assert_eq!(bound.worktree, Path::new("/fixture/repo"));
                 let state = Path::new("/fixture/scratch");
                 for (key, path) in [
-                    ("GIT_DIR", state.join("git-common")),
+                    (
+                        "GIT_DIR",
+                        state
+                            .join("git-common")
+                            .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+                            .join(provenant_core::LANE_GIT_REGISTRATION),
+                    ),
                     ("GIT_COMMON_DIR", state.join("git-common")),
                     ("GIT_WORK_TREE", Path::new("/fixture/repo").to_path_buf()),
                     ("GIT_OBJECT_DIRECTORY", state.join("git-objects")),
@@ -756,6 +762,20 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
                 b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
             )?;
             std::fs::write(private_common.join("HEAD"), b"ref: refs/heads/linked\n")?;
+            // Match the host-prepared linked-worktree registration.
+            let registration = private_common
+                .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+                .join(provenant_core::LANE_GIT_REGISTRATION);
+            std::fs::create_dir_all(&registration)?;
+            std::fs::copy(
+                private_common.join("HEAD"),
+                registration.join("HEAD"),
+            )?;
+            std::fs::write(registration.join("commondir"), b"../..\n")?;
+            std::fs::write(
+                registration.join("gitdir"),
+                format!("{}\n", linked.join(".git").display()),
+            )?;
             std::fs::write(
                 private_common.join("config"),
                 std::fs::read(repo.join(".git/config"))?,
@@ -827,6 +847,28 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
             );
             output.stdout
         };
+        // A consumer that scrubs GIT_* gets the shape of a registered linked
+        // worktree from the shim: git-dir is the private registration, the
+        // common dir is the attempt's private store, and both name the lane.
+        let git_dir = lane_git(&["rev-parse".as_ref(), "--git-dir".as_ref()]);
+        let common_dir = lane_git(&["rev-parse".as_ref(), "--git-common-dir".as_ref()]);
+        assert_ne!(
+            git_dir, common_dir,
+            "{id}: the private gitdir collapsed into the common dir"
+        );
+        assert_eq!(
+            PathBuf::from(std::str::from_utf8(&common_dir)?.trim()),
+            lane_git_common,
+            "{id}: the common dir must still be the private store"
+        );
+        let listing = lane_git(&["worktree".as_ref(), "list".as_ref()]);
+        let listing = std::str::from_utf8(&listing)?;
+        assert!(
+            listing
+                .lines()
+                .any(|line| line.starts_with(&format!("{} ", linked.display()))),
+            "{id}: lane checkout missing from worktree list: {listing}"
+        );
         let bound_head = host_git(&linked, &["rev-parse".as_ref(), "HEAD".as_ref()]);
         assert_eq!(
             lane_git(&["rev-parse".as_ref(), "HEAD".as_ref()]),
@@ -957,7 +999,16 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
                 host_git(&linked, &["rev-parse".as_ref(), "HEAD".as_ref()]),
                 bound_head
             );
-            assert!(scratch.join("git-common/FETCH_HEAD").is_file());
+            // FETCH_HEAD is a per-worktree file: under the linked layout the
+            // shim's GIT_DIR is the private registration, so fetch state lands
+            // there, while refs still land in the attempt's private common dir.
+            let registration = lane_git_common
+                .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+                .join(provenant_core::LANE_GIT_REGISTRATION);
+            assert!(
+                registration.join("FETCH_HEAD").is_file(),
+                "{id}: fetch state must stay in the attempt-private registration"
+            );
             assert!(
                 scratch
                     .join("git-common/refs/remotes/origin/reader")

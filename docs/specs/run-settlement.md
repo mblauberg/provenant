@@ -22,8 +22,10 @@ custody-pinned launch tip with a warning and a recovery ref. A later host tip is
 Settlement decides whether a Git operation is unfinished before it imports objects or
 publishes the branch, on the first pass and on a resume whose recorded phase is already Publish
 or Record. It observes every directory the lane's writer can write: the bound worktree's private
-Git and the attempt's candidate common directory, using one marker inventory shared with custody
-and the object view. An unfinished operation confined to the lane's own Git warns, names the
+Git and the attempt's candidate private registration, falling back to the candidate common
+directory for direct Git calls. The registration owns per-worktree operation state and is checked
+first, using one marker inventory shared with custody and the object view. An unfinished operation
+confined to the lane's own Git warns, names the
 commit its `HEAD` denotes whether symbolic or detached and the directory that retains the
 operation, then publishes the lane's committed tip and leaves that state intact, never resetting
 or cleaning it. Only an operation in the host checkout refuses, before import, with the checkout's

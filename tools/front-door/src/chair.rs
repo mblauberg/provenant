@@ -1075,6 +1075,12 @@ pub fn hook(start: bool, globals: &Globals, deadline: Instant) -> u8 {
     let result = (|| -> Result<Option<Value>, Error> {
         let input_deadline = deadline.min(Instant::now() + Duration::from_secs(1));
         let input = hook_io::read_stdin(1024 * 1024, input_deadline)?;
+        // A native subagent arrives with its own task prompt. Return before any
+        // handoff is consumed or chair attribution recorded: neither belongs to
+        // the subagent's session, and neither may appear in its context.
+        if crate::hooks::hook_marks_subagent(&input) {
+            return Ok(None);
+        }
         let input: Input = serde_json::from_slice(&input)?;
         if input.hook_event_name
             != if start {

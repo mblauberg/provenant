@@ -175,6 +175,17 @@ provisioning, and provisioning verifies the exact branch and head.
 - Why: an owned writer must land in one project-owned location wherever the launch ran, and a
   failed bind must not leave a half-made worktree.
 
+A writer node that reuses an existing worktree declares its comparison `base`. When none is
+declared, the host resolves one from the worktree branch's upstream, else from its merge base
+with the default branch; `run --explain` reports each chosen commit and its source. The base is
+pinned only to review panels sourcing that writer, so each panel compares its writer's base
+against its pushed head without turning one writer's inferred base into a graph-wide fallback.
+A node-sourced review panel with no resolved base and no authored review base refuses the graph
+before launch, naming the writer and the remedy; a plain writer without a base remains advisory
+and falls back to the caller checkout.
+- Why: without a pinned base every lens reviews an empty range and reports equal commits, which
+  hides the missing Git evidence instead of naming it once before any lane starts.
+
 `run --explain` runs the same pre-attempt admission checks as a launch, in read-only form:
 graph exclusions, the submission snapshot, the refusal of host-authored writer-preflight
 fields, protected delivery targets and every declared writer branch, read from an existing
@@ -206,8 +217,18 @@ Standing lane rules come from `lanes.brief_preamble`: a file path set at the hos
 file whose first line is a `<!-- provenant-roles: ... -->` header applies only to the roles it
 names: writer, review or read-only. A missing or unreadable file warns with its layer, and the
 launch proceeds without it. A writer's preamble also lists the project's declared no-build
-static checks from the port table under `Static checks:`, to run before pushing. Readers do
-not get that list.
+static checks from the port table under `Static checks:`, to run before pushing. A project
+declares them as `verify.static_checks` entries in `.provenant/ports.json` (or the host port
+table): each has an `argv`, a repository-relative `cwd` and a `timeout_seconds` cap. An absent
+or empty list adds no text and invents no tier for other stacks; an invalid entry warns and is
+dropped rather than refusing the launch. The list is labelled with the layer and exact file and
+key that declared it. Host and bound host-project declarations name their resolved ports file;
+project declarations use the stable `.provenant/ports.json` path. That same list is recorded as
+`static_checks` on the launch receipt beside `ci_scope` and `pr_policy`; each surviving check
+entry carries that layer and file/key source. Config merging replaces arrays wholesale, so entries
+in the effective list share one source. A failure is reported in the handoff and does not refuse
+the push; CI still gates the merge.
+Readers get neither the list nor its receipt.
 - Why: standing rules belong in one owned file per layer, not repeated in every brief, and a
   writer should run the cheap checks the project declares before CI does.
 
@@ -228,15 +249,25 @@ an empty range. A remote reader binds the peer's **own** checkout HEAD, not the 
 commit: the sender's head names a commit in its scratch project that the peer clone may never
 have seen, and the source view materialiser refuses an absent commit rather than substituting a
 nearby ref. The peer's HEAD first parent supplies its review base; when Git evidence is missing,
-the launch warns and falls back to the sender's pins. For a manual bundled smoke launch without a
-`diff_base`, the checkout's first parent supplies the range; if unavailable, review is skipped with a reason and the other eligible
-nodes continue. A node may name a small project-relative fixture;
+the launch warns and falls back to the sender's pins. A bundled smoke review runs after the write
+node and reads the commit the writer produced in its scratch worktree, so its diff is the writer's
+own smoke change and needs no delivered pr or push; its base is the commit the writer branched
+from, or the existing linked checkout's HEAD immediately before the write, unless
+`--set diff_base=BASE` pins another one. The chosen source is shown in the warnings.
+A manual smoke launch with no writer has no scratch commit to review, so review is skipped with a
+reason and the other eligible nodes continue. A node may name a small project-relative fixture;
 the host stages its bytes with the task, so a peer places the same file in its own candidate
-scratch and the brief names its path instead of leaking a caller path. The upgrade smoke fixture
+scratch and the brief names its path instead of leaking a caller path. A remotely placed reader
+binds the receiving peer's checkout `HEAD` as its source and `HEAD^` as its review base, so
+sender-only commits do not prevent the reader from seeing the peer's tree. If Git cannot resolve
+that evidence, the peer warns and falls back to the sender's pins; this does not refuse the launch.
+The upgrade smoke fixture
 carries a fresh random fact that exists only in those staged bytes, never in a committed tree or
-the bundled template, so a reader that reconstructs the answer from source cannot report it.
-- Why: a verification graph must run on a real install and exercise a writer, and a skipped node
-  must not refuse the run it does not take part in. A fixture must reach every host that runs a
+the bundled template, so a reader that reconstructs the answer from source cannot report it; the
+review asserts that exact token against the read lane's report.
+- Why: a verification graph must run on a real install and exercise a writer, a skipped node must
+  not refuse the run it does not take part in, and a smoke review must stay bounded by its own
+  scratch change rather than the caller checkout. A fixture must reach every host that runs a
   reader, not just the host that owns the checkout; a stale peer clone must still read a valid
   tree, and a smoke pass must be evidence that the staged fixture was actually read.
 

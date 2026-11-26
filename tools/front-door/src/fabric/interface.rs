@@ -1,12 +1,12 @@
 //! Document-based graph service shared by the CLI and the lane relay.
 use super::writer_base::{
     DEFAULT_WRITER_BASE, bind_default_read_only_source, bind_writer_base_source,
-    resolve_writer_base,
+    resolve_reused_worktree_base, resolve_writer_base,
 };
 use super::*;
 use provenant_fabric_runtime::graph::{
-    FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, QueueKnobs, Template,
-    TemplateLibrary,
+    AccessMode, FileJournal, GraphDocument, GraphJournal, GraphNode, GraphStatus, Layer,
+    QueueKnobs, SourceBinding, Template, TemplateLibrary,
     patch::{self, LiveGraph, Patch, PatchContext},
 };
 use serde_json::{Value, json};
@@ -431,6 +431,88 @@ fn bind_review_base(node: &mut provenant_fabric_runtime::graph::GraphNode, base:
     if let Some(composite) = &mut node.composite {
         for child in &mut composite.nodes {
             bind_review_base(child, base);
+        }
+    }
+}
+
+/// Whether a node, or one of its members, carries a review protocol. A
+/// composite boundary owns no protocol of its own; its lens members do.
+fn carries_review_protocol(node: &GraphNode) -> bool {
+    node.review_behaviour.is_some()
+        || node.delivery_review.is_some()
+        || node.role.as_deref().is_some_and(|role| {
+            role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
+        })
+        || node.template.as_deref().is_some_and(|name| {
+            name == "findings-panel" || name == "review-panel" || name.starts_with("review")
+        })
+        || node
+            .composite
+            .as_ref()
+            .is_some_and(|composite| composite.nodes.iter().any(carries_review_protocol))
+        || node
+            .loop_body
+            .as_ref()
+            .is_some_and(|loop_spec| loop_spec.body.iter().any(carries_review_protocol))
+}
+
+/// Whether a node reads one named writer by node source and carries a review
+/// protocol. Only those nodes compare base..head; other readers of a writer's
+/// head (hygiene, publication, conflict) have no review range to resolve.
+fn is_node_sourced_review_of(node: &GraphNode, writer: &str) -> bool {
+    matches!(&node.source, Some(SourceBinding::Node { node }) if node == writer)
+        && node.access == AccessMode::ReadOnly
+        && carries_review_protocol(node)
+}
+
+fn has_node_sourced_review(node: &GraphNode, writer: &str) -> bool {
+    is_node_sourced_review_of(node, writer)
+        || node.composite.as_ref().is_some_and(|composite| {
+            composite
+                .nodes
+                .iter()
+                .any(|child| has_node_sourced_review(child, writer))
+        })
+        || node.loop_body.as_ref().is_some_and(|loop_spec| {
+            loop_spec
+                .body
+                .iter()
+                .any(|child| has_node_sourced_review(child, writer))
+        })
+}
+
+/// Whether this writer has a node-sourced review without a panel-specific or
+/// graph-authored comparison base.
+fn has_unbased_node_sourced_review(node: &GraphNode, writer: &str) -> bool {
+    (is_node_sourced_review_of(node, writer) && node.review_base.is_none())
+        || node.composite.as_ref().is_some_and(|composite| {
+            composite
+                .nodes
+                .iter()
+                .any(|child| has_unbased_node_sourced_review(child, writer))
+        })
+        || node.loop_body.as_ref().is_some_and(|loop_spec| {
+            loop_spec
+                .body
+                .iter()
+                .any(|child| has_unbased_node_sourced_review(child, writer))
+        })
+}
+
+/// Any review node that sources `writer` gets the resolved base. The composite
+/// boundary and its members are both pinned so every lens receives base..head.
+fn bind_writer_review_base(node: &mut GraphNode, writer: &str, base: &str) {
+    if is_node_sourced_review_of(node, writer) {
+        bind_review_base(node, base);
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_writer_review_base(child, writer, base);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_writer_review_base(child, writer, base);
         }
     }
 }
@@ -2066,7 +2148,14 @@ impl Factory {
         // Review ranges are launch controls: resolve them on the host before
         // admitting a graph, and bind immutable object IDs into its identity.
         let review_launch = declared.accepts_review_range();
-        let review_subject = self.review_subject(input, review_launch, cancel)?;
+        // The bundled smoke graph pins its review to the writer's scratch
+        // commit in the template itself. The host's checkout-derived default
+        // subject would point that review back at the caller and make a smoke
+        // check as expensive as the release commit it was launched from, so
+        // leave range resolution to the template for a bundled smoke launch.
+        let bundled_smoke = input.get("template").and_then(Value::as_str) == Some("smoke")
+            && library.layer("smoke") == Some(Layer::Default);
+        let review_subject = self.review_subject(input, review_launch && !bundled_smoke, cancel)?;
         let review_pin = review_subject
             .as_ref()
             .map(|subject| json!({"base":subject.base,"head":subject.head}));
@@ -2135,7 +2224,7 @@ impl Factory {
             selection["branch"] = json!(format!("queue/{}", launch.item.graph_id));
             queue_base_input = Some(selection);
         }
-        let writer_base = if writer_launch {
+        let mut writer_base = if writer_launch {
             Some(resolve_writer_base(
                 queue_base_input.as_ref().unwrap_or(input),
                 &self.context.project_root,
@@ -2394,6 +2483,62 @@ impl Factory {
             }
             document = decode_input(compiled, "document")?;
         }
+        // #4064: a writer that reuses an existing worktree has no launch-level
+        // base. Resolve one from the node (declared base, the branch's upstream,
+        // else its merge base with the default branch) so a findings-panel that
+        // sources that writer compares base..pushed head instead of an empty
+        // range. A plain writer stays advisory: only a node-sourced review
+        // needs the base to be present before launch.
+        let mut reused_writer_bases = Vec::new();
+        for node in &document.nodes {
+            if node.access == AccessMode::WorktreeWrite && node.worktree.is_some() {
+                reused_writer_bases.push((
+                    node.id.clone(),
+                    resolve_reused_worktree_base(
+                        node,
+                        &self.context.project_root,
+                        &self.cwd,
+                        self.context.roots.state.as_path(),
+                        &read_source,
+                        git.as_deref(),
+                    ),
+                ));
+            }
+        }
+        for (writer_id, base) in &reused_writer_bases {
+            if writer_base
+                .as_ref()
+                .is_none_or(|base| base.commit.is_none())
+                && reused_writer_bases.len() == 1
+            {
+                writer_base = base.clone();
+            }
+            match base.as_ref().and_then(|base| base.commit.as_deref()) {
+                Some(commit) => {
+                    let has_review = document
+                        .nodes
+                        .iter()
+                        .any(|node| has_node_sourced_review(node, writer_id));
+                    for node in &mut document.nodes {
+                        bind_writer_review_base(node, writer_id, commit);
+                    }
+                    if has_review {
+                        document.schema_version = document.schema_version.max(2);
+                    }
+                }
+                None if document.review_base.is_none()
+                    && document
+                        .nodes
+                        .iter()
+                        .any(|node| has_unbased_node_sourced_review(node, writer_id)) =>
+                {
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field(format!(
+                        "review_base_unresolved: writer {writer_id} reuses a worktree with no declared base, upstream or default-branch merge base; declare base on the node or supply review_base"
+                    ))));
+                }
+                None => {}
+            }
+        }
         // NameDecision::Replay returns above. A graph_id in the raw document
         // can still name a new full-document submission, so queue presence is
         // the only selector here.
@@ -2650,9 +2795,24 @@ impl Factory {
             let refused = source_admission
                 .iter()
                 .any(|row| row["status"] == "refused");
+            let reused_writer_bases = reused_writer_bases
+                .iter()
+                .map(|(node, base)| {
+                    json!({
+                        "node": node,
+                        "commit": base.as_ref().and_then(|base| base.commit.as_deref()),
+                        "source": base.as_ref().map(|base| base.source.label()),
+                    })
+                })
+                .collect::<Vec<_>>();
             return Ok(json!({
                 "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
                 "capability_gaps": capability_gaps,
+                "writer_base": writer_base.as_ref().map(|base| json!({
+                    "commit": base.commit,
+                    "source": base.source.label(),
+                })),
+                "reused_writer_bases": reused_writer_bases,
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,
@@ -2713,6 +2873,15 @@ impl Factory {
         }
         result["warnings"] = json!(warnings);
         result["read_source"] = read_source_report(default_source.as_ref(), &read_source);
+        result["writer_base"] = writer_base
+            .as_ref()
+            .map(|base| {
+                json!({
+                    "commit": base.commit,
+                    "source": base.source.label(),
+                })
+            })
+            .unwrap_or(Value::Null);
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });
@@ -2860,133 +3029,15 @@ impl Factory {
             parameters["integration_branch"] = branch.clone();
         }
         if bundled_smoke {
-            let is_remote = input
-                .get("host")
-                .and_then(Value::as_str)
-                .is_some_and(|h| !h.is_empty() && !matches!(h, "local" | "localhost"));
-            let controls = smoke_writer
-                .as_object()
-                .is_some_and(|node| !node.is_empty());
-            if controls {
-                // A remote graph must not retain or transmit a caller path.
-                // `--branch`/`--base` name a worktree the peer creates in its
-                // own clone, so they are admitted; only a caller path is not.
-                if is_remote && first_control == Some(&"worktree") {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                        "worktree".into(),
-                    )));
-                }
-                // A control and a `--set` of the same binding are two
-                // answers to one question.
-                if ["worktree", "write_attempt"]
-                    .iter()
-                    .any(|name| overrides.get(*name).is_some())
-                {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                        "set".into(),
-                    )));
-                }
-                parameters["worktree"] = smoke_writer["worktree"].clone();
-                if let Some(attempt) = smoke_writer.get("attempt") {
-                    parameters["write_attempt"] = attempt.clone();
-                }
-            }
-            // A peer-owned writer is provisioned from a branch and a base ref,
-            // never from a caller path. Drop the host path while retaining the
-            // branch intent so the peer can create its own worktree.
-            if is_remote {
-                parameters["worktree"] = json!("");
-            }
-            let requested = parameters.get("smoke-write").is_some();
-            let write_disabled = requested && parameters["smoke-write"] == json!(false);
-            // A remote launch carries no caller worktree. Provision a scratch
-            // branch from a sourced default so verification exercises the
-            // remote writer even when the caller supplies no --branch; an
-            // explicit --branch/--base or --set write_attempt still wins.
-            if is_remote
-                && !write_disabled
-                && !parameters
-                    .get("write_attempt")
-                    .and_then(|attempt| attempt.get("new_worktree"))
-                    .is_some()
-            {
-                let branch = input
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|name| !name.is_empty())
-                    .map(|name| format!("smoke/{name}"))
-                    .unwrap_or_else(|| "smoke/verify".to_owned());
-                let explicit_base = input
-                    .get("base")
-                    .and_then(Value::as_str)
-                    .filter(|base| !base.is_empty())
-                    .map(str::to_owned);
-                let base = explicit_base.as_deref().unwrap_or(DEFAULT_WRITER_BASE);
-                let mut attempt = parameters
-                    .get("write_attempt")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                let object = attempt.as_object_mut().ok_or_else(|| {
-                    FacadeError::invalid(InvalidInputDetail::Field("write_attempt".into()))
-                })?;
-                let mut provision = json!({"branch":branch,"base":base});
-                if explicit_base.is_none() {
-                    provision["default_base"] = json!(true);
-                }
-                object.insert("new_worktree".into(), provision);
-                parameters["write_attempt"] = attempt;
-                input_warnings.push(format!(
-                    "remote smoke writer uses scratch branch {branch} from {base} (source: default smoke placement); pass --branch B --base REF to override"
-                ));
-            }
-            // Without an explicit base, a first parent supplies a distinct
-            // review range. A root commit (or unavailable Git) has no such
-            // range, so omit review rather than launching an empty one.
-            if parameters
-                .get("diff_base")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .is_empty()
-            {
-                if let Some(base) = provenant_os::git::git_executable()
-                    .and_then(|git| provenant_run::resolve_git_base(&git, &self.cwd, "HEAD^").ok())
-                {
-                    parameters["diff_base"] = json!(base);
-                    input_warnings.push(format!(
-                        "smoke review uses base {base} (source: checkout first parent); pass --set diff_base=BASE to override"
-                    ));
-                } else {
-                    parameters["smoke-review"] = json!(false);
-                    input_warnings.push(
-                        "smoke skipped review: no diff_base supplied and checkout first parent is unavailable; pass --set diff_base=BASE to enable review".into(),
-                    );
-                }
-            }
-            let peer_owned_writer = is_remote
-                && parameters
-                    .get("write_attempt")
-                    .and_then(|attempt| attempt.get("new_worktree"))
-                    .is_some();
-            if !requested {
-                let worktree = parameters
-                    .get("worktree")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                parameters["smoke-write"] =
-                    json!(peer_owned_writer || (!is_remote && !worktree.is_empty()));
-            }
-            if parameters["smoke-write"] != json!(true) {
-                let reason = if requested {
-                    "smoke-write is not enabled"
-                } else if is_remote {
-                    "remote placement needs --branch B to provision a peer-owned worktree; caller paths are not accepted"
-                } else {
-                    "no writer worktree supplied; pass --worktree PATH or --branch B to run it"
-                };
-                input_warnings.push(format!(
-                    "smoke skipped node write: {reason}; other eligible nodes still run"
-                ));
-            }
+            smoke::configure(
+                self,
+                input,
+                &mut parameters,
+                &overrides,
+                &smoke_writer,
+                first_control.copied(),
+                input_warnings,
+            )?;
         }
         node["with"] = parameters;
         Ok(TemplateLaunch {
@@ -4182,6 +4233,8 @@ fn route_choice(input: &Value, raw: Option<&Value>) -> Result<Option<RouteChoice
 
 #[path = "interface_route.rs"]
 mod route;
+#[path = "interface_smoke.rs"]
+mod smoke;
 use route::override_tier;
 
 fn add(row: &mut Value, key: &str, value: u64) {

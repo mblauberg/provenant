@@ -29,6 +29,14 @@ pub use names::{
 pub mod retry;
 pub mod review_cover;
 
+/// Directory under an attempt's private `git-common` that holds Git's
+/// per-worktree registry. A lane's private Git directory lives here so its
+/// repository shape matches a registered linked worktree.
+pub const LANE_GIT_WORKTREES_DIR: &str = "worktrees";
+/// Name of the lane's registration in `LANE_GIT_WORKTREES_DIR`. Each attempt
+/// owns its own `git-common`, so one stable entry is enough.
+pub const LANE_GIT_REGISTRATION: &str = "lane";
+
 /// Validate a user-facing task title. The limit is measured in UTF-8 bytes.
 pub fn validate_task_title(title: &str) -> Result<(), &'static str> {
     if title.is_empty() || title.len() > 256 || title.chars().any(char::is_control) {

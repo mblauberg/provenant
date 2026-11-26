@@ -256,6 +256,18 @@ serves every listed graph, so a `--full` page never repeats those scans per grap
 The admission summary reuses that holder reading, and the process census is
 taken only when local attempt evidence needs it.
 
+`status NAME` resolves the name in the caller's project first. On a miss it
+searches the state root's other registered projects: one match is read through
+the owning project's identity and reported with a `CROSS_PROJECT_TARGET_FOUND`
+warning naming that project; several matches refuse with `AMBIGUOUS_TARGET`
+listing every project instead of guessing one. Inside a lane the relay's project
+and chair-session read scope still applies
+([fabric](fabric.md#lane-graph-read-scope)).
+
+- Why: a graph in another registered project stays reachable without the caller
+  having to know which project owns it, and an ambiguous name is never resolved
+  by guessing.
+
 `status --mine` reads active custody across projects (or one `--project`),
 including attempts nested under the current chair and unattended items open to
 adoption. `status --adoptable` lists only the unattended items open to adoption.
@@ -270,7 +282,11 @@ Writer presence is `live`, `unattended`, `settling` or `unknown`. `running` show
 only while the recorded guardian or provider identity is present. A changed boot
 proves the old process tree is gone; same-boot absence, a reused PID, an
 unobservable host, incomplete evidence and unreachable peers stay `unknown`,
-because a child may have forked into another session and been reparented. Status
+because a child may have forked into another session and been reparented. A
+reachable peer supplies its own observed presence with the relayed status, so
+its attempt reports `running` on the launching host without that host reading
+the peer's process table; a reconcile hint for a peer-owned attempt names the
+peer's graph target and the host where it resolves. Status
 never mutates or schedules recovery; unattended and settling rows name the scoped
 `provenant reconcile` action, which rechecks custody before settlement. A
 settling row also names PIDs and the custody writer-lock path observed at the

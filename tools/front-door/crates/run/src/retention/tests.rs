@@ -1228,6 +1228,60 @@ fn pressure_only_collects_temporary_and_keeps_captures_and_provider_state() -> T
 }
 
 #[test]
+fn over_cap_scratch_is_collected_before_idle_once_settled() -> TestResult {
+    let (_temp, context, store, input, attempt) = seeded()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    withdraw(&store, &input, &call)?;
+    let scratch = scratch_root_of(&attempt).join("tmp");
+    fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+    fs::write(scratch.join("payload"), vec![1; 8192])?;
+    let unowned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Unowned;
+    let root = Directory::open_anchor(context.state_root.as_path())?;
+    // Three days into a seven-day idle window: age alone keeps the scratch.
+    let now = WallTime::from_micros(200 + 3 * DAY_MICROS)?;
+    let under_cap = ScratchPolicy {
+        scratch_cap_bytes: 16_384,
+        owner: Some(&unowned),
+        ..ScratchPolicy::new(7 * 86_400)
+    };
+    let kept = store.gc_temporary(
+        &root,
+        &under_cap,
+        now,
+        false,
+        &call,
+        &RetentionScan::default(),
+    )?;
+    assert!(kept.errors.is_empty(), "{kept:?}");
+    assert!(
+        kept.attempt_tmp.is_empty(),
+        "under-cap scratch must wait out gc.idle"
+    );
+    assert!(scratch.join("payload").is_file());
+    // The same settled attempt is over a smaller cap, so its scratch goes now.
+    let over_cap = ScratchPolicy {
+        scratch_cap_bytes: 4096,
+        ..under_cap
+    };
+    let collected = store.gc_temporary(
+        &root,
+        &over_cap,
+        now,
+        false,
+        &call,
+        &RetentionScan::default(),
+    )?;
+    assert!(collected.errors.is_empty(), "{collected:?}");
+    assert_eq!(collected.attempt_tmp.len(), 1);
+    assert!(
+        !scratch.exists(),
+        "over-cap scratch must be reclaimed once settled"
+    );
+    Ok(())
+}
+
+#[test]
 fn collecting_tmp_prunes_only_empty_attempt_scratch_roots() -> TestResult {
     let (_temp, _context, store, input, attempt) = seeded()?;
     let (clock, cancel) = (clock(), CancelToken::new());
