@@ -210,11 +210,13 @@ static checks from the port table under `Static checks:`, to run before pushing.
 declares them as `verify.static_checks` entries in `.provenant/ports.json` (or the host port
 table): each has an `argv`, a repository-relative `cwd` and a `timeout_seconds` cap. An absent
 or empty list adds no text and invents no tier for other stacks; an invalid entry warns and is
-dropped rather than refusing the launch. The list is labelled with the layer and key that
-declared it, and that same sourced list is recorded as `static_checks` on the launch receipt
-beside `ci_scope` and `pr_policy`. Config merging replaces arrays wholesale, so one source
-covers the list rather than each entry. A failure is reported in the handoff and does not
-refuse the push; CI still gates the merge. Readers get neither the list nor its receipt.
+dropped rather than refusing the launch. The list is labelled with the layer and exact file and
+key that declared it. Host and bound host-project declarations name their resolved ports file;
+project declarations use the stable `.provenant/ports.json` path. That same sourced list is
+recorded as `static_checks` on the launch receipt beside `ci_scope` and `pr_policy`. Config
+merging replaces arrays wholesale, so one source covers the list rather than each entry. A
+failure is reported in the handoff and does not refuse the push; CI still gates the merge.
+Readers get neither the list nor its receipt.
 - Why: standing rules belong in one owned file per layer, not repeated in every brief, and a
   writer should run the cheap checks the project declares before CI does.
 

@@ -672,15 +672,23 @@ impl BriefPreamble {
         if role != BriefRole::Writer {
             return;
         }
-        let origin = format!("{}#verify.static_checks", provenant_config::PORTS_CONFIG);
-        let source = Source {
-            layer: ports
-                .provenance()
-                .get("verify.static_checks")
-                .copied()
-                .unwrap_or(ports.verify.source),
-            origin: Some(origin.clone()),
-        };
+        let default_origin = format!("{}#verify.static_checks", provenant_config::PORTS_CONFIG);
+        let source = ports
+            .sourced_leaf("verify.static_checks")
+            .last()
+            .map(|candidate| candidate.source.clone())
+            .unwrap_or_else(|| Source {
+                layer: ports
+                    .provenance()
+                    .get("verify.static_checks")
+                    .copied()
+                    .unwrap_or(ports.verify.source),
+                origin: Some(default_origin.clone()),
+            });
+        let origin = source
+            .origin
+            .clone()
+            .unwrap_or_else(|| default_origin.clone());
         let mut checks = Vec::new();
         for (index, check) in ports.verify.static_checks.iter().enumerate() {
             if check.is_valid() {
@@ -1241,6 +1249,87 @@ mod tests {
             writer.contains("source: project; .provenant/ports.json#verify.static_checks"),
             "{writer}"
         );
+    }
+
+    /// Invariant: static-check advice and its receipt preserve the exact
+    /// winning ports file and key for host and host-project declarations.
+    /// Spec: docs/specs/run-launch.md#layered-brief-preamble
+    #[test]
+    fn host_static_checks_keep_the_winning_file_in_preamble_and_receipt() {
+        let state = tempfile::tempdir().unwrap();
+        let host = state.path().join("host");
+        std::fs::create_dir_all(&host).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let write_checks = |path: &Path, program: &str| {
+            std::fs::write(
+                path,
+                serde_json::to_vec(&serde_json::json!({
+                    "verify": {
+                        "static_checks": [
+                            {"argv": [program], "cwd": ".", "timeout_seconds": 30},
+                        ],
+                    },
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        };
+
+        let host_ports = host.join("ports.json");
+        write_checks(&host_ports, "host-check");
+        let host_table = provenant_config::PortTable::read_for(Some(project.path()), &host)
+            .expect("host static checks resolve");
+        let mut host_brief = BriefPreamble::default();
+        host_brief.set_static_checks_from_ports(&host_table, BriefRole::Writer);
+        let host_origin = format!("{}#verify.static_checks", host_ports.display());
+        let host_source = host_brief
+            .static_checks_source
+            .as_ref()
+            .expect("host source is present");
+        assert_eq!(host_source.layer, Layer::Host);
+        assert_eq!(host_source.origin.as_deref(), Some(host_origin.as_str()));
+        assert!(
+            host_brief
+                .static_checks_paragraph()
+                .contains(&format!("source: host; {host_origin}"))
+        );
+        let host_receipt = host_brief
+            .static_checks_receipt()
+            .expect("host checks reach the receipt");
+        assert_eq!(host_receipt.source, Layer::Host);
+        assert_eq!(host_receipt.key, host_origin);
+
+        let project_git = project.path().join(".git");
+        std::fs::create_dir_all(&project_git).unwrap();
+        let host_project_dir = provenant_config::host_project_dir(&host, project.path())
+            .expect("checkout has a host-project directory");
+        std::fs::create_dir_all(&host_project_dir).unwrap();
+        let host_project_ports = host_project_dir.join("ports.json");
+        write_checks(&host_project_ports, "host-project-check");
+        let host_project_table = provenant_config::PortTable::read_for(Some(project.path()), &host)
+            .expect("host-project static checks resolve");
+        let mut host_project_brief = BriefPreamble::default();
+        host_project_brief.set_static_checks_from_ports(&host_project_table, BriefRole::Writer);
+        let host_project_origin = format!("{}#verify.static_checks", host_project_ports.display());
+        let host_project_source = host_project_brief
+            .static_checks_source
+            .as_ref()
+            .expect("host-project source is present");
+        assert_eq!(host_project_source.layer, Layer::HostProject);
+        assert_eq!(
+            host_project_source.origin.as_deref(),
+            Some(host_project_origin.as_str())
+        );
+        assert!(
+            host_project_brief
+                .static_checks_paragraph()
+                .contains(&format!("source: host_project; {host_project_origin}"))
+        );
+        let host_project_receipt = host_project_brief
+            .static_checks_receipt()
+            .expect("host-project checks reach the receipt");
+        assert_eq!(host_project_receipt.source, Layer::HostProject);
+        assert_eq!(host_project_receipt.key, host_project_origin);
     }
 
     /// An absent or empty `verify.static_checks` declaration adds no preamble
