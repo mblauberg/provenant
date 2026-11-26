@@ -807,7 +807,7 @@ fn retained_lane_settlement_leaves_output_and_cache_for_gc()
     let delivery = provenant_run::WriterDeliveryReceipt {
         extra: Default::default(),
         schema_version: 1,
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "resumed-lane".into(),
         head: None,
         review_acceptance: None,

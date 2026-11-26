@@ -1,5 +1,6 @@
 //! Fast manifest and source policy checks. No Cargo subprocess required.
 use std::{
+    collections::HashMap,
     error::Error,
     fs,
     path::{Path, PathBuf},
@@ -500,7 +501,260 @@ fn is_test_source(name: &str) -> bool {
 
 // Method-level bans (including direct sleep) live in clippy.toml. The remaining
 // scanners express contextual rules: Git arguments/environment, reserved OS
-// namespaces, and adapter identity comparisons; Clippy cannot model those.
+// namespaces, adapter identity comparisons and fixed waits in tests; Clippy
+// cannot model those.
+//
+// Fixed waits in tests hide ordering bugs: they pass on an idle host and flake
+// under load. This rule warns first, so existing fixtures are not broken by a
+// policy change. `PROVENANT_STRICT_TEST_WAITS=1` turns the warning into a
+// refusal once the named waits have moved to `wait_until` or an event. A scope
+// that names `disallowed_methods` is an explicit real-time boundary and is
+// exempt: the wait primitives themselves must still be allowed to sleep.
+fn fixed_wait_violations(source: &str, test_file: bool) -> Vec<String> {
+    test_scopes(source, test_file)
+        .into_iter()
+        .filter_map(|scope| {
+            let tokens = rust_tokens(scope);
+            // A crate-wide `#![allow]` is a blanket suppression, not a named
+            // boundary; it cannot exempt every test in the file.
+            let blanket = tokens.starts_with(&["#", "!", "["]);
+            if !blanket && tokens.contains(&"disallowed_methods") {
+                return None;
+            }
+            // A fixed `Duration` is a wait only when the statement also names
+            // a sleep or timeout primitive. A deadline passed to a bounded
+            // helper such as `wait_until` or `fixture_accept` is not a fixed
+            // wait: its owner decides when it expires.
+            let is_wait_statement = |index: usize| {
+                let start = (0..index)
+                    .rev()
+                    .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                    .map_or(0, |position| position + 1);
+                let end = (index..tokens.len())
+                    .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                    .unwrap_or(tokens.len());
+                tokens[start..end].iter().any(|token| {
+                    matches!(
+                        *token,
+                        "sleep" | "park_timeout" | "recv_timeout" | "wait_timeout"
+                    )
+                })
+            };
+            let mut violations = Vec::new();
+            // Track local bindings by lexical block, including aliases and reassignment.
+            // A shadowing binding replaces the outer value until its block ends.
+            let mut bindings: Vec<HashMap<&str, bool>> = vec![HashMap::new()];
+            let is_fixed = |expression: &[&str], bindings: &[HashMap<&str, bool>]| {
+                expression.windows(3).any(|window| {
+                    window[0] == "Duration"
+                        && window[1] == "::"
+                        && matches!(
+                            window[2],
+                            "from_secs" | "from_millis" | "from_micros" | "from_nanos"
+                        )
+                }) || expression.iter().any(|name| {
+                    bindings
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name))
+                        .copied()
+                        .unwrap_or(false)
+                })
+            };
+            for (index, token) in tokens.iter().enumerate() {
+                match *token {
+                    "{" => bindings.push(HashMap::new()),
+                    "}" if bindings.len() > 1 => {
+                        bindings.pop();
+                    }
+                    _ => {}
+                }
+                let declaration = *token == "let";
+                let name_index = index + 1 + usize::from(tokens.get(index + 1) == Some(&"mut"));
+                let assignment = !declaration
+                    && tokens.get(index + 1) == Some(&"=")
+                    && (index == 0 || matches!(tokens[index - 1], ";" | "{" | "}"));
+                if declaration || assignment {
+                    let name_index = if declaration { name_index } else { index };
+                    if let Some(name) = tokens.get(name_index).copied() {
+                        let end = (name_index + 1..tokens.len())
+                            .find(|position| matches!(tokens[*position], ";" | "{" | "}"))
+                            .unwrap_or(tokens.len());
+                        if let Some(equal) =
+                            (name_index + 1..end).find(|position| tokens[*position] == "=")
+                        {
+                            let fixed = is_fixed(&tokens[equal + 1..end], &bindings);
+                            if declaration {
+                                bindings.last_mut().expect("root scope").insert(name, fixed);
+                            } else if let Some(scope) = bindings
+                                .iter_mut()
+                                .rev()
+                                .find(|scope| scope.contains_key(name))
+                            {
+                                scope.insert(name, fixed);
+                            }
+                        }
+                    }
+                }
+                if matches!(*token, "recv_timeout" | "wait_timeout")
+                    && tokens.get(index + 1) == Some(&"(")
+                {
+                    let mut depth = 0usize;
+                    let end = (index + 1..tokens.len()).find(|position| {
+                        match tokens[*position] {
+                            "(" => depth += 1,
+                            ")" => depth = depth.saturating_sub(1),
+                            _ => {}
+                        }
+                        depth == 0
+                    });
+                    if end.is_some_and(|end| is_fixed(&tokens[index + 2..end], &bindings)) {
+                        violations.push(format!("{token}, fixed duration wait in a test"));
+                    }
+                }
+                if matches!(*token, "sleep" | "park_timeout") && tokens.get(index + 1) == Some(&"(")
+                {
+                    violations.push(format!("{token}, fixed wait in a test"));
+                }
+                if *token == "Duration"
+                    && tokens.get(index + 1) == Some(&"::")
+                    && matches!(
+                        tokens.get(index + 2).copied(),
+                        Some("from_secs" | "from_millis" | "from_micros" | "from_nanos")
+                    )
+                    && is_wait_statement(index)
+                {
+                    violations.push(format!(
+                        "Duration::{}, fixed wait in a test",
+                        tokens[index + 2]
+                    ));
+                }
+            }
+            (!violations.is_empty()).then_some(violations.join(", "))
+        })
+        .collect()
+}
+
+#[test]
+fn fixed_wait_rule_distinguishes_explicit_boundaries_from_test_waits() {
+    let direct = r#"
+        #[test]
+        fn flaky() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    "#;
+    let found = fixed_wait_violations(direct, false);
+    assert!(found.iter().any(|item| item.contains("sleep")), "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|item| item.contains("Duration::from_millis")),
+        "{found:?}"
+    );
+    let allowed = r#"
+        #[allow(clippy::disallowed_methods)]
+        #[test]
+        fn bounded() {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    "#;
+    assert!(fixed_wait_violations(allowed, true).is_empty());
+    let blanket = r#"
+        #![allow(clippy::disallowed_methods)]
+        #[test]
+        fn flaky() {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    "#;
+    assert!(!fixed_wait_violations(blanket, true).is_empty());
+    let bounded = r#"
+        #[test]
+        fn patient() {
+            wait_until("ready", deadline, observe, reached);
+            wait_for("ready", Duration::from_secs(1), observe, reached);
+        }
+    "#;
+    assert!(fixed_wait_violations(bounded, false).is_empty());
+    let production = "fn busy() { std::thread::sleep(Duration::from_millis(50)); }";
+    assert!(fixed_wait_violations(production, false).is_empty());
+}
+
+#[test]
+fn fixed_duration_bindings_to_timeouts_warn_and_refuse_in_strict_mode() {
+    let split = r#"
+        #[test]
+        fn flaky() {
+            let timeout = Duration::from_millis(50);
+            receiver.recv_timeout(timeout);
+        }
+    "#;
+    let found = fixed_wait_violations(split, false);
+    assert!(!found.is_empty(), "split fixed duration must be reported");
+    assert!(!fixed_waits_refused(&found, false));
+    assert!(fixed_waits_refused(&found, true));
+    let aliases_and_shadowing = r#"
+        #[test]
+        fn waits() {
+            let mut timeout = deadline;
+            timeout = Duration::from_secs(1);
+            let alias = timeout;
+            { let alias = deadline; receiver.recv_timeout(alias); }
+            receiver.recv_timeout(alias);
+        }
+    "#;
+    assert!(!fixed_wait_violations(aliases_and_shadowing, false).is_empty());
+    let shadowed = r#"
+        #[test]
+        fn bounded() {
+            let timeout = Duration::from_secs(1);
+            { let timeout = deadline; receiver.recv_timeout(timeout); }
+            wait_for("ready", timeout, observe, reached);
+        }
+    "#;
+    assert!(fixed_wait_violations(shadowed, false).is_empty());
+}
+
+fn fixed_waits_refused(violations: &[String], strict: bool) -> bool {
+    strict && !violations.is_empty()
+}
+
+#[test]
+#[allow(
+    clippy::print_stderr,
+    reason = "warn-first policy reports fixed waits on stderr"
+)]
+fn test_waits_warn_before_refusal() -> Result<(), Box<dyn Error>> {
+    let strict = std::env::var("PROVENANT_STRICT_TEST_WAITS").is_ok_and(|value| value == "1");
+    let mut violations = Vec::new();
+    for path in source_roots() {
+        let mut sources = Vec::new();
+        rust_sources(&path, &mut sources)?;
+        for source_path in sources {
+            let source = fs::read_to_string(&source_path)?;
+            let test_file = is_test_source(&source_path.to_string_lossy());
+            for violation in fixed_wait_violations(&source, test_file) {
+                violations.push(format!("{}: {violation}", source_path.display()));
+            }
+        }
+    }
+    if !violations.is_empty() {
+        eprintln!(
+            "fixed waits in tests (warn first; set PROVENANT_STRICT_TEST_WAITS=1 to refuse):"
+        );
+        for violation in violations.iter().take(20) {
+            eprintln!("  {violation}");
+        }
+        if violations.len() > 20 {
+            eprintln!("  ... and {} more", violations.len() - 20);
+        }
+    }
+    assert!(
+        !fixed_waits_refused(&violations, strict),
+        "fixed waits in tests under PROVENANT_STRICT_TEST_WAITS=1:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
 
 // Counts for the tokens owned by one function body (innermost function wins).
 #[derive(Default)]
@@ -1884,8 +2138,9 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/records/src/run.rs", 4500),
         ("crates/redact/src/lib.rs", 2500),
         ("crates/routing/src/catalog.rs", 2500),
-        // Pinned-account offer judgement and the same-reason refusal detail (#3892).
-        ("crates/routing/src/resolve.rs", 4500),
+        // One owner for offer evidence, pinned-account judgement and the
+        // same-reason refusal detail (#3892, #3933).
+        ("crates/routing/src/resolve.rs", 4750),
         ("crates/routing/src/review.rs", 3000),
         ("crates/run/src/build_dir_gc.rs", 6250),
         // Static-check launch guidance and receipt provenance (#3652).

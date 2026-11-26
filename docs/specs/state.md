@@ -256,7 +256,13 @@ free-form source to the typed `stream` source, preserving every stated number.
 A malformed row is skipped so it fails only its own decode; a row already in the
 new shape is left byte-identical. No decoder accepts a retired spelling.
 
-The run store's base-14-to-15 migration (`crates/run/src/migration_14_15.sql`) is the one crossing
+The run store's base-14-to-15 migration (`crates/run/src/migration_14_15.sql`)
+rewrites the retired empty local destination to JSON null in an attempt's
+stored delivery receipt and its integration. It leaves named remotes and
+already-current rows alone and skips malformed JSON. The terminal update trigger
+is restored in the migration transaction.
+
+The run store's base-15-to-16 migration (`crates/run/src/migration_15_16.sql`) is the one crossing
 for the settlement renames. On a writable open it renames `$.state.terminal_cause` to
 `$.state.cause`, rewriting the value `handoff_refused` to `launch_handoff_refused`, and renames
 `$.partial_signals` to `$.signals`, `$.terminal_evidence` to `$.terminal_basis`, and

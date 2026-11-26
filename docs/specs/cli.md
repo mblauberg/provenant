@@ -502,6 +502,17 @@ Release checks inspect the artifact to be distributed as well as Git evidence.
 - Why: an inspection must not change its subject or certify an uninspected
   artifact.
 
+### Check config reports warm-target provenance
+
+`check config` names the layer that set `build.target` when a layer other than
+the builtin changed the target identity, and warns when the toolchain recorded in
+a warm slot differs from the checkout's `rust-toolchain.toml` pin. These are
+findings: the check never rewarms a target or edits a slot record.
+
+- Why: a warm cache built by a different toolchain or worktree is cold or
+  stale, and the source of that decision must be visible without building.
+- Owner: `tools/front-door/src/checks.rs`
+
 ### Check install uses recorded roots
 
 `check install` builds its targets from the roots recorded in the install

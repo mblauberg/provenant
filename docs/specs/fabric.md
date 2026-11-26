@@ -638,7 +638,8 @@ liveness. When such a row needs recovery, its `next:` hint names the peer's own
 graph target and the host that owns it, where `reconcile` can resolve it. An
 uncertain remote mutation is resolved by the owner's receipt, never resent. Remote attempts bind the origin identity, transferred Git objects are
 verified before use, and a protocol mismatch is refused before decoding;
-cross-host text follows the configured disclosure policy. A peer locator
+reachable peer status relays the owner's authenticated presence and recovery
+hints name the owning host. Cross-host text follows the configured disclosure policy. A peer locator
 identifies a registered Git common directory, Git's verified worktree inventory
 selects the checkout that owns project configuration, and a bare common directory
 stays its own host-only layout root.

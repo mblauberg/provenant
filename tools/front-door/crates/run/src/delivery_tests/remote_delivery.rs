@@ -153,10 +153,10 @@ fn launch_and_stop_publication_share_one_remote_refresh()
     Ok(())
 }
 
-// Regression for #3888 F1: a local-integration launch deliberately records an
-// empty remote. Stop publication must still name its own real remote, and the
-// writer's stop-work evidence must be gathered against that remote rather than
-// treating the sealed sentinel as a corrupt name.
+// Regression for #3888 F1 and #3895: a local-integration launch records a
+// typed `Local` destination and no remote. Stop publication must still name its
+// own real remote, and the writer's stop-work evidence must be gathered against
+// that remote rather than treating the local destination as a corrupt name.
 #[test]
 fn local_integration_stop_publication_uses_the_stop_remote()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -164,7 +164,7 @@ fn local_integration_stop_publication_uses_the_stop_remote()
     fixture.request = WriterDeliveryRequest {
         extra: Default::default(),
         mode: DeliveryMode::Integrate("main".into()),
-        remote: String::new(),
+        remote: provenant_records::run::Destination::Local,
         branch: "main".into(),
         open_pr: false,
         fast_forward_only: false,
@@ -177,9 +177,9 @@ fn local_integration_stop_publication_uses_the_stop_remote()
     )?
     .ok_or("stop-publish destination")?;
     let host = launch.prepare_stop_publish(&fixture.writer, &stop_request)?;
-    assert_eq!(host.delivery_remote()?, None);
+    assert_eq!(host.delivery_remote(), None);
     assert_eq!(
-        host.stop_publish_remote()?,
+        host.stop_publish_remote(),
         Some(provenant_config::RemoteName::new("origin")?)
     );
 
@@ -219,7 +219,7 @@ fn local_integration_stop_publication_uses_the_stop_remote()
 
 // The same local-integration delivery with no stop-publish binding has no
 // remote at all: settlement seals a stop-work summary with no ahead evidence,
-// without refusing the empty sealed sentinel.
+// because the sealed destination is `Local`, not a malformed name.
 #[test]
 fn local_integration_without_stop_publish_leaves_the_stop_remote_absent()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -228,14 +228,14 @@ fn local_integration_without_stop_publish_leaves_the_stop_remote_absent()
     fixture.request = WriterDeliveryRequest {
         extra: Default::default(),
         mode: DeliveryMode::Integrate("main".into()),
-        remote: String::new(),
+        remote: provenant_records::run::Destination::Local,
         branch: "main".into(),
         open_pr: false,
         fast_forward_only: false,
     };
     let launch = fixture.prepare()?;
-    assert_eq!(launch.delivery_remote()?, None);
-    assert_eq!(launch.stop_publish_remote()?, None);
+    assert_eq!(launch.delivery_remote(), None);
+    assert_eq!(launch.stop_publish_remote(), None);
 
     fixture.terminal_via_with(
         "origin",
@@ -1466,8 +1466,8 @@ fn concise_delivery_preserves_alias_contract_and_refuses_injection() -> Result<(
     )?
     .ok_or(RunError::Validation("push"))?;
     assert_eq!(
-        (&*push.remote, &*push.branch, push.open_pr),
-        ("origin", "lane", false)
+        (push.remote.as_str(), &*push.branch, push.open_pr),
+        (Some("origin"), "lane", false)
     );
     assert!(
         HostDeliveryContext::destination(
@@ -1484,8 +1484,8 @@ fn concise_delivery_preserves_alias_contract_and_refuses_injection() -> Result<(
     )?
     .ok_or(RunError::Validation("integration"))?;
     assert_eq!(
-        (&*remote.remote, &*remote.branch),
-        ("origin", "integration")
+        (remote.remote.as_str(), &*remote.branch),
+        (Some("origin"), "integration")
     );
     for invalid in [
         "integrate:",

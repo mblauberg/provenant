@@ -87,6 +87,17 @@ index, refs, worktree files and mtimes are never written. Nothing in a slot is c
 and a nonzero `slot_changes` count is reported on stderr. Stream output maps slot paths to
 the worktree; no `--message-format` flag is injected.
 
+The slot's Cargo target uses `build.target` (default `toolchain,worktree`).
+`toolchain` is derived from the compiler selected by Cargo, including an
+explicit `+toolchain` argument, so a warm cache built by another compiler
+cannot be reused by a pinned build. `worktree` sets a checkout-specific
+workspace-only rustc wrapper, giving workspace members separate fingerprints
+while dependencies stay in the shared target. An empty key (`shared`) restores
+the legacy shared target. `rustc -vV` release of
+the last warm job is kept in `slot.json`; `check config` reports the configured
+source layer and warns when that release differs from the repository's
+`rust-toolchain.toml` pin.
+
 A job runs locally, with its `exception` recorded and a warning, when it is sandboxed, not
 eligible, offload is off, staging or the pool is unavailable or quarantined, or no snapshot
 exists. A pool problem warns and runs locally; it never fails the chair's check.

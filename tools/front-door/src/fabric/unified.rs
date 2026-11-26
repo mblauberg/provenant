@@ -1280,8 +1280,8 @@ fn enrich_status_rows_with_facts(
                 PeerResult::Run { data, .. } => match *data {
                     RunResult::Status {
                         attempt: record,
-                        lane_waits,
                         presence,
+                        lane_waits,
                         ..
                     } if record.attempt_id == attempt => (record, lane_waits, presence),
                     _ => return Err(FacadeError::StateCorrupt),

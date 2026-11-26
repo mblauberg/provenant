@@ -184,6 +184,9 @@ pub const WRITER_FENCE_LIST_FAILED: WarningCode = WarningCode("WRITER_FENCE_LIST
 /// A settled writer attempt named a retained fence that is missing; abandon proceeds.
 pub const ABANDON_RETAINED_FENCE_MISSING: WarningCode =
     WarningCode("ABANDON_RETAINED_FENCE_MISSING");
+/// A dead lane's attributed process was found but cannot be proven enough to
+/// reap; it is named in status for the chair.
+pub const ORPHAN_PROCESS_ATTRIBUTED: WarningCode = WarningCode("ORPHAN_PROCESS_ATTRIBUTED");
 /// An abandoned lane left a stale Git worktree registration; the lane settled.
 pub const ABANDON_STALE_WORKTREE_REGISTRATION: WarningCode =
     WarningCode("ABANDON_STALE_WORKTREE_REGISTRATION");

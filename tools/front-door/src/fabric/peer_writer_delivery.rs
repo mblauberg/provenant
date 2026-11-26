@@ -379,7 +379,7 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
     let delivered = WriterDeliveryReceipt {
         extra: Default::default(),
         schema_version: 1,
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "lane".into(),
         head: None,
         review_acceptance: None,

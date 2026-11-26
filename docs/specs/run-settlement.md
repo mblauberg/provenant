@@ -60,11 +60,16 @@ terminal record, so a resume does not repeat them and `status` can show them.
 The guardian transfers its writer exclusion to recovery, and import and cleanup reuse that guard
 for the same scope. Failed steps before import share a durable budget of three failures. A resumed
 worker honours `retry_after_ms` before its first pass and paces every later pass. Exhausted
-retries keep their cause and stop automatic recovery: status reports settlement held and calls
-for explicit reconciliation. A retry deadline overdue by three minutes is flagged stalled in the
-status reason, and a stalled custody-path refusal names the remedy (replace a symlink or restore a
-path inside the attempt directory).
-- Why: a retained writer must not contend with itself or retry an unchanged failure forever.
+retries keep their cause and stop automatic recovery: status reports settlement held and names
+both `provenant reconcile <lane>` and `provenant reconcile --abandon <lane> --reason <text>` as the
+ways an owner clears it. Every other status that leaves recovery outstanding — a paced retry or a
+retry deadline overdue by three minutes — names the same commands alongside the cause, so a lane
+never reads as automatically pending without a way out. A stalled custody-path refusal also names
+its remedy (replace a symlink or restore a path inside the attempt directory), and a status for a
+writer that has exited says settlement recovery is outstanding rather than promising an automatic
+retry that an exhausted budget will never make.
+- Why: a retained writer must not contend with itself or retry an unchanged failure forever, and
+  a lane whose automatic retries have stopped must still tell the owner what to run next.
 
 A lane's temporary scratch directory is never a child of the attempt record directory:
 it lives at `<state>/attempt-scratch/<attempt id>/tmp`. GC, writer-Git reads, disk
@@ -414,6 +419,10 @@ identities, or a spawned tree the guardian never completed a census of, is never
 unless the sandbox mark was in effect: a daemon that double-forks and calls setsid after the last
 census matches no pid, session or group, and only the mark finds it. An unsandboxed lane lost
 before that record is durable is refused, and `reconcile --abandon` is the explicit escape. The
+guardian's durable group/session attempt tag, plus the internal mark inherited in the
+provider's environment, still lets reconcile name a detached process for status even when it
+cannot prove enough to signal it; a host with neither an OS containment mark nor a durable
+tag warns once per change with its setting source. The
 host must also prove worktree non-occupancy under exclusion; unknown or occupied is not free (a
 read-only attempt has no worktree). A writer checkout removed from disk is censused like any
 other root. Nothing that still exists lies under it, so a process in an existing directory is
