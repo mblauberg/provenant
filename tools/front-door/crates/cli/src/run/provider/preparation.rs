@@ -7467,7 +7467,7 @@ mod candidate_walk_regressions {
         let availability = [provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: pinned.adapter.clone(),
-            executable: "/fixture/agy".into(),
+            executable: "/fixture/cursor".into(),
             version: "fixture".into(),
             last_update: None,
             fixture_ref: "fixture".into(),
@@ -7518,7 +7518,7 @@ mod candidate_walk_regressions {
 
     #[test]
     fn alternative_account_must_serve_the_pinned_model() {
-        let mut pinned = route("legacy", "spent");
+        let mut pinned = route("gemini-4-hydrogen", "spent");
         pinned.adapter = "agy".into();
         pinned.catalogue_revision = "revision".into();
         let policy = offer_policy(0);
@@ -7547,30 +7547,30 @@ mod candidate_walk_regressions {
         ));
         assert!(!has_alternative_account(
             &pinned,
-            &[record("spent", &["legacy"])],
+            &[record("spent", &["gemini-3.8-flash"])],
             &refused,
             &policy,
             &catalogue,
         ));
         assert!(has_alternative_account(
             &pinned,
-            &[record("other", &["legacy"])],
+            &[record("other", &["gemini-3.8-flash"])],
             &refused,
             &policy,
             &catalogue,
         ));
         assert!(!has_alternative_account(
             &pinned,
-            &[record("other", &["unrelated"])],
+            &[record("other", &["gemini-4-argon"])],
             &refused,
             &policy,
             &catalogue,
         ));
         let mut refused = std::collections::BTreeSet::new();
-        refused.insert(("cursor".to_owned(), "other".to_owned()));
+        refused.insert(("agy".to_owned(), "other".to_owned()));
         assert!(!has_alternative_account(
             &pinned,
-            &[record("other", &["legacy"])],
+            &[record("other", &["gemini-3.8-flash"])],
             &refused,
             &policy,
             &catalogue,
@@ -7579,13 +7579,13 @@ mod candidate_walk_regressions {
 
     #[test]
     fn alternative_account_uses_fresh_snapshot_offer_evidence() {
-        let mut pinned = route("legacy", "spent");
+        let mut pinned = route("gemini-4-hydrogen", "spent");
         pinned.adapter = "agy".into();
         pinned.catalogue_revision = "revision".into();
         let availability = [provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: pinned.adapter.clone(),
-            executable: "/fixture/cursor".into(),
+            executable: "/fixture/agy".into(),
             version: "fixture".into(),
             last_update: None,
             fixture_ref: "fixture".into(),
@@ -7615,7 +7615,7 @@ mod candidate_walk_regressions {
             authority_ref: None,
             details: Some(provenant_quota::QuotaDetails {
                 extra: Default::default(),
-                models: vec!["legacy".into()],
+                models: vec!["gemini-3.8-flash".into()],
                 ..Default::default()
             }),
             windows: Vec::new(),
