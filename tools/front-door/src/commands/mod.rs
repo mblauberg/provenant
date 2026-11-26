@@ -16,6 +16,7 @@
 //! contracted signature across every domain.
 #![allow(clippy::result_large_err)]
 mod accounts;
+mod adapter;
 mod admit;
 mod build;
 mod chair;
@@ -71,6 +72,7 @@ use provenant_records::{CommandError, Outcome};
 /// Every command domain, one module per top-level grammar command.
 pub static DOMAINS: &[&Domain] = &[
     &accounts::DOMAIN,
+    &adapter::DOMAIN,
     &admit::DOMAIN,
     &build::DOMAIN,
     &chair::DOMAIN,
