@@ -541,27 +541,29 @@ impl RunStore {
                 let result = (|| -> Result<()> {
                     let mut record: AttemptRecord = match crate::db::decode_attempt(&raw) {
                         Ok(record) => record,
-                        Err(_) if scratch.is_some() => {
-                            return self.collect_grace_scratch(
-                                &id,
-                                now,
-                                dry_run,
-                                scratch.unwrap(),
-                                call,
-                                scan,
-                                &mut temporary_sizes,
-                                &mut report,
-                            );
+                        Err(error) => {
+                            if let Some(policy) = scratch {
+                                return self.collect_grace_scratch(
+                                    &id,
+                                    now,
+                                    dry_run,
+                                    policy,
+                                    call,
+                                    scan,
+                                    &mut temporary_sizes,
+                                    &mut report,
+                                );
+                            }
+                            return Err(error);
                         }
-                        Err(error) => return Err(error.into()),
                     };
                     if let Err(error) = crate::reader::validate_attempt(&record) {
-                        if scratch.is_some() {
+                        if let Some(policy) = scratch {
                             return self.collect_grace_scratch(
                                 &id,
                                 now,
                                 dry_run,
-                                scratch.unwrap(),
+                                policy,
                                 call,
                                 scan,
                                 &mut temporary_sizes,
@@ -588,21 +590,23 @@ impl RunStore {
                         // Git with no import proof is not a permanent fence.
                         // After the configured grace the scratch is collectible
                         // under fresh lock and continuation checks below.
-                        Err(error)
-                            if scratch.is_some() && matches!(error, RunError::Validation(_)) =>
-                        {
-                            return self.collect_grace_scratch(
-                                &id,
-                                now,
-                                dry_run,
-                                scratch.unwrap(),
-                                call,
-                                scan,
-                                &mut temporary_sizes,
-                                &mut report,
-                            );
+                        Err(error) => {
+                            if matches!(error, RunError::Validation(_)) {
+                                if let Some(policy) = scratch {
+                                    return self.collect_grace_scratch(
+                                        &id,
+                                        now,
+                                        dry_run,
+                                        policy,
+                                        call,
+                                        scan,
+                                        &mut temporary_sizes,
+                                        &mut report,
+                                    );
+                                }
+                            }
+                            return Err(error);
                         }
-                        Err(error) => return Err(error),
                     };
                     let Some(Held {
                         attempt,

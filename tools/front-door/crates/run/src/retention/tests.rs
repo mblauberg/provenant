@@ -3048,8 +3048,12 @@ fn settled_scratch_without_custody_proof_is_collected_after_grace() -> TestResul
     // The record is terminal and released, so this is a settled attempt whose
     // scratch must not be kept forever.
     fs::write(attempt.join("writer-objects.json"), b"{}")?;
-    let old = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_secs(3 * 86_400))
+    let now = provenant_os::clock::SystemClock.wall_now()?;
+    let old = std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_micros(
+            u64::try_from(now.as_micros())?
+                .saturating_sub(u64::try_from(DAY_MICROS)?.saturating_mul(3)),
+        ))
         .ok_or("fixture time")?;
     for path in [
         &scratch,
@@ -3060,7 +3064,6 @@ fn settled_scratch_without_custody_proof_is_collected_after_grace() -> TestResul
     }
     let unowned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Unowned;
     let root = Directory::open_anchor(context.state_root.as_path())?;
-    let now = provenant_os::clock::SystemClock.wall_now()?;
     let within = ScratchPolicy {
         grace_seconds: 7 * 86_400,
         owner: Some(&unowned),
