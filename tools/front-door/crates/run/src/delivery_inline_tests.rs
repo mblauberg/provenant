@@ -424,4 +424,51 @@ mod forge_context_tests {
         );
         assert_eq!(integrate.branch, "trunk");
     }
+
+    /// With no remote HEAD to read, delivery protects exactly the declared
+    /// set (plus its declared default branch), not a compiled-in main/master.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn declared_protected_set_holds_when_the_remote_has_no_head() {
+        use provenant_records::provenance::Layer;
+        use std::os::unix::fs::DirBuilderExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&state)
+            .unwrap();
+        std::fs::create_dir_all(project.join(".git/refs/remotes")).unwrap();
+        std::fs::write(
+            project.join(".git/config"),
+            "[remote \"upstream\"]\n\turl = git@example.invalid:up.git\n",
+        )
+        .unwrap();
+        // Deliberately no .git/refs/remotes/upstream/HEAD: the declaration must
+        // be the only source of the default branch and protected set.
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            r#"{"git":{"remote":"upstream","default_branch":"trunk","protected":["release"]}}"#,
+        )
+        .unwrap();
+        let ports = provenant_config::PortTable::read_for(Some(&project), &state).unwrap();
+
+        let forge = resolve_forge(&state, &project, &ports).expect("declared context resolves");
+        assert_eq!(forge.remote.value, "upstream");
+        assert_eq!(forge.default_branch.value, "trunk");
+        assert_eq!(forge.protected.value, ["release", "trunk"]);
+        assert_eq!(forge.protected.source.layer, Layer::Project);
+        assert!(forge.is_protected("release"));
+        assert!(forge.is_protected("trunk"));
+        assert!(!forge.is_protected("main"));
+
+        let push = HostDeliveryContext::destination(crate::DeliveryMode::Push, "lane", &forge)
+            .expect("destination")
+            .expect("push request");
+        assert_eq!(push.remote.to_string(), "upstream");
+        assert_eq!(push.branch, "lane");
+    }
 }

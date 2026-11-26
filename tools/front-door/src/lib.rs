@@ -731,6 +731,47 @@ fn config_ports_prepare(table: &provenant_config::PortTable, full: bool) -> serd
     )
 }
 
+/// The effective forge facts for `config ports`: the one resolved remote,
+/// default branch and protected set, each with the layer and origin that
+/// supplied it. A checkout whose context cannot be resolved still reports the
+/// declared leaves, with the refusal as a warning rather than a failed command.
+///
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+fn config_ports_git(
+    project: &std::path::Path,
+    table: &provenant_config::PortTable,
+    full: bool,
+) -> serde_json::Value {
+    match provenant_config::resolve_for(project, table) {
+        Ok(forge) => serde_json::json!({
+            "remote": sourced_leaf_json(&forge.remote, &[], full),
+            "default_branch": sourced_leaf_json(&forge.default_branch, &[], full),
+            "protected": sourced_leaf_json(&forge.protected, &[], full),
+        }),
+        Err(error) => serde_json::json!({
+            "remote": config_port_leaf(
+                table,
+                "git.remote",
+                serde_json::Value::String(table.git.remote.clone()),
+                full,
+            ),
+            "default_branch": config_port_leaf(
+                table,
+                "git.default_branch",
+                serde_json::Value::String(table.git.default_branch.clone()),
+                full,
+            ),
+            "protected": config_port_leaf(
+                table,
+                "git.protected",
+                serde_json::to_value(&table.git.protected).unwrap_or_default(),
+                full,
+            ),
+            "warning": error.to_string(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod config_ports_tests {
     /// Spec: docs/specs/state.md#every-setting-reports-its-layer
@@ -852,6 +893,42 @@ mod config_ports_tests {
                 .ends_with("ports.json#worktree_layout.roots")
         );
     }
+
+    /// The configured remote and protected set are what `config ports` shows,
+    /// each with the layer and key that declared it.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn config_ports_reports_the_effective_remote_and_protected_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            r#"{"git":{"remote":"pinned","default_branch":"trunk","protected":["release"]}}"#,
+        )
+        .unwrap();
+        let table = provenant_config::PortTable::read_for(Some(&project), &state).unwrap();
+
+        let git = super::config_ports_git(&project, &table, false);
+        assert!(git.get("warning").is_none(), "{git}");
+        assert_eq!(git["remote"]["value"], "pinned");
+        assert_eq!(git["remote"]["layer"], "project");
+        assert!(
+            git["remote"]["origin"]
+                .as_str()
+                .unwrap()
+                .ends_with("ports.json#git.remote")
+        );
+        assert_eq!(git["default_branch"]["value"], "trunk");
+        assert_eq!(
+            git["protected"]["value"],
+            serde_json::json!(["release", "trunk"])
+        );
+        assert_eq!(git["protected"]["layer"], "project");
+    }
 }
 
 fn config_setting_value(
@@ -918,6 +995,11 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                     "build": {
                         "prepare": config_ports_prepare(&table, globals.full),
                     },
+                    // The one resolved forge context, read with its layer and
+                    // origin, so a non-origin remote and a declared protected
+                    // set are visible before any workflow command runs.
+                    // Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+                    "git": config_ports_git(&context.project, &table, globals.full),
                 })
             }
             ConfigAction::Detect => serde_json::to_value(config::detect::detect(&context.project))?,
