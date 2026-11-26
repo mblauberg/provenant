@@ -3036,6 +3036,7 @@ fn evicted_payload_keeps_records_tails_and_refuses_resume() -> TestResult {
 #[test]
 // Spec: docs/specs/disk.md#scratch-and-cache-custody
 fn settled_scratch_without_custody_proof_is_collected_after_grace() -> TestResult {
+    use provenant_core::Clock;
     let (_temp, context, store, input, attempt) = seeded()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
