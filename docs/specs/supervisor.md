@@ -397,9 +397,14 @@ stay read-only to lanes. The host imports verified objects and moves the branch
 by compare-and-swap ([launch custody](run-launch.md#admission-and-custody)). The
 lane Git wrapper binds commands that implicitly target its worktree; commands
 with an explicit repository selector, other repositories and transport endpoints
-pass through unchanged.
-- Why: ordinary Git works in the lane while other lanes' refs and the host's Git
-  behaviour stay protected.
+pass through unchanged. The bound private Git directory is a registration below
+the attempt's private common directory (`worktrees/lane`), with its backlink and
+head, so `--git-dir` differs from `--git-common-dir` and `git worktree list`
+resolves the lane checkout. Tooling that clears `GIT_*` and re-enters through the
+shim still sees an ordinary registered linked worktree; refs, objects and the
+index stay in the attempt's private store.
+- Why: ordinary Git and repository checkout guards work in the lane while other
+  lanes' refs and the host's Git behaviour stay protected.
 
 ### Native environment and sandbox tool stores
 

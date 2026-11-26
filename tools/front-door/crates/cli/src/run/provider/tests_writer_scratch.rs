@@ -60,6 +60,26 @@ fn phase(name: &'static str) {
     PHASE.set(name);
 }
 
+/// Mirror the host's linked-worktree registration for a fixture that prepares
+/// its private Git store directly. A lane's `GIT_DIR` names this registration,
+/// so omitting it presents an unregistered worktree root to Git.
+fn prepare_lane_registration(
+    common: &Path,
+    worktree: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let registration = common
+        .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+        .join(provenant_core::LANE_GIT_REGISTRATION);
+    std::fs::create_dir_all(&registration)?;
+    std::fs::copy(common.join("HEAD"), registration.join("HEAD"))?;
+    std::fs::write(registration.join("commondir"), b"../..\n")?;
+    std::fs::write(
+        registration.join("gitdir"),
+        format!("{}\n", worktree.join(".git").display()),
+    )?;
+    Ok(())
+}
+
 fn writer_preparation_fixture(
     fence_only: bool,
     auth_layout: &'static str,
@@ -1010,6 +1030,7 @@ printf 'agy 1.0.0\n'
                 provenant_os::fixture::run_git(&private, &["init", "--bare"])?;
                 std::fs::copy(project.join(".git/config"), private.join("config"))?;
                 std::fs::write(private.join("HEAD"), b"ref: refs/heads/writer\n")?;
+                prepare_lane_registration(&private, worktree)?;
                 std::fs::create_dir_all(paths.temporary.join("candidate-0/git-objects"))?;
                 environment.push(("IDENTITY_PROBE".into(), "writer".into()));
                 environment.push(("EXPECTED_ADMIN".into(), admin.into_os_string()));
@@ -1752,6 +1773,9 @@ printf 'agy 1.0.0\n'
     std::fs::create_dir_all(private_common.join("refs"))?;
     std::fs::write(private_common.join("HEAD"), b"ref: refs/heads/writer\n")?;
     std::fs::copy(project.join(".git/config"), private_common.join("config"))?;
+    // The runtime binds GIT_DIR to the linked-worktree registration, so the
+    // fixture must materialise it like the host does before the shim runs.
+    prepare_lane_registration(&private_common, worktree)?;
     let private_objects = publishing_paths.temporary.join("candidate-0/git-objects");
     std::fs::create_dir_all(private_objects.join("info"))?;
     std::fs::write(

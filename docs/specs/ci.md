@@ -96,7 +96,10 @@ Whenever native macOS tests run, every declared native test must have passed and
 every quarantine entry must resolve against both platform test lists. A run that
 did not build the native list only warns on an entry it cannot resolve; `main`
 always builds both lists, and a change to quarantine entries pulls the native
-suite into its pull request.
+suite into its pull request. The native evidence verifier runs only after its
+archive producer succeeds; if the archive is skipped or fails, the selected
+suite's required archive job still fails the `ci-status` gate without a
+secondary missing-artifact error.
 
 - Why: a quarantine entry must name a real test, but a pull request that defers
   native tests cannot see the native list.
