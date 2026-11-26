@@ -576,7 +576,11 @@ impl TargetProtection {
 /// targets rather than deleting them. Spec: docs/specs/cli.md#warnings-are-typed-values
 fn gc_warning(message: impl Into<String>) {
     use provenant_records::warning::{BUILD_DIR_GC_TARGET_RETAINED, Warning, warn};
-    warn(Warning::new(BUILD_DIR_GC_TARGET_RETAINED, message.into()));
+    warn(Warning::new(
+        BUILD_DIR_GC_TARGET_RETAINED,
+        message.into(),
+        provenant_records::warning::detected_source(BUILD_DIR_GC_TARGET_RETAINED),
+    ));
 }
 
 /// Snapshot live writer custody across every registered project for launch

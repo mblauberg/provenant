@@ -63,7 +63,9 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
             .map_or(0, |limit| limit.value)
     };
     CapturePlan {
-        stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. } if provider == "command")
+        stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. }
+            if provenant_records::AdapterSpec::get(provider)
+                .is_some_and(|s| s.launch.framing == provenant_records::StreamFraming::Raw))
         {
             provenant_supervisor::custody::StreamMode::Tail {
                 limit: provenant_records::COMMAND_OUTPUT_TAIL_BYTES as u64,
@@ -166,8 +168,12 @@ impl PreparedLaunch {
                     use provenant_records::warning::{SANDBOX_UNAVAILABLE, Warning, warn};
                     // Spec: docs/specs/cli.md#warnings-are-typed-values
                     warn(
-                        Warning::new(SANDBOX_UNAVAILABLE, message)
-                            .subject("LAUNCH_SANDBOX_UNAVAILABLE_NONE"),
+                        Warning::new(
+                            SANDBOX_UNAVAILABLE,
+                            message,
+                            provenant_records::warning::detected_source(SANDBOX_UNAVAILABLE),
+                        )
+                        .subject("LAUNCH_SANDBOX_UNAVAILABLE_NONE"),
                     );
                 }
                 self.environment.retain(|(name, _)| name != SANDBOX);
@@ -205,7 +211,11 @@ impl PreparedLaunch {
         if let Some(warning) = &mode.warning {
             use provenant_records::warning::{SANDBOX_UNAVAILABLE, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            warn(Warning::new(SANDBOX_UNAVAILABLE, warning.clone()));
+            warn(Warning::new(
+                SANDBOX_UNAVAILABLE,
+                warning.clone(),
+                provenant_records::warning::detected_source(SANDBOX_UNAVAILABLE),
+            ));
         }
         self.environment.retain(|(name, _)| name != SANDBOX);
         self.environment
@@ -1475,6 +1485,7 @@ impl RunStore {
                 warn(Warning::new(
                     ADMISSION_RECEIPT_UNCONFIRMED,
                     format!("admission receipt is visible but durability is unconfirmed: {cause}"),
+                    provenant_records::warning::detected_source(ADMISSION_RECEIPT_UNCONFIRMED),
                 ));
                 true
             }
@@ -1575,6 +1586,7 @@ impl RunStore {
                 warn(Warning::new(
                     ADMISSION_RELEASE_PENDING,
                     "repository admission release remains pending; attempt remains queued",
+                    provenant_records::warning::detected_source(ADMISSION_RELEASE_PENDING),
                 ));
             }
             return (
@@ -1628,6 +1640,7 @@ impl RunStore {
                 warn(Warning::new(
                     ADMISSION_RELEASE_PENDING,
                     "repository admission release failed after a concurrent terminal change",
+                    provenant_records::warning::detected_source(ADMISSION_RELEASE_PENDING),
                 ));
             }
             return (
@@ -1650,6 +1663,7 @@ impl RunStore {
             warn(Warning::new(
                 ADMISSION_RELEASE_PENDING,
                 "repository admission release failed after an unsuccessful acquire",
+                provenant_records::warning::detected_source(ADMISSION_RELEASE_PENDING),
             ));
         }
         (
@@ -1718,6 +1732,7 @@ impl RunStore {
             warn(Warning::new(
                 ADMISSION_RELEASE_PENDING,
                 "stored repository admission binding digest is invalid; release was not run",
+                provenant_records::warning::detected_source(ADMISSION_RELEASE_PENDING),
             ));
             return false;
         }
@@ -1781,6 +1796,7 @@ impl RunStore {
                 warn(Warning::new(
                     ADMISSION_RELEASE_PENDING,
                     "repository admission release could not read the stored request",
+                    provenant_records::warning::detected_source(ADMISSION_RELEASE_PENDING),
                 ));
                 return false;
             }
@@ -1797,6 +1813,7 @@ impl RunStore {
             warn(Warning::new(
                 ADMISSION_RELEASE_PENDING,
                 "repository admission release failed; reconcile will retry the idempotent command",
+                provenant_records::warning::detected_source(ADMISSION_RELEASE_PENDING),
             ));
             return false;
         }
@@ -2012,6 +2029,9 @@ impl RunStore {
                         Warning::new(
                             REPOSITORY_ADMISSION_SKIPPED,
                             format!("repository admission skipped {id}: {reason}"),
+                            provenant_records::warning::detected_source(
+                                REPOSITORY_ADMISSION_SKIPPED,
+                            ),
                         )
                         .subject(format!("attempt {id}")),
                     );
@@ -2097,6 +2117,7 @@ impl RunStore {
                     Warning::new(
                         REPOSITORY_ADMISSION_SKIPPED,
                         format!("repository admission skipped {id}: {reason}"),
+                        provenant_records::warning::detected_source(REPOSITORY_ADMISSION_SKIPPED),
                     )
                     .subject(format!("attempt {id}")),
                 );
@@ -2242,7 +2263,7 @@ impl RunStore {
                     Warning::new(
                         LANE_PRIORITY_FALLBACK,
                         format!("lane priority unavailable ({reason}); using compiled domains.fabric.lanes.priority default {fallback}"),
-                    )
+                     provenant_records::warning::detected_source(LANE_PRIORITY_FALLBACK))
                     .once_per_change(),
                 );
                 fallback

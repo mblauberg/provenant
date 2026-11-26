@@ -219,6 +219,9 @@ pub fn run(command: Tracker, globals: &Globals) -> u8 {
                 provenant_records::warning::Warning::new(
                     provenant_records::warning::CONFIG_UNAVAILABLE,
                     format!("cannot read tracker port: {error}; using compiled defaults"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                    ),
                 )
                 .subject(source.display().to_string())
                 .once_per_change(),

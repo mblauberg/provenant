@@ -149,10 +149,12 @@ pub enum NamedEntry {
 
 /// Evidence used to identify the model after a provider finishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelObservation {
+pub enum AnsweringModelSource {
     Stream,
     Rollout,
     SessionDatabase,
+    /// The adapter reports no answering model at all.
+    Unreported,
 }
 
 /// Location of a provider's user skill tree relative to the host home or an
@@ -185,14 +187,85 @@ pub struct AccountModelPlan {
     pub quota: AccountQuota,
 }
 
-/// Provider integration support, including the evidence for a native limitation.
+pub const ADAPTER_ROW_SOURCE: &str = "crates/records/src/adapters.rs";
+pub const ADAPTER_ROW_REASON: &str = "declared by the adapter row";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CapabilitySupport {
-    Supported,
-    Unsupported {
-        reason: &'static str,
-        source: &'static str,
-    },
+pub struct AdapterFact<T> {
+    pub value: T,
+    pub reason: &'static str,
+    pub source: &'static str,
+}
+impl<T> AdapterFact<T> {
+    pub const fn row(value: T) -> Self {
+        Self {
+            value,
+            reason: ADAPTER_ROW_REASON,
+            source: ADAPTER_ROW_SOURCE,
+        }
+    }
+    pub const fn because(value: T, reason: &'static str, source: &'static str) -> Self {
+        Self {
+            value,
+            reason,
+            source,
+        }
+    }
+}
+impl AdapterFact<bool> {
+    pub const fn supported() -> Self {
+        Self::row(true)
+    }
+    pub const fn unsupported(reason: &'static str, source: &'static str) -> Self {
+        Self::because(false, reason, source)
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalEventStrength {
+    /// The provider's terminal event states success or failure, and it
+    /// outranks a clean exit.
+    Strong,
+    Weak,
+    Absent,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageAttribution {
+    Attempt,
+    Session,
+}
+/// How the provider session id is learned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionReference {
+    /// The decoder emits a provider session event.
+    Reported,
+    /// The session id is inferred from other evidence.
+    Inferred,
+    /// No provider session id is available.
+    Absent,
+}
+/// A known adapter limitation, shown in diagnostics and the capability matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caveat {
+    pub code: &'static str,
+    pub note: &'static str,
+    pub source: &'static str,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetainedArtifact {
+    pub parent: &'static str,
+    pub name: &'static str,
+    pub scrub: &'static [&'static str],
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    pub transcript_layout: AdapterFact<bool>,
+    pub artifacts: &'static [RetainedArtifact],
+    /// Sessions formerly stored in host configuration now require private attempt state.
+    pub relocated_session_state: bool,
+    /// Copy only session files when retaining private state.
+    pub sessions_only: bool,
+    /// Setup may mirror a transcript into the registered account directory.
+    pub transcript_account_root: bool,
 }
 
 /// Wire format used by a native harness hook registry.
@@ -273,10 +346,13 @@ pub enum HookEvent {
         source: &'static str,
     },
 }
-impl CapabilitySupport {
-    pub const fn is_supported(self) -> bool {
-        matches!(self, Self::Supported)
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeCapabilities {
+    pub hooks: AdapterFact<bool>,
+    pub answer_delivery: AdapterFact<bool>,
+    /// Whether a pre-compaction response reaches the model's context.
+    pub precompact_context: AdapterFact<bool>,
+    pub instructions: AdapterFact<bool>,
 }
 
 /// Managed harness paths and native integration capabilities. Wire formats stay
@@ -290,17 +366,13 @@ pub struct HarnessInstall {
     pub config: &'static str,
     /// Config relative to the user home when using the default harness home.
     pub default_home_config: Option<&'static str>,
-    pub instruction: Option<&'static str>,
+    pub instruction_file: Option<&'static str>,
     pub hook_file: Option<&'static str>,
     /// Provider CLI option that loads a generated hook settings document.
     pub hook_settings_arg: Option<&'static str>,
-    pub hooks: CapabilitySupport,
+    pub native: NativeCapabilities,
     pub hook_protocol: Option<HookProtocol>,
     pub hook_events: &'static [HookEvent],
-    pub answer_delivery: CapabilitySupport,
-    /// Whether a pre-compaction response reaches the model's context.
-    pub precompact_context: CapabilitySupport,
-    pub instructions: CapabilitySupport,
     /// The adapter declares its instruction documents as an array in its config.
     pub instruction_array: bool,
     pub source: &'static str,
@@ -308,7 +380,8 @@ pub struct HarnessInstall {
 
 const CHAIR_HOOKS_NOT_APPLICABLE: &str =
     "Provenant chair switching is enabled only for adapters declaring chair_switch";
-const CHAIR_HOOKS_SOURCE: &str = "AdapterSpec.chair_switch in crates/records/src/adapters.rs";
+const CHAIR_HOOKS_SOURCE: &str =
+    "AdapterSpec.launch.chair_switch in crates/records/src/adapters.rs";
 const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
     // Claude Code treats a failed PreToolUse hook as a refusal of the tool.
     // Answer delivery offers untrusted inbox data and needs no such authority,
@@ -601,16 +674,19 @@ const OPENCODE_HOOK_EVENTS: &[HookEvent] = &[
 
 /// Framing declared by the adapter for provider stream decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamContract {
+pub enum StreamFraming {
     ProviderJsonl,
     Raw,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct AdapterSpec {
-    pub stdout: StreamContract,
-    pub id: Harness,
+pub struct AdapterIdentity {
     pub name: &'static str,
+    /// Provider family used by declared route constraints.
+    pub family: &'static str,
+    pub binary: &'static str,
+    /// How the adapter's own executable updates itself.
+    pub update: UpdateCommand,
     /// Format of a supported CLI model listing.
     pub model_listing: Option<ModelListingFormat>,
     /// Default provider setting for the models this adapter can select.
@@ -621,70 +697,18 @@ pub struct AdapterSpec {
     /// CLI argv for a model-listing probe. Absence excludes the adapter from
     /// model discovery entirely.
     pub model_discovery: Option<&'static [&'static str]>,
-    /// Provider family used by declared route constraints.
-    pub family: &'static str,
-    pub binary: &'static str,
-    /// None for execution entries without a native managed harness.
-    pub install: Option<HarnessInstall>,
-    pub skills: Option<SkillLocation>,
-    /// Home-relative installation roots that can supply linked skills.
-    /// They describe discovery provenance, not an eligibility allowlist.
-    pub skill_install_roots: &'static [&'static str],
-    /// Environment override and home-relative default for an implicitly discovered account.
-    pub default_account_directory: Option<(&'static str, &'static str)>,
-    /// Credential policy of the declared default directory at its home-relative path.
-    pub default_account_root_kind: &'static provenant_core::CredentialKind,
-    pub registered_account: bool,
-    /// A registered account's directory is the client's configuration
-    /// directory, which account settings sync keeps in step. False where it is
-    /// something else: agy's is the account's keychain home.
-    pub account_config_dir: bool,
-    /// Fixed home-relative prefix for registered account directories, if required.
-    pub account_directory_prefix: Option<&'static str>,
-    /// Prefix of a registered key derived from the signed-in identity, for
-    /// adapters that namespace their account keys.
-    pub account_key_prefix: Option<&'static str>,
-    /// Namespace carried inside a provider identity string and folded into the
-    /// registered key by `account_key`.
-    pub account_identity_namespace: Option<&'static str>,
-    /// Registered account configuration supports shared settings overlays.
-    pub shared_account_settings: bool,
-    /// Registered accounts use an isolated login keychain rooted in their home.
-    pub isolated_login_keychain: bool,
-    /// Setup may mirror a transcript into the registered account directory.
-    pub transcript_account_root: bool,
-    pub setup_root: SetupRoot,
-    pub local_login: bool,
-    pub login_reprobe: LoginReprobe,
-    pub login_observation: LoginObservation,
-    /// The login recheck identifies the signed-in account.
-    pub login_check_names_account: bool,
-    /// How a registered account's identity is read from its directory.
-    pub account_identity_probe: AccountIdentityProbe,
-    /// Synthetic account label and key for an adapter using its local login.
-    pub local_account: (&'static str, &'static str),
+    pub namespaced_models: bool,
+    /// The account reports the models it offers; a launch naming another model is refused.
+    pub offered_models: bool,
+    /// Preparation mechanism for a model-less named entry.
+    pub named_entry: NamedEntry,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AdapterLaunch {
+    pub framing: StreamFraming,
+    pub config_environment: &'static [&'static str],
     pub argv_prompt: bool,
-    pub authentication: Option<&'static str>,
-    /// When a host-access launch warns about the adapter's native login.
-    pub native_auth_warning: NativeAuthWarning,
-    /// Files observed by metadata only, relative to the account directory.
-    pub credential_files: &'static [&'static str],
-    /// Additional Provenant-owned files protected within registered stores.
-    pub credential_auxiliary_files: &'static [&'static str],
-    /// Also watch the account directory's sibling JSON profile.
-    pub credential_profile_sibling: bool,
-    /// Also watch the host login keychain on macOS.
-    pub credential_host_keychain: bool,
-    pub login_hint: &'static str,
-    /// How the adapter's own executable updates itself.
-    pub update: UpdateCommand,
-    /// Account-scoped interactive login command, with {directory} shell quoted.
-    pub login_template: Option<&'static str>,
-    /// Account-scoped interactive command for refreshing an expired login.
-    /// `{directory}` is shell quoted by the caller.
-    pub login_refresh_template: Option<&'static str>,
-    /// Lowercase provider stderr fragments indicating a missing or expired login.
-    pub auth_markers: &'static [&'static str],
     /// Shell wrapper path and environment selector, relative to scratch.
     pub shell_prefix: Option<(&'static str, &'static str)>,
     /// Provider argument granting file tools access to captured Git context.
@@ -703,20 +727,26 @@ pub struct AdapterSpec {
     pub compaction_env: Option<&'static str>,
     /// Host variables identifying this adapter's native client session.
     pub client_env_markers: Option<ClientEnvMarkers>,
-    pub allowance_prefix: Option<&'static str>,
-    /// Local allowance windows governing models under allowance_prefix.
-    pub allowance_windows: &'static [&'static str],
-    pub namespaced_models: bool,
-    pub chair_switch: bool,
-    /// The account reports the models it offers; a launch naming another model is refused.
-    pub offered_models: bool,
-    /// Maximum age of provider refusal evidence before revalidation.
-    pub refusal_revalidation_seconds: Option<i64>,
-    pub github_auth: Option<GithubAuth>,
+    pub skill_location: Option<SkillLocation>,
+    /// Home-relative installation roots that can supply linked skills.
+    /// They describe discovery provenance, not an eligibility allowlist.
+    pub skill_install_roots: &'static [&'static str],
     /// Supports launching a transferred interactive session.
     pub session_handoff: bool,
     /// Refresh an account token through the authorised credential broker at launch.
     pub launch_token_refresh: bool,
+    /// The adapter's plan uses the Codex clean/inherited config policy.
+    pub codex_policy: bool,
+    pub github_auth: Option<GithubAuth>,
+    /// Use the requested route as the observed route when a command exits.
+    pub exit_route: bool,
+    /// Config-deprecation notices can arrive on stderr as well as the event
+    /// stream; the host folds both into one warning per attempt.
+    pub stderr_config_notices: bool,
+    /// Classify exit-time stderr for quota refusals.
+    pub stderr_quota: bool,
+    /// Parse stdout error diagnostics for provider failure explanations.
+    pub stdout_error_diagnostic: bool,
     /// Remove a duplicated complete answer from the provider stream.
     pub deduplicate_result: bool,
     /// Oversized command-execution frames are ignorable evidence for this adapter.
@@ -730,50 +760,105 @@ pub struct AdapterSpec {
     pub usage: UsageSemantics,
     /// Provider-specific explanation when writer token budgets cannot stop it.
     pub token_budget_notice: Option<&'static str>,
-    /// Usage totals are session-wide unless an attempt marks them per-attempt,
-    /// so they cannot be attributed to one attempt by default.
-    pub session_wide_usage: bool,
-    /// Config-deprecation notices can arrive on stderr as well as the event
-    /// stream; the host folds both into one warning per attempt.
-    pub stderr_config_notices: bool,
-    /// Use the requested route as the observed route when a command exits.
-    pub exit_route: bool,
-    /// Classify exit-time stderr for quota refusals.
-    pub stderr_quota: bool,
-    /// Parse stdout error diagnostics for provider failure explanations.
-    pub stdout_error_diagnostic: bool,
-    /// The adapter's plan uses the Codex clean/inherited config policy.
-    pub codex_policy: bool,
-    /// Source of model identity after a run.
-    pub model_observation: ModelObservation,
-    /// Preparation mechanism for a model-less named entry.
-    pub named_entry: NamedEntry,
-    pub user_sessions: bool,
-    /// Sessions formerly stored in host configuration now require private attempt state.
-    pub relocated_session_state: bool,
-    /// Copy only session files when retaining private state.
-    pub copy_sessions_only: bool,
-    pub quota_probe: QuotaProbeKind,
+    pub chair_switch: bool,
+    /// Drop a valid but unrecorded model effort with a route warning.
+    pub drop_unrecorded_effort: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AdapterAccounts {
+    /// Environment override and home-relative default for an implicitly discovered account.
+    pub default_directory: Option<(&'static str, &'static str)>,
+    /// Credential policy of the declared default directory at its home-relative path.
+    pub default_root_kind: &'static provenant_core::CredentialKind,
+    pub registered: bool,
+    /// A registered account's directory is the client's configuration
+    /// directory, which account settings sync keeps in step. False where it is
+    /// something else: agy's is the account's keychain home.
+    pub config_dir: bool,
+    /// Fixed home-relative prefix for registered account directories, if required.
+    pub directory_prefix: Option<&'static str>,
+    /// Prefix of a registered key derived from the signed-in identity, for
+    /// adapters that namespace their account keys.
+    pub key_prefix: Option<&'static str>,
+    /// Namespace carried inside a provider identity string and folded into the
+    /// registered key by `account_key`.
+    pub identity_namespace: Option<&'static str>,
+    /// Registered account configuration supports shared settings overlays.
+    pub shared_settings: bool,
+    /// Registered accounts use an isolated login keychain rooted in their home.
+    pub isolated_login_keychain: bool,
+    /// Synthetic account label and key for an adapter using its local login.
+    pub local_entry: (&'static str, &'static str),
+    pub setup_root: SetupRoot,
+    pub peer_bootstrap: bool,
+    /// Registered plans partition model namespaces independently of account keys.
+    pub model_plans: &'static [AccountModelPlan],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AdapterQuota {
+    pub probe: QuotaProbeKind,
     /// Missing monthly observations constrain allowance pacing for this adapter.
     pub monthly_allowance: bool,
-    pub quota_credits: bool,
-    pub grouped_quota_pools: bool,
-    pub retain_quota_accounts: bool,
-    pub quota_identity_check: bool,
-    pub peer_bootstrap: bool,
+    pub credits: bool,
+    pub grouped_pools: bool,
+    pub retain_accounts: bool,
+    pub identity_check: bool,
     /// A snapshot governs only this model prefix; None governs every model.
-    pub quota_model_prefix: Option<&'static str>,
-    /// Registered plans partition model namespaces independently of account keys.
-    pub account_model_plans: &'static [AccountModelPlan],
+    pub model_prefix: Option<&'static str>,
     pub free_pool: Option<&'static str>,
     /// Where a recorded quota refusal's expiry comes from, as the quota view names it.
     pub refusal_reset_source: &'static str,
-    /// Drop a valid but unrecorded model effort with a route warning.
-    pub drop_unsupported_effort: bool,
+    /// Maximum age of provider refusal evidence before revalidation.
+    pub refusal_revalidation_seconds: Option<i64>,
     pub pacing_keys: Option<(&'static str, &'static str)>,
-    /// What a launch may ask of this adapter. The one source for dispatch,
-    /// `run`, resume and graph validation.
-    pub launch: LaunchCapabilities,
+    pub allowance_prefix: Option<&'static str>,
+    /// Local allowance windows governing models under allowance_prefix.
+    pub allowance_windows: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AdapterLogin {
+    pub local: bool,
+    pub reprobe: LoginReprobe,
+    pub observation: LoginObservation,
+    /// The login recheck identifies the signed-in account.
+    pub check_names_account: bool,
+    /// How a registered account's identity is read from its directory.
+    pub identity_probe: AccountIdentityProbe,
+    pub authentication: Option<&'static str>,
+    /// When a host-access launch warns about the adapter's native login.
+    pub native_auth_warning: NativeAuthWarning,
+    /// Files observed by metadata only, relative to the account directory.
+    pub credential_files: &'static [&'static str],
+    /// Additional Provenant-owned files protected within registered stores.
+    pub credential_auxiliary_files: &'static [&'static str],
+    /// Also watch the account directory's sibling JSON profile.
+    pub credential_profile_sibling: bool,
+    /// Also watch the host login keychain on macOS.
+    pub credential_host_keychain: bool,
+    pub hint: &'static str,
+    /// Account-scoped interactive login command, with {directory} shell quoted.
+    pub template: Option<&'static str>,
+    /// Account-scoped interactive command for refreshing an expired login.
+    /// `{directory}` is shell quoted by the caller.
+    pub refresh_template: Option<&'static str>,
+    /// Lowercase provider stderr fragments indicating a missing or expired login.
+    pub auth_markers: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AdapterSpec {
+    pub id: Harness,
+    pub identity: AdapterIdentity,
+    pub launch: AdapterLaunch,
+    pub accounts: AdapterAccounts,
+    pub quota: AdapterQuota,
+    pub login: AdapterLogin,
+    pub install: Option<HarnessInstall>,
+    pub retention: Retention,
+    pub capabilities: Capabilities,
 }
 
 const ALL_NETWORK: &[NetworkAccess] = &[
@@ -782,88 +867,366 @@ const ALL_NETWORK: &[NetworkAccess] = &[
     NetworkAccess::Open,
 ];
 
-/// Declared launch capabilities. Unsupported enforced controls are refused
-/// before admission; missing image input is advisory.
+/// Declared launch capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchCapabilities {
-    /// Accepts a model selector; false for configured command entries.
-    pub model: bool,
-    pub default_network: NetworkAccess,
-    /// Takes a reasoning-effort control on the command line.
-    pub effort: bool,
-    /// Continues a recorded provider session.
-    pub resume: bool,
-    /// What a control message can do for this adapter, per launch kind.
-    pub control: ControlCapabilities,
-    /// Network modes the adapter's sandbox profile can enforce.
+    pub model: AdapterFact<bool>,
+    pub effort: AdapterFact<bool>,
+    pub image_input: AdapterFact<bool>,
+    pub resume: AdapterFact<bool>,
+    pub write: AdapterFact<bool>,
     pub network: &'static [NetworkAccess],
-    /// Accepts image input in a prompt.
-    pub image_input: bool,
-    /// Runs with worktree-write access.
-    pub write: bool,
+    pub default_network: NetworkAccess,
 }
-
-/// The fields of a launch request an adapter can refuse.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    pub launch: LaunchCapabilities,
+    pub control: ControlCapabilities,
+    pub terminal_event: AdapterFact<TerminalEventStrength>,
+    pub answering_model: AdapterFact<AnsweringModelSource>,
+    pub usage_attribution: AdapterFact<UsageAttribution>,
+    pub live_input: AdapterFact<bool>,
+    pub session_reference: AdapterFact<SessionReference>,
+    pub caveats: &'static [Caveat],
+}
+#[derive(Debug, Clone, Default)]
 pub struct LaunchRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    pub image_input: bool,
     pub resume: bool,
     pub network: Option<NetworkAccess>,
     pub write: bool,
     pub skill_location: bool,
+    pub gap_policy: GapPolicy,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchField {
     Model,
     Effort,
+    ImageInput,
     Resume,
     Network,
     Write,
     SkillLocation,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchAction {
+    Degrade,
+    Refuse,
 }
 impl LaunchField {
     pub fn name(self) -> &'static str {
         match self {
             Self::Model => "model",
             Self::Effort => "effort",
+            Self::ImageInput => "image input",
             Self::Resume => "resume",
             Self::Network => "network",
             Self::Write => "write",
             Self::SkillLocation => "skill location",
         }
     }
-    /// A fixed refusal for callers that cannot carry the adapter name.
-    pub fn refusal(self) -> &'static str {
+    /// The fields whose gap action an owner may set.
+    pub const DEGRADABLE: [Self; 3] = [Self::Model, Self::Effort, Self::ImageInput];
+    /// The policy rule that sets this field's gap action.
+    pub const fn policy_code(self) -> Option<&'static str> {
         match self {
-            Self::Model => "model is not supported by the route's adapter",
-            Self::Effort => "effort is not supported by the route's adapter",
-            Self::Resume => "resume is not supported by the route's adapter",
-            Self::Network => "network mode is not supported by the route's adapter",
-            Self::Write => "worktree-write is not supported by the route's adapter",
-            Self::SkillLocation => "skill location is not supported by the route's adapter",
+            Self::Model => Some("LAUNCH_MODEL_UNSUPPORTED"),
+            Self::Effort => Some("LAUNCH_EFFORT_UNSUPPORTED"),
+            Self::ImageInput => Some("LAUNCH_IMAGE_INPUT_UNSUPPORTED"),
+            _ => None,
+        }
+    }
+    /// The `[[adapter_capabilities]] on_gap` key for this field.
+    pub const fn on_gap_key(self) -> Option<&'static str> {
+        match self {
+            Self::Model => Some("model"),
+            Self::Effort => Some("effort"),
+            Self::ImageInput => Some("image_input"),
+            _ => None,
+        }
+    }
+    pub fn default_action(self) -> LaunchAction {
+        match self {
+            Self::Model | Self::Effort | Self::ImageInput => LaunchAction::Degrade,
+            _ => LaunchAction::Refuse,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchGap {
+    pub adapter: &'static str,
+    pub field: LaunchField,
+    pub action: LaunchAction,
+    pub reason: &'static str,
+    pub source: &'static str,
+    /// Whether the caller should surface this gap as a warning. Refusals always
+    /// warn; a degrades-only gap can be silenced by `off`.
+    pub warn: bool,
+    /// The layer and setting that chose the action. A refuse-only field
+    /// always carries the compiled default: no setting can change it.
+    pub action_source: crate::Source,
+}
+impl std::fmt::Display for LaunchGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} does not support {}: {}; source={}{}",
+            self.adapter,
+            self.field.name(),
+            self.reason,
+            self.source,
+            self.action_suffix()
+        )
+    }
+}
+impl std::error::Error for LaunchGap {}
+impl LaunchGap {
+    /// The setting that chose a degradable field's action, or, for the
+    /// compiled default, the two settings that can change it. A refuse-only
+    /// field names none: no setting changes it.
+    fn action_suffix(&self) -> String {
+        let (Some(code), Some(key)) = (self.field.policy_code(), self.field.on_gap_key()) else {
+            return String::new();
+        };
+        if self.action_source.layer == crate::Layer::Default {
+            let action = match (self.action, self.warn) {
+                (LaunchAction::Refuse, _) => GapAction::Refuse,
+                (_, true) => GapAction::Warn,
+                (_, false) => GapAction::Off,
+            };
+            return format!(
+                "; {} by default; set policy.{code} or [[adapter_capabilities]] on_gap.{key}",
+                action.as_str()
+            );
+        }
+        format!(
+            "; action set by {} ({})",
+            self.action_source
+                .origin
+                .as_deref()
+                .unwrap_or("an unnamed setting"),
+            self.action_source.layer.description()
+        )
+    }
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchCheck {
+    pub gaps: Vec<LaunchGap>,
+}
+impl LaunchCheck {
+    pub fn refusal(&self) -> Option<&LaunchGap> {
+        self.gaps.iter().find(|d| d.action == LaunchAction::Refuse)
+    }
+    pub fn degraded(&self, field: LaunchField) -> Option<&LaunchGap> {
+        self.gaps
+            .iter()
+            .find(|d| d.field == field && d.action == LaunchAction::Degrade)
+    }
+}
+
+/// Why a fact was switched off by an owner entry rather than by the row.
+pub const OVERLAY_REASON: &str = "disabled by an [[adapter_capabilities]] entry; `provenant adapter capabilities` names its layer and reason";
+pub const OVERLAY_SOURCE: &str = "config.toml#adapter_capabilities";
+
+/// Capabilities an owner may narrow through `[[adapter_capabilities]]`.
+/// Widening a row's fact is not expressible: only `disable` is accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OverridableCapability {
+    Model,
+    Effort,
+    ImageInput,
+    Resume,
+    Write,
+    LiveInput,
+}
+impl OverridableCapability {
+    pub const ALL: &'static [Self] = &[
+        Self::Model,
+        Self::Effort,
+        Self::ImageInput,
+        Self::Resume,
+        Self::Write,
+        Self::LiveInput,
+    ];
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Effort => "effort",
+            Self::ImageInput => "image_input",
+            Self::Resume => "resume",
+            Self::Write => "write",
+            Self::LiveInput => "live_input",
+        }
+    }
+    pub fn parse(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|item| item.key() == key)
+    }
+}
+
+/// What happens when a requested capability is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GapAction {
+    #[default]
+    Warn,
+    Off,
+    Refuse,
+}
+
+impl GapAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Off => "off",
+            Self::Refuse => "refuse",
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnsupportedLaunch {
-    pub adapter: &'static str,
-    pub field: LaunchField,
+/// One degradable field's action, where it was set, and the lower-precedence
+/// candidates it shadowed (lowest first), so a gap and `--explain` can name
+/// every setting that took part.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GapRule {
+    pub action: GapAction,
+    pub source: crate::Source,
+    pub shadowed: Vec<crate::Sourced<GapAction>>,
 }
-impl std::fmt::Display for UnsupportedLaunch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} does not support {}", self.adapter, self.field.name())
+
+/// The effective gap actions. Resume, network, write and skill location have no
+/// rule: they always keep their default refusal.
+///
+/// One resolver, [`CapabilityOverlay::gap_policy`], decides each degradable
+/// field. Precedence, lowest first: the compiled default; then
+/// `policy.LAUNCH_<FIELD>_UNSUPPORTED`, itself layered host, project and
+/// dispatch by the policy table; then the adapter's `[[adapter_capabilities]]`
+/// `on_gap.<field>`, host then project. The per-adapter entry is the narrower
+/// setting, so it wins over the policy rule for every layer.
+/// Spec: docs/specs/run-launch.md#capability-overrides-and-gap-policy
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GapPolicy {
+    pub model: GapRule,
+    pub effort: GapRule,
+    pub image_input: GapRule,
+}
+impl GapPolicy {
+    pub fn rule(&self, field: LaunchField) -> Option<&GapRule> {
+        match field {
+            LaunchField::Model => Some(&self.model),
+            LaunchField::Effort => Some(&self.effort),
+            LaunchField::ImageInput => Some(&self.image_input),
+            LaunchField::Resume
+            | LaunchField::Network
+            | LaunchField::Write
+            | LaunchField::SkillLocation => None,
+        }
+    }
+    fn rule_mut(&mut self, field: LaunchField) -> Option<&mut GapRule> {
+        match field {
+            LaunchField::Model => Some(&mut self.model),
+            LaunchField::Effort => Some(&mut self.effort),
+            LaunchField::ImageInput => Some(&mut self.image_input),
+            LaunchField::Resume
+            | LaunchField::Network
+            | LaunchField::Write
+            | LaunchField::SkillLocation => None,
+        }
+    }
+    fn set(&mut self, field: LaunchField, rule: GapRule) {
+        if let Some(slot) = self.rule_mut(field) {
+            *slot = rule;
+        }
     }
 }
-impl std::error::Error for UnsupportedLaunch {}
+
+/// One `[[adapter_capabilities]]` row from a host or project layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterOverride {
+    pub adapter: String,
+    pub disable: Vec<OverridableCapability>,
+    pub reason: Option<String>,
+    pub on_gap: Vec<(LaunchField, GapAction)>,
+    pub source: crate::Source,
+}
+
+/// Effective owner entries; a later layer replaces the whole entry by adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CapabilityOverlay {
+    pub entries: Vec<AdapterOverride>,
+}
+impl CapabilityOverlay {
+    pub fn entry(&self, adapter: &str) -> Option<&AdapterOverride> {
+        self.entries.iter().find(|row| row.adapter == adapter)
+    }
+
+    /// The one resolver for degradable gap actions; [`GapPolicy`] states the
+    /// precedence. The policy rule's action is the floor, named by its layer
+    /// and key; an adapter entry's `on_gap` replaces it and records it as
+    /// shadowed. Other fields have no rule.
+    pub fn gap_policy(&self, adapter: &str, policy: &crate::policy::Policy) -> GapPolicy {
+        let mut gap = GapPolicy::default();
+        let entry = self.entry(adapter);
+        for field in LaunchField::DEGRADABLE {
+            let (Some(code), Some(key)) = (field.policy_code(), field.on_gap_key()) else {
+                continue;
+            };
+            let effective = policy.rule(code);
+            let action = match effective.rule.strength {
+                crate::policy::Strength::Warn => GapAction::Warn,
+                crate::policy::Strength::Off => GapAction::Off,
+                crate::policy::Strength::Refuse => GapAction::Refuse,
+            };
+            let mut rule = GapRule {
+                action,
+                source: crate::Source {
+                    layer: effective.source.layer(),
+                    origin: Some(format!("policy.{code}")),
+                },
+                shadowed: Vec::new(),
+            };
+            if let Some((entry, action)) = entry.and_then(|entry| {
+                entry
+                    .on_gap
+                    .iter()
+                    .find(|(gap_field, _)| *gap_field == field)
+                    .map(|(_, action)| (entry, *action))
+            }) {
+                let place = entry
+                    .source
+                    .origin
+                    .as_deref()
+                    .unwrap_or("[[adapter_capabilities]]");
+                let floor = std::mem::replace(
+                    &mut rule,
+                    GapRule {
+                        action,
+                        source: crate::Source {
+                            layer: entry.source.layer,
+                            origin: Some(format!(
+                                "{place}[adapter={}].on_gap.{key}",
+                                entry.adapter
+                            )),
+                        },
+                        shadowed: Vec::new(),
+                    },
+                );
+                rule.shadowed.push(crate::Sourced {
+                    value: floor.action,
+                    source: floor.source,
+                });
+            }
+            gap.set(field, rule);
+        }
+        gap
+    }
+}
 
 impl AdapterSpec {
     /// Whether account entries describe metadata for one shared local login
     /// instead of separate registered credential trees.
     pub fn uses_shared_local_login(&self) -> bool {
-        !self.registered_account && self.local_login
+        !self.accounts.registered && self.login.local
     }
 
     /// Whether `key` names the synthetic entry of an unregistered local login.
@@ -871,38 +1234,114 @@ impl AdapterSpec {
     /// has one: it runs on the user's own login, so nothing is registered, probed
     /// or pinned, and registered keys (`agy-<fingerprint>`) never collide with it.
     pub fn is_unregistered_local(&self, key: &str) -> bool {
-        self.registered_account && self.local_login && key == "local"
+        self.accounts.registered && self.login.local && key == "local"
     }
+    /// A copy whose disabled facts are unsupported with the overlay's own
+    /// reason and source. It never turns a fact on and changes nothing else.
+    pub fn with_overlay(&self, overlay: &CapabilityOverlay) -> AdapterSpec {
+        let Some(entry) = overlay.entry(self.identity.name) else {
+            return *self;
+        };
+        if entry.disable.is_empty() {
+            return *self;
+        }
+        let mut spec = *self;
+        for capability in &entry.disable {
+            match capability {
+                OverridableCapability::Model => {
+                    spec.capabilities.launch.model =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+                OverridableCapability::Effort => {
+                    spec.capabilities.launch.effort =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+                OverridableCapability::ImageInput => {
+                    spec.capabilities.launch.image_input =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+                OverridableCapability::Resume => {
+                    spec.capabilities.launch.resume =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+                OverridableCapability::Write => {
+                    spec.capabilities.launch.write =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+                OverridableCapability::LiveInput => {
+                    spec.capabilities.live_input =
+                        AdapterFact::unsupported(OVERLAY_REASON, OVERLAY_SOURCE)
+                }
+            }
+        }
+        spec
+    }
+
     /// Check a request against the declared table before any side effect.
-    pub fn check_launch(&self, request: &LaunchRequest<'_>) -> Result<(), UnsupportedLaunch> {
-        let caps = &self.launch;
-        let field = if request.model.is_some() && !caps.model {
-            Some(LaunchField::Model)
-        } else if request.effort.is_some() && !caps.effort {
-            Some(LaunchField::Effort)
-        } else if request.resume && !caps.resume {
-            Some(LaunchField::Resume)
-        } else if request
+    pub fn check_launch(&self, request: &LaunchRequest<'_>) -> LaunchCheck {
+        let caps = &self.capabilities.launch;
+        let mut gaps = Vec::new();
+        let mut add = |field: LaunchField, reason, source| {
+            let rule = request.gap_policy.rule(field);
+            let action = match rule {
+                Some(GapRule {
+                    action: GapAction::Refuse,
+                    ..
+                }) => LaunchAction::Refuse,
+                Some(_) => LaunchAction::Degrade,
+                None => field.default_action(),
+            };
+            let warn = action == LaunchAction::Refuse
+                || rule.is_some_and(|rule| rule.action == GapAction::Warn);
+            gaps.push(LaunchGap {
+                adapter: self.identity.name,
+                field,
+                action,
+                warn,
+                action_source: rule.map(|rule| rule.source.clone()).unwrap_or_default(),
+                reason,
+                source,
+            })
+        };
+        for (requested, field, declaration) in [
+            (request.model.is_some(), LaunchField::Model, caps.model),
+            (request.effort.is_some(), LaunchField::Effort, caps.effort),
+            (
+                request.image_input,
+                LaunchField::ImageInput,
+                caps.image_input,
+            ),
+            (request.resume, LaunchField::Resume, caps.resume),
+        ] {
+            if requested && !declaration.value {
+                add(field, declaration.reason, declaration.source);
+            }
+        }
+        if request
             .network
             .is_some_and(|mode| !caps.network.contains(&mode))
         {
-            Some(LaunchField::Network)
-        } else if request.write && !caps.write {
-            Some(LaunchField::Write)
-        } else if request.skill_location && self.skills.is_none() {
-            Some(LaunchField::SkillLocation)
-        } else {
-            None
-        };
-        field.map_or(Ok(()), |field| {
-            Err(UnsupportedLaunch {
-                adapter: self.name,
-                field,
-            })
-        })
+            add(
+                LaunchField::Network,
+                "network mode is outside the adapter's sandbox profiles",
+                ADAPTER_ROW_SOURCE,
+            );
+        }
+        if request.write && !caps.write.value {
+            add(LaunchField::Write, caps.write.reason, caps.write.source);
+        }
+        if request.skill_location && self.launch.skill_location.is_none() {
+            add(
+                LaunchField::SkillLocation,
+                "the adapter declares no skill location",
+                ADAPTER_ROW_SOURCE,
+            );
+        }
+        LaunchCheck { gaps }
     }
     pub fn account_plan(&self, plan: Option<&str>) -> Option<&AccountModelPlan> {
-        self.account_model_plans
+        self.accounts
+            .model_plans
             .iter()
             .find(|row| plan.is_some_and(|plan| row.plan.eq_ignore_ascii_case(plan.trim())))
     }
@@ -922,31 +1361,33 @@ impl AdapterSpec {
     /// prefix. Ungrouped windows, an unset model pool and other adapters keep
     /// every window, which is the conservative reading.
     pub fn window_serves_pool(&self, window: &str, model_pool: Option<&str>) -> bool {
-        match (self.grouped_quota_pools, model_pool, window.split_once('.')) {
+        match (self.quota.grouped_pools, model_pool, window.split_once('.')) {
             (true, Some(pool), Some((group, _))) => group == pool,
             _ => true,
         }
     }
     pub fn get(name: &str) -> Option<&'static Self> {
-        ADAPTER_SPECS.iter().find(|spec| spec.name == name)
+        ADAPTER_SPECS.iter().find(|spec| spec.identity.name == name)
     }
     /// Strip this adapter's declared model-id namespace, when it has one.
     pub fn normalise_model_id<'a>(&self, id: &'a str) -> &'a str {
-        self.model_id_prefix
+        self.identity
+            .model_id_prefix
             .and_then(|prefix| id.strip_prefix(prefix))
             .unwrap_or(id)
     }
     /// Prefix a registered key built from a provider identity carries.
     pub fn registered_key_prefix(&self) -> Option<&'static str> {
-        self.account_key_prefix
+        self.accounts.key_prefix
     }
     /// Build a registered key from a provider identity string.
     pub fn account_key(&self, identity: &str) -> String {
-        let Some(prefix) = self.account_key_prefix else {
+        let Some(prefix) = self.accounts.key_prefix else {
             return identity.to_owned();
         };
         let identity = self
-            .account_identity_namespace
+            .accounts
+            .identity_namespace
             .and_then(|namespace| identity.strip_prefix(namespace))
             .unwrap_or(identity);
         format!("{prefix}{identity}")
@@ -958,7 +1399,7 @@ impl AdapterSpec {
 pub fn normalise_model_id(id: &str) -> &str {
     ADAPTER_SPECS
         .iter()
-        .filter_map(|spec| spec.model_id_prefix)
+        .filter_map(|spec| spec.identity.model_id_prefix)
         .find_map(|prefix| id.strip_prefix(prefix))
         .unwrap_or(id)
 }
@@ -973,1315 +1414,1064 @@ const SKILL_INSTALL_ROOTS: &[&str] = &[concat!(
 // Keep the rows in Harness order. CLI installation also uses this order.
 adapter_specs! { $;
     Claude [] (claude: 1) {
-        name: "claude",
-        usage: UsageSemantics::new(UsageScope::Cumulative, false, true),
-        stdout: StreamContract::ProviderJsonl,
-        model_listing: None,
-        default_models: None,
-        model_id_prefix: None,
-        model_discovery: None,
-        family: "anthropic",
-        binary: "claude",
+        identity: AdapterIdentity {
+            name: "claude",
+            family: "anthropic",
+            binary: "claude",
+            update: UpdateCommand::Subcommand("update"),
+            model_listing: None,
+            default_models: None,
+            model_id_prefix: None,
+            model_discovery: None,
+            namespaced_models: false,
+            offered_models: false,
+            named_entry: NamedEntry::None,
+        },
+        launch: AdapterLaunch {
+            framing: StreamFraming::ProviderJsonl,
+            config_environment: &[],
+            argv_prompt: false,
+            shell_prefix: Some(("bin/claude-shell", "CLAUDE_CODE_SHELL_PREFIX")),
+            context_directory_arg: Some("--add-dir"),
+            ignore_files: &[],
+            indexing_ignore_files: &[],
+            compaction_env: Some("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+            client_env_markers: Some(ClientEnvMarkers {
+                equals_one: Some("CLAUDECODE"),
+                presence: &["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"],
+            }),
+            skill_location: Some(SkillLocation {
+                environment: None,
+                fallback: ".claude",
+                suffix: "skills",
+            }),
+            skill_install_roots: SKILL_INSTALL_ROOTS,
+            session_handoff: true,
+            launch_token_refresh: true,
+            codex_policy: false,
+            github_auth: Some(GithubAuth::Environment),
+            exit_route: false,
+            stderr_config_notices: false,
+            stderr_quota: false,
+            stdout_error_diagnostic: false,
+            deduplicate_result: false,
+            oversize_command_frames: false,
+            answer_from_text: true,
+            result_event_usage: true,
+            usage: UsageSemantics::new(UsageScope::Cumulative, false, true),
+            token_budget_notice: None,
+            chair_switch: true,
+            drop_unrecorded_effort: false,
+        },
+        accounts: AdapterAccounts {
+            default_directory: None,
+            default_root_kind: &provenant_core::CredentialKind::Store,
+            registered: true,
+            config_dir: true,
+            directory_prefix: Some(".claude-"),
+            key_prefix: None,
+            identity_namespace: None,
+            shared_settings: true,
+            isolated_login_keychain: false,
+            local_entry: ("default", "local"),
+            setup_root: SetupRoot::None,
+            peer_bootstrap: true,
+            model_plans: &[],
+        },
+        quota: AdapterQuota {
+            probe: QuotaProbeKind::HttpGet,
+            monthly_allowance: false,
+            credits: true,
+            grouped_pools: false,
+            retain_accounts: false,
+            identity_check: false,
+            model_prefix: None,
+            free_pool: None,
+            refusal_reset_source: "provider reset",
+            refusal_revalidation_seconds: None,
+            pacing_keys: None,
+            allowance_prefix: None,
+            allowance_windows: &[],
+        },
+        login: AdapterLogin {
+            local: false,
+            reprobe: LoginReprobe::AccountIdentity,
+            observation: LoginObservation::Reprobe,
+            check_names_account: true,
+            identity_probe: AccountIdentityProbe::CliAuthStatus,
+            authentication: None,
+            native_auth_warning: NativeAuthWarning::Always,
+            credential_files: &[".credentials.json", "settings.json"],
+            credential_auxiliary_files: &["provenant-lane-token", "provenant-oauth-refresh.lock"],
+            credential_profile_sibling: true,
+            credential_host_keychain: true,
+            hint: "claude auth login",
+            template: Some("CLAUDE_CONFIG_DIR={directory} claude auth login"),
+            refresh_template: Some("CLAUDE_CONFIG_DIR={directory} claude"),
+            auth_markers: &["not logged in", "authentication_failed"],
+        },
         install: Some(HarnessInstall {
             home: ".claude",
             lane_home: ("CLAUDE_CONFIG_DIR", ""),
             config: ".claude.json",
             default_home_config: Some(".claude.json"),
-            instruction: Some("CLAUDE.md"),
+            instruction_file: Some("CLAUDE.md"),
             hook_file: Some("settings.json"),
             hook_settings_arg: Some("--settings"),
-            hooks: CapabilitySupport::Supported,
+            native: NativeCapabilities {
+                hooks: AdapterFact::supported(),
+                answer_delivery: AdapterFact::supported(),
+                precompact_context: AdapterFact::supported(),
+                instructions: AdapterFact::supported(),
+            },
             hook_protocol: Some(HookProtocol::CommandGroups { timeout_unit: HookTimeoutUnit::Seconds }),
             hook_events: CLAUDE_HOOK_EVENTS,
-            answer_delivery: CapabilitySupport::Supported,
-            precompact_context: CapabilitySupport::Supported,
-            instructions: CapabilitySupport::Supported,
             instruction_array: false,
             source: "https://docs.anthropic.com/en/docs/claude-code/settings; https://docs.anthropic.com/en/docs/claude-code/hooks",
         }),
-        skills: Some(SkillLocation {
-            environment: None,
-            fallback: ".claude",
-            suffix: "skills",
-        }),
-        skill_install_roots: SKILL_INSTALL_ROOTS,
-        default_account_directory: None,
-        default_account_root_kind: &provenant_core::CredentialKind::Store,
-        registered_account: true,
-        account_config_dir: true,
-        account_directory_prefix: Some(".claude-"),
-        account_key_prefix: None,
-        account_identity_namespace: None,
-        shared_account_settings: true,
-        isolated_login_keychain: false,
-        transcript_account_root: true,
-        setup_root: SetupRoot::None,
-        local_login: false,
-        login_reprobe: LoginReprobe::AccountIdentity,
-        login_observation: LoginObservation::Reprobe,
-        login_check_names_account: true,
-        account_identity_probe: AccountIdentityProbe::CliAuthStatus,
-        local_account: ("default", "local"),
-        argv_prompt: false,
-        authentication: None,
-        native_auth_warning: NativeAuthWarning::Always,
-        credential_files: &[".credentials.json", "settings.json"],
-        credential_auxiliary_files: &["provenant-lane-token", "provenant-oauth-refresh.lock"],
-        credential_profile_sibling: true,
-        credential_host_keychain: true,
-        login_hint: "claude auth login",
-        update: UpdateCommand::Subcommand("update"),
-        login_template: Some("CLAUDE_CONFIG_DIR={directory} claude auth login"),
-        login_refresh_template: Some("CLAUDE_CONFIG_DIR={directory} claude"),
-        auth_markers: &["not logged in", "authentication_failed"],
-        shell_prefix: Some(("bin/claude-shell", "CLAUDE_CODE_SHELL_PREFIX")),
-        context_directory_arg: Some("--add-dir"),
-        ignore_files: &[],
-        indexing_ignore_files: &[],
-        compaction_env: Some("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
-        client_env_markers: Some(ClientEnvMarkers {
-            equals_one: Some("CLAUDECODE"),
-            presence: &["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"],
-        }),
-        allowance_prefix: None,
-        allowance_windows: &[],
-        namespaced_models: false,
-        chair_switch: true,
-        offered_models: false,
-        refusal_revalidation_seconds: None,
-        github_auth: Some(GithubAuth::Environment),
-        session_handoff: true,
-        launch_token_refresh: true,
-        deduplicate_result: false,
-        oversize_command_frames: false,
-        answer_from_text: true,
-        result_event_usage: true,
-        token_budget_notice: None,
-        session_wide_usage: false,
-        stderr_config_notices: false,
-        exit_route: false,
-        stderr_quota: false,
-        stdout_error_diagnostic: false,
-        codex_policy: false,
-        model_observation: ModelObservation::Stream,
-        named_entry: NamedEntry::None,
-        user_sessions: false,
-        relocated_session_state: true,
-        copy_sessions_only: false,
-        quota_probe: QuotaProbeKind::HttpGet,
-        monthly_allowance: false,
-        quota_credits: true,
-        grouped_quota_pools: false,
-        retain_quota_accounts: false,
-        quota_identity_check: false,
-        peer_bootstrap: true,
-        quota_model_prefix: None,
-        account_model_plans: &[],
-        free_pool: None,
-        refusal_reset_source: "provider reset",
-        drop_unsupported_effort: false,
-        pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: true,
-            resume: true,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: AdapterFact::supported(),
+                default_network: NetworkAccess::Open,
+                effort: AdapterFact::supported(),
+                resume: AdapterFact::supported(),
+                network: ALL_NETWORK,
+                image_input: AdapterFact::supported(),
+                write: AdapterFact::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
                 chair: ControlSupport::MailOnly,
             },
-            network: ALL_NETWORK,
-            image_input: true,
-            write: true,
+            terminal_event: AdapterFact::row(TerminalEventStrength::Weak),
+            answering_model: AdapterFact::row(AnsweringModelSource::Stream),
+            usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
+            live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::row(SessionReference::Reported),
+            caveats: &[],
         },
+        retention: Retention { transcript_layout: AdapterFact::supported(), artifacts: &[] , relocated_session_state: true, sessions_only: false, transcript_account_root: true },
     },
     Codex [] (codex: 0) {
-        name: "codex",
-        usage: UsageSemantics::new(UsageScope::Step, true, true),
-        stdout: StreamContract::ProviderJsonl,
-        model_listing: Some(ModelListingFormat::CodexJson),
-        default_models: None,
-        model_id_prefix: None,
-        model_discovery: Some(&["debug", "models"]),
-        family: "openai",
-        binary: "codex",
+        identity: AdapterIdentity {
+            name: "codex",
+            family: "openai",
+            binary: "codex",
+            update: UpdateCommand::HomebrewOrNpm {
+                formula: "codex",
+                module: "@openai/codex",
+                package: "@openai/codex@latest",
+            },
+            model_listing: Some(ModelListingFormat::CodexJson),
+            default_models: None,
+            model_id_prefix: None,
+            model_discovery: Some(&["debug", "models"]),
+            namespaced_models: false,
+            offered_models: false,
+            named_entry: NamedEntry::None,
+        },
+        launch: AdapterLaunch {
+            framing: StreamFraming::ProviderJsonl,
+            config_environment: &[],
+            argv_prompt: false,
+            shell_prefix: None,
+            context_directory_arg: None,
+            ignore_files: &[],
+            indexing_ignore_files: &[],
+            compaction_env: None,
+            client_env_markers: Some(ClientEnvMarkers {
+                equals_one: None,
+                presence: &["CODEX_THREAD_ID"],
+            }),
+            skill_location: Some(SkillLocation {
+                environment: None,
+                fallback: ".agents",
+                suffix: "skills",
+            }),
+            skill_install_roots: SKILL_INSTALL_ROOTS,
+            session_handoff: false,
+            launch_token_refresh: false,
+            codex_policy: true,
+            github_auth: Some(GithubAuth::ShellEnvironment),
+            exit_route: false,
+            stderr_config_notices: true,
+            stderr_quota: false,
+            stdout_error_diagnostic: false,
+            deduplicate_result: false,
+            oversize_command_frames: true,
+            answer_from_text: false,
+            result_event_usage: false,
+            usage: UsageSemantics::new(UsageScope::Step, true, true),
+            token_budget_notice: Some("Codex writer token budgets are checked at completed-turn boundaries; a turn cannot be interrupted mid-flight"),
+            chair_switch: false,
+            drop_unrecorded_effort: false,
+        },
+        accounts: AdapterAccounts {
+            default_directory: Some(provenant_core::CODEX_ACCOUNT_DIRECTORY),
+            default_root_kind: &provenant_core::CredentialKind::CodexHome,
+            registered: true,
+            config_dir: true,
+            directory_prefix: None,
+            key_prefix: Some("codex-"),
+            identity_namespace: None,
+            shared_settings: false,
+            isolated_login_keychain: false,
+            local_entry: ("default", "local"),
+            setup_root: SetupRoot::None,
+            peer_bootstrap: true,
+            model_plans: &[],
+        },
+        quota: AdapterQuota {
+            probe: QuotaProbeKind::Command,
+            monthly_allowance: false,
+            credits: true,
+            grouped_pools: false,
+            retain_accounts: false,
+            identity_check: true,
+            model_prefix: None,
+            free_pool: None,
+            refusal_reset_source: "provider reset",
+            refusal_revalidation_seconds: None,
+            pacing_keys: None,
+            allowance_prefix: None,
+            allowance_windows: &[],
+        },
+        login: AdapterLogin {
+            local: false,
+            reprobe: LoginReprobe::Codex,
+            observation: LoginObservation::Reprobe,
+            check_names_account: false,
+            identity_probe: AccountIdentityProbe::AuthJson,
+            authentication: Some("login"),
+            native_auth_warning: NativeAuthWarning::WhenMismatch,
+            credential_files: &["auth.json", "config.toml"],
+            credential_auxiliary_files: &[],
+            credential_profile_sibling: false,
+            credential_host_keychain: false,
+            hint: "codex login",
+            template: Some("CODEX_HOME={directory} codex login"),
+            refresh_template: None,
+            auth_markers: &[
+                "please log out and sign in again",
+                "refresh token expired",
+                "not logged in",
+            ],
+        },
         install: Some(HarnessInstall {
             home: ".codex",
             lane_home: ("CODEX_HOME", ""),
             config: "config.toml",
             default_home_config: None,
-            instruction: Some("AGENTS.md"),
+            instruction_file: Some("AGENTS.md"),
             hook_file: Some("hooks.json"),
             hook_settings_arg: None,
-            hooks: CapabilitySupport::Supported,
+            native: NativeCapabilities {
+                hooks: AdapterFact::supported(),
+                answer_delivery: AdapterFact::supported(),
+                precompact_context: AdapterFact::unsupported("Codex PreCompact accepts only a systemMessage UI notice, not model context", "https://developers.openai.com/codex/hooks"),
+                instructions: AdapterFact::supported(),
+            },
             hook_protocol: Some(HookProtocol::CommandGroups { timeout_unit: HookTimeoutUnit::Seconds }),
             hook_events: CODEX_HOOK_EVENTS,
-            answer_delivery: CapabilitySupport::Supported,
-            precompact_context: CapabilitySupport::Unsupported {
-                reason: "Codex PreCompact accepts only a systemMessage UI notice, not model context",
-                source: "https://developers.openai.com/codex/hooks",
-            },
-            instructions: CapabilitySupport::Supported,
             instruction_array: false,
             source: "https://learn.chatgpt.com/docs/hooks; https://developers.openai.com/codex/guides/agents-md",
         }),
-        skills: Some(SkillLocation {
-            environment: None,
-            fallback: ".agents",
-            suffix: "skills",
-        }),
-        skill_install_roots: SKILL_INSTALL_ROOTS,
-        default_account_directory: Some(provenant_core::CODEX_ACCOUNT_DIRECTORY),
-        default_account_root_kind: &provenant_core::CredentialKind::CodexHome,
-        registered_account: true,
-        account_config_dir: true,
-        account_directory_prefix: None,
-        account_key_prefix: Some("codex-"),
-        account_identity_namespace: None,
-        shared_account_settings: false,
-        isolated_login_keychain: false,
-        transcript_account_root: false,
-        setup_root: SetupRoot::None,
-        local_login: false,
-        login_reprobe: LoginReprobe::Codex,
-        login_observation: LoginObservation::Reprobe,
-        login_check_names_account: false,
-        account_identity_probe: AccountIdentityProbe::AuthJson,
-        local_account: ("default", "local"),
-        argv_prompt: false,
-        authentication: Some("login"),
-        native_auth_warning: NativeAuthWarning::WhenMismatch,
-        credential_files: &["auth.json", "config.toml"],
-        credential_auxiliary_files: &[],
-        credential_profile_sibling: false,
-        credential_host_keychain: false,
-        login_hint: "codex login",
-        update: UpdateCommand::HomebrewOrNpm {
-            formula: "codex",
-            module: "@openai/codex",
-            package: "@openai/codex@latest",
-        },
-        login_template: Some("CODEX_HOME={directory} codex login"),
-        login_refresh_template: None,
-        auth_markers: &[
-            "please log out and sign in again",
-            "refresh token expired",
-            "not logged in",
-        ],
-        shell_prefix: None,
-        context_directory_arg: None,
-        ignore_files: &[],
-        indexing_ignore_files: &[],
-        compaction_env: None,
-        client_env_markers: Some(ClientEnvMarkers {
-            equals_one: None,
-            presence: &["CODEX_THREAD_ID"],
-        }),
-        allowance_prefix: None,
-        allowance_windows: &[],
-        namespaced_models: false,
-        chair_switch: false,
-        offered_models: false,
-        refusal_revalidation_seconds: None,
-        github_auth: Some(GithubAuth::ShellEnvironment),
-        session_handoff: false,
-        launch_token_refresh: false,
-        deduplicate_result: false,
-        oversize_command_frames: true,
-        answer_from_text: false,
-        result_event_usage: false,
-        token_budget_notice: Some("Codex writer token budgets are checked at completed-turn boundaries; a turn cannot be interrupted mid-flight"),
-        session_wide_usage: true,
-        stderr_config_notices: true,
-        exit_route: false,
-        stderr_quota: false,
-        stdout_error_diagnostic: false,
-        codex_policy: true,
-        model_observation: ModelObservation::Rollout,
-        named_entry: NamedEntry::None,
-        user_sessions: false,
-        relocated_session_state: false,
-        copy_sessions_only: true,
-        quota_probe: QuotaProbeKind::Command,
-        monthly_allowance: false,
-        quota_credits: true,
-        grouped_quota_pools: false,
-        retain_quota_accounts: false,
-        quota_identity_check: true,
-        peer_bootstrap: true,
-        quota_model_prefix: None,
-        account_model_plans: &[],
-        free_pool: None,
-        refusal_reset_source: "provider reset",
-        drop_unsupported_effort: false,
-        pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: true,
-            resume: true,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: AdapterFact::supported(),
+                default_network: NetworkAccess::Open,
+                effort: AdapterFact::supported(),
+                resume: AdapterFact::supported(),
+                network: ALL_NETWORK,
+                image_input: AdapterFact::supported(),
+                write: AdapterFact::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
                 chair: ControlSupport::MailOnly,
             },
-            network: ALL_NETWORK,
-            image_input: true,
-            write: true,
+            terminal_event: AdapterFact::row(TerminalEventStrength::Weak),
+            answering_model: AdapterFact::row(AnsweringModelSource::Rollout),
+            usage_attribution: AdapterFact::because(UsageAttribution::Session, "codex usage totals are session-wide unless marked per attempt", "crates/run/src/holder.rs"),
+            live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::row(SessionReference::Reported),
+            caveats: &[],
         },
+        retention: Retention { transcript_layout: AdapterFact::supported(), artifacts: &[] , relocated_session_state: false, sessions_only: true, transcript_account_root: false },
     },
     Cursor [] (cursor: 2) {
-        name: "cursor",
-        usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::ProviderJsonl,
-        model_listing: Some(ModelListingFormat::CursorText),
-        default_models: Some(&["auto", "composer-*", "grok-*"]),
-        model_id_prefix: None,
-        model_discovery: Some(&["models"]),
-        family: "cursor",
-        binary: "cursor-agent",
+        identity: AdapterIdentity {
+            name: "cursor",
+            family: "cursor",
+            binary: "cursor-agent",
+            update: UpdateCommand::None,
+            model_listing: Some(ModelListingFormat::CursorText),
+            default_models: Some(&["auto", "composer-*", "grok-*"]),
+            model_id_prefix: None,
+            model_discovery: Some(&["models"]),
+            namespaced_models: false,
+            offered_models: false,
+            named_entry: NamedEntry::None,
+        },
+        launch: AdapterLaunch {
+            framing: StreamFraming::ProviderJsonl,
+            config_environment: &[],
+            argv_prompt: true,
+            shell_prefix: None,
+            context_directory_arg: None,
+            ignore_files: &[".cursorignore"],
+            indexing_ignore_files: &[".cursorindexingignore"],
+            compaction_env: None,
+            client_env_markers: None,
+            skill_location: Some(SkillLocation {
+                environment: None,
+                fallback: ".cursor",
+                suffix: "skills",
+            }),
+            skill_install_roots: SKILL_INSTALL_ROOTS,
+            session_handoff: false,
+            launch_token_refresh: false,
+            codex_policy: false,
+            github_auth: None,
+            exit_route: false,
+            stderr_config_notices: false,
+            stderr_quota: false,
+            stdout_error_diagnostic: false,
+            deduplicate_result: false,
+            oversize_command_frames: false,
+            answer_from_text: true,
+            result_event_usage: false,
+            usage: UsageSemantics::new(UsageScope::Step, false, false),
+            token_budget_notice: None,
+            chair_switch: false,
+            drop_unrecorded_effort: true,
+        },
+        accounts: AdapterAccounts {
+            default_directory: None,
+            default_root_kind: &provenant_core::CredentialKind::Store,
+            registered: false,
+            config_dir: false,
+            directory_prefix: None,
+            key_prefix: Some("cursor-"),
+            identity_namespace: None,
+            shared_settings: false,
+            isolated_login_keychain: false,
+            local_entry: ("default", "local"),
+            setup_root: SetupRoot::Home,
+            peer_bootstrap: false,
+            model_plans: &[],
+        },
+        quota: AdapterQuota {
+            probe: QuotaProbeKind::HttpGet,
+            monthly_allowance: true,
+            credits: false,
+            grouped_pools: false,
+            retain_accounts: false,
+            identity_check: true,
+            model_prefix: None,
+            free_pool: None,
+            refusal_reset_source: "provider reset",
+            refusal_revalidation_seconds: None,
+            pacing_keys: None,
+            allowance_prefix: None,
+            allowance_windows: &[],
+        },
+        login: AdapterLogin {
+            local: true,
+            reprobe: LoginReprobe::Cursor,
+            observation: LoginObservation::Reprobe,
+            check_names_account: false,
+            identity_probe: AccountIdentityProbe::Vscdb,
+            authentication: Some("login"),
+            native_auth_warning: NativeAuthWarning::WhenMismatch,
+            credential_files: &["state.vscdb", "state.vscdb-wal", "state.vscdb-shm", "cli-config.json"],
+            credential_auxiliary_files: &[],
+            credential_profile_sibling: false,
+            credential_host_keychain: false,
+            hint: "agent login",
+            template: None,
+            refresh_template: None,
+            auth_markers: &[
+                "authentication required. please run agent login",
+                "not logged in",
+            ],
+        },
         install: Some(HarnessInstall {
             home: ".cursor",
             lane_home: ("HOME", ".cursor"),
             config: "mcp.json",
             default_home_config: None,
-            instruction: None,
+            instruction_file: None,
             hook_file: Some("hooks.json"),
             hook_settings_arg: None,
-            hooks: CapabilitySupport::Supported,
+            native: NativeCapabilities {
+                hooks: AdapterFact::supported(),
+                answer_delivery: AdapterFact::unsupported("Cursor preToolUse does not accept the additionalContext response used by Provenant answer delivery", "https://cursor.com/docs/hooks#pretooluse"),
+                precompact_context: AdapterFact::unsupported("Cursor preCompact accepts only user_message output shown to the user, not model context", "https://cursor.com/docs/hooks#precompact"),
+                instructions: AdapterFact::unsupported("Cursor global instructions are settings-managed; AGENTS.md is project-root scoped", "https://docs.cursor.com/context/rules-for-ai"),
+            },
             hook_protocol: Some(HookProtocol::CursorCommands { timeout_unit: HookTimeoutUnit::Seconds }),
             hook_events: CURSOR_HOOK_EVENTS,
-            answer_delivery: CapabilitySupport::Unsupported {
-                reason: "Cursor preToolUse does not accept the additionalContext response used by Provenant answer delivery",
-                source: "https://cursor.com/docs/hooks#pretooluse",
-            },
-            precompact_context: CapabilitySupport::Unsupported {
-                reason: "Cursor preCompact accepts only user_message output shown to the user, not model context",
-                source: "https://cursor.com/docs/hooks#precompact",
-            },
-            instructions: CapabilitySupport::Unsupported {
-                reason: "Cursor global instructions are settings-managed; AGENTS.md is project-root scoped",
-                source: "https://docs.cursor.com/context/rules-for-ai",
-            },
             instruction_array: false,
             source: "https://docs.cursor.com/hooks; https://docs.cursor.com/context/rules-for-ai",
         }),
-        skills: Some(SkillLocation {
-            environment: None,
-            fallback: ".cursor",
-            suffix: "skills",
-        }),
-        skill_install_roots: SKILL_INSTALL_ROOTS,
-        default_account_directory: None,
-        default_account_root_kind: &provenant_core::CredentialKind::Store,
-        registered_account: false,
-        account_config_dir: false,
-        account_directory_prefix: None,
-        account_key_prefix: Some("cursor-"),
-        account_identity_namespace: None,
-        shared_account_settings: false,
-        isolated_login_keychain: false,
-        transcript_account_root: false,
-        setup_root: SetupRoot::Home,
-        local_login: true,
-        login_reprobe: LoginReprobe::Cursor,
-        login_observation: LoginObservation::Reprobe,
-        login_check_names_account: false,
-        account_identity_probe: AccountIdentityProbe::Vscdb,
-        local_account: ("default", "local"),
-        argv_prompt: true,
-        authentication: Some("login"),
-        native_auth_warning: NativeAuthWarning::WhenMismatch,
-        credential_files: &["state.vscdb", "state.vscdb-wal", "state.vscdb-shm", "cli-config.json"],
-        credential_auxiliary_files: &[],
-        credential_profile_sibling: false,
-        credential_host_keychain: false,
-        login_hint: "agent login",
-        update: UpdateCommand::None,
-        login_template: None,
-        login_refresh_template: None,
-        auth_markers: &[
-            "authentication required. please run agent login",
-            "not logged in",
-        ],
-        shell_prefix: None,
-        context_directory_arg: None,
-        ignore_files: &[".cursorignore"],
-        indexing_ignore_files: &[".cursorindexingignore"],
-        compaction_env: None,
-        client_env_markers: None,
-        allowance_prefix: None,
-        allowance_windows: &[],
-        namespaced_models: false,
-        chair_switch: false,
-        offered_models: false,
-        refusal_revalidation_seconds: None,
-        github_auth: None,
-        session_handoff: false,
-        launch_token_refresh: false,
-        deduplicate_result: false,
-        oversize_command_frames: false,
-        answer_from_text: true,
-        result_event_usage: false,
-        token_budget_notice: None,
-        session_wide_usage: false,
-        stderr_config_notices: false,
-        exit_route: false,
-        stderr_quota: false,
-        stdout_error_diagnostic: false,
-        codex_policy: false,
-        model_observation: ModelObservation::Stream,
-        named_entry: NamedEntry::None,
-        user_sessions: false,
-        relocated_session_state: true,
-        copy_sessions_only: false,
-        quota_probe: QuotaProbeKind::HttpGet,
-        monthly_allowance: true,
-        quota_credits: false,
-        grouped_quota_pools: false,
-        retain_quota_accounts: false,
-        quota_identity_check: true,
-        peer_bootstrap: false,
-        quota_model_prefix: None,
-        account_model_plans: &[],
-        free_pool: None,
-        refusal_reset_source: "provider reset",
-        drop_unsupported_effort: true,
-        pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: true,
-            resume: true,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: AdapterFact::supported(),
+                default_network: NetworkAccess::Open,
+                effort: AdapterFact::supported(),
+                resume: AdapterFact::supported(),
+                network: ALL_NETWORK,
+                image_input: AdapterFact::unsupported("cursor does not provide image input control", ADAPTER_ROW_SOURCE),
+                write: AdapterFact::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
                 chair: ControlSupport::MailOnly,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: true,
+            terminal_event: AdapterFact::row(TerminalEventStrength::Weak),
+            answering_model: AdapterFact::row(AnsweringModelSource::Stream),
+            usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
+            live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::row(SessionReference::Reported),
+            caveats: &[],
         },
+        retention: Retention { transcript_layout: AdapterFact::supported(), artifacts: &[RetainedArtifact { parent: ".cursor", name: "chats", scrub: &[] }] , relocated_session_state: true, sessions_only: false, transcript_account_root: false },
     },
     Agy [] (agy: 3) {
-        name: "agy",
-        usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::ProviderJsonl,
-        model_listing: Some(ModelListingFormat::AgyText),
-        default_models: None,
-        model_id_prefix: Some("agy/"),
-        model_discovery: Some(&["models"]),
-        family: "google",
-        binary: "agy",
+        identity: AdapterIdentity {
+            name: "agy",
+            family: "google",
+            binary: "agy",
+            update: UpdateCommand::None,
+            model_listing: Some(ModelListingFormat::AgyText),
+            default_models: None,
+            model_id_prefix: Some("agy/"),
+            model_discovery: Some(&["models"]),
+            namespaced_models: false,
+            offered_models: true,
+            named_entry: NamedEntry::None,
+        },
+        launch: AdapterLaunch {
+            framing: StreamFraming::ProviderJsonl,
+            config_environment: &[],
+            argv_prompt: true,
+            shell_prefix: None,
+            context_directory_arg: None,
+            ignore_files: &[],
+            indexing_ignore_files: &[],
+            compaction_env: None,
+            client_env_markers: None,
+            skill_location: Some(SkillLocation {
+                environment: None,
+                fallback: ".gemini",
+                suffix: "skills",
+            }),
+            skill_install_roots: SKILL_INSTALL_ROOTS,
+            session_handoff: false,
+            launch_token_refresh: false,
+            codex_policy: false,
+            github_auth: None,
+            exit_route: false,
+            stderr_config_notices: false,
+            stderr_quota: false,
+            stdout_error_diagnostic: false,
+            deduplicate_result: true,
+            oversize_command_frames: false,
+            answer_from_text: false,
+            result_event_usage: false,
+            usage: UsageSemantics::new(UsageScope::Step, false, false),
+            token_budget_notice: None,
+            chair_switch: false,
+            drop_unrecorded_effort: false,
+        },
+        accounts: AdapterAccounts {
+            default_directory: None,
+            default_root_kind: &provenant_core::CredentialKind::Store,
+            registered: true,
+            config_dir: false,
+            directory_prefix: None,
+            key_prefix: Some("agy-google-"),
+            identity_namespace: Some("google-"),
+            shared_settings: false,
+            isolated_login_keychain: true,
+            local_entry: ("default", "local"),
+            setup_root: SetupRoot::None,
+            peer_bootstrap: false,
+            model_plans: &[],
+        },
+        quota: AdapterQuota {
+            probe: QuotaProbeKind::Command,
+            monthly_allowance: false,
+            credits: false,
+            grouped_pools: true,
+            retain_accounts: true,
+            identity_check: false,
+            model_prefix: None,
+            free_pool: None,
+            refusal_reset_source: "provider reset",
+            refusal_revalidation_seconds: Some(300),
+            pacing_keys: None,
+            allowance_prefix: None,
+            allowance_windows: &[],
+        },
+        login: AdapterLogin {
+            local: true,
+            reprobe: LoginReprobe::AccountIdentity,
+            observation: LoginObservation::Reprobe,
+            check_names_account: true,
+            identity_probe: AccountIdentityProbe::KeychainLog,
+            authentication: Some("keychain"),
+            native_auth_warning: NativeAuthWarning::WhenMismatch,
+            credential_files: &[
+                "state.vscdb",
+                "state.vscdb-wal",
+                "Library/Keychains/login.keychain-db",
+            ],
+            credential_auxiliary_files: &[],
+            credential_profile_sibling: false,
+            credential_host_keychain: false,
+            hint: "agy auth login",
+            template: Some("HOME={directory} agy` and use `/login"),
+            refresh_template: None,
+            auth_markers: &[
+                "authentication required. please login to continue.",
+                "authentication required. please log in",
+            ],
+        },
         install: Some(HarnessInstall {
             home: ".gemini",
             lane_home: ("HOME", ".gemini"),
             config: "config/mcp_config.json",
             default_home_config: None,
-            instruction: Some("AGENTS.md"),
+            instruction_file: Some("AGENTS.md"),
             hook_file: Some("config/hooks.json"),
             hook_settings_arg: None,
-            hooks: CapabilitySupport::Supported,
+            native: NativeCapabilities {
+                hooks: AdapterFact::supported(),
+                answer_delivery: AdapterFact::unsupported("Antigravity PreToolUse returns a tool decision and argument overwrite, not injected context", "https://antigravity.google/docs/hooks#input-and-output-contract"),
+                precompact_context: AdapterFact::unsupported("Antigravity exposes no PreCompact event", "https://antigravity.google/docs/hooks#supported-events"),
+                instructions: AdapterFact::supported(),
+            },
             hook_protocol: Some(HookProtocol::NamedGroups { timeout_unit: HookTimeoutUnit::Seconds }),
             hook_events: AGY_HOOK_EVENTS,
-            answer_delivery: CapabilitySupport::Unsupported {
-                reason: "Antigravity PreToolUse returns a tool decision and argument overwrite, not injected context",
-                source: "https://antigravity.google/docs/hooks#input-and-output-contract",
-            },
-            precompact_context: CapabilitySupport::Unsupported {
-                reason: "Antigravity exposes no PreCompact event",
-                source: "https://antigravity.google/docs/hooks#supported-events",
-            },
-            instructions: CapabilitySupport::Supported,
             instruction_array: false,
             source: "https://antigravity.google/docs/hooks; https://antigravity.google/docs/customization-discovery",
         }),
-        skills: Some(SkillLocation {
-            environment: None,
-            fallback: ".gemini",
-            suffix: "skills",
-        }),
-        skill_install_roots: SKILL_INSTALL_ROOTS,
-        default_account_directory: None,
-        default_account_root_kind: &provenant_core::CredentialKind::Store,
-        registered_account: true,
-        account_config_dir: false,
-        account_directory_prefix: None,
-        account_key_prefix: Some("agy-google-"),
-        account_identity_namespace: Some("google-"),
-        shared_account_settings: false,
-        isolated_login_keychain: true,
-        transcript_account_root: false,
-        setup_root: SetupRoot::None,
-        local_login: true,
-        login_reprobe: LoginReprobe::AccountIdentity,
-        login_observation: LoginObservation::Reprobe,
-        login_check_names_account: true,
-        account_identity_probe: AccountIdentityProbe::KeychainLog,
-        local_account: ("default", "local"),
-        argv_prompt: true,
-        authentication: Some("keychain"),
-        native_auth_warning: NativeAuthWarning::WhenMismatch,
-        credential_files: &[
-            "state.vscdb",
-            "state.vscdb-wal",
-            "Library/Keychains/login.keychain-db",
-        ],
-        credential_auxiliary_files: &[],
-        credential_profile_sibling: false,
-        credential_host_keychain: false,
-        login_hint: "agy auth login",
-        update: UpdateCommand::None,
-        login_template: Some("HOME={directory} agy` and use `/login"),
-        login_refresh_template: None,
-        auth_markers: &[
-            "authentication required. please login to continue.",
-            "authentication required. please log in",
-        ],
-        shell_prefix: None,
-        context_directory_arg: None,
-        ignore_files: &[],
-        indexing_ignore_files: &[],
-        compaction_env: None,
-        client_env_markers: None,
-        allowance_prefix: None,
-        allowance_windows: &[],
-        namespaced_models: false,
-        chair_switch: false,
-        offered_models: true,
-        refusal_revalidation_seconds: Some(300),
-        github_auth: None,
-        session_handoff: false,
-        launch_token_refresh: false,
-        deduplicate_result: true,
-        oversize_command_frames: false,
-        answer_from_text: false,
-        result_event_usage: false,
-        token_budget_notice: None,
-        session_wide_usage: false,
-        stderr_config_notices: false,
-        exit_route: false,
-        stderr_quota: false,
-        stdout_error_diagnostic: false,
-        codex_policy: false,
-        model_observation: ModelObservation::Stream,
-        named_entry: NamedEntry::None,
-        user_sessions: false,
-        relocated_session_state: false,
-        copy_sessions_only: false,
-        quota_probe: QuotaProbeKind::Command,
-        monthly_allowance: false,
-        quota_credits: false,
-        grouped_quota_pools: true,
-        retain_quota_accounts: true,
-        quota_identity_check: false,
-        peer_bootstrap: false,
-        quota_model_prefix: None,
-        account_model_plans: &[],
-        free_pool: None,
-        refusal_reset_source: "provider reset",
-        drop_unsupported_effort: false,
-        pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: true,
-            resume: true,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: AdapterFact::supported(),
+                default_network: NetworkAccess::Open,
+                effort: AdapterFact::supported(),
+                resume: AdapterFact::supported(),
+                network: ALL_NETWORK,
+                image_input: AdapterFact::unsupported("agy does not provide image input control", ADAPTER_ROW_SOURCE),
+                write: AdapterFact::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
                 chair: ControlSupport::MailOnly,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: true,
+            terminal_event: AdapterFact::row(TerminalEventStrength::Weak),
+            answering_model: AdapterFact::row(AnsweringModelSource::Stream),
+            usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
+            live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::row(SessionReference::Reported),
+            caveats: &[],
         },
+        retention: Retention { transcript_layout: AdapterFact::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] , relocated_session_state: false, sessions_only: false, transcript_account_root: false },
     },
     Opencode [] (opencode: 4) {
-        name: "opencode",
-        usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::ProviderJsonl,
-        model_listing: Some(ModelListingFormat::OpencodeText),
-        default_models: None,
-        model_id_prefix: Some("opencode/"),
-        model_discovery: Some(&["models"]),
-        family: "opencode",
-        binary: "opencode",
+        identity: AdapterIdentity {
+            name: "opencode",
+            family: "opencode",
+            binary: "opencode",
+            update: UpdateCommand::Subcommand("upgrade"),
+            model_listing: Some(ModelListingFormat::OpencodeText),
+            default_models: None,
+            model_id_prefix: Some("opencode/"),
+            model_discovery: Some(&["models"]),
+            namespaced_models: true,
+            offered_models: false,
+            named_entry: NamedEntry::None,
+        },
+        launch: AdapterLaunch {
+            framing: StreamFraming::ProviderJsonl,
+            config_environment: &["XDG_DATA_HOME"],
+            argv_prompt: false,
+            shell_prefix: None,
+            context_directory_arg: None,
+            ignore_files: &[],
+            indexing_ignore_files: &[],
+            compaction_env: None,
+            client_env_markers: None,
+            skill_location: Some(SkillLocation {
+                environment: Some("XDG_CONFIG_HOME"),
+                fallback: ".config",
+                suffix: "opencode/skills",
+            }),
+            skill_install_roots: SKILL_INSTALL_ROOTS,
+            session_handoff: false,
+            launch_token_refresh: false,
+            codex_policy: false,
+            github_auth: None,
+            exit_route: false,
+            stderr_config_notices: false,
+            stderr_quota: true,
+            stdout_error_diagnostic: true,
+            deduplicate_result: false,
+            oversize_command_frames: false,
+            answer_from_text: false,
+            result_event_usage: false,
+            usage: UsageSemantics::new(UsageScope::Step, false, false),
+            token_budget_notice: None,
+            chair_switch: false,
+            drop_unrecorded_effort: true,
+        },
+        accounts: AdapterAccounts {
+            default_directory: None,
+            default_root_kind: &provenant_core::CredentialKind::Store,
+            registered: false,
+            config_dir: false,
+            directory_prefix: None,
+            key_prefix: None,
+            identity_namespace: None,
+            shared_settings: false,
+            isolated_login_keychain: false,
+            local_entry: ("go", "go"),
+            setup_root: SetupRoot::XdgDataHome,
+            peer_bootstrap: false,
+            model_plans: &[
+                AccountModelPlan { plan: "go", model_prefix: "opencode-go/", quota: AccountQuota::LocalLedger },
+                AccountModelPlan { plan: "zen", model_prefix: "opencode/", quota: AccountQuota::ObservedRefusals },
+            ],
+        },
+        quota: AdapterQuota {
+            probe: QuotaProbeKind::LocalLedger,
+            monthly_allowance: false,
+            credits: true,
+            grouped_pools: false,
+            retain_accounts: false,
+            identity_check: false,
+            model_prefix: Some("opencode-go/"),
+            free_pool: Some("opencode-free"),
+            refusal_reset_source: "provider retry-after",
+            refusal_revalidation_seconds: None,
+            pacing_keys: Some(("opencode_free", "opencode_paid")),
+            allowance_prefix: Some("opencode-go/"),
+            allowance_windows: &["five_hour", "seven_day", "thirty_day"],
+        },
+        login: AdapterLogin {
+            local: true,
+            reprobe: LoginReprobe::ExecutableOnly,
+            observation: LoginObservation::ExecutableOnly,
+            check_names_account: false,
+            identity_probe: AccountIdentityProbe::None,
+            authentication: Some("login"),
+            native_auth_warning: NativeAuthWarning::None,
+            credential_files: &[
+                "auth.json",
+                "opencode.db",
+                "opencode.db-wal",
+                "opencode.json",
+            ],
+            credential_auxiliary_files: &[],
+            credential_profile_sibling: false,
+            credential_host_keychain: false,
+            hint: "opencode auth login",
+            template: None,
+            refresh_template: None,
+            auth_markers: &["no api key found", "run opencode auth login"],
+        },
         install: Some(HarnessInstall {
             home: ".config/opencode",
             lane_home: ("XDG_CONFIG_HOME", "opencode"),
             config: "opencode.jsonc",
             default_home_config: None,
-            instruction: Some("AGENTS.md"),
+            instruction_file: Some("AGENTS.md"),
             hook_file: Some("plugins/provenant/index.ts"),
             hook_settings_arg: None,
-            hooks: CapabilitySupport::Supported,
+            native: NativeCapabilities {
+                hooks: AdapterFact::supported(),
+                answer_delivery: AdapterFact::unsupported("OpenCode tool.execute.before hooks cannot inject additional context into the active session", "https://opencode.ai/docs/build/plugins/server#tool-execution"),
+                precompact_context: AdapterFact::supported(),
+                instructions: AdapterFact::supported(),
+            },
             hook_protocol: Some(HookProtocol::OpenCodePlugin),
             hook_events: OPENCODE_HOOK_EVENTS,
-            answer_delivery: CapabilitySupport::Unsupported {
-                reason: "OpenCode tool.execute.before hooks cannot inject additional context into the active session",
-                source: "https://opencode.ai/docs/build/plugins/server#tool-execution",
-            },
-            precompact_context: CapabilitySupport::Supported,
-            instructions: CapabilitySupport::Supported,
             instruction_array: true,
             source: "https://opencode.ai/docs/build/plugins/; https://opencode.ai/docs/instructions",
         }),
-        skills: Some(SkillLocation {
-            environment: Some("XDG_CONFIG_HOME"),
-            fallback: ".config",
-            suffix: "opencode/skills",
-        }),
-        skill_install_roots: SKILL_INSTALL_ROOTS,
-        default_account_directory: None,
-        default_account_root_kind: &provenant_core::CredentialKind::Store,
-        registered_account: false,
-        account_config_dir: false,
-        account_directory_prefix: None,
-        account_key_prefix: None,
-        account_identity_namespace: None,
-        shared_account_settings: false,
-        isolated_login_keychain: false,
-        transcript_account_root: false,
-        setup_root: SetupRoot::XdgDataHome,
-        local_login: true,
-        login_reprobe: LoginReprobe::ExecutableOnly,
-        login_observation: LoginObservation::ExecutableOnly,
-        login_check_names_account: false,
-        account_identity_probe: AccountIdentityProbe::None,
-        local_account: ("go", "go"),
-        argv_prompt: false,
-        authentication: Some("login"),
-        native_auth_warning: NativeAuthWarning::None,
-        credential_files: &[
-            "auth.json",
-            "opencode.db",
-            "opencode.db-wal",
-            "opencode.json",
-        ],
-        credential_auxiliary_files: &[],
-        credential_profile_sibling: false,
-        credential_host_keychain: false,
-        login_hint: "opencode auth login",
-        update: UpdateCommand::Subcommand("upgrade"),
-        login_template: None,
-        login_refresh_template: None,
-        auth_markers: &["no api key found", "run opencode auth login"],
-        shell_prefix: None,
-        context_directory_arg: None,
-        ignore_files: &[],
-        indexing_ignore_files: &[],
-        compaction_env: None,
-        client_env_markers: None,
-        allowance_prefix: Some("opencode-go/"),
-        allowance_windows: &["five_hour", "seven_day", "thirty_day"],
-        namespaced_models: true,
-        chair_switch: false,
-        offered_models: false,
-        refusal_revalidation_seconds: None,
-        github_auth: None,
-        session_handoff: false,
-        launch_token_refresh: false,
-        deduplicate_result: false,
-        oversize_command_frames: false,
-        answer_from_text: false,
-        result_event_usage: false,
-        token_budget_notice: None,
-        session_wide_usage: false,
-        stderr_config_notices: false,
-        exit_route: false,
-        stderr_quota: true,
-        stdout_error_diagnostic: true,
-        codex_policy: false,
-        model_observation: ModelObservation::SessionDatabase,
-        named_entry: NamedEntry::None,
-        user_sessions: false,
-        relocated_session_state: true,
-        copy_sessions_only: false,
-        quota_probe: QuotaProbeKind::LocalLedger,
-        monthly_allowance: false,
-        quota_credits: true,
-        grouped_quota_pools: false,
-        retain_quota_accounts: false,
-        quota_identity_check: false,
-        peer_bootstrap: false,
-        quota_model_prefix: Some("opencode-go/"),
-        account_model_plans: &[
-            AccountModelPlan { plan: "go", model_prefix: "opencode-go/", quota: AccountQuota::LocalLedger },
-            AccountModelPlan { plan: "zen", model_prefix: "opencode/", quota: AccountQuota::ObservedRefusals },
-        ],
-        free_pool: Some("opencode-free"),
-        refusal_reset_source: "provider retry-after",
-        drop_unsupported_effort: true,
-        pacing_keys: Some(("opencode_free", "opencode_paid")),
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: true,
-            resume: true,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: AdapterFact::supported(),
+                default_network: NetworkAccess::Open,
+                effort: AdapterFact::supported(),
+                resume: AdapterFact::supported(),
+                network: ALL_NETWORK,
+                image_input: AdapterFact::unsupported("opencode does not provide image input control", ADAPTER_ROW_SOURCE),
+                write: AdapterFact::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
                 chair: ControlSupport::MailOnly,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: true,
+            terminal_event: AdapterFact::row(TerminalEventStrength::Weak),
+            answering_model: AdapterFact::row(AnsweringModelSource::SessionDatabase),
+            usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
+            live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::row(SessionReference::Reported),
+            caveats: &[],
         },
+        retention: Retention { transcript_layout: AdapterFact::supported(), artifacts: &[RetainedArtifact { parent: "data", name: "opencode", scrub: &["auth.json"] }] , relocated_session_state: true, sessions_only: false, transcript_account_root: false },
     },
     Command [] (command: 5) {
-        name: "command",
-        usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::Raw,
-        model_listing: None,
-        default_models: None,
-        model_id_prefix: None,
-        model_discovery: None,
-        family: "command",
-        binary: "",
+        identity: AdapterIdentity {
+            name: "command",
+            family: "command",
+            binary: "",
+            update: UpdateCommand::None,
+            model_listing: None,
+            default_models: None,
+            model_id_prefix: None,
+            model_discovery: None,
+            namespaced_models: false,
+            offered_models: false,
+            named_entry: NamedEntry::Command,
+        },
+        launch: AdapterLaunch {
+            framing: StreamFraming::Raw,
+            config_environment: &[],
+            argv_prompt: false,
+            shell_prefix: None,
+            context_directory_arg: None,
+            ignore_files: &[],
+            indexing_ignore_files: &[],
+            compaction_env: None,
+            client_env_markers: None,
+            skill_location: None,
+            skill_install_roots: &[],
+            session_handoff: false,
+            launch_token_refresh: false,
+            codex_policy: false,
+            github_auth: None,
+            exit_route: true,
+            stderr_config_notices: false,
+            stderr_quota: false,
+            stdout_error_diagnostic: false,
+            deduplicate_result: false,
+            oversize_command_frames: false,
+            answer_from_text: false,
+            result_event_usage: false,
+            usage: UsageSemantics::new(UsageScope::Step, false, false),
+            token_budget_notice: None,
+            chair_switch: false,
+            drop_unrecorded_effort: false,
+        },
+        accounts: AdapterAccounts {
+            default_directory: None,
+            default_root_kind: &provenant_core::CredentialKind::Store,
+            registered: false,
+            config_dir: false,
+            directory_prefix: None,
+            key_prefix: None,
+            identity_namespace: None,
+            shared_settings: false,
+            isolated_login_keychain: false,
+            local_entry: ("default", "local"),
+            setup_root: SetupRoot::None,
+            peer_bootstrap: false,
+            model_plans: &[],
+        },
+        quota: AdapterQuota {
+            probe: QuotaProbeKind::None,
+            monthly_allowance: false,
+            credits: false,
+            grouped_pools: false,
+            retain_accounts: false,
+            identity_check: false,
+            model_prefix: None,
+            free_pool: None,
+            refusal_reset_source: "provider reset",
+            refusal_revalidation_seconds: None,
+            pacing_keys: None,
+            allowance_prefix: None,
+            allowance_windows: &[],
+        },
+        login: AdapterLogin {
+            local: false,
+            reprobe: LoginReprobe::None,
+            observation: LoginObservation::None,
+            check_names_account: false,
+            identity_probe: AccountIdentityProbe::None,
+            authentication: None,
+            native_auth_warning: NativeAuthWarning::None,
+            credential_files: &[],
+            credential_auxiliary_files: &[],
+            credential_profile_sibling: false,
+            credential_host_keychain: false,
+            hint: "",
+            template: None,
+            refresh_template: None,
+            auth_markers: &[],
+        },
         install: None,
-        skills: None,
-        skill_install_roots: &[],
-        default_account_directory: None,
-        default_account_root_kind: &provenant_core::CredentialKind::Store,
-        registered_account: false,
-        account_config_dir: false,
-        account_directory_prefix: None,
-        account_key_prefix: None,
-        account_identity_namespace: None,
-        shared_account_settings: false,
-        isolated_login_keychain: false,
-        transcript_account_root: false,
-        setup_root: SetupRoot::None,
-        local_login: false,
-        login_reprobe: LoginReprobe::None,
-        login_observation: LoginObservation::None,
-        login_check_names_account: false,
-        account_identity_probe: AccountIdentityProbe::None,
-        local_account: ("default", "local"),
-        argv_prompt: false,
-        authentication: None,
-        native_auth_warning: NativeAuthWarning::None,
-        credential_files: &[],
-        credential_auxiliary_files: &[],
-        credential_profile_sibling: false,
-        credential_host_keychain: false,
-        login_hint: "",
-        update: UpdateCommand::None,
-        login_template: None,
-        login_refresh_template: None,
-        auth_markers: &[],
-        shell_prefix: None,
-        context_directory_arg: None,
-        ignore_files: &[],
-        indexing_ignore_files: &[],
-        compaction_env: None,
-        client_env_markers: None,
-        allowance_prefix: None,
-        allowance_windows: &[],
-        namespaced_models: false,
-        chair_switch: false,
-        offered_models: false,
-        refusal_revalidation_seconds: None,
-        github_auth: None,
-        session_handoff: false,
-        launch_token_refresh: false,
-        deduplicate_result: false,
-        oversize_command_frames: false,
-        answer_from_text: false,
-        result_event_usage: false,
-        token_budget_notice: None,
-        session_wide_usage: false,
-        stderr_config_notices: false,
-        exit_route: true,
-        stderr_quota: false,
-        stdout_error_diagnostic: false,
-        codex_policy: false,
-        model_observation: ModelObservation::Stream,
-        named_entry: NamedEntry::Command,
-        user_sessions: false,
-        relocated_session_state: false,
-        copy_sessions_only: false,
-        quota_probe: QuotaProbeKind::None,
-        monthly_allowance: false,
-        quota_credits: false,
-        grouped_quota_pools: false,
-        retain_quota_accounts: false,
-        quota_identity_check: false,
-        peer_bootstrap: false,
-        quota_model_prefix: None,
-        account_model_plans: &[],
-        free_pool: None,
-        refusal_reset_source: "provider reset",
-        drop_unsupported_effort: false,
-        pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: false,
-            default_network: NetworkAccess::Open,
-            effort: false,
-            resume: false,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: AdapterFact::unsupported("command does not provide model control", ADAPTER_ROW_SOURCE),
+                default_network: NetworkAccess::Open,
+                effort: AdapterFact::unsupported("command does not provide effort control", ADAPTER_ROW_SOURCE),
+                resume: AdapterFact::unsupported("command does not provide resume control", ADAPTER_ROW_SOURCE),
+                network: ALL_NETWORK,
+                image_input: AdapterFact::unsupported("command does not provide image input control", ADAPTER_ROW_SOURCE),
+                write: AdapterFact::unsupported("command does not provide write control", ADAPTER_ROW_SOURCE),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::Unsupported,
                 chair: ControlSupport::Unsupported,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: false,
+            terminal_event: AdapterFact::because(TerminalEventStrength::Absent, "process exit is the contract for raw output", ADAPTER_ROW_SOURCE),
+            answering_model: AdapterFact::because(AnsweringModelSource::Unreported, "configured commands report no model", ADAPTER_ROW_SOURCE),
+            usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
+            live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::because(SessionReference::Absent, "raw output carries no session id", ADAPTER_ROW_SOURCE),
+            caveats: &[],
         },
+        retention: Retention { transcript_layout: AdapterFact::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] , relocated_session_state: false, sessions_only: false, transcript_account_root: false },
     },
     // A named, optional host feature. Preparation delegates to its provider;
     // decoding, accounts and confinement remain owned by that provider.
     HostNative [serde(rename = "host-native")] () {
-        name: "host-native",
-        usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::ProviderJsonl,
-        model_listing: None,
-        default_models: None,
-        model_id_prefix: None,
-        model_discovery: None,
-        family: "host-native",
-        binary: "",
+        identity: AdapterIdentity {
+            name: "host-native",
+            family: "host-native",
+            binary: "",
+            update: UpdateCommand::None,
+            model_listing: None,
+            default_models: None,
+            model_id_prefix: None,
+            model_discovery: None,
+            namespaced_models: false,
+            offered_models: false,
+            named_entry: NamedEntry::DelegatedAgent,
+        },
+        launch: AdapterLaunch {
+            framing: StreamFraming::ProviderJsonl,
+            config_environment: &[],
+            argv_prompt: false,
+            shell_prefix: None,
+            context_directory_arg: None,
+            ignore_files: &[],
+            indexing_ignore_files: &[],
+            compaction_env: None,
+            client_env_markers: None,
+            skill_location: None,
+            skill_install_roots: &[],
+            session_handoff: false,
+            launch_token_refresh: false,
+            codex_policy: false,
+            github_auth: None,
+            exit_route: false,
+            stderr_config_notices: false,
+            stderr_quota: false,
+            stdout_error_diagnostic: false,
+            deduplicate_result: false,
+            oversize_command_frames: false,
+            answer_from_text: false,
+            result_event_usage: false,
+            usage: UsageSemantics::new(UsageScope::Step, false, false),
+            token_budget_notice: None,
+            chair_switch: false,
+            drop_unrecorded_effort: false,
+        },
+        accounts: AdapterAccounts {
+            default_directory: None,
+            default_root_kind: &provenant_core::CredentialKind::Store,
+            registered: false,
+            config_dir: false,
+            directory_prefix: None,
+            key_prefix: None,
+            identity_namespace: None,
+            shared_settings: false,
+            isolated_login_keychain: false,
+            local_entry: ("default", "local"),
+            setup_root: SetupRoot::None,
+            peer_bootstrap: false,
+            model_plans: &[],
+        },
+        quota: AdapterQuota {
+            probe: QuotaProbeKind::None,
+            monthly_allowance: false,
+            credits: false,
+            grouped_pools: false,
+            retain_accounts: false,
+            identity_check: false,
+            model_prefix: None,
+            free_pool: None,
+            refusal_reset_source: "provider reset",
+            refusal_revalidation_seconds: None,
+            pacing_keys: None,
+            allowance_prefix: None,
+            allowance_windows: &[],
+        },
+        login: AdapterLogin {
+            local: false,
+            reprobe: LoginReprobe::None,
+            observation: LoginObservation::None,
+            check_names_account: false,
+            identity_probe: AccountIdentityProbe::None,
+            authentication: None,
+            native_auth_warning: NativeAuthWarning::None,
+            credential_files: &[],
+            credential_auxiliary_files: &[],
+            credential_profile_sibling: false,
+            credential_host_keychain: false,
+            hint: "",
+            template: None,
+            refresh_template: None,
+            auth_markers: &[],
+        },
         install: None,
-        skills: None,
-        skill_install_roots: &[],
-        default_account_directory: None,
-        default_account_root_kind: &provenant_core::CredentialKind::Store,
-        registered_account: false,
-        account_config_dir: false,
-        account_directory_prefix: None,
-        account_key_prefix: None,
-        account_identity_namespace: None,
-        shared_account_settings: false,
-        isolated_login_keychain: false,
-        transcript_account_root: false,
-        setup_root: SetupRoot::None,
-        local_login: false,
-        login_reprobe: LoginReprobe::None,
-        login_observation: LoginObservation::None,
-        login_check_names_account: false,
-        account_identity_probe: AccountIdentityProbe::None,
-        local_account: ("default", "local"),
-        argv_prompt: false,
-        authentication: None,
-        native_auth_warning: NativeAuthWarning::None,
-        credential_files: &[],
-        credential_auxiliary_files: &[],
-        credential_profile_sibling: false,
-        credential_host_keychain: false,
-        login_hint: "",
-        update: UpdateCommand::None,
-        login_template: None,
-        login_refresh_template: None,
-        auth_markers: &[],
-        shell_prefix: None,
-        context_directory_arg: None,
-        ignore_files: &[],
-        indexing_ignore_files: &[],
-        compaction_env: None,
-        client_env_markers: None,
-        allowance_prefix: None,
-        allowance_windows: &[],
-        namespaced_models: false,
-        chair_switch: false,
-        offered_models: false,
-        refusal_revalidation_seconds: None,
-        github_auth: None,
-        session_handoff: false,
-        launch_token_refresh: false,
-        deduplicate_result: false,
-        oversize_command_frames: false,
-        answer_from_text: false,
-        result_event_usage: false,
-        token_budget_notice: None,
-        session_wide_usage: false,
-        stderr_config_notices: false,
-        exit_route: false,
-        stderr_quota: false,
-        stdout_error_diagnostic: false,
-        codex_policy: false,
-        model_observation: ModelObservation::Stream,
-        named_entry: NamedEntry::DelegatedAgent,
-        user_sessions: false,
-        relocated_session_state: false,
-        copy_sessions_only: false,
-        quota_probe: QuotaProbeKind::None,
-        monthly_allowance: false,
-        quota_credits: false,
-        grouped_quota_pools: false,
-        retain_quota_accounts: false,
-        quota_identity_check: false,
-        peer_bootstrap: false,
-        quota_model_prefix: None,
-        account_model_plans: &[],
-        free_pool: None,
-        refusal_reset_source: "provider reset",
-        drop_unsupported_effort: false,
-        pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: false,
-            default_network: NetworkAccess::Open,
-            effort: false,
-            resume: false,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: AdapterFact::unsupported("host-native does not provide model control", ADAPTER_ROW_SOURCE),
+                default_network: NetworkAccess::Open,
+                effort: AdapterFact::unsupported("host-native does not provide effort control", ADAPTER_ROW_SOURCE),
+                resume: AdapterFact::unsupported("host-native does not provide resume control", ADAPTER_ROW_SOURCE),
+                network: ALL_NETWORK,
+                image_input: AdapterFact::unsupported("host-native does not provide image input control", ADAPTER_ROW_SOURCE),
+                write: AdapterFact::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::Unsupported,
                 chair: ControlSupport::Unsupported,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: true,
+            terminal_event: AdapterFact::row(TerminalEventStrength::Weak),
+            answering_model: AdapterFact::row(AnsweringModelSource::Stream),
+            usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
+            live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::because(SessionReference::Absent, "the delegated adapter reports no provider session id", ADAPTER_ROW_SOURCE),
+            caveats: &[],
         },
+        retention: Retention { transcript_layout: AdapterFact::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] , relocated_session_state: false, sessions_only: false, transcript_account_root: false },
     },
     #[cfg(feature = "registry-fixture")]
     FixtureProvider [serde(rename = "fixture-provider")] () {
-        name: "fixture-provider",
-        usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::ProviderJsonl,
-        model_listing: None,
-        default_models: None,
-        model_id_prefix: None,
-        model_discovery: None,
-        family: "fixture",
-        binary: "fixture-provider",
+        identity: AdapterIdentity {
+            name: "fixture-provider",
+            family: "fixture",
+            binary: "fixture-provider",
+            update: UpdateCommand::None,
+            model_listing: None,
+            default_models: None,
+            model_id_prefix: None,
+            model_discovery: None,
+            namespaced_models: false,
+            offered_models: false,
+            named_entry: NamedEntry::None,
+        },
+        launch: AdapterLaunch {
+            framing: StreamFraming::ProviderJsonl,
+            config_environment: &[],
+            argv_prompt: false,
+            shell_prefix: None,
+            context_directory_arg: None,
+            ignore_files: &[],
+            indexing_ignore_files: &[],
+            compaction_env: None,
+            client_env_markers: None,
+            skill_location: None,
+            skill_install_roots: &[],
+            session_handoff: false,
+            launch_token_refresh: false,
+            codex_policy: false,
+            github_auth: None,
+            exit_route: true,
+            stderr_config_notices: false,
+            stderr_quota: false,
+            stdout_error_diagnostic: false,
+            deduplicate_result: false,
+            oversize_command_frames: false,
+            answer_from_text: false,
+            result_event_usage: false,
+            usage: UsageSemantics::new(UsageScope::Step, false, false),
+            token_budget_notice: None,
+            chair_switch: false,
+            drop_unrecorded_effort: false,
+        },
+        accounts: AdapterAccounts {
+            default_directory: None,
+            default_root_kind: &provenant_core::CredentialKind::Store,
+            registered: false,
+            config_dir: false,
+            directory_prefix: None,
+            key_prefix: None,
+            identity_namespace: None,
+            shared_settings: false,
+            isolated_login_keychain: false,
+            local_entry: ("fixture", "work"),
+            setup_root: SetupRoot::None,
+            peer_bootstrap: false,
+            model_plans: &[],
+        },
+        quota: AdapterQuota {
+            probe: QuotaProbeKind::None,
+            monthly_allowance: false,
+            credits: false,
+            grouped_pools: false,
+            retain_accounts: false,
+            identity_check: false,
+            model_prefix: None,
+            free_pool: None,
+            refusal_reset_source: "provider reset",
+            refusal_revalidation_seconds: None,
+            pacing_keys: None,
+            allowance_prefix: None,
+            allowance_windows: &[],
+        },
+        login: AdapterLogin {
+            local: true,
+            reprobe: LoginReprobe::None,
+            observation: LoginObservation::None,
+            check_names_account: false,
+            identity_probe: AccountIdentityProbe::None,
+            authentication: None,
+            native_auth_warning: NativeAuthWarning::None,
+            credential_files: &[],
+            credential_auxiliary_files: &[],
+            credential_profile_sibling: false,
+            credential_host_keychain: false,
+            hint: "",
+            template: None,
+            refresh_template: None,
+            auth_markers: &[],
+        },
         install: None,
-        skills: None,
-        skill_install_roots: &[],
-        default_account_directory: None,
-        default_account_root_kind: &provenant_core::CredentialKind::Store,
-        registered_account: false,
-        account_config_dir: false,
-        account_directory_prefix: None,
-        account_key_prefix: None,
-        account_identity_namespace: None,
-        shared_account_settings: false,
-        isolated_login_keychain: false,
-        transcript_account_root: false,
-        setup_root: SetupRoot::None,
-        local_login: true,
-        login_reprobe: LoginReprobe::None,
-        login_observation: LoginObservation::None,
-        login_check_names_account: false,
-        account_identity_probe: AccountIdentityProbe::None,
-        local_account: ("fixture", "work"),
-        argv_prompt: false,
-        authentication: None,
-        native_auth_warning: NativeAuthWarning::None,
-        credential_files: &[],
-        credential_auxiliary_files: &[],
-        credential_profile_sibling: false,
-        credential_host_keychain: false,
-        login_hint: "",
-        update: UpdateCommand::None,
-        login_template: None,
-        login_refresh_template: None,
-        auth_markers: &[],
-        shell_prefix: None,
-        context_directory_arg: None,
-        ignore_files: &[],
-        indexing_ignore_files: &[],
-        compaction_env: None,
-        client_env_markers: None,
-        allowance_prefix: None,
-        allowance_windows: &[],
-        namespaced_models: false,
-        chair_switch: false,
-        offered_models: false,
-        refusal_revalidation_seconds: None,
-        github_auth: None,
-        session_handoff: false,
-        launch_token_refresh: false,
-        deduplicate_result: false,
-        oversize_command_frames: false,
-        answer_from_text: false,
-        result_event_usage: false,
-        token_budget_notice: None,
-        session_wide_usage: false,
-        stderr_config_notices: false,
-        exit_route: true,
-        stderr_quota: false,
-        stdout_error_diagnostic: false,
-        codex_policy: false,
-        model_observation: ModelObservation::Stream,
-        named_entry: NamedEntry::None,
-        user_sessions: false,
-        relocated_session_state: false,
-        copy_sessions_only: false,
-        quota_probe: QuotaProbeKind::None,
-        monthly_allowance: false,
-        quota_credits: false,
-        grouped_quota_pools: false,
-        retain_quota_accounts: false,
-        quota_identity_check: false,
-        peer_bootstrap: false,
-        quota_model_prefix: None,
-        account_model_plans: &[],
-        free_pool: None,
-        refusal_reset_source: "provider reset",
-        drop_unsupported_effort: false,
-        pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: false,
-            resume: false,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: AdapterFact::supported(),
+                default_network: NetworkAccess::Open,
+                effort: AdapterFact::unsupported("fixture-provider does not provide effort control", ADAPTER_ROW_SOURCE),
+                resume: AdapterFact::unsupported("fixture-provider does not provide resume control", ADAPTER_ROW_SOURCE),
+                network: ALL_NETWORK,
+                image_input: AdapterFact::unsupported("fixture-provider does not provide image input control", ADAPTER_ROW_SOURCE),
+                write: AdapterFact::unsupported("fixture-provider does not provide write control", ADAPTER_ROW_SOURCE),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::Unsupported,
                 chair: ControlSupport::Unsupported,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: false,
+            terminal_event: AdapterFact::row(TerminalEventStrength::Weak),
+            answering_model: AdapterFact::row(AnsweringModelSource::Stream),
+            usage_attribution: AdapterFact::row(UsageAttribution::Attempt),
+            live_input: AdapterFact::unsupported("no live mid-run input is implemented for this adapter", ADAPTER_ROW_SOURCE),
+            session_reference: AdapterFact::because(SessionReference::Absent, "the delegated adapter reports no provider session id", ADAPTER_ROW_SOURCE),
+            caveats: &[],
         },
+        retention: Retention { transcript_layout: AdapterFact::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] , relocated_session_state: false, sessions_only: false, transcript_account_root: false },
     },
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn account_and_session_facts_are_consistent() {
-        for spec in ADAPTER_SPECS {
-            assert!(
-                !spec.transcript_account_root || spec.registered_account,
-                "{}",
-                spec.name
-            );
-            assert!(
-                spec.account_directory_prefix.is_none() || spec.registered_account,
-                "{}",
-                spec.name
-            );
-            assert!(
-                !spec.shared_account_settings
-                    || (spec.registered_account && spec.account_config_dir),
-                "{}",
-                spec.name
-            );
-            assert!(
-                !spec.isolated_login_keychain || spec.local_login,
-                "{}",
-                spec.name
-            );
-        }
-    }
-
-    #[test]
-    fn host_native_declares_a_fresh_named_writer_contract() {
-        let spec = AdapterSpec::get("host-native").unwrap();
-        assert!(spec.binary.is_empty() && !spec.registered_account);
-        assert_eq!(spec.launch.default_network, NetworkAccess::Open);
-        assert!(
-            spec.check_launch(&LaunchRequest {
-                write: true,
-                network: Some(NetworkAccess::Open),
-                ..Default::default()
-            })
-            .is_ok()
-        );
-        for (request, field) in [
-            (
-                LaunchRequest {
-                    model: Some("claude/model"),
-                    ..Default::default()
-                },
-                LaunchField::Model,
-            ),
-            (
-                LaunchRequest {
-                    effort: Some("high"),
-                    ..Default::default()
-                },
-                LaunchField::Effort,
-            ),
-            (
-                LaunchRequest {
-                    resume: true,
-                    ..Default::default()
-                },
-                LaunchField::Resume,
-            ),
-        ] {
-            assert_eq!(spec.check_launch(&request).unwrap_err().field, field);
-        }
-    }
-
-    #[test]
-    fn managed_harness_capabilities_are_sourced_and_coherent() {
-        for spec in ADAPTER_SPECS {
-            let Some(install) = spec.install else {
-                continue;
-            };
-            assert!(!install.home.is_empty(), "{}", spec.name);
-            assert!(!install.config.is_empty(), "{}", spec.name);
-            assert!(!install.source.is_empty(), "{}", spec.name);
-            assert_eq!(
-                install.hooks.is_supported(),
-                install.hook_file.is_some(),
-                "{}",
-                spec.name
-            );
-            assert_eq!(
-                install.instructions.is_supported(),
-                install.instruction.is_some(),
-                "{}",
-                spec.name
-            );
-            for support in [
-                install.hooks,
-                install.instructions,
-                install.answer_delivery,
-                install.precompact_context,
-            ] {
-                if let CapabilitySupport::Unsupported { reason, source } = support {
-                    assert!(!reason.trim().is_empty(), "{}", spec.name);
-                    assert!(!source.trim().is_empty(), "{}", spec.name);
-                }
-            }
-            assert_eq!(
-                spec.launch.default_network,
-                NetworkAccess::Open,
-                "{}",
-                spec.name
-            );
-            for network in ALL_NETWORK {
-                assert!(spec.launch.network.contains(network), "{}", spec.name);
-            }
-            assert!(
-                spec.launch.write,
-                "managed providers share worktree-write capability"
-            );
-        }
-    }
-
-    #[test]
-    fn adapter_specs_are_unique_and_match_typed_identities() {
-        for spec in ADAPTER_SPECS {
-            assert_eq!(
-                ADAPTER_SPECS
-                    .iter()
-                    .filter(|row| row.name == spec.name)
-                    .count(),
-                1
-            );
-            assert!(std::ptr::eq(spec.id.spec(), spec));
-            assert!(std::ptr::eq(AdapterSpec::get(spec.name).unwrap(), spec));
-            assert_eq!(serde_json::to_value(spec.id).unwrap(), spec.name);
-            assert_eq!(
-                serde_json::from_value::<Harness>(serde_json::json!(spec.name)).unwrap(),
-                spec.id
-            );
-        }
-        assert!(AdapterSpec::get("unknown").is_none());
-    }
-}
-
-#[cfg(test)]
-mod account_tests {
-    use super::*;
-
-    #[test]
-    fn only_registered_adapters_declare_config_directory_accounts() {
-        for spec in ADAPTER_SPECS {
-            assert!(
-                !spec.account_config_dir || spec.registered_account,
-                "{}",
-                spec.name
-            );
-        }
-        assert!(AdapterSpec::get("codex").unwrap().account_config_dir);
-        assert!(!AdapterSpec::get("agy").unwrap().account_config_dir);
-    }
-
-    #[test]
-    fn unregistered_local_accounts_follow_registered_local_login_facts() {
-        for spec in ADAPTER_SPECS {
-            let has_local_account = spec.registered_account && spec.local_login;
-            for (key, expected) in [("local", has_local_account), ("fixture-account", false)] {
-                assert_eq!(
-                    spec.is_unregistered_local(key),
-                    expected,
-                    "{}: {key}",
-                    spec.name
-                );
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod account_plan_tests {
-    #[test]
-    fn registered_plan_partitions_follow_the_adapter_declaration() {
-        for spec in super::ADAPTER_SPECS {
-            for plan in spec.account_model_plans {
-                let model = format!("{}fixture", plan.model_prefix);
-                assert!(spec.account_serves_model(Some(plan.plan), &model));
-                assert_eq!(
-                    spec.is_free_plan(Some(plan.plan)),
-                    plan.quota == super::AccountQuota::ObservedRefusals
-                );
-                assert!(spec.account_serves_model(None, &model));
-                assert!(spec.account_serves_model(Some("unrecognised"), &model));
-                for other in spec
-                    .account_model_plans
-                    .iter()
-                    .filter(|other| other.plan != plan.plan)
-                {
-                    assert!(!spec.account_serves_model(Some(other.plan), &model));
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod launch_tests {
-    use super::*;
-
-    #[test]
-    fn command_has_no_model_effort_session_or_write_capability() {
-        let command = AdapterSpec::get("command").unwrap();
-        assert!(!command.registered_account);
-        assert_eq!(command.quota_probe, QuotaProbeKind::None);
-        assert_eq!(command.launch.default_network, NetworkAccess::Open);
-        assert!(command.check_launch(&LaunchRequest::default()).is_ok());
-        for (request, field) in [
-            (
-                LaunchRequest {
-                    model: Some("placeholder"),
-                    ..Default::default()
-                },
-                LaunchField::Model,
-            ),
-            (
-                LaunchRequest {
-                    effort: Some("high"),
-                    ..Default::default()
-                },
-                LaunchField::Effort,
-            ),
-            (
-                LaunchRequest {
-                    resume: true,
-                    ..Default::default()
-                },
-                LaunchField::Resume,
-            ),
-            (
-                LaunchRequest {
-                    write: true,
-                    ..Default::default()
-                },
-                LaunchField::Write,
-            ),
-        ] {
-            assert_eq!(command.check_launch(&request).unwrap_err().field, field);
-        }
-    }
-
-    #[test]
-    fn launch_table_is_checked_per_adapter() {
-        // (adapter, effort, resume, network, write, refused field)
-        let effort = Some("high");
-        let cases = [
-            ("claude", effort, None),
-            ("codex", effort, None),
-            ("agy", effort, None),
-            ("opencode", effort, None),
-            ("cursor", effort, None),
-            ("cursor", None, None),
-        ];
-        for (name, effort, refused) in cases {
-            let spec = AdapterSpec::get(name).unwrap();
-            let request = LaunchRequest {
-                model: None,
-                effort,
-                resume: true,
-                network: Some(NetworkAccess::Open),
-                write: true,
-                ..Default::default()
-            };
-            assert_eq!(
-                spec.check_launch(&request).err().map(|e| e.field),
-                refused,
-                "{name}"
-            );
-        }
-    }
-
-    #[test]
-    fn refusal_names_the_adapter_and_field() {
-        let error = AdapterSpec::get("command")
-            .unwrap()
-            .check_launch(&LaunchRequest {
-                effort: Some("low"),
-                ..Default::default()
-            })
-            .unwrap_err();
-        assert_eq!(error.adapter, "command");
-        assert_eq!(error.field, LaunchField::Effort);
-    }
-
-    #[test]
-    fn declared_unsupported_modes_are_refused_by_field() {
-        for spec in ADAPTER_SPECS {
-            let capabilities = spec.launch;
-            let cases = [
-                (
-                    LaunchRequest {
-                        model: Some("fixture/model"),
-                        ..Default::default()
-                    },
-                    capabilities.model,
-                    LaunchField::Model,
-                ),
-                (
-                    LaunchRequest {
-                        effort: Some("high"),
-                        ..Default::default()
-                    },
-                    capabilities.effort,
-                    LaunchField::Effort,
-                ),
-                (
-                    LaunchRequest {
-                        resume: true,
-                        ..Default::default()
-                    },
-                    capabilities.resume,
-                    LaunchField::Resume,
-                ),
-                (
-                    LaunchRequest {
-                        write: true,
-                        ..Default::default()
-                    },
-                    capabilities.write,
-                    LaunchField::Write,
-                ),
-                (
-                    LaunchRequest {
-                        skill_location: true,
-                        ..Default::default()
-                    },
-                    spec.skills.is_some(),
-                    LaunchField::SkillLocation,
-                ),
-            ];
-            for (request, supported, field) in cases {
-                if !supported {
-                    assert_eq!(spec.check_launch(&request).unwrap_err().field, field);
-                }
-            }
-            for network in ALL_NETWORK {
-                if !capabilities.network.contains(network) {
-                    assert_eq!(
-                        spec.check_launch(&LaunchRequest {
-                            network: Some(*network),
-                            ..Default::default()
-                        })
-                        .unwrap_err()
-                        .field,
-                        LaunchField::Network
-                    );
-                }
-            }
-        }
-    }
-}
+#[path = "adapters_tests.rs"]
+mod adapters_tests;

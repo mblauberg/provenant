@@ -363,7 +363,11 @@ pub(super) fn check_capacity_policy(
         Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
             if let Some(detail) = diagnostic.detail {
                 use provenant_records::warning::{POLICY_STRICT_REFUSAL, Warning};
-                report_policy_message(Warning::new(POLICY_STRICT_REFUSAL, detail));
+                report_policy_message(Warning::new(
+                    POLICY_STRICT_REFUSAL,
+                    detail,
+                    provenant_records::warning::detected_source(POLICY_STRICT_REFUSAL),
+                ));
             }
             Err(strict_error)
         }

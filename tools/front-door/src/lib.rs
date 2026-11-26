@@ -385,7 +385,7 @@ fn report_account_sync(
                         .iter()
                         .find(|status| {
                             status.label == entry.label
-                                && status.harness.spec().name == entry.adapter
+                                && status.harness.spec().identity.name == entry.adapter
                         })
                         .map_or(provenant_config::AccountState::NotInstalled, |s| s.state);
                     let state = serde_json::to_value(state)
@@ -1580,7 +1580,7 @@ pub fn dispatch(
                         provenant_records::warning::Warning::new(
                             provenant_records::warning::ADMISSION_SLOTS_UNAVAILABLE,
                             format!("admission slots unavailable; command may proceed without them: {error}"),
-                        )
+                         provenant_records::warning::detected_source(provenant_records::warning::ADMISSION_SLOTS_UNAVAILABLE))
                         .once_per_change(),
                     );
                 }

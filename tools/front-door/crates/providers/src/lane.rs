@@ -76,7 +76,7 @@ impl crate::LaunchSpec {
     }
     /// Restore selected environment before the provider starts a shell command.
     pub fn configure_shell(&mut self, scratch: &Path, adapter: &provenant_records::AdapterSpec) {
-        let Some((relative, selector)) = adapter.shell_prefix else {
+        let Some((relative, selector)) = adapter.launch.shell_prefix else {
             return;
         };
         let path = scratch.join(relative);
@@ -1295,8 +1295,10 @@ mod tests {
             .collect();
         let declared: BTreeSet<_> = provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|spec| spec.install.is_some() || spec.named_entry == NamedEntry::Command)
-            .map(|spec| spec.name)
+            .filter(|spec| {
+                spec.install.is_some() || spec.identity.named_entry == NamedEntry::Command
+            })
+            .map(|spec| spec.identity.name)
             .collect();
         assert_eq!(implemented, declared);
     }
@@ -1903,7 +1905,7 @@ mod tests {
             .ok_or("adapter")?;
         let base = crate::tests::fixture_access_plan(
             crate::Access::WorktreeWrite,
-            provenant_records::AdapterSpec::get(adapter).and_then(|s| s.authentication),
+            provenant_records::AdapterSpec::get(adapter).and_then(|s| s.login.authentication),
             false,
         );
         let mut permissions = base.permissions().clone();
@@ -2442,8 +2444,10 @@ mod tests {
         assert!(
             !provenant_records::AdapterSpec::get("command")
                 .expect("command")
+                .capabilities
                 .launch
                 .write
+                .value
         );
     }
 
@@ -2641,8 +2645,10 @@ mod tests {
                 assert!(
                     !provenant_records::AdapterSpec::get(id)
                         .expect("registered adapter spec")
+                        .capabilities
                         .launch
                         .write
+                        .value
                 );
                 continue;
             }
@@ -2650,7 +2656,7 @@ mod tests {
             route.account_key = None;
             let plan = crate::tests::fixture_access_plan(
                 access,
-                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication),
+                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.login.authentication),
                 false,
             );
             let mut spec = entry.adapter.prepare(crate::tests::fixture_input(

@@ -265,6 +265,7 @@ fn step_finish_reports_keyed_usage_and_provider_cost() {
 
     let semantics = provenant_records::AdapterSpec::get("opencode")
         .expect("declared adapter")
+        .launch
         .usage;
     let mut accumulator = crate::UsageAccumulator::new(semantics);
     for report in &reports {

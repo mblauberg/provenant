@@ -468,7 +468,7 @@ fn validate_stored_handoff(handoff: &provenant_records::handoff::Handoff) -> Res
 pub(super) fn agent(node: &PlannedNode) -> bool {
     matches!(
         node.kind,
-        None | Some(NodeKind::Task | NodeKind::Synthesise)
+        None | Some(NodeKind::Task | NodeKind::Synthesise | NodeKind::Adjudicate)
     )
 }
 

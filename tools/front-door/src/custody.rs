@@ -584,6 +584,9 @@ fn release_unreadable_writer_lease(
             provenant_records::warning::Warning::new(
                 provenant_records::warning::UNREADABLE_RECORD_HELD,
                 format!("writer lease for attempt {id} could not be inspected: {error}"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::UNREADABLE_RECORD_HELD,
+                ),
             )
             .subject(id.to_string()),
         ),

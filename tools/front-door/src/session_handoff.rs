@@ -264,12 +264,20 @@ fn unsafe_wip(tree: &Tree) -> bool {
     tree.primary || tree.branch.is_none() || tree.live_writer || tree.writer_unknown || tree.unknown
 }
 
-fn write_writer_advisory(output: &mut impl io::Write, advisory: &str) -> io::Result<()> {
-    writeln!(
-        output,
-        "warning: {}",
-        provenant_fabric_runtime::hosts::plain_text(advisory, 4096)
-    )
+/// An advisory observation about a writer worktree is a typed warning: it does
+/// not block the handoff, and it travels once per change in the JSON envelope.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn emit_writer_advisory(advisory: &str) {
+    provenant_records::warning::warn(
+        provenant_records::warning::Warning::new(
+            provenant_records::warning::WRITER_ADVISORY,
+            provenant_fabric_runtime::hosts::plain_text(advisory, 4096),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::WRITER_ADVISORY,
+            ),
+        )
+        .once_per_change(),
+    );
 }
 
 fn wip_unsafe_description(tree: &Tree) -> String {
@@ -482,7 +490,7 @@ fn checkpoint_repair(
     client: Option<provenant_records::Harness>,
 ) -> String {
     let client = client
-        .map(|harness| format!(" --client {}", harness.spec().name))
+        .map(|harness| format!(" --client {}", harness.spec().identity.name))
         .unwrap_or_else(|| " --client HARNESS".into());
     let rest = format!(
         "workflow session save {}{client} --rebind",
@@ -593,7 +601,8 @@ fn execute(
             "coordination mutations are not allowed inside a lane",
         ));
     }
-    if !provenant_records::AdapterSpec::get(&args.provider).is_some_and(|spec| spec.session_handoff)
+    if !provenant_records::AdapterSpec::get(&args.provider)
+        .is_some_and(|spec| spec.launch.session_handoff)
     {
         return Err(Refusal::new(
             Outcome::Unavailable,
@@ -735,7 +744,7 @@ fn execute(
         .iter()
         .filter_map(|tree| tree.writer_advisory.as_deref())
     {
-        let _ = write_writer_advisory(&mut std::io::stderr().lock(), advisory);
+        emit_writer_advisory(advisory);
     }
     let problems: Vec<Tree> = trees
         .iter()

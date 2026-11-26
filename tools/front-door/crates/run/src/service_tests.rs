@@ -547,7 +547,7 @@ fn full_model_routes_replay_without_rederiving_the_id() -> TestResult {
 }
 
 #[test]
-fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
+fn undeclared_effort_degrades_but_only_refusals_block_dispatch() -> TestResult {
     let model = |provider: &str, effort: Option<&str>| RequestedRoute::Model {
         required_family: None,
         extra: Default::default(),
@@ -555,16 +555,18 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
         model: format!("{provider}/m"),
         effort: effort.map(str::to_owned),
     };
-    // (provider, effort, accepted): the effort column of the adapter table.
+    // Effort is a degradation on every row: preflight admits it and routing
+    // either drops it on an exact pin or prefers a fallback in a pool.
     let cases = [
-        ("claude", Some("high"), true),
-        ("codex", Some("high"), true),
-        ("agy", Some("high"), true),
-        ("opencode", Some("high"), true),
-        ("cursor", Some("high"), true),
-        ("cursor", None, true),
+        ("claude", Some("high")),
+        ("codex", Some("high")),
+        ("agy", Some("high")),
+        ("opencode", Some("high")),
+        ("cursor", Some("high")),
+        ("cursor", None),
+        ("command", Some("high")),
     ];
-    for (provider, effort, accepted) in cases {
+    for (provider, effort) in cases {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -574,15 +576,26 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
         input.task.route = model(provider, effort);
         let result = Service::new(&store).dispatch(input, temp.path(), &call);
         let recorded = store.operation(&operation, &call)?.is_some();
-        assert_eq!(result.is_ok(), accepted, "{provider} {effort:?}");
+        assert!(result.is_ok(), "{provider} {effort:?}: {result:?}");
         assert!(recorded, "{provider} {effort:?} left no operation");
-        if let Err(error) = result {
-            assert_eq!(
-                error.to_string(),
-                format!("{provider} does not support effort")
-            );
-        }
     }
+    // A preflight refusal still names the adapter, field, reason and source.
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = submission("capabilities");
+    input.task.route = model("command", Some("high"));
+    input.task.profile.require_skill_location = true;
+    let refused = Service::new(&store)
+        .dispatch(input, temp.path(), &call)
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .starts_with("command does not support skill location: ")
+    );
+    assert!(refused.to_string().contains("source="));
     Ok(())
 }
 
@@ -625,6 +638,7 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
             model: "command/m".into(),
             effort: Some("high".into()),
         };
+        input.task.profile.require_skill_location = true;
         input
     };
     let mut operations = Vec::new();
@@ -745,6 +759,7 @@ fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestR
                 model: "command/m".into(),
                 effort: Some("high".into()),
             };
+            input.task.profile.require_skill_location = true;
             input
         };
         let input = make();
@@ -808,7 +823,11 @@ fn explicit_skill_location_is_rechecked_before_dispatch() -> TestResult {
         );
         assert!(store.operation(&operation, &call)?.is_some());
         if let Err(error) = result {
-            assert_eq!(error.to_string(), "command does not support skill location");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("command does not support skill location: ")
+            );
         }
     }
     Ok(())
@@ -825,17 +844,23 @@ fn the_task_is_checked_before_a_writer_is_prepared() -> TestResult {
     // The writer path cannot resolve, so reaching its preparation would fail
     // with a different error than the route check.
     input.task.worktree = Some(temp.path().join("no-such-writer"));
-    input.task.route = RequestedRoute::Model {
+    // The worktree makes this a writer task, and command declares no write
+    // support: a refuse-only field, so preflight blocks it. A model or effort
+    // gap would only degrade and leave the fallback question to routing.
+    input.task.route = RequestedRoute::Adapter {
         required_family: None,
         extra: Default::default(),
         provider: "command".into(),
-        model: "command/m".into(),
-        effort: Some("high".into()),
+        name: "fixture".into(),
     };
     let error = Service::new(&store)
         .dispatch(input, temp.path(), &call)
         .unwrap_err();
-    assert_eq!(error.to_string(), "command does not support model");
+    assert!(
+        error
+            .to_string()
+            .starts_with("command does not support write: ")
+    );
     assert_eq!(
         store
             .operation(&operation, &call)?
@@ -1007,11 +1032,11 @@ fn writer_replay_preserves_current_request_and_authority() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let mut context = context(&root)?;
-    std::fs::create_dir_all(context.state_root.as_path())?;
-    std::fs::set_permissions(
-        context.state_root.as_path(),
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )?;
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(context.state_root.as_path())?;
     let mut roots = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
     roots.state_dir = Some(context.state_root.as_path().to_owned());
     let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;

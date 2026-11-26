@@ -476,6 +476,9 @@ fn serve_authorised(
                     format!(
                         "graph admission policy unavailable ({error}); using compiled defaults"
                     ),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                    ),
                 ));
                 Default::default()
             }

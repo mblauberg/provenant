@@ -114,6 +114,150 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
     assert!(composite.outputs.is_none());
 }
 
+// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+#[test]
+fn split_verdict_patch_runs_one_adjudicator_and_supplies_the_gate_verdict() {
+    let answer = |verdict: &str| {
+        format!("```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\n{verdict}\n")
+    };
+    let lens = |id: &str| {
+        serde_json::json!({
+            "id":id, "access":"read_only", "review_lens":id,
+            "review_behaviour":"lens", "require_findings":true,
+            "prompt":"review", "route":{"alias":"fixture"}
+        })
+    };
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "split-adjudication", "nodes": [
+            {"id":"panel", "kind":"composite", "access":"read_only",
+             "composite":{"min_successful":2,"reduce_verdict":true,
+                "nodes":[lens("lens-changes"),lens("lens-approve")],
+                "exports":[
+                    {"node":"lens-changes","outputs":["result","findings","verdict"]},
+                    {"node":"lens-approve","outputs":["result","findings","verdict"]}
+                ]}},
+            {"id":"gate", "kind":"gate", "access":"read_only", "depends_on":["panel"],
+             "inputs":[{"node":"panel","outputs":["verdict"]}],
+             "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+        ]
+    }))
+    .unwrap();
+    for first in [
+        "VERDICT: FAIL",
+        "VERDICT: INCONCLUSIVE",
+    ] {
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(first)),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("VERDICT: PASS")),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("VERDICT: PASS")),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+
+        let adjudicators: Vec<_> = run
+            .checkpoint
+            .nodes
+            .iter()
+            .filter(|node| node.id.ends_with("adjudicate"))
+            .collect();
+        assert_eq!(
+            adjudicators.len(),
+            1,
+            "a split is resolved by exactly one adjudicator"
+        );
+        assert_eq!(adjudicators[0].state, NodeState::Succeeded);
+        assert_eq!(
+            adjudicators[0]
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.verdict.as_deref()),
+            Some("VERDICT: PASS")
+        );
+        assert_eq!(
+            owner.calls.len(),
+            3,
+            "only the two lenses and one adjudicator run"
+        );
+        assert!(
+            owner
+                .prompts
+                .last()
+                .is_some_and(|prompt| prompt.contains("Resolve the split once"))
+        );
+        let gate = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "gate")
+            .unwrap();
+        assert!(
+            gate.gate.as_ref().is_some_and(|gate| gate.passed),
+            "the gate uses the adjudicator verdict"
+        );
+    }
+}
+
+// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+#[test]
+fn each_split_panel_uses_its_own_adjudicator_on_its_pinned_head() {
+    let answer = |verdict: &str| format!(
+        "```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: {verdict}\n"
+    );
+    let panel = |id: &str, dependency: Option<&str>, head: &str| {
+        let lens = |name: &str| serde_json::json!({
+            "id": name, "access": "read_only", "review_lens": name,
+            "review_behaviour": "lens", "require_findings": true,
+            "prompt": "review", "route": {"alias": "fixture"},
+            "source": {"type": "commit", "commit": head}
+        });
+        serde_json::json!({
+            "id": id, "kind": "composite", "access": "read_only",
+            "depends_on": dependency.into_iter().collect::<Vec<_>>(),
+            "composite": {"min_successful": 2, "reduce_verdict": true,
+                "nodes": [lens("changes"), lens("approve")],
+                "exports": [
+                    {"node": "changes", "outputs": ["result", "findings", "verdict"]},
+                    {"node": "approve", "outputs": ["result", "findings", "verdict"]}
+                ]}
+        })
+    };
+    let gate = |id: &str, source: &str, expected: &str| serde_json::json!({
+        "id": id, "kind": "gate", "access": "read_only", "depends_on": [source],
+        "inputs": [{"node": source, "outputs": ["verdict"]}],
+        "condition": {"type": "verdict", "expected": expected, "threshold": "all"}
+    });
+    let first_head = "a".repeat(40);
+    let second_head = "b".repeat(40);
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "two-splits", "nodes": [
+            panel("first", None, &first_head), gate("first-gate", "first", "VERDICT: PASS"),
+            panel("second", Some("first-gate"), &second_head),
+            gate("second-gate", "second", "VERDICT: FAIL")
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: ["FAIL", "PASS", "PASS", "FAIL", "PASS", "FAIL"]
+            .into_iter().map(|verdict| terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(verdict))).collect(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    for (panel, gate_id, head, verdict) in [
+        ("first", "first-gate", &first_head, "VERDICT: PASS"),
+        ("second", "second-gate", &second_head, "VERDICT: FAIL"),
+    ] {
+        let adjudicator = run.checkpoint.nodes.iter().find(|node| node.id == format!("{panel}--adjudicate")).unwrap();
+        assert_eq!(adjudicator.state, NodeState::Succeeded);
+        assert_eq!(adjudicator.source_commit.as_deref(), Some(head.as_str()));
+        assert_eq!(adjudicator.outputs.as_ref().and_then(|outputs| outputs.verdict.as_deref()), Some(verdict));
+        let gate = run.checkpoint.nodes.iter().find(|node| node.id == gate_id).unwrap();
+        assert!(gate.gate.as_ref().is_some_and(|gate| gate.passed));
+    }
+    assert_eq!(owner.calls.len(), 6);
+}
+
 // Spec: docs/specs/fabric.md#composite-settlement
 #[test]
 fn soft_panel_settles_and_names_its_stopped_lens() {

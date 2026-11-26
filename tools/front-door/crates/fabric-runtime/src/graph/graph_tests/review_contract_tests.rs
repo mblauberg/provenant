@@ -7,6 +7,17 @@ fn review(name: &str, id: &str) -> GraphNode {
         .unwrap()
 }
 
+/// Plan a compiled node the way the graph kernel sees it: the review and
+/// repair-writer behaviours used by the contract checks are derived during
+/// planning, not present on the raw `GraphNode`.
+fn planned(node: GraphNode) -> PlannedNode {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1, "graph_id": "g", "nodes": [node]
+    }))
+    .unwrap();
+    validate_plan(&document).unwrap().0.nodes.remove(0)
+}
+
 fn finding() -> Value {
     json!({"id":"F1","severity":"high","file":"a.rs","line":1,
             "summary":"The failing path is reachable","status":"open",
@@ -388,11 +399,7 @@ fn invalid_propagation_cannot_alias_an_independent_sibling_finding() {
 
 #[test]
 fn typed_contract_rejects_invalid_verdicts_even_without_a_pass_requirement() {
-    for verdict in [
-        "",
-        "VERDICT: BANANA",
-        "VERDICT: PASS\nVERDICT: PASS",
-    ] {
+    for verdict in ["", "VERDICT: BANANA", "VERDICT: PASS\nVERDICT: PASS"] {
         let mut node = review("review.tests", "review");
         // Repair panels remove the PASS requirement, not the output contract.
         node.required_verdict = None;
@@ -437,16 +444,29 @@ fn normalised_review_verdict_settles_with_a_warning() {
         node.required_verdict = None;
         let mut owner = FakeOwner {
             observations: [terminal_with_result(
-                GraphAttemptOutcome::Succeeded, &answer(json!([]), line),
-            )].into(),
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([]), line),
+            )]
+            .into(),
             ..Default::default()
         };
-        let run = advance(&graph(vec![node]), &mut owner, &mut MemoryJournal::default()).unwrap();
+        let run = advance(
+            &graph(vec![node]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
         let progress = &run.checkpoint.nodes[0];
         assert_eq!(progress.state, NodeState::Succeeded);
         let outputs = progress.outputs.as_ref().unwrap();
         assert_eq!(outputs.verdict.as_deref(), Some(expected));
-        assert!(outputs.warnings.iter().any(|warning| warning.contains("review_verdict_normalised") && warning.contains(line)));
+        assert!(
+            outputs
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("review_verdict_normalised")
+                    && warning.contains(line))
+        );
     }
 }
 
@@ -1132,18 +1152,36 @@ fn correction_over_structural_limit_pauses_until_limit_is_raised() {
     assert!(lens.review_verdict_correction_refused.is_none());
     assert!(lens.previous_attempts.is_empty());
     assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+    assert_eq!(
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::StructuralLimit)
+    );
     assert!(lens.expansion_pause.is_some());
     assert_eq!(journal.0.as_ref(), Some(&run.checkpoint));
     // Reopen the durable checkpoint as a fresh host would.
     let saved = serde_json::to_vec(&journal.0).unwrap();
     let mut journal = MemoryJournal(serde_json::from_slice(&saved).unwrap());
     let resumed = resume_with_budget(
-        &document, &mut owner, &mut journal, &Default::default(), &Default::default(), &[],
-    ).unwrap();
-    assert_ne!(resumed.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
-    assert_eq!(owner.prompts.iter().filter(|prompt| prompt.contains("only automatic verdict correction")).count(), 1);
-
+        &document,
+        &mut owner,
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+        &[],
+    )
+    .unwrap();
+    assert_ne!(
+        resumed.checkpoint.pause_cause(),
+        Some(PauseCause::StructuralLimit)
+    );
+    assert_eq!(
+        owner
+            .prompts
+            .iter()
+            .filter(|prompt| prompt.contains("only automatic verdict correction"))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1309,6 +1347,192 @@ fn oversized_blocking_findings_remain_retrievable_with_the_verdict() {
             .checkpoint,
         run.checkpoint
     );
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+fn round_two_findings_without_a_named_invariant_are_warned_then_refused() {
+    let mut node = planned(review("review.tests", "check"));
+    node.round = Some(LoopRound {
+        extra: Default::default(),
+        loop_id: "repair".into(),
+        round: 2,
+        node_id: "check".into(),
+        until: false,
+        retry_on: false,
+        previous_gate: None,
+    });
+    let unnamed: Vec<Finding> = serde_json::from_value(json!([finding()])).unwrap();
+    let outputs = NodeOutputs {
+        schema_version: 1,
+        verdict: Some("VERDICT: FAIL".into()),
+        findings_available: Some(true),
+        findings: unnamed,
+        ..Default::default()
+    };
+    let warnings = review::invariant_warnings(&node, &outputs);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.starts_with("finding_invariant_missing:")),
+        "{warnings:?}"
+    );
+    assert_eq!(
+        review::invariant_error(&node, &outputs).map(|(code, _)| code),
+        Some("review_invariant_missing")
+    );
+    let mut named = finding();
+    named["class"] = json!("unchecked input x");
+    let named_outputs = NodeOutputs {
+        findings: serde_json::from_value(json!([named])).unwrap(),
+        ..outputs.clone()
+    };
+    assert!(review::invariant_warnings(&node, &named_outputs).is_empty());
+    assert!(review::invariant_error(&node, &named_outputs).is_none());
+
+    // Round one is not the delta review: the first gap is only a warning there.
+    node.round.as_mut().unwrap().round = 1;
+    assert!(review::invariant_warnings(&node, &outputs).is_empty());
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+fn fix_round_without_sweep_sites_and_pin_is_flagged() {
+    let mut node = planned(review("task", "fix"));
+    node.repair_writer = true;
+    let bare: Vec<RepairItem> = serde_json::from_value(json!([{
+        "id": "unchecked input x", "status": "fixed", "reason": "removed the case"
+    }]))
+    .unwrap();
+    let outputs = NodeOutputs {
+        schema_version: 1,
+        repair_items: Some(bare),
+        ..Default::default()
+    };
+    let warnings = review::repair_return_warnings(&node, &outputs);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].starts_with("repair_invariant_return_missing:"));
+    for part in ["sweep", "sites", "pin"] {
+        assert!(warnings[0].contains(part), "{warnings:?}");
+    }
+
+    let complete: Vec<RepairItem> = serde_json::from_value(json!([{
+        "id": "unchecked input x", "status": "fixed", "reason": "removed the case",
+        "sweep": "rg -n 'parse(.*)input' src", "sites": ["src/a.rs", "src/b.rs"],
+        "pin": "input_is_checked_when_parsed"
+    }]))
+    .unwrap();
+    let complete_outputs = NodeOutputs {
+        repair_items: Some(complete),
+        ..outputs
+    };
+    assert!(review::repair_return_warnings(&node, &complete_outputs).is_empty());
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+fn round_two_missing_invariant_is_refused_at_graph_settlement() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1, "graph_id": "delta-contract", "nodes": [{
+            "id": "repair", "kind": "loop", "access": "read_only",
+            "loop": {"max_rounds": 2, "until": "accepted", "body": [
+                review("review.tests", "check"),
+                {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["check"],
+                 "inputs":[{"node":"check","outputs":["verdict"]}],
+                 "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+            ]}
+        }]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([]), "VERDICT: FAIL"),
+            ),
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([finding()]), "VERDICT: FAIL"),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let checkpoint = journal.0.as_ref().unwrap();
+    assert_eq!(checkpoint, &run.checkpoint);
+    let check = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "repair--r2--check")
+        .unwrap();
+    assert_eq!(check.state, NodeState::Failed);
+    assert_eq!(
+        check.advance_code.as_deref(),
+        Some("review_invariant_missing")
+    );
+    assert!(
+        check
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("finding_invariant_missing:"))
+    );
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+fn fix_round_missing_sweep_sites_and_pin_is_flagged_at_graph_settlement() {
+    let mut writer = node("fix", route("fixture"));
+    writer.repair_writer = true;
+    writer.depends_on = vec!["source".into()];
+    writer.inputs = vec![GraphInput {
+        extra: Default::default(),
+        required_outputs: vec![],
+        node: "source".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    let document = graph(vec![node("source", route("fixture")), writer]);
+    let report = format!(
+        "```findings\n{}\n```",
+        json!({
+            "schema_version": 1, "findings": [], "repair_items": [{
+                "id":"unchecked input x", "status":"fixed", "reason":"removed the case"
+            }]
+        })
+    );
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([finding()]), "VERDICT: FAIL"),
+            ),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &report),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let checkpoint = journal.0.as_ref().unwrap();
+    assert_eq!(checkpoint, &run.checkpoint);
+    let fix = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "fix")
+        .unwrap();
+    assert_eq!(fix.state, NodeState::Succeeded);
+    let warnings = &fix.outputs.as_ref().unwrap().warnings;
+    let warning = warnings
+        .iter()
+        .find(|warning| warning.starts_with("repair_invariant_return_missing:"))
+        .unwrap();
+    for part in ["sweep", "sites", "pin"] {
+        assert!(warning.contains(part), "{warnings:?}");
+    }
 }
 
 fn delivery_review_panel() -> GraphDocument {

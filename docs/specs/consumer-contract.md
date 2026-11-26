@@ -67,7 +67,12 @@ names. There are no new refusals and no multi-remote workflows.
 Command names may change freely, and an unknown command or flag fails with
 exit 2; there are no aliases. JSON envelopes other than `process-tree` are
 evolving, and so is human output, including printed next-step command lines:
-scripts read `--json`.
+scripts read `--json`. `provenant adapter capabilities --json` projects the
+declared capability matrix, harness compatibility and measured latency in the
+result envelope's `data`; every capability declaration carries a reason and a
+source. The effective overlay, per-field gap actions and sourced settings are
+projected with it. Repeatable `--adapter ID` narrows the rows (an unknown id
+warns and is skipped) and `--no-probe` leaves compatibility `version_unread`.
 
 - Why: a script that drives Provenant needs a fixed grammar and one parseable form.
 - Owner: `crates/cli/src/grammar.rs`
@@ -189,6 +194,23 @@ Every command exits with the code of its envelope `status`. This tier is stable.
 
 - Why: a script branches on the exit code before it parses any output.
 - Owner: `crates/records/src/command_result.rs`
+
+## JSON output
+
+Every JSON command result is a version-2 `CommandResult`. Besides
+`schema_version`, `command`, `status`, `data` and `error`, it always carries a
+typed `warnings` array, empty when nothing warned. A consumer reads warnings
+from that array instead of stderr. The field's name and presence belong to the
+evolving envelope; the warning codes themselves follow the stable-code rules in
+[the CLI spec](cli.md#warnings-are-typed-values). The `process-tree` envelope is
+the one stable JSON output (see below).
+
+| Object | Field | Stability |
+|---|---|---|
+| envelope | `warnings` | evolving |
+
+- Why: a consumer must know which envelope fields it may parse and at which tier.
+- Owner: `crates/records/src/command_result.rs`, `crates/cli/src/external_contract.rs`
 
 ## Process tree
 

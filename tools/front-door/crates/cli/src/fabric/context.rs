@@ -842,7 +842,7 @@ impl Context {
             self.identity.host,
             &self.config,
             std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
-            harness_client(client).map(|harness| harness.spec().name),
+            harness_client(client).map(|harness| harness.spec().identity.name),
         )
     }
     pub fn text(&self, text: &str) -> Result<(), EdgeError> {
@@ -1131,7 +1131,7 @@ fn harness_client(
         let detected: Vec<_> = provenant_records::ADAPTER_SPECS
             .iter()
             .filter(|spec| {
-                spec.client_env_markers.is_some_and(|markers| {
+                spec.launch.client_env_markers.is_some_and(|markers| {
                     markers
                         .equals_one
                         .is_some_and(|name| std::env::var(name).is_ok_and(|value| value == "1"))
@@ -1146,7 +1146,7 @@ fn harness_client(
     })
 }
 fn active_harness_client() -> Option<&'static str> {
-    harness_client(None).map(|harness| harness.spec().name)
+    harness_client(None).map(|harness| harness.spec().identity.name)
 }
 
 /// A peer call failure: the stable error plus, for transport failures, the

@@ -40,6 +40,19 @@ repair.
 blocking; [review-lenses.md](references/review-lenses.md) supplies the shared
 inspection questions. The lens briefs sit under `references/lenses/`.
 
+## Fix rounds and split verdicts
+
+Every finding names the invariant it breaks in its top-level `class`. On a fix
+round, name the invariant under repair: round two reviews only the repair delta
+against those named invariants, not a fresh full panel. A lens may raise a new
+invariant, which follows the same naming contract. Two findings that share an
+invariant are one shared flaw and route to principal design, not another repair
+round. A single head with conflicting lens verdicts goes to one adjudication
+node that returns one verdict; the split itself never starts another round,
+though an upheld changes-request still needs repair.
+
+Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+
 ## What a clean verdict proves
 
 Say what was inspected: the dependency cone read (callers, owners, tests,

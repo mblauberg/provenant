@@ -111,6 +111,9 @@ impl Reader<'_> {
                     provenant_records::warning::Warning::new(
                         provenant_records::warning::GH_RATE_LIMITED,
                         format!("GitHub rate limit; skipped this read; reset {reset}"),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::GH_RATE_LIMITED,
+                        ),
                     )
                     .once_per_change(),
                 );

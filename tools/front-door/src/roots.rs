@@ -346,6 +346,9 @@ fn report_warnings(roots: &Roots) {
             provenant_records::Warning::new(
                 provenant_records::warning::STATE_ROOT_OVERLAP,
                 warning.message(),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::STATE_ROOT_OVERLAP,
+                ),
             )
             .subject(warning.path.display().to_string())
             .repair("choose a state root outside the advisory location or pass --state-dir PATH")

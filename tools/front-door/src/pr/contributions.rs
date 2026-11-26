@@ -209,6 +209,9 @@ pub(super) fn warn(number: Option<u64>, error: &dyn std::fmt::Display) {
         provenant_records::warning::Warning::new(
             provenant_records::warning::PR_CONTRIBUTION_BINDING_FAILED,
             format!("PR contribution capture failed: {error}"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::PR_CONTRIBUTION_BINDING_FAILED,
+            ),
         )
         .subject(label.clone())
         .repair(format!("retry `provenant pr contributions {label} --bind`")),

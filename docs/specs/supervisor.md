@@ -213,6 +213,8 @@ because attribution alone does not prove ownership. If the operating system
 cannot expose a process's arguments or environment, that process cannot be
 matched by its inherited mark. An `ORPHAN_PROCESS_ATTRIBUTED` attempt warning
 keeps the PIDs visible in status while the fence holds.
+The emitted typed warning identifies this observed condition with a detected
+source and the attempt as its subject.
 
 When a lane is killed before its guardian can publish an exit, `reconcile` ends
 its recorded process tree under writer exclusion once the guardian's published
