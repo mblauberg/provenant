@@ -470,7 +470,7 @@ fn wait_reports_latest_peer_failure_after_unknown_status_projection()
         attempt: None,
     };
     let mut pending = graph_snapshot(checkpoint("g"));
-    pending.advance_error = Some("earlier settlement error".into());
+    pending.advance_note = Some("earlier settlement error".into());
     let local_host = context.identity.host;
     let remote_host = if local_host == provenant_core::HostId::from_bytes([1; 16]) {
         provenant_core::HostId::from_bytes([2; 16])
@@ -521,7 +521,7 @@ fn wait_reports_latest_peer_failure_after_unknown_status_projection()
     )?;
     assert!(reads.get() >= 2);
     assert_eq!(
-        waited.advance_error.as_deref(),
+        waited.advance_note.as_deref(),
         Some("run execution owner is unavailable")
     );
     Ok(())

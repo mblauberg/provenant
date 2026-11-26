@@ -573,7 +573,7 @@ mod graph_writer_admission_tests {
         assert!(reads.get() >= 3);
         assert_eq!(advancements.get(), 1);
         // A later successful reading clears the failures that preceded it.
-        assert_eq!(waited.advance_error.as_deref(), None);
+        assert_eq!(waited.advance_note.as_deref(), None);
     }
 
     #[test]
@@ -696,9 +696,12 @@ mod graph_writer_admission_tests {
         .unwrap();
         assert!(reads.get() >= errors.len());
         assert_eq!(
-            waited.advance_error.as_deref(),
+            waited.advance_note.as_deref(),
             Some("run execution owner is unavailable")
         );
+        let output = serde_json::to_value(&waited).unwrap();
+        assert_eq!(output["advance_note"], "run execution owner is unavailable");
+        assert!(output.get("advance_error").is_none());
     }
 
     #[test]

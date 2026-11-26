@@ -85,7 +85,7 @@ impl Factory {
                 .nodes
                 .iter()
                 .all(|node| node.state.settled())
-            && FileJournal::read_advance_error(
+            && FileJournal::read_advance_note(
                 &self.context.roots.state,
                 self.context.identity.project,
                 &advanced.checkpoint.graph_id,
@@ -93,7 +93,7 @@ impl Factory {
             .map_err(|_| FacadeError::io("access graph journal"))?
             .is_some()
         {
-            FileJournal::set_advance_error(
+            FileJournal::set_advance_note(
                 &self.context.roots.state,
                 self.context.identity.project,
                 &advanced.checkpoint.graph_id,
@@ -395,7 +395,7 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
     // start. A settled or cancelled wait has no pending failure to name.
     if active(&run) {
         if let Some(error) = history.last_remote_error.take() {
-            run.advance_error = Some(error.to_string());
+            run.advance_note = Some(error.to_string());
         }
     } else {
         history.last_remote_error = None;
