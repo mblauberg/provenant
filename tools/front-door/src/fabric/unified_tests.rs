@@ -647,8 +647,8 @@ fn graph_peer_status_preserves_typed_wait_facts() -> Result<(), Box<dyn std::err
     let decoded: RunResult = serde_json::from_value(serde_json::to_value(response)?)?;
     let RunResult::Status {
         attempt: peer_attempt,
-        lane_waits: peer_waits,
         presence,
+        lane_waits: peer_waits,
         ..
     } = decoded
     else {

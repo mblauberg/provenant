@@ -1,7 +1,10 @@
 //! Rust adapter: eligibility, stable environment and path rewriting.
+use super::process::Command;
 use super::{BuildContext, Exception, Job, JobKind, Priority};
+use sha2::{Digest, Sha256};
 use std::{
     ffi::{OsStr, OsString},
+    fs,
     path::Path,
 };
 
@@ -137,6 +140,7 @@ pub fn job_env(
                         | "CARGO_TARGET_DIR"
                         | "CARGO_BUILD_TARGET_DIR"
                         | "CARGO_BUILD_BUILD_DIR"
+                        | "RUSTC_WORKSPACE_WRAPPER"
                         | "TMPDIR"
                         | "TMP"
                         | "TEMP"
@@ -155,6 +159,9 @@ pub fn job_env(
         ("PATH", context.host_path.as_os_str()),
     ] {
         result.push((k.into(), v.into()));
+    }
+    if let Some(wrapper) = &slot.workspace_wrapper {
+        result.push(("RUSTC_WORKSPACE_WRAPPER".into(), wrapper.as_os_str().into()));
     }
     if let Some(home) = &context.rustup_home {
         result.retain(|(key, _)| key != "RUSTUP_HOME");
@@ -195,8 +202,199 @@ pub fn maintenance_argv() -> Vec<OsString> {
         .collect()
 }
 
+/// What `rustc -vV` reports about the compiler a job actually uses. A channel
+/// string alone does not identify a compiler: two toolchains can share a
+/// channel while producing incompatible artifacts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolchainInfo {
+    pub release: String,
+    pub host: String,
+    pub commit: String,
+}
+
+impl ToolchainInfo {
+    /// A stable, filesystem-safe key from the full `rustc -vV` identity. This
+    /// is what keys the shared target directory, never the channel string.
+    pub fn key(&self) -> String {
+        digest_key(
+            &[&self.release, &self.host, &self.commit],
+            &[&self.release, &self.host],
+        )
+    }
+}
+
+/// Keep the human-readable parts of a key legible and bound them to a digest
+/// of every distinguishing field, so no two identities can collide.
+fn digest_key(hashed: &[&str], labelled: &[&str]) -> String {
+    let mut digest = Sha256::new();
+    for part in hashed {
+        digest.update(part.as_bytes());
+        digest.update([0_u8]);
+    }
+    let hash: String = digest
+        .finalize()
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let labels: Vec<String> = labelled.iter().map(|part| key_label(part)).collect();
+    format!("{}--{hash}", labels.join("-"))
+}
+
+fn key_label(raw: &str) -> String {
+    let label: String = raw
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let label = label.trim_matches('-');
+    if label.is_empty() {
+        "unknown".to_owned()
+    } else {
+        label.to_owned()
+    }
+}
+
+/// The channel pinned by a checkout, from `rust-toolchain.toml` or the plain
+/// `rust-toolchain` file. Aliases such as `stable` are returned verbatim and
+/// are not compared as concrete versions.
+pub fn pinned_toolchain(root: &Path) -> Option<String> {
+    let toml = fs::read_to_string(root.join("rust-toolchain.toml")).ok();
+    if let Some(text) = toml {
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(value) = line.strip_prefix("channel") else {
+                continue;
+            };
+            let value = value.trim().trim_start_matches('=').trim();
+            let value = value.trim_matches(['"', '\'']);
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    let plain = fs::read_to_string(root.join("rust-toolchain")).ok()?;
+    plain
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+}
+
+/// A concrete pin that differs from the toolchain that warmed the cache. A
+/// channel alias cannot be compared to a `rustc -vV` release, so it never
+/// produces a drift report.
+pub fn toolchain_drift(pin: &str, warm: Option<&str>) -> Option<(String, String)> {
+    let warm = warm?;
+    let concrete = pin.chars().next().is_some_and(|c| c.is_ascii_digit());
+    (concrete && pin != warm).then(|| (pin.to_owned(), warm.to_owned()))
+}
+
+/// Resolve the compiler a job will actually run from the same stable
+/// environment the job uses. Nothing here reads the caller's toolchain pin:
+/// the pin is only compared against this result when reporting drift.
+pub fn cargo_toolchain_selector(argv: &[OsString]) -> Option<OsString> {
+    let argument = argv.get(1)?.to_str()?;
+    argument.strip_prefix('+').map(OsString::from)
+}
+
+pub fn probe_toolchain(
+    env: &[(OsString, OsString)],
+    cwd: &Path,
+    selector: Option<&OsStr>,
+) -> Option<ToolchainInfo> {
+    let mut command = Command::new("rustc");
+    command
+        .arg("-vV")
+        .current_dir(cwd)
+        .env_clear()
+        .envs(env.iter().cloned());
+    if let Some(selector) = selector {
+        command.env("RUSTUP_TOOLCHAIN", selector);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let field = |name: &str| {
+        let prefix = format!("{name}: ");
+        text.lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    Some(ToolchainInfo {
+        release: field("release")?.to_owned(),
+        host: field("host")?.to_owned(),
+        commit: field("commit").unwrap_or_default().to_owned(),
+    })
+}
+
+pub fn probe_job_toolchain(
+    env: &[(OsString, OsString)],
+    cwd: &Path,
+    argv: &[OsString],
+) -> Option<ToolchainInfo> {
+    let selector = cargo_toolchain_selector(argv);
+    probe_toolchain(env, cwd, selector.as_deref())
+}
+
+/// Stable identity for a source checkout. Workspace members are keyed by this
+/// so a worktree never reuses another worktree's member artifacts, while
+/// commit-sourced maintenance jobs share one identity across their runs.
+pub fn worktree_key(path: &Path) -> String {
+    let mut digest = Sha256::new();
+    digest.update(path.to_string_lossy().as_bytes());
+    digest
+        .finalize()
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn target_probe_uses_the_toolchain_selected_by_cargo_argv() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let rustc = temp.path().join("rustc");
+        std::fs::write(
+            &rustc,
+            "#!/bin/sh\nprintf 'release: %s\\nhost: fixture-host\\ncommit: fixture-commit\\n' \"$RUSTUP_TOOLCHAIN\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let env = [
+            ("PATH".into(), temp.path().as_os_str().to_owned()),
+            ("RUSTUP_TOOLCHAIN".into(), "1.100.0".into()),
+        ];
+        let argv = ["cargo", "+1.99.1", "check"].map(OsString::from);
+        let resolved = super::probe_job_toolchain(&env, temp.path(), &argv).unwrap();
+        assert_eq!(resolved.release, "1.99.1");
+    }
+
+    #[test]
+    fn cargo_toolchain_selector_matches_the_invocation_prefix() {
+        assert_eq!(
+            super::cargo_toolchain_selector(&["cargo".into(), "+1.99.1".into()]),
+            Some("1.99.1".into())
+        );
+        assert_eq!(
+            super::cargo_toolchain_selector(&["cargo".into(), "check".into()]),
+            None
+        );
+    }
+
     use super::*;
     use crate::build::{JobKind, Origin, Output, SnapshotSource, Stack, Step};
     fn job(root: &Path, argv: &[&str]) -> Job {
@@ -228,6 +426,70 @@ mod tests {
             prelude: None,
         }
     }
+    #[test]
+    fn toolchain_key_binds_the_full_rustc_identity() {
+        let pinned = ToolchainInfo {
+            release: "1.100.0".into(),
+            host: "x86_64-apple-darwin".into(),
+            commit: "aaaaaaaa".into(),
+        };
+        let same_channel = ToolchainInfo {
+            release: "1.100.0".into(),
+            host: "x86_64-apple-darwin".into(),
+            commit: "bbbbbbbb".into(),
+        };
+        let older = ToolchainInfo {
+            release: "1.99.1".into(),
+            host: "x86_64-apple-darwin".into(),
+            commit: "aaaaaaaa".into(),
+        };
+        assert_eq!(pinned.key(), pinned.key());
+        assert_ne!(pinned.key(), same_channel.key());
+        assert_ne!(pinned.key(), older.key());
+        assert!(pinned.key().starts_with("1.100.0-x86_64-apple-darwin--"));
+        assert!(
+            pinned
+                .key()
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        );
+    }
+
+    #[test]
+    fn pinned_toolchain_reads_a_concrete_channel() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(pinned_toolchain(tmp.path()), None);
+        std::fs::write(
+            tmp.path().join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.100.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(pinned_toolchain(tmp.path()).as_deref(), Some("1.100.0"));
+    }
+
+    #[test]
+    fn toolchain_drift_ignores_aliases_and_matching_pins() {
+        assert_eq!(
+            toolchain_drift("1.100.0", Some("1.99.1")),
+            Some(("1.100.0".into(), "1.99.1".into()))
+        );
+        assert_eq!(toolchain_drift("1.100.0", Some("1.100.0")), None);
+        assert_eq!(toolchain_drift("stable", Some("1.99.1")), None);
+        assert_eq!(toolchain_drift("1.100.0", None), None);
+    }
+
+    #[test]
+    fn worktree_key_is_stable_per_checkout() {
+        assert_eq!(
+            worktree_key(Path::new("/lane/a")),
+            worktree_key(Path::new("/lane/a"))
+        );
+        assert_ne!(
+            worktree_key(Path::new("/lane/a")),
+            worktree_key(Path::new("/lane/b"))
+        );
+    }
+
     #[test]
     fn eligibility_table() {
         let tmp = tempfile::tempdir().unwrap();
@@ -299,7 +561,8 @@ mod tests {
             host_path: "/bin".into(),
             verify_base: None,
         };
-        let slot = super::super::slots::SlotPaths::new(Path::new("/home"), "p", 0);
+        let mut slot = super::super::slots::SlotPaths::new(Path::new("/home"), "p", 0);
+        slot.workspace_wrapper = Some("/slot/workspace-wrappers/worktree-a".into());
         let env = |lane: &str| {
             vec![
                 ("PROVENANT_LANE".into(), lane.into()),
@@ -313,6 +576,19 @@ mod tests {
         };
         let a = job_env(&env("a"), &context, &slot);
         assert_eq!(a, job_env(&env("b"), &context, &slot));
+        assert!(a.contains(&("CARGO_TARGET_DIR".into(), slot.target.as_os_str().into())));
+        assert!(a.contains(&(
+            "RUSTC_WORKSPACE_WRAPPER".into(),
+            "/slot/workspace-wrappers/worktree-a".into()
+        )));
+        let mut other_worktree = slot.clone();
+        other_worktree.workspace_wrapper = Some("/slot/workspace-wrappers/worktree-b".into());
+        let b = job_env(&env("b"), &context, &other_worktree);
+        assert!(b.contains(&("CARGO_TARGET_DIR".into(), slot.target.as_os_str().into())));
+        assert!(b.contains(&(
+            "RUSTC_WORKSPACE_WRAPPER".into(),
+            "/slot/workspace-wrappers/worktree-b".into()
+        )));
         assert!(a.contains(&("RUSTFLAGS".into(), "-Dwarnings".into())));
         assert!(a.contains(&("RUSTC_WRAPPER".into(), "/wrapper".into())));
         assert!(

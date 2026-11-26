@@ -552,23 +552,8 @@ pub(super) fn apply_attempt_observation(
                         | AttemptOutcome::DeclaredStop
                         | AttemptOutcome::StoppedNoWork
                 );
-                // A done brief plus a commit beyond the input head closes the
-                // writer whatever provisional reason was recorded. In particular
-                // a `failed` reason cannot deny a pushed, finished brief (#4065).
-                // The provider outcome still has to be classifiable below, so a
-                // genuinely failed attempt is never promoted by this escape.
-                let completed_by_evidence = launched
-                    && commits_ahead
-                    && handoff_done
-                    && matches!(
-                        settlement_reason,
-                        None | Some(
-                            provenant_records::run::SettlementReason::Completed
-                                | provenant_records::run::SettlementReason::DeclaredStop
-                                | provenant_records::run::SettlementReason::CompletedBeforeBudget
-                                | provenant_records::run::SettlementReason::Failed
-                        )
-                    );
+                let completed_by_evidence =
+                    completed_by_evidence(launched, commits_ahead, handoff_done, settlement_reason);
                 let outcome = if stop_classifiable
                     && launched
                     && node.access == AccessMode::WorktreeWrite
@@ -934,6 +919,45 @@ pub(super) fn apply_attempt_observation(
         retry_was_pending,
         should_continue,
     })
+}
+
+fn completed_by_evidence(
+    launched: bool,
+    commits_ahead: bool,
+    handoff_done: bool,
+    settlement_reason: Option<provenant_records::run::SettlementReason>,
+) -> bool {
+    launched
+        && commits_ahead
+        && handoff_done
+        && matches!(
+            settlement_reason,
+            None | Some(
+                provenant_records::run::SettlementReason::Completed
+                    | provenant_records::run::SettlementReason::DeclaredStop
+                    | provenant_records::run::SettlementReason::CompletedBeforeBudget
+                    | provenant_records::run::SettlementReason::Failed
+            )
+        )
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    #[test]
+    fn provisional_failed_reason_does_not_override_complete_writer_evidence() {
+        assert!(super::completed_by_evidence(
+            true,
+            true,
+            true,
+            Some(provenant_records::run::SettlementReason::Failed),
+        ));
+        assert!(!super::completed_by_evidence(
+            true,
+            false,
+            true,
+            Some(provenant_records::run::SettlementReason::Failed),
+        ));
+    }
 }
 
 /// Initialise durable progress solely from the admitted plan and host identity.

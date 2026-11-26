@@ -198,6 +198,7 @@
     "offload": "auto",
     "overflow": "auto",
     "clean": "untracked",
+    "target": "toolchain,worktree",
     "stacks": [],
     "snapshot_retention": "7d",
     "priority": {
