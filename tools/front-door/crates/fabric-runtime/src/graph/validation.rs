@@ -1061,6 +1061,7 @@ fn validate_flat_plan_inner(
             kind: match node.kind {
                 Some(
                     NodeKind::Synthesise
+                    | NodeKind::Adjudicate
                     | NodeKind::Gate
                     | NodeKind::Loop
                     | NodeKind::Composite
