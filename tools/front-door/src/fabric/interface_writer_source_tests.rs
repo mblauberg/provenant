@@ -252,3 +252,158 @@ fn writer_without_a_base_names_the_caller_checkout_fallback() {
         .unwrap();
     assert!(warning.contains("caller checkout"), "{warning}");
 }
+
+/// Declare the one forge context a graph with `delivery: push` needs.
+fn declare_forge(rig: &TestRig) -> Result {
+    std::fs::create_dir_all(rig.project.join(".provenant"))?;
+    std::fs::write(
+        rig.project.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&json!({
+            "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+            "git": {"remote":"origin", "default_branch":"main", "protected":[]},
+        }))?,
+    )?;
+    Ok(())
+}
+
+/// A primary checkout whose `main` is pushed to `origin`, plus a linked
+/// worktree on `fix` tracking `origin/main` with one new commit. The base is
+/// where `fix` diverged; the head is the writer's pushed subject.
+fn reused_worktree_with_upstream(rig: &TestRig) -> Result<(PathBuf, String, String)> {
+    git(rig, &["config", "user.name", "Test"])?;
+    git(rig, &["config", "user.email", "test@example.invalid"])?;
+    let remote = rig.root.join("remote.git");
+    let remote = remote.to_str().ok_or("remote path")?;
+    git(rig, &["init", "-q", "--bare", remote])?;
+    git(
+        rig,
+        &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"],
+    )?;
+    git(rig, &["remote", "add", "origin", remote])?;
+    git(rig, &["push", "-q", "origin", "main"])?;
+    git(rig, &["remote", "set-head", "origin", "main"])?;
+    let base = git(rig, &["rev-parse", "HEAD"])?;
+    let writer = rig.root.join("reused-writer");
+    let writer_text = writer.to_str().ok_or("writer path")?;
+    git(
+        rig,
+        &["worktree", "add", "-q", "-b", "fix", writer_text, &base],
+    )?;
+    git(
+        rig,
+        &[
+            "-C",
+            writer_text,
+            "branch",
+            "--set-upstream-to=origin/main",
+            "fix",
+        ],
+    )?;
+    std::fs::write(writer.join("change"), "one\n")?;
+    git(rig, &["-C", writer_text, "add", "change"])?;
+    git(
+        rig,
+        &["-C", writer_text, "commit", "-q", "-m", "one new commit"],
+    )?;
+    let head = git(rig, &["-C", writer_text, "rev-parse", "HEAD"])?;
+    Ok((writer, base, head))
+}
+
+/// The graph shape from the issue: an implement node reusing a worktree and a
+/// findings-panel sourcing that node, with no authored review base.
+fn reused_writer_panel(writer: &std::path::Path) -> Value {
+    json!({
+        "op":"run", "explain":true,
+        "document":{
+            "schema_version":2, "graph_id":"reused-writer-panel",
+            "nodes":[
+                {"id":"implement","use":"implement","with":{"plan":false},"worktree":writer,"write_scope":["."],"delivery":"push"},
+                {"id":"review","use":"findings-panel","after":["implement"],"source":{"type":"node","node":"implement"}}
+            ]
+        }
+    })
+}
+
+/// Regression #4064: a reused-worktree writer resolves its base from the
+/// branch's upstream, and the findings-panel reads base..pushed head instead
+/// of failing every lens on an empty range.
+#[test]
+fn reused_worktree_writer_pins_a_non_empty_panel_range() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let (writer, base, head) = reused_worktree_with_upstream(&rig)?;
+    declare_forge(&rig)?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let response = factory.graph_document(reused_writer_panel(&writer), budget, &cancel)?;
+    assert_eq!(response["writer_base"]["commit"], json!(base), "{response}");
+    assert_eq!(
+        response["writer_base"]["source"],
+        json!("the reused worktree branch's upstream"),
+        "{response}"
+    );
+    assert_eq!(
+        response["document"]["review_base"],
+        json!(base),
+        "{response}"
+    );
+    // The same comparison the launch owner makes for every lens: it must
+    // resolve a base that is not the subject commit.
+    let range_base = factory.review_comparison_base(&writer, Some(&base), &head)?;
+    assert_eq!(range_base, base);
+    assert_ne!(range_base, head);
+    Ok(())
+}
+
+/// Regression #4064: the node accepts a `base` and its source is reported.
+#[test]
+fn authored_writer_base_is_accepted_and_named_in_explain() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let (writer, base, _head) = reused_worktree_with_upstream(&rig)?;
+    declare_forge(&rig)?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let mut input = reused_writer_panel(&writer);
+    input["document"]["nodes"][0]["base"] = json!(base);
+    let response = factory.graph_document(input, budget, &cancel)?;
+    assert_eq!(response["writer_base"]["commit"], json!(base), "{response}");
+    assert_eq!(
+        response["writer_base"]["source"],
+        json!("the writer node's base"),
+        "{response}"
+    );
+    Ok(())
+}
+
+/// Regression #4064: a node-sourced panel with no resolvable base refuses the
+/// graph at launch, rather than failing lens by lens at execution.
+#[test]
+fn node_sourced_panel_without_a_base_refuses_before_launch() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    git(rig, &["config", "user.name", "Test"])?;
+    git(rig, &["config", "user.email", "test@example.invalid"])?;
+    let writer = rig.root.join("no-base-writer");
+    git(
+        rig,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            writer.to_str().ok_or("writer path")?,
+        ],
+    )?;
+    declare_forge(&rig)?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let error = factory
+        .graph_document(reused_writer_panel(&writer), budget, &cancel)
+        .unwrap_err();
+    assert!(
+        matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::Field(ref message)) } if message.contains("review_base_unresolved")),
+        "{error:?}"
+    );
+    Ok(())
+}

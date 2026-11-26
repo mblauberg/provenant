@@ -23,15 +23,21 @@ pub(super) enum WriterBaseSource {
     ExplicitBase,
     BranchDefault,
     WorktreeHead,
+    NodeBase,
+    WorktreeUpstream,
+    DefaultBranchMergeBase,
     CallerCheckout,
 }
 
 impl WriterBaseSource {
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::ExplicitBase => "explicit --base",
             Self::BranchDefault => "the --branch default",
             Self::WorktreeHead => "the named worktree HEAD",
+            Self::NodeBase => "the writer node's base",
+            Self::WorktreeUpstream => "the reused worktree branch's upstream",
+            Self::DefaultBranchMergeBase => "the worktree's merge base with the default branch",
             Self::CallerCheckout => "no base expression",
         }
     }
@@ -95,6 +101,42 @@ pub(super) fn resolve_writer_base(
         commit: None,
         source: WriterBaseSource::CallerCheckout,
     }
+}
+
+/// Resolve the base of a writer node that reuses an existing worktree. The
+/// node's declared `base` wins; otherwise the worktree branch's upstream, else
+/// the point where it diverged from the default branch. A worktree with neither
+/// upstream nor a default-branch ref has no Git evidence to pin, so its base
+/// stays unresolved and a graph that needs one is refused before launch.
+/// Spec: docs/specs/run-launch.md#writer-binding
+pub(super) fn resolve_reused_worktree_base(
+    node: &GraphNode,
+    project_root: &Path,
+    cwd: &Path,
+    state: &Path,
+    read_source: &ReadSourceChoice,
+    git: Option<&Path>,
+) -> Option<WriterBase> {
+    if let Some(base) = node.base.as_deref().filter(|base| !base.is_empty()) {
+        return Some(WriterBase {
+            commit: resolve_ref(state, cwd, base, read_source, "node base"),
+            source: WriterBaseSource::NodeBase,
+        });
+    }
+    let worktree = node.worktree.as_deref().filter(|path| !path.is_empty())?;
+    let git = git?;
+    let path = absolute(project_root, worktree);
+    if let Some(commit) = provenant_run::resolve_git_base(git, &path, "HEAD@{upstream}").ok() {
+        return Some(WriterBase {
+            commit: Some(commit),
+            source: WriterBaseSource::WorktreeUpstream,
+        });
+    }
+    Some(WriterBase {
+        commit: provenant_run::review_merge_base_between(git, &path, "HEAD", DEFAULT_WRITER_BASE)
+            .ok(),
+        source: WriterBaseSource::DefaultBranchMergeBase,
+    })
 }
 
 /// A `--worktree` control, or a composite's `--set worktree=PATH` binding.
