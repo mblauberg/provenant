@@ -31,13 +31,14 @@ fn lane_reader_process() -> Result {
         provenant_cli::parse(arguments.into_iter().map(Into::into))
     });
     let actual = crate::dispatch(parsed, &crate::System, warnings);
-    if actual != expected {
+    assert_lane_exit(actual, expected, || {
         use provenant_supervisor::census::{
             ProcessObservation, ProcessObserver, SystemProcessObserver,
         };
+        use std::fmt::Write as _;
         let observer = SystemProcessObserver;
         let mut pid = i64::from(std::process::id());
-        eprintln!("relay ancestry diagnostic: client pid {pid}");
+        let mut diagnostic = format!("relay ancestry diagnostic: client pid {pid}\n");
         if let Ok(attempt) = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
             && let Ok(attempt) = attempt.parse()
         {
@@ -47,16 +48,27 @@ fn lane_reader_process() -> Result {
                 std::time::Instant::now() + std::time::Duration::from_secs(1),
                 &CancelToken::new(),
             ) {
-                Ok(stream) => eprintln!(
-                    "relay ancestry diagnostic: socket peer {:?}",
-                    provenant_os::pid::unix_peer_pid(&stream)
-                ),
-                Err(error) => eprintln!("relay ancestry diagnostic: socket connect {error}"),
+                Ok(stream) => {
+                    let _ = writeln!(
+                        diagnostic,
+                        "relay ancestry diagnostic: socket peer {:?}",
+                        provenant_os::pid::unix_peer_pid(&stream)
+                    );
+                }
+                Err(error) => {
+                    let _ = writeln!(
+                        diagnostic,
+                        "relay ancestry diagnostic: socket connect {error}"
+                    );
+                }
             }
         }
         for _ in 0..32 {
             let observation = observer.observe(pid);
-            eprintln!("relay ancestry diagnostic: pid {pid}: {observation:?}");
+            let _ = writeln!(
+                diagnostic,
+                "relay ancestry diagnostic: pid {pid}: {observation:?}"
+            );
             match observation {
                 ProcessObservation::Present(fact)
                     if fact.parent_pid > 0 && fact.parent_pid != pid =>
@@ -66,9 +78,25 @@ fn lane_reader_process() -> Result {
                 _ => break,
             }
         }
-    }
-    assert_eq!(actual, expected);
+        diagnostic
+    });
     Ok(())
+}
+
+fn assert_lane_exit(actual: u8, expected: u8, diagnostic: impl FnOnce() -> String) {
+    if actual != expected {
+        assert_eq!(actual, expected, "{}", diagnostic());
+    }
+}
+
+#[test]
+fn lane_exit_failure_preserves_diagnostic() {
+    let failure = std::panic::catch_unwind(|| {
+        assert_lane_exit(1, 0, || "relay ancestry evidence".to_owned());
+    })
+    .expect_err("mismatched exit must fail");
+    let message = failure.downcast_ref::<String>().expect("assertion message");
+    assert!(message.contains("relay ancestry evidence"), "{message}");
 }
 
 fn lane_command(rig: &TestRig, arguments: &[&str], expected: u8) -> Result<Value> {
