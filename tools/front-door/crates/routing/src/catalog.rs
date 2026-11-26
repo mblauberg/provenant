@@ -1073,27 +1073,27 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("model_policy.defaults.lane.stop_early_ok", "bool"),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.handoff_missing",
-        provenant_records::settlement::policy::HANDOFF_MISSING_VALUES,
+        <provenant_records::settlement::policy::HandoffAction as provenant_records::settlement::policy::PolicyValue>::VALUES,
     ),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.handoff_malformed",
-        provenant_records::settlement::policy::HANDOFF_MALFORMED_VALUES,
+        <provenant_records::settlement::policy::HandoffAction as provenant_records::settlement::policy::PolicyValue>::VALUES,
     ),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.empty_result",
-        provenant_records::settlement::policy::EMPTY_RESULT_VALUES,
+        <provenant_records::settlement::policy::EmptyResultAction as provenant_records::settlement::policy::PolicyValue>::VALUES,
     ),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.uncommitted_work",
-        provenant_records::settlement::policy::UNCOMMITTED_WORK_VALUES,
+        <provenant_records::settlement::policy::UncommittedAction as provenant_records::settlement::policy::PolicyValue>::VALUES,
     ),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.stray_work",
-        provenant_records::settlement::policy::STRAY_WORK_VALUES,
+        <provenant_records::settlement::policy::StrayAction as provenant_records::settlement::policy::PolicyValue>::VALUES,
     ),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.settlement.no_work",
-        provenant_records::settlement::policy::NO_WORK_VALUES,
+        <provenant_records::settlement::policy::NoWork as provenant_records::settlement::policy::PolicyValue>::VALUES,
     ),
     FieldMetadata::new("model_policy.defaults.lane.read_only", "bool"),
     FieldMetadata::enumeration("model_policy.defaults.lane.access", &["host", "isolated"]),

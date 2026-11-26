@@ -341,8 +341,9 @@ host-name or project-name special cases. Each value is a `Sourced<T>` carrying i
 the effective `SettlementPolicy` is sealed into `settlement-evidence.json` so a re-drive and an audit
 reproduce the decision. An invalid value warns `SETTLEMENT_POLICY_INVALID` naming the key, layer and
 origin, keeps the default and never refuses. `config show`, `config schema`, `check` and
-`run --explain` report the same value and source, and status names an `AppliedPolicy` when a
-non-default action changed the outcome or the settlement class.
+`run --explain` report the same value and source, and status names an `AppliedPolicy` (its key,
+value and source) when a non-default value changed the outcome or the settlement class. Each key
+has its own value type, so a value another key allows is invalid here.
 
 | Key | Allowed | Default | Scope | Effect |
 | --- | --- | --- | --- | --- |

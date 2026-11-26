@@ -19,7 +19,10 @@ use provenant_records::settlement::{
     SettlementEvidence,
     classify::budget_completed,
     classify::settle,
-    policy::{NoWork, RouteSettlement, SettlementPolicy, SignalAction},
+    policy::{
+        EmptyResultAction, HandoffAction, NoWork, RouteSettlement, SettlementKey, SettlementPolicy,
+        StrayAction, UncommittedAction,
+    },
 };
 use provenant_records::stop::StopCause;
 
@@ -557,7 +560,7 @@ fn an_adapter_writer_reports_no_declaration_counts() {
 
 // --- Slice 9: the sealed policy is applied at each ladder step. ---
 
-fn sourced_action(value: SignalAction) -> Sourced<SignalAction> {
+fn sourced_action<T>(value: T) -> Sourced<T> {
     Sourced {
         value,
         source: Source {
@@ -580,21 +583,21 @@ fn sourced_no_work(value: NoWork) -> Sourced<NoWork> {
 #[test]
 fn handoff_missing_fail_settles_failed_with_its_source() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
-    evidence.policy.handoff_missing = sourced_action(SignalAction::Fail);
+    evidence.policy.handoff_missing = sourced_action(HandoffAction::Fail);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Failed);
     assert_eq!(fact.settlement_class, SettlementClass::Failed);
     assert!(fact.signals.contains(&SettlementSignal::HandoffMissing));
     assert_eq!(fact.applied.len(), 1);
-    assert_eq!(fact.applied[0].signal, SettlementSignal::HandoffMissing);
-    assert_eq!(fact.applied[0].action, SignalAction::Fail);
+    assert_eq!(fact.applied[0].key, SettlementKey::HandoffMissing);
+    assert_eq!(fact.applied[0].action, "fail");
     assert_eq!(fact.applied[0].source.layer, Layer::Project);
 }
 
 #[test]
 fn handoff_missing_off_records_the_signal_but_releases_dependants() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
-    evidence.policy.handoff_missing = sourced_action(SignalAction::Off);
+    evidence.policy.handoff_missing = sourced_action(HandoffAction::Off);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Succeeded);
     assert_eq!(fact.settlement_class, SettlementClass::Completed);
@@ -604,7 +607,7 @@ fn handoff_missing_off_records_the_signal_but_releases_dependants() {
     );
     assert!(fact.signals.contains(&SettlementSignal::HandoffMissing));
     assert_eq!(fact.applied.len(), 1);
-    assert_eq!(fact.applied[0].action, SignalAction::Off);
+    assert_eq!(fact.applied[0].action, "off");
 }
 
 #[test]
@@ -613,7 +616,7 @@ fn handoff_malformed_off_keeps_the_error_but_completes_the_lane() {
     evidence.handoff = DeclarationEvidence::Rejected {
         error: HandoffError::new("status", "expected status done, stopped_early or blocked"),
     };
-    evidence.policy.handoff_malformed = sourced_action(SignalAction::Off);
+    evidence.policy.handoff_malformed = sourced_action(HandoffAction::Off);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Succeeded);
     assert_eq!(fact.settlement_class, SettlementClass::Completed);
@@ -626,12 +629,14 @@ fn handoff_malformed_off_keeps_the_error_but_completes_the_lane() {
 fn empty_result_fail_overrides_the_default_review() {
     let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);
     evidence.host.result_empty = true;
-    evidence.policy.empty_result = sourced_action(SignalAction::Fail);
+    evidence.policy.empty_result = sourced_action(EmptyResultAction::Fail);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Failed);
     assert_eq!(fact.settlement_class, SettlementClass::Failed);
+    // The empty result is its own knob, not a missing handoff.
     assert_eq!(fact.applied.len(), 1);
-    assert_eq!(fact.applied[0].signal, SettlementSignal::HandoffMissing);
+    assert_eq!(fact.applied[0].key, SettlementKey::EmptyResult);
+    assert_eq!(fact.applied[0].action, "fail");
 }
 
 #[test]
@@ -640,7 +645,7 @@ fn uncommitted_work_off_does_not_downgrade_a_success() {
     evidence.git = git_at(Some(BASE), Some(HEAD));
     evidence.git.as_mut().unwrap().uncommitted = Some("dirty worktree".into());
     evidence.handoff = accepted(handoff(HandoffStatus::Done, "Delivered"));
-    evidence.policy.uncommitted_work = sourced_action(SignalAction::Off);
+    evidence.policy.uncommitted_work = sourced_action(UncommittedAction::Off);
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Succeeded);
     assert_eq!(fact.settlement_class, SettlementClass::Completed);
@@ -659,13 +664,14 @@ fn no_work_off_keeps_a_declared_stop_on_an_unchanged_head() {
     assert_eq!(fact.settlement_class, SettlementClass::DeclaredStop);
     assert_eq!(fact.applied.len(), 1);
     assert_eq!(fact.applied[0].source.layer, Layer::Route);
-    assert_eq!(fact.applied[0].signal, SettlementSignal::DeclaredStop);
+    assert_eq!(fact.applied[0].key, SettlementKey::NoWork);
+    assert_eq!(fact.applied[0].action, "off");
 }
 
 #[test]
 fn a_route_value_is_sealed_with_the_policy() {
     let route = RouteSettlement {
-        stray_work: Some(SignalAction::Off),
+        stray_work: Some(StrayAction::Off),
         ..Default::default()
     };
     let mut evidence = base(LaneRole::ModelWriter, Outcome::Succeeded, None);

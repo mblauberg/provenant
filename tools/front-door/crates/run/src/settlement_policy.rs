@@ -12,23 +12,10 @@ use provenant_config::knob_source;
 use provenant_records::provenance::{Layer, Source, Sourced, warn_ignored};
 use provenant_records::run::HarnessProfile;
 use provenant_records::settlement::policy::{
-    EMPTY_RESULT_VALUES, HANDOFF_MALFORMED_VALUES, HANDOFF_MISSING_VALUES, NO_WORK_VALUES,
-    RouteSettlement, SETTLEMENT_PRECEDENCE, STRAY_WORK_VALUES, SettlementPolicy,
-    UNCOMMITTED_WORK_VALUES,
+    PolicyValue, RouteSettlement, SETTLEMENT_PRECEDENCE, SettlementKey, SettlementPolicy,
 };
 use provenant_records::warning::{SETTLEMENT_POLICY_INVALID, Warning, warn};
-use serde::de::DeserializeOwned;
 use serde_json::Value;
-
-/// The knob names settlement reads, in the order they appear in a receipt.
-pub const KNOBS: [&str; 6] = [
-    "lanes.settlement.handoff_missing",
-    "lanes.settlement.handoff_malformed",
-    "lanes.settlement.empty_result",
-    "lanes.settlement.uncommitted_work",
-    "lanes.settlement.stray_work",
-    "lanes.settlement.no_work",
-];
 
 /// The configured `[knobs]` entries, each with the layer and origin that set
 /// it. Several entries may name one key: the declared precedence decides
@@ -76,10 +63,10 @@ impl SettlementConfig {
         Self { knobs }
     }
 
-    fn candidates(&self, key: &str) -> Vec<Sourced<Value>> {
+    fn candidates(&self, key: SettlementKey) -> Vec<Sourced<Value>> {
         self.knobs
             .iter()
-            .filter(|candidate| candidate.value.0 == key)
+            .filter(|candidate| candidate.value.0 == key.knob())
             .map(|candidate| Sourced {
                 value: candidate.value.1.clone(),
                 source: candidate.source.clone(),
@@ -88,36 +75,19 @@ impl SettlementConfig {
     }
 }
 
-/// Each knob with the values it allows, in `KNOBS` order.
-pub const ALLOWED: [&[&str]; 6] = [
-    HANDOFF_MISSING_VALUES,
-    HANDOFF_MALFORMED_VALUES,
-    EMPTY_RESULT_VALUES,
-    UNCOMMITTED_WORK_VALUES,
-    STRAY_WORK_VALUES,
-    NO_WORK_VALUES,
-];
-
 /// Parse and merge one key's candidates. A value outside the key's declared
 /// set warns with its layer and origin and is dropped, so a valid lower layer
 /// or the default applies; a candidate from an undeclared layer is warned and
 /// ignored.
-fn resolve_one<T: Clone + DeserializeOwned>(
-    key: &str,
-    allowed: &[&str],
+fn resolve_one<T: PolicyValue>(
+    key: SettlementKey,
     default: T,
     candidates: Vec<Sourced<Value>>,
 ) -> Sourced<T> {
+    let name = key.knob();
     let mut parsed = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        let declared = candidate
-            .value
-            .as_str()
-            .is_some_and(|value| allowed.contains(&value));
-        match serde_json::from_value::<T>(candidate.value.clone())
-            .ok()
-            .filter(|_| declared)
-        {
+        match serde_json::from_value::<T>(candidate.value.clone()).ok() {
             Some(value) => parsed.push(Sourced {
                 value,
                 source: candidate.source,
@@ -128,18 +98,18 @@ fn resolve_one<T: Clone + DeserializeOwned>(
                     Warning::new(
                         SETTLEMENT_POLICY_INVALID,
                         format!(
-                            "{key} from {layer} has an unrecognised value; the default applies"
+                            "{name} from {layer} has an unrecognised value; the default applies"
                         ),
                     )
-                    .subject(key)
+                    .subject(name)
                     .source(candidate.source)
-                    .repair(format!("set {key} to one of {}", allowed.join(", "))),
+                    .repair(format!("set {name} to one of {}", T::VALUES.join(", "))),
                 );
             }
         }
     }
     let resolved = SETTLEMENT_PRECEDENCE.merge_over_default(default, parsed);
-    warn_ignored(&resolved.ignored, key);
+    warn_ignored(&resolved.ignored, name);
     resolved.winner
 }
 
@@ -173,7 +143,11 @@ pub fn explain(knobs: &BTreeMap<String, Sourced<Value>>) -> Value {
     let config = SettlementConfig {
         knobs: knobs
             .iter()
-            .filter(|(name, _)| KNOBS.contains(&name.as_str()))
+            .filter(|(name, _)| {
+                SettlementKey::ALL
+                    .iter()
+                    .any(|key| key.knob() == name.as_str())
+            })
             .map(|(name, sourced)| Sourced {
                 value: (name.clone(), sourced.value.clone()),
                 source: sourced.source.clone(),
@@ -182,15 +156,13 @@ pub fn explain(knobs: &BTreeMap<String, Sourced<Value>>) -> Value {
     };
     let (policy, warnings) = resolve(&config, None);
     let resolved = serde_json::to_value(&policy).unwrap_or_default();
-    let knobs: Vec<Value> = KNOBS
+    let knobs: Vec<Value> = SettlementKey::ALL
         .iter()
-        .zip(ALLOWED)
-        .map(|(key, allowed)| {
-            let field = key.trim_start_matches("lanes.settlement.");
-            let mut entry = resolved.get(field).cloned().unwrap_or_default();
+        .map(|key| {
+            let mut entry = resolved.get(key.field()).cloned().unwrap_or_default();
             if let Value::Object(map) = &mut entry {
-                map.insert("key".into(), Value::from(*key));
-                map.insert("allowed".into(), Value::from(allowed.to_vec()));
+                map.insert("key".into(), Value::from(key.knob()));
+                map.insert("allowed".into(), Value::from(key.values().to_vec()));
             }
             entry
         })
@@ -212,56 +184,50 @@ pub fn resolve(
     let shipped = SettlementPolicy::shipped();
     let (policy, warnings) = provenant_records::warning::capture(|| SettlementPolicy {
         handoff_missing: resolve_one(
-            KNOBS[0],
-            ALLOWED[0],
+            SettlementKey::HandoffMissing,
             shipped.handoff_missing.value,
             with_route(
-                config.candidates(KNOBS[0]),
+                config.candidates(SettlementKey::HandoffMissing),
                 route_policy.and_then(|route| route_value(route.handoff_missing.as_ref())),
             ),
         ),
         handoff_malformed: resolve_one(
-            KNOBS[1],
-            ALLOWED[1],
+            SettlementKey::HandoffMalformed,
             shipped.handoff_malformed.value,
             with_route(
-                config.candidates(KNOBS[1]),
+                config.candidates(SettlementKey::HandoffMalformed),
                 route_policy.and_then(|route| route_value(route.handoff_malformed.as_ref())),
             ),
         ),
         empty_result: resolve_one(
-            KNOBS[2],
-            ALLOWED[2],
+            SettlementKey::EmptyResult,
             shipped.empty_result.value,
             with_route(
-                config.candidates(KNOBS[2]),
+                config.candidates(SettlementKey::EmptyResult),
                 route_policy.and_then(|route| route_value(route.empty_result.as_ref())),
             ),
         ),
         uncommitted_work: resolve_one(
-            KNOBS[3],
-            ALLOWED[3],
+            SettlementKey::UncommittedWork,
             shipped.uncommitted_work.value,
             with_route(
-                config.candidates(KNOBS[3]),
+                config.candidates(SettlementKey::UncommittedWork),
                 route_policy.and_then(|route| route_value(route.uncommitted_work.as_ref())),
             ),
         ),
         stray_work: resolve_one(
-            KNOBS[4],
-            ALLOWED[4],
+            SettlementKey::StrayWork,
             shipped.stray_work.value,
             with_route(
-                config.candidates(KNOBS[4]),
+                config.candidates(SettlementKey::StrayWork),
                 route_policy.and_then(|route| route_value(route.stray_work.as_ref())),
             ),
         ),
         no_work: resolve_one(
-            KNOBS[5],
-            ALLOWED[5],
+            SettlementKey::NoWork,
             shipped.no_work.value,
             with_route(
-                config.candidates(KNOBS[5]),
+                config.candidates(SettlementKey::NoWork),
                 route_policy.and_then(|route| route_value(route.no_work.as_ref())),
             ),
         ),
@@ -272,7 +238,18 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_records::settlement::policy::{NoWork, SignalAction};
+    use provenant_records::settlement::policy::{
+        EmptyResultAction, HandoffAction, NoWork, StrayAction,
+    };
+
+    const KNOBS: [&str; 6] = [
+        SettlementKey::HandoffMissing.knob(),
+        SettlementKey::HandoffMalformed.knob(),
+        SettlementKey::EmptyResult.knob(),
+        SettlementKey::UncommittedWork.knob(),
+        SettlementKey::StrayWork.knob(),
+        SettlementKey::NoWork.knob(),
+    ];
     use serde_json::json;
 
     fn value_map(layer: Layer, key: &str, value: Value) -> Vec<Sourced<(String, Value)>> {
@@ -302,7 +279,7 @@ mod tests {
         };
         let (policy, warnings) = resolve(&config, None);
         assert!(warnings.is_empty());
-        assert_eq!(policy.handoff_missing.value, SignalAction::Warn);
+        assert_eq!(policy.handoff_missing.value, HandoffAction::Warn);
         assert_eq!(policy.handoff_missing.source.layer, Layer::Project);
     }
 
@@ -312,12 +289,12 @@ mod tests {
             knobs: value_map(Layer::Project, KNOBS[4], json!("warn")),
         };
         let route = RouteSettlement {
-            stray_work: Some(SignalAction::Off),
+            stray_work: Some(StrayAction::Off),
             ..Default::default()
         };
         let (policy, warnings) = resolve(&config, Some(&route));
         assert!(warnings.is_empty());
-        assert_eq!(policy.stray_work.value, SignalAction::Off);
+        assert_eq!(policy.stray_work.value, StrayAction::Off);
         assert_eq!(policy.stray_work.source.layer, Layer::Route);
     }
 
@@ -327,7 +304,7 @@ mod tests {
             knobs: value_map(Layer::Host, KNOBS[2], json!("other")),
         };
         let (policy, warnings) = resolve(&config, None);
-        assert_eq!(policy.empty_result.value, SignalAction::Review);
+        assert_eq!(policy.empty_result.value, EmptyResultAction::Review);
         assert_eq!(policy.empty_result.source.layer, Layer::Default);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code.as_ref(), SETTLEMENT_POLICY_INVALID.0);
@@ -340,8 +317,8 @@ mod tests {
 
     #[test]
     fn a_value_outside_its_keys_declared_set_warns_and_keeps_the_default() {
-        // `hold` is a SignalAction but not an empty-result action; `fail` is
-        // not a stray-work action. Each key admits only its declared values.
+        // `hold` is an uncommitted-work value but not an empty-result one;
+        // `fail` is not a stray-work value. Each key admits only its own.
         let config = SettlementConfig {
             knobs: value_map(Layer::Host, KNOBS[2], json!("hold"))
                 .into_iter()
@@ -360,16 +337,6 @@ mod tests {
                 .iter()
                 .all(|warning| warning.code.as_ref() == SETTLEMENT_POLICY_INVALID.0)
         );
-    }
-
-    #[test]
-    fn every_shipped_default_is_one_of_its_keys_declared_values() {
-        let shipped = serde_json::to_value(SettlementPolicy::shipped()).unwrap();
-        for (key, allowed) in KNOBS.iter().zip(ALLOWED) {
-            let field = key.trim_start_matches("lanes.settlement.");
-            let value = shipped[field]["value"].as_str().unwrap();
-            assert!(allowed.contains(&value), "{key}={value} not in {allowed:?}");
-        }
     }
 
     #[test]

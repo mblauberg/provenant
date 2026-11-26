@@ -3478,7 +3478,7 @@ impl RunStore {
                     if uncommitted.is_none()
                         && decoded.outcome == Outcome::Succeeded
                         && settlement_policy.stray_work.value
-                            != provenant_records::settlement::policy::SignalAction::Off
+                            != provenant_records::settlement::policy::StrayAction::Off
                     {
                         let stray = self.writer_stray(
                             &record,

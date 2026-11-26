@@ -13,12 +13,42 @@ use crate::provenance::Sourced;
 use crate::run::{
     CauseKind, DependantRelease, Outcome, SettlementClass, SettlementSignal, TerminalBasis,
 };
-use crate::settlement::policy::{AppliedPolicy, NoWork, SettlementPolicy, SignalAction};
+use crate::settlement::policy::{
+    AppliedPolicy, EmptyResultAction, HandoffAction, NoWork, PolicyValue, SettlementKey,
+    SettlementPolicy, StrayAction, UncommittedAction,
+};
 use crate::settlement::{
     HandoffSource, HeadProgress, IdentityPolicyEffect, LaneRole, OutcomeFact, PrimaryCheckout,
     RouteIdentityFact, SettlementEvidence,
 };
 use crate::stop::{Stop, StopCause};
+
+/// Whether a policy value lets its signal reach the class ladder. Review and
+/// hold keep the partial class; fail, warn and off withhold it, so the class
+/// is a plain failure or a completed lane.
+trait Classed: Copy {
+    fn classed(self) -> bool;
+}
+impl Classed for HandoffAction {
+    fn classed(self) -> bool {
+        self == Self::Review
+    }
+}
+impl Classed for EmptyResultAction {
+    fn classed(self) -> bool {
+        self == Self::Review
+    }
+}
+impl Classed for UncommittedAction {
+    fn classed(self) -> bool {
+        matches!(self, Self::Review | Self::Hold)
+    }
+}
+impl Classed for StrayAction {
+    fn classed(self) -> bool {
+        self == Self::Review
+    }
+}
 
 const EMPTY_RESULT_REASON: &str = "provider result is empty or incomplete";
 const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
@@ -151,26 +181,22 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     // A recorded signal is a fact. An action changes the outcome and whether
     // the signal reaches the class ladder; only a non-default action that
     // actually changed one of those is reported with its source.
-    fn record_action(
+    // A value that withholds its signal from the class ladder changes the
+    // class even when the outcome is unchanged.
+    fn record_action<T: PolicyValue>(
         applied: &mut Vec<AppliedPolicy>,
-        shipped: SignalAction,
-        sourced: &Sourced<SignalAction>,
-        signal: SettlementSignal,
+        key: SettlementKey,
+        shipped: T,
+        sourced: &Sourced<T>,
         changed: bool,
     ) {
         if sourced.value != shipped && changed {
             applied.push(AppliedPolicy {
-                signal,
-                action: sourced.value,
+                key,
+                action: sourced.value.as_str().into(),
                 source: sourced.source.clone(),
             });
         }
-    }
-    fn classed(action: SignalAction) -> bool {
-        !matches!(
-            action,
-            SignalAction::Fail | SignalAction::Warn | SignalAction::Off
-        )
     }
 
     // 1. Edits left on the worktree are not a success. The census note is the
@@ -183,21 +209,20 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         let action = policy.uncommitted_work.value;
         let before = outcome;
         outcome = match action {
-            SignalAction::Fail => Outcome::Failed,
-            SignalAction::Review => Outcome::ReviewRequired,
-            SignalAction::Warn | SignalAction::Off => outcome,
-            SignalAction::Hold => Outcome::Uncommitted,
+            UncommittedAction::Review => Outcome::ReviewRequired,
+            UncommittedAction::Warn | UncommittedAction::Off => outcome,
+            UncommittedAction::Hold => Outcome::Uncommitted,
         };
         signals.push(SettlementSignal::UncommittedWork);
-        if action != SignalAction::Off {
+        if action != UncommittedAction::Off {
             append(&mut reason, note.clone());
         }
         record_action(
             &mut applied,
+            SettlementKey::UncommittedWork,
             shipped.uncommitted_work.value,
             &policy.uncommitted_work,
-            SettlementSignal::UncommittedWork,
-            outcome != before || !classed(action),
+            outcome != before || !action.classed(),
         );
     }
 
@@ -208,21 +233,19 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
                 let action = policy.stray_work.value;
                 let before = outcome;
                 outcome = match action {
-                    SignalAction::Fail => Outcome::Failed,
-                    SignalAction::Review => Outcome::ReviewRequired,
-                    SignalAction::Warn | SignalAction::Off => outcome,
-                    SignalAction::Hold => Outcome::Uncommitted,
+                    StrayAction::Review => Outcome::ReviewRequired,
+                    StrayAction::Warn | StrayAction::Off => outcome,
                 };
                 signals.push(SettlementSignal::StrayWork);
-                if action != SignalAction::Off {
+                if action != StrayAction::Off {
                     append(&mut reason, note.clone());
                 }
                 record_action(
                     &mut applied,
+                    SettlementKey::StrayWork,
                     shipped.stray_work.value,
                     &policy.stray_work,
-                    SettlementSignal::StrayWork,
-                    outcome != before || !classed(action),
+                    outcome != before || !action.classed(),
                 );
             }
             PrimaryCheckout::Warn { note } | PrimaryCheckout::Unavailable { note } => {
@@ -240,22 +263,19 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
             let before = outcome;
             cause = Some(CauseKind::EmptyWriterResult);
             outcome = match action {
-                SignalAction::Fail => Outcome::Failed,
-                SignalAction::Review if outcome == Outcome::Succeeded => Outcome::ReviewRequired,
-                SignalAction::Review
-                | SignalAction::Warn
-                | SignalAction::Off
-                | SignalAction::Hold => outcome,
+                EmptyResultAction::Fail => Outcome::Failed,
+                EmptyResultAction::Review if outcome == Outcome::Succeeded => {
+                    Outcome::ReviewRequired
+                }
+                EmptyResultAction::Review | EmptyResultAction::Warn => outcome,
             };
-            if action != SignalAction::Off {
-                append(&mut reason, CauseKind::EmptyWriterResult.detail());
-            }
+            append(&mut reason, CauseKind::EmptyWriterResult.detail());
             record_action(
                 &mut applied,
+                SettlementKey::EmptyResult,
                 shipped.empty_result.value,
                 &policy.empty_result,
-                SettlementSignal::HandoffMissing,
-                outcome != before || !classed(action),
+                outcome != before || !action.classed(),
             );
         } else {
             // A reader's only product is its answer, so an empty one stays
@@ -289,26 +309,24 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         let action = policy.handoff_malformed.value;
         let before = outcome;
         signals.push(SettlementSignal::HandoffMalformed);
-        if action != SignalAction::Off {
+        if action != HandoffAction::Off {
             append(&mut reason, error.to_string());
         }
         outcome = match action {
-            SignalAction::Fail => Outcome::Failed,
-            SignalAction::Review
+            HandoffAction::Fail => Outcome::Failed,
+            HandoffAction::Review
                 if matches!(outcome, Outcome::Succeeded | Outcome::Uncommitted) =>
             {
                 Outcome::ReviewRequired
             }
-            SignalAction::Review | SignalAction::Warn | SignalAction::Off | SignalAction::Hold => {
-                outcome
-            }
+            HandoffAction::Review | HandoffAction::Warn | HandoffAction::Off => outcome,
         };
         record_action(
             &mut applied,
+            SettlementKey::HandoffMalformed,
             shipped.handoff_malformed.value,
             &policy.handoff_malformed,
-            SettlementSignal::HandoffMalformed,
-            outcome != before || !classed(action),
+            outcome != before || !action.classed(),
         );
     }
     if cause == Some(CauseKind::EmptyWriterResult) {
@@ -325,21 +343,19 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         let before = outcome;
         signals.push(SettlementSignal::HandoffMissing);
         outcome = match action {
-            SignalAction::Fail => Outcome::Failed,
-            SignalAction::Review if outcome == Outcome::Succeeded => {
+            HandoffAction::Fail => Outcome::Failed,
+            HandoffAction::Review if outcome == Outcome::Succeeded => {
                 reason = Some(NO_HANDOFF_REASON.into());
                 Outcome::ReviewRequired
             }
-            SignalAction::Review | SignalAction::Warn | SignalAction::Off | SignalAction::Hold => {
-                outcome
-            }
+            HandoffAction::Review | HandoffAction::Warn | HandoffAction::Off => outcome,
         };
         record_action(
             &mut applied,
+            SettlementKey::HandoffMissing,
             shipped.handoff_missing.value,
             &policy.handoff_missing,
-            SettlementSignal::HandoffMissing,
-            outcome != before || !classed(action),
+            outcome != before || !action.classed(),
         );
     }
 
@@ -425,8 +441,8 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
     }
     if no_work_applies && policy.no_work.value != shipped.no_work.value {
         applied.push(AppliedPolicy {
-            signal: SettlementSignal::DeclaredStop,
-            action: SignalAction::Off,
+            key: SettlementKey::NoWork,
+            action: policy.no_work.value.as_str().into(),
             source: policy.no_work.source.clone(),
         });
     }
@@ -582,24 +598,24 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         .iter()
         .copied()
         .filter(|signal| match signal {
-            SettlementSignal::UncommittedWork => classed(policy.uncommitted_work.value),
-            SettlementSignal::StrayWork => classed(policy.stray_work.value),
-            SettlementSignal::HandoffMalformed => classed(policy.handoff_malformed.value),
+            SettlementSignal::UncommittedWork => policy.uncommitted_work.value.classed(),
+            SettlementSignal::StrayWork => policy.stray_work.value.classed(),
+            SettlementSignal::HandoffMalformed => policy.handoff_malformed.value.classed(),
             SettlementSignal::HandoffMissing => {
-                classed(policy.handoff_missing.value)
-                    && (!empty_result_missing || classed(policy.empty_result.value))
+                policy.handoff_missing.value.classed()
+                    && (!empty_result_missing || policy.empty_result.value.classed())
             }
             _ => true,
         })
         .collect();
     let class_cause =
-        if cause == Some(CauseKind::EmptyWriterResult) && !classed(policy.empty_result.value) {
+        if cause == Some(CauseKind::EmptyWriterResult) && !policy.empty_result.value.classed() {
             None
         } else {
             cause
         };
     let class_declaration: HandoffResult =
-        if declaration.is_err() && !classed(policy.handoff_malformed.value) {
+        if declaration.is_err() && !policy.handoff_malformed.value.classed() {
             Ok(None)
         } else {
             declaration.clone()
