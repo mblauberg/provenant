@@ -124,7 +124,14 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
                 std::fs::symlink_metadata(state_path.join(path.as_path()))
                     .is_ok_and(|metadata| metadata.is_file())
             });
-            json!({"name":name,"bytes":item.bytes,"digest":item.digest,"complete":item.complete,"redacted":item.redacted,"present":present})
+            super::projection::detail_artifact(
+                name,
+                item.bytes,
+                &json!(item.digest),
+                item.complete,
+                item.redacted,
+                present,
+            )
         })
     };
     let mut artifacts: Vec<Value> = artifact("prompt", Some(&record.prompt))
@@ -139,9 +146,25 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
         .flatten(),
     );
     let (linked_inbox_requests, inbox_coverage) = super::detail_inbox::read(roots, &record);
-    let timing = json!({"queued_at":record.queued_at,"started_at":record.started_at,"provider_ms":record.provider_ms,"finished_at":match &record.state { provenant_run::AttemptState::Terminal { finished_at, .. } => Some(finished_at), _ => None }});
+    let finished_at = match &record.state {
+        provenant_run::AttemptState::Terminal { finished_at, .. } => {
+            serde_json::to_value(finished_at).map_err(|_| Error::Encode)?
+        }
+        _ => Value::Null,
+    };
+    let timing = super::projection::detail_timings(
+        &serde_json::to_value(record.queued_at).map_err(|_| Error::Encode)?,
+        &serde_json::to_value(record.started_at).map_err(|_| Error::Encode)?,
+        &serde_json::to_value(record.provider_ms).map_err(|_| Error::Encode)?,
+        &finished_at,
+    );
     Ok(super::projection::detail(
-        &json!({"host":local_host,"project_id":record.project_id,"key":key,"attempt_id":record.attempt_id}),
+        &super::projection::lane_id(
+            &serde_json::to_value(local_host).map_err(|_| Error::Encode)?,
+            &serde_json::to_value(record.project_id).map_err(|_| Error::Encode)?,
+            &serde_json::to_value(key).map_err(|_| Error::Encode)?,
+            &serde_json::to_value(record.attempt_id).map_err(|_| Error::Encode)?,
+        ),
         "found",
         &as_value(&record.requested_route)?,
         &as_value(&record.resolved_route)?,

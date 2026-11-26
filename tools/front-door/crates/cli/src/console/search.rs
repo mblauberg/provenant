@@ -138,14 +138,25 @@ pub(super) fn read(
                 let start = match_position.saturating_sub(SNIPPET_CHARS / 3);
                 let snippet: String = chars.iter().skip(start).take(SNIPPET_CHARS).collect();
                 let key = &attempt.key;
-                matches.push(json!({"lane_id":{"host":null,"project_id":attempt.project_id,"key":key,"attempt_id":attempt.attempt_id},"part":part,"snippet":snippet,"artifact_bytes":expected_bytes}));
+                let lane_id = super::projection::lane_id(
+                    &Value::Null,
+                    &serde_json::to_value(attempt.project_id).map_err(|_| Error::Encode)?,
+                    &serde_json::to_value(key).map_err(|_| Error::Encode)?,
+                    &serde_json::to_value(attempt.attempt_id).map_err(|_| Error::Encode)?,
+                );
+                matches.push(super::projection::search_match(
+                    &lane_id,
+                    part,
+                    &snippet,
+                    expected_bytes,
+                ));
             }
             if page.next.is_none() {
                 break;
             }
         }
     }
-    let snapshot = digest(&(
+    let snapshot = super::projection::search_snapshot(
         query,
         part,
         session,
@@ -153,7 +164,8 @@ pub(super) fn read(
         scanned,
         scan_bytes,
         truncated,
-    ))?;
+    )
+    .map_err(|_| Error::Encode)?;
     let offset = if let Some(cursor) = cursor {
         let (found_snapshot, found_offset, checksum) = cursor
             .split_once('.')

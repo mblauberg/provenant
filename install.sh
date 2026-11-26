@@ -91,6 +91,9 @@ while [ "$#" -gt 0 ]; do
 done
 case "$state" in /*) ;; *) die 2 '--state-dir must be absolute' ;; esac
 case "$apps_dir" in /*) ;; *) die 2 'PROVENANT_APPS_DIR must be absolute' ;; esac
+while [ "$apps_dir" != / ] && [ "${apps_dir%/}" != "$apps_dir" ]; do
+    apps_dir=${apps_dir%/}
+done
 case "$bin_dir" in ''|/*) ;; *) die 2 '--bin-dir must be absolute' ;; esac
 case "$tag" in *[!a-zA-Z0-9._-]*) die 2 'Invalid release tag' ;; esac
 if [ -z "$source_dir" ]; then

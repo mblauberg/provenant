@@ -2,7 +2,6 @@
 use crate::metadata::CatalogueArg;
 use clap::Subcommand;
 use provenant_core::{ProjectId, Roots};
-use provenant_records::CanonicalV1;
 use provenant_workflow::session::{HostSessionId, discover_sessions_bounded};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -167,14 +166,14 @@ fn detail_reference(
 }
 
 #[derive(Serialize)]
-struct Project {
-    project_id: ProjectId,
-    common_dir: Value,
-    label: Option<String>,
+pub struct Project {
+    pub project_id: ProjectId,
+    pub common_dir: Value,
+    pub label: Option<String>,
 }
 
 impl Project {
-    fn new(project_id: ProjectId, path: &std::path::Path) -> Self {
+    pub fn new(project_id: ProjectId, path: &std::path::Path) -> Self {
         let bytes = path.as_os_str().as_bytes();
         let common_dir = match std::str::from_utf8(bytes) {
             Ok(text) => json!({"encoding":"utf8", "path":text}),
@@ -364,13 +363,14 @@ fn read_with_budget(
             break;
         }
     }
-    let snapshot = CanonicalV1::record_digest(
-        "console-sessions",
-        1,
-        &(selected, session, limit, scan_truncated, &sessions),
+    let snapshot = projection::session_snapshot(
+        selected,
+        session.as_deref(),
+        *limit,
+        scan_truncated,
+        &sessions,
     )
-    .map_err(|_| Error::Encode)?
-    .to_string();
+    .map_err(|_| Error::Encode)?;
     let offset = if let Some(cursor) = cursor {
         let (digest, offset) = cursor.rsplit_once(':').ok_or(Error::Cursor)?;
         if digest != snapshot {

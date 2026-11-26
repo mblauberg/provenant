@@ -106,7 +106,13 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
             remaining_bytes -= page.bytes_read;
             for item in page.items {
                 if let Some(label) = labels.get(&item.project_id) {
-                    needs_you.push(json!({"id":item.id,"project_id":item.project_id,"project_label":label,"title":item.title,"chair_session_id":item.chair_session_id}));
+                    needs_you.push(super::projection::overview_needs_you(
+                        &json!(item.id),
+                        &item.title,
+                        &json!(item.chair_session_id),
+                        &json!(item.project_id),
+                        &json!(label),
+                    ));
                 }
             }
             if page.truncated {
@@ -173,7 +179,17 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                     attention_count += usize::from(attention);
                     if active || attention {
                         let key = &item.record.key;
-                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"key":key,"attempt_id":row.attempt_id,"task_label":item.title,"state":row.state,"reason":row.reason,"presence":row.presence,"queued_at":item.record.queued_at,"cause":row.cause,"retry_of":row.retry_of,"superseded_by":row.superseded_by,"attention":attention}));
+                        let attempt = serde_json::to_value(row).map_err(|_| Error::Encode)?;
+                        lanes.push(super::projection::overview_lane(
+                            &json!(item.project_id),
+                            label,
+                            &serde_json::to_value(key).map_err(|_| Error::Encode)?,
+                            &item.title,
+                            &attempt,
+                            &serde_json::to_value(item.record.queued_at)
+                                .map_err(|_| Error::Encode)?,
+                            attention,
+                        ));
                     }
                 }
                 if batch.truncated {

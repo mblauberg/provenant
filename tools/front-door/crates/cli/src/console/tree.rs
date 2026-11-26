@@ -173,7 +173,26 @@ pub(super) fn read_inner(
                     attempt.superseded_by.is_none(),
                     census.as_ref().ok_or(()),
                 );
-                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"key":work_key,"attempt_id":projected.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"usage":usage,"parents":{"dispatch":parents.0,"continuation":parents.1},"metadata":{"operation":lane.operation,"attempt":projected}}));
+                let projected = serde_json::to_value(projected).map_err(|_| Error::Encode)?;
+                let lane_id = super::projection::lane_id(
+                    &serde_json::to_value(host).map_err(|_| Error::Encode)?,
+                    &serde_json::to_value(attempt.project_id).map_err(|_| Error::Encode)?,
+                    &serde_json::to_value(work_key).map_err(|_| Error::Encode)?,
+                    &projected["attempt_id"],
+                );
+                let parents = json!({"dispatch":parents.0,"continuation":parents.1});
+                let operation = serde_json::to_value(&lane.operation).map_err(|_| Error::Encode)?;
+                nodes.push(super::projection::tree_node(
+                    &lane_id,
+                    depth,
+                    &serde_json::to_value(owner_attempt).map_err(|_| Error::Encode)?,
+                    include_store_path.then_some(store_path.as_str()),
+                    &usage,
+                    &parents,
+                    &operation,
+                    &projected,
+                    &[],
+                ));
             }
             match page.next {
                 Some(next) => after = next,
@@ -194,7 +213,20 @@ pub(super) fn read_inner(
     for node in &nodes {
         for kind in ["dispatch", "continuation"] {
             if let Some(parent) = node["parents"][kind].as_str() {
-                edges.push(json!({"project_id":node["lane_id"]["project_id"],"kind":kind,"parent_attempt":parent,"child_attempt":node["lane_id"]["attempt_id"],"parent_status":if ids.contains(&(node["lane_id"]["project_id"].as_str().unwrap_or(""), parent)) { "present" } else { "missing" }}));
+                edges.push(super::projection::tree_edge(
+                    &node["lane_id"]["project_id"],
+                    kind,
+                    parent,
+                    node["lane_id"]["attempt_id"]
+                        .as_str()
+                        .ok_or(Error::Encode)?,
+                    if ids.contains(&(node["lane_id"]["project_id"].as_str().unwrap_or(""), parent))
+                    {
+                        "present"
+                    } else {
+                        "missing"
+                    },
+                ));
             }
         }
     }
@@ -203,14 +235,11 @@ pub(super) fn read_inner(
         || !conflicts.is_empty()
         || edges.iter().any(|edge| edge["parent_status"] == "missing");
     for node in &mut nodes {
-        let children: Vec<_> = edges
-            .iter()
-            .filter(|edge| {
-                edge["project_id"] == node["lane_id"]["project_id"]
-                    && edge["parent_attempt"] == node["lane_id"]["attempt_id"]
-            })
-            .map(|edge| json!({"kind":edge["kind"],"attempt_id":edge["child_attempt"]}))
-            .collect();
+        let children = super::projection::tree_children(
+            &edges,
+            &node["lane_id"]["project_id"],
+            &node["lane_id"]["attempt_id"],
+        );
         let metadata = node["metadata"].clone();
         if !include_store_path {
             node.as_object_mut()
@@ -230,11 +259,8 @@ pub(super) fn read_inner(
         .into_iter()
         .map(|(key, (known, missing))| (key, json!({"known_sum":known,"missing":missing})))
         .collect();
-    let totals = json!({
-        "attempts": seen.len(),
-        "duplicate_observations": duplicate_count,
-        "usage": usage,
-    });
+    let usage = serde_json::to_value(usage).map_err(|_| Error::Encode)?;
+    let totals = super::projection::tree_totals(seen.len(), duplicate_count, &usage);
     Ok(super::projection::tree(
         &nodes,
         &edges,

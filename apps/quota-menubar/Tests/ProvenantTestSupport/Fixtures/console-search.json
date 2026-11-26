@@ -48,7 +48,7 @@
     "part": "result",
     "query": "fixture",
     "schema_version": 1,
-    "snapshot": "sha256:x",
+    "snapshot": "sha256:3536f522c7aba8935edc86aefdb256875c59f1f07f3a9510f284b6abf6f648df",
     "truncated": false
   },
   "error": null,

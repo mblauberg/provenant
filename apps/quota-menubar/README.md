@@ -37,11 +37,13 @@ Run `swift test` in this directory. Tests replay CLI output from
 `Tests/ProvenantTestSupport/Fixtures`. Those files are **generated**. The
 generator builds one synthetic set of loaded values (fixed ids, `/fixture`
 paths, fixed timestamps) and passes it to the same pure projection functions
-in `provenant_cli::console::projection` that the owner commands call; the
-envelope is the real `CommandResult` wire type. Quota, inbox and answer
-fixtures re-serialise their real wire types directly. No console envelope is
-hand-written in the generator, and no live CLI capture belongs in the
-checkout. Regenerate after any wire or projection change from the repository
+in `provenant_cli::console::projection` that the owner commands call. This
+includes row, node, edge, artifact, timing, filter, snapshot and result-evidence
+projection; sessions and projects use their real wire types. The envelope is
+the real `CommandResult` wire type. Quota, inbox and answer fixtures re-serialise
+their real wire types directly. No console projection row is hand-written in
+the generator, and no live CLI capture belongs in the checkout. Regenerate
+after any wire or projection change from the repository
 root:
 
 ```sh

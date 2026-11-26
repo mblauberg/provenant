@@ -9,11 +9,7 @@ use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
 
 fn binding(high_water: u64, filters: &Value) -> Result<String, Error> {
-    Ok(
-        CanonicalV1::record_digest("console-board", 2, &(high_water, filters))
-            .map_err(|_| Error::Encode)?
-            .to_string(),
-    )
+    super::projection::board_snapshot(high_water, filters).map_err(|_| Error::Encode)
 }
 
 fn token(snapshot: &str, high_water: u64, before: u64) -> Result<String, Error> {
@@ -72,7 +68,7 @@ pub(super) fn read(
     };
     let root = CanonicalV1::file_digest(roots.state.as_path().as_os_str().as_bytes());
     let filters =
-        json!({"state_root":root,"host":host,"project_id":selected,"all":all,"limit":limit});
+        super::projection::board_filters(&json!(root), &json!(host), &json!(selected), all, limit);
     let position = cursor
         .map(|cursor| cursor_position(cursor, &filters))
         .transpose()?;
@@ -167,6 +163,7 @@ pub(super) fn read(
         }
         for lane in page.lanes {
             let attempt = &lane.attempt;
+            let attempt_id = attempt.attempt_id;
             let work_key = &attempt.key;
             let chair = match &chairs {
                 Ok(Some(index)) => {
@@ -221,11 +218,27 @@ pub(super) fn read(
                 )
             );
             let attention = terminal_attention || liveness_attention;
-            lanes.push(json!({"lane_id":{"host":host,"key":work_key,
-                "attempt_id":projected.attempt_id},
-                "chair":chair,"metadata":{"operation":lane.operation, "attempt":projected},"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),
-                "attention":attention,"usage_coverage":{"known":known,"missing":missing},
-                "observation_coverage":if observed.contains(&attempt.attempt_id) { "complete" } else { "unavailable" }}));
+            let attempt = serde_json::to_value(projected).map_err(|_| Error::Encode)?;
+            let lane_id = json!({"host":host,"key":work_key,"attempt_id":attempt["attempt_id"]});
+            let operation = serde_json::to_value(&lane.operation).map_err(|_| Error::Encode)?;
+            let chair = serde_json::to_value(&chair).map_err(|_| Error::Encode)?;
+            let wait = serde_json::to_value(waits.iter().find(|w| w.attempt_id == attempt_id))
+                .map_err(|_| Error::Encode)?;
+            lanes.push(super::projection::board_lane(
+                &lane_id,
+                &chair,
+                &operation,
+                &attempt,
+                &wait,
+                attention,
+                &known,
+                &missing,
+                if observed.contains(&attempt_id) {
+                    "complete"
+                } else {
+                    "unavailable"
+                },
+            ));
         }
     }
     let observed_at = serde_json::to_value(clock.wall_now().map_err(|_| Error::Encode)?)

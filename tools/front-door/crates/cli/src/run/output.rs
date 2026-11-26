@@ -1101,10 +1101,7 @@ fn output_read_part(
         let base = run::writer_base(session.context.state_root.as_path(), &record)
             .ok()
             .flatten();
-        data["writer_base"] = json!(base);
-        data["writer_head"] = json!(record.head);
-        data["residual_tree"] = residual_tree_evidence(session, &record, call);
-        data["publication"] = match &record.delivery {
+        let publication = match &record.delivery {
             Some(delivery)
                 if matches!(delivery.state, run::WriterDeliveryState::Delivered { .. })
                     && delivery
@@ -1117,8 +1114,15 @@ fn output_read_part(
             _ => Value::Null,
         };
         let (paths, total) = changed_file_evidence(session, &record, call);
-        data["changed_files"] = paths;
-        data["changed_files_total"] = total;
+        crate::console::projection::output_result_evidence(
+            &mut data,
+            &json!(base),
+            &json!(record.head),
+            &residual_tree_evidence(session, &record, call),
+            &publication,
+            &paths,
+            &total,
+        );
         // The wire schema declares `stop_work` an optional object: absent,
         // never null, when no stop evidence was recorded.
         if let Some(stop_work) = &record.stop_work {

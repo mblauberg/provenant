@@ -8,7 +8,29 @@
       "runs": "complete",
       "scope": "local"
     },
-    "edges": [],
+    "edges": [
+      {
+        "child_attempt": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+        "kind": "dispatch",
+        "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "parent_status": "present",
+        "project_id": "01010101010101010101010101010101"
+      },
+      {
+        "child_attempt": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "kind": "dispatch",
+        "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "parent_status": "missing",
+        "project_id": "01010101010101010101010101010101"
+      },
+      {
+        "child_attempt": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+        "kind": "continuation",
+        "parent_attempt": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+        "parent_status": "missing",
+        "project_id": "01010101010101010101010101010101"
+      }
+    ],
     "identity_conflicts": [],
     "limits": {
       "depth": 8,
@@ -19,10 +41,6 @@
         "children": [
           {
             "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
-            "kind": "dispatch"
-          },
-          {
-            "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
             "kind": "dispatch"
           }
         ],
@@ -35,7 +53,8 @@
             "graph": "implement-console-overview",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
@@ -100,21 +119,40 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-implement-console-overview",
+            "parent_attempt": null,
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
           "continuation": null,
           "dispatch": null
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node implement-console-overview",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       },
       {
-        "children": [
-          {
-            "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
-            "kind": "retry"
-          }
-        ],
+        "children": [],
         "depth": 1,
         "lane_id": {
           "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
@@ -124,7 +162,8 @@
             "graph": "review-the-change-set",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
@@ -189,13 +228,37 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-review-the-change-set",
+            "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
           "continuation": null,
-          "dispatch": null
+          "dispatch": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node review-the-change-set",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       },
       {
         "children": [],
@@ -208,7 +271,8 @@
             "graph": "write-the-migration-notes",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
@@ -273,13 +337,37 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-write-the-migration-notes",
+            "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
           "continuation": null,
-          "dispatch": null
+          "dispatch": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node write-the-migration-notes",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       },
       {
         "children": [],
@@ -292,7 +380,8 @@
             "graph": "settle-quota-fixtures",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
@@ -357,13 +446,37 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-settle-quota-fixtures",
+            "parent_attempt": null,
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
-          "continuation": null,
+          "continuation": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
           "dispatch": null
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node settle-quota-fixtures",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       },
       {
         "children": [],
@@ -376,7 +489,8 @@
             "graph": "regenerate-cli-fixtures",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
@@ -441,13 +555,37 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-regenerate-cli-fixtures",
+            "parent_attempt": null,
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
           "continuation": null,
           "dispatch": null
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node regenerate-cli-fixtures",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       },
       {
         "children": [],
@@ -460,7 +598,8 @@
             "graph": "run-the-whole-test-suite",
             "node": "task--writer",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
@@ -525,20 +664,65 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-run-the-whole-test-suite",
+            "parent_attempt": null,
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
           "continuation": null,
           "dispatch": null
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node run-the-whole-test-suite",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       }
     ],
     "schema_version": 1,
     "totals": {
       "attempts": 6,
       "duplicate_observations": 0,
-      "usage": {}
+      "usage": {
+        "cache_read": {
+          "known_sum": 0,
+          "missing": 6
+        },
+        "cache_write": {
+          "known_sum": 0,
+          "missing": 6
+        },
+        "input": {
+          "known_sum": 0,
+          "missing": 6
+        },
+        "output": {
+          "known_sum": 0,
+          "missing": 6
+        },
+        "reasoning": {
+          "known_sum": 0,
+          "missing": 6
+        }
+      }
     },
     "truncated": false,
     "unfetched_children": []

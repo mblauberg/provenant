@@ -10,8 +10,160 @@
 //! that the owner reads (timestamps, snapshots, host identities, coverage
 //! decisions) arrive as arguments so the caller keeps that decision visible.
 
+use provenant_core::ProjectId;
+use provenant_records::CanonicalV1;
 use provenant_workflow::session::{SummaryLine, SummarySource};
+use serde::Serialize;
 use serde_json::{Value, json};
+
+/// One overview lane from an already projected attempt.
+pub fn overview_lane(
+    project_id: &Value,
+    project_label: &str,
+    key: &Value,
+    task_label: &str,
+    attempt: &Value,
+    queued_at: &Value,
+    attention: bool,
+) -> Value {
+    json!({
+        "project_id": project_id, "project_label": project_label, "key": key,
+        "attempt_id": attempt["attempt_id"], "task_label": task_label,
+        "state": attempt["state"], "reason": attempt["reason"],
+        "presence": attempt["presence"], "queued_at": queued_at,
+        "cause": attempt["cause"], "retry_of": attempt["retry_of"],
+        "superseded_by": attempt["superseded_by"], "attention": attention,
+    })
+}
+
+/// One joined needs-you request after the inbox and project owners resolved it.
+pub fn overview_needs_you(
+    id: &Value,
+    title: &str,
+    chair_session_id: &Value,
+    project_id: &Value,
+    project_label: &Value,
+) -> Value {
+    json!({"id":id,"title":title,"chair_session_id":chair_session_id,
+        "project_id":project_id,"project_label":project_label})
+}
+
+/// One board lane, including the owner operation metadata and census coverage.
+pub fn board_lane(
+    lane_id: &Value,
+    chair: &Value,
+    operation: &Value,
+    attempt: &Value,
+    wait: &Value,
+    attention: bool,
+    known: &[&str],
+    missing: &[&str],
+    observation: &str,
+) -> Value {
+    json!({"lane_id":lane_id,"chair":chair,"metadata":{"operation":operation,"attempt":attempt},
+        "wait":wait,"attention":attention,"usage_coverage":{"known":known,"missing":missing},
+        "observation_coverage":observation})
+}
+
+/// One tree node with all derived display fields kept beside the source record.
+pub fn tree_node(
+    lane_id: &Value,
+    depth: u64,
+    store_parent_attempt: &Value,
+    store_path: Option<&str>,
+    usage: &Value,
+    parents: &Value,
+    operation: &Value,
+    attempt: &Value,
+    children: &[Value],
+) -> Value {
+    let mut node = json!({"lane_id":lane_id,"depth":depth,
+        "store_parent_attempt":store_parent_attempt,"usage":usage,"parents":parents,
+        "metadata":{"operation":operation,"attempt":attempt},"children":children,
+        "status":attempt["state"],"title":attempt["title"]});
+    if let Some(path) = store_path {
+        node["store_path"] = json!(path);
+    }
+    node
+}
+
+/// One parent/child edge in the tree projection.
+pub fn tree_edge(
+    project_id: &Value,
+    kind: &str,
+    parent: &str,
+    child: &str,
+    parent_status: &str,
+) -> Value {
+    json!({"project_id":project_id,"kind":kind,"parent_attempt":parent,
+        "child_attempt":child,"parent_status":parent_status})
+}
+
+/// Child links projected from the same tree edges exposed at top level.
+pub fn tree_children(edges: &[Value], project_id: &Value, parent: &Value) -> Vec<Value> {
+    edges
+        .iter()
+        .filter(|edge| {
+            edge.get("project_id") == Some(project_id) && edge.get("parent_attempt") == Some(parent)
+        })
+        .map(|edge| json!({"kind":edge["kind"],"attempt_id":edge["child_attempt"]}))
+        .collect()
+}
+
+/// Totals are a projection of observed tree records, not a fixture constant.
+pub fn tree_totals(attempts: usize, duplicates: u64, usage: &Value) -> Value {
+    json!({"attempts":attempts,"duplicate_observations":duplicates,"usage":usage})
+}
+
+/// A search match from one bounded artifact scan.
+pub fn search_match(lane_id: &Value, part: &str, snippet: &str, artifact_bytes: u64) -> Value {
+    json!({"lane_id":lane_id,"part":part,"snippet":snippet,"artifact_bytes":artifact_bytes})
+}
+
+/// Detail lane identity, including project ownership.
+pub fn lane_id(host: &Value, project_id: &Value, key: &Value, attempt_id: &Value) -> Value {
+    json!({"host":host,"project_id":project_id,"key":key,"attempt_id":attempt_id})
+}
+
+/// Detail artifact inventory entry after the owner has checked filesystem presence.
+pub fn detail_artifact(
+    name: &str,
+    bytes: u64,
+    digest: &Value,
+    complete: bool,
+    redacted: bool,
+    present: bool,
+) -> Value {
+    json!({"name":name,"bytes":bytes,"digest":digest,"complete":complete,"redacted":redacted,"present":present})
+}
+
+/// Detail timing values, including terminal finish time when available.
+pub fn detail_timings(
+    queued: &Value,
+    started: &Value,
+    provider_ms: &Value,
+    finished: &Value,
+) -> Value {
+    json!({"queued_at":queued,"started_at":started,"provider_ms":provider_ms,"finished_at":finished})
+}
+
+/// Attach result-only owner evidence to the common output projection.
+pub fn output_result_evidence(
+    data: &mut Value,
+    writer_base: &Value,
+    writer_head: &Value,
+    residual_tree: &Value,
+    publication: &Value,
+    changed_files: &Value,
+    changed_files_total: &Value,
+) {
+    data["writer_base"] = writer_base.clone();
+    data["writer_head"] = writer_head.clone();
+    data["residual_tree"] = residual_tree.clone();
+    data["publication"] = publication.clone();
+    data["changed_files"] = changed_files.clone();
+    data["changed_files_total"] = changed_files_total.clone();
+}
 
 /// `console projects` data from the registered local projects.
 pub fn projects<T: serde::Serialize>(registered: &[T]) -> Value {
@@ -100,6 +252,24 @@ pub fn sessions(
     })
 }
 
+/// Stable snapshot identity for a session catalogue page, shared by the owner
+/// and fixture generator so cursor semantics are part of the fixture contract.
+pub fn session_snapshot<T: Serialize>(
+    selected: Option<ProjectId>,
+    session: Option<&str>,
+    limit: u64,
+    scan_truncated: bool,
+    rows: &[T],
+) -> Result<String, String> {
+    CanonicalV1::record_digest(
+        "console-sessions",
+        1,
+        &(selected, session, limit, scan_truncated, rows),
+    )
+    .map(|digest| digest.to_string())
+    .map_err(|error| error.to_string())
+}
+
 /// `console changes`: compare the current owner generations with an optional
 /// baseline. The caller parses and validates `--since`; this only compares.
 pub fn changes(current: &Value, previous: Option<&Value>) -> Value {
@@ -148,6 +318,24 @@ pub fn board(
             "observations": observations, "nested_runs": "unavailable"
         },
     })
+}
+
+/// Stable cursor binding shared with the board owner and fixture generator.
+pub fn board_snapshot(high_water: u64, filters: &Value) -> Result<String, String> {
+    CanonicalV1::record_digest("console-board", 2, &(high_water, filters))
+        .map(|digest| digest.to_string())
+        .map_err(|error| error.to_string())
+}
+
+/// Filter identity embedded in a board response and used to bind its cursor.
+pub fn board_filters(
+    state_root: &Value,
+    host: &Value,
+    project_id: &Value,
+    all: bool,
+    limit: u64,
+) -> Value {
+    json!({"state_root":state_root,"host":host,"project_id":project_id,"all":all,"limit":limit})
 }
 
 /// `console tree` data from a bounded snapshot of projected nodes and edges.
@@ -267,6 +455,25 @@ pub fn search(
             "restart": "If the cursor is invalid or stale, restart with the same query and filters without --cursor."
         },
     })
+}
+
+/// Stable identity for a search scan, shared with cursor validation.
+pub fn search_snapshot(
+    query: &str,
+    part: &str,
+    session: Option<&str>,
+    rows: &[Value],
+    scanned: usize,
+    scan_bytes: u64,
+    truncated: bool,
+) -> Result<String, String> {
+    CanonicalV1::record_digest(
+        "console-search",
+        1,
+        &(query, part, session, rows, scanned, scan_bytes, truncated),
+    )
+    .map(|digest| digest.to_string())
+    .map_err(|error| error.to_string())
 }
 
 /// `output` data for one artifact byte range. The attempt identity and state

@@ -14,7 +14,7 @@
     ],
     "coverage": {
       "linked_inbox_requests": "complete",
-      "nested": "bounded_tree_search",
+      "nested": "not_searched",
       "peer": "not_searched"
     },
     "delivery": null,
@@ -26,7 +26,8 @@
         "graph": "fixture",
         "node": "task",
         "project": "01010101010101010101010101010101"
-      }
+      },
+      "project_id": "01010101010101010101010101010101"
     },
     "linked_inbox_requests": [],
     "observed_route": null,

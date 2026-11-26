@@ -2,9 +2,9 @@
   "command": "console overview",
   "data": {
     "counts": {
-      "attention": 1,
+      "attention": 3,
       "needs_you": 3,
-      "running": 2
+      "running": 0
     },
     "coverage": {
       "inbox": "complete",
@@ -15,7 +15,7 @@
     "lanes": [
       {
         "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
-        "attention": false,
+        "attention": true,
         "cause": null,
         "key": {
           "attempt": 1,
@@ -35,7 +35,7 @@
       },
       {
         "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
-        "attention": false,
+        "attention": true,
         "cause": null,
         "key": {
           "attempt": 1,
