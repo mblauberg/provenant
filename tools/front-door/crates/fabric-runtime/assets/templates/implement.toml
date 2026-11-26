@@ -1,5 +1,5 @@
 doc = "Meet acceptance, commit and hand off."
-brief = "Meet the acceptance checks in the writer's worktree. Optional write-scope paths are advisory; list out-of-scope edits in the handoff. Commit with a conventional message and end with a handoff block."
+brief = "Meet the acceptance checks in the writer's worktree. Optional write-scope paths are advisory; list out-of-scope edits in your declaration. Commit with a conventional message and declare your result with provenant declare --stdin."
 tier = "junior"
 access = "worktree_write"
 outputs = ["result", "branch", "commit"]

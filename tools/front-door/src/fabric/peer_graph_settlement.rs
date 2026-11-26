@@ -265,7 +265,7 @@ fn child_launch_refuses_credential_and_state_roots_at_the_host()
             match &result {
                 Err(FacadeError::DispatchRefused { .. }) => assert_eq!(name, "state"),
                 Ok(graph::AttemptObservation::Terminal {
-                    outcome: graph::AttemptOutcome::PreparationRefused(_),
+                    outcome: graph::GraphAttemptOutcome::PreparationRefused(_),
                     launched: false,
                     ..
                 }) => assert_eq!(name, "credential"),

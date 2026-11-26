@@ -733,7 +733,7 @@ pub enum Reconciled {
     /// The supervisor is resuming durable settlement in the background.
     Settling {
         phase: String,
-        blocking_reason: Option<String>,
+        held_reason: Option<String>,
     },
     /// A chair explicitly released settlement while retaining its evidence.
     Abandoned { reason: String },
@@ -833,12 +833,9 @@ impl std::fmt::Display for Reconciled {
             Self::Held => f.write_str("held"),
             Self::DeadlineStop => f.write_str("deadline_stop"),
             Self::StallStop { policy } => write!(f, "stall_stop ({})", policy.as_str()),
-            Self::Settling {
-                phase,
-                blocking_reason,
-            } => {
+            Self::Settling { phase, held_reason } => {
                 write!(f, "settling ({phase})")?;
-                if let Some(reason) = blocking_reason {
+                if let Some(reason) = held_reason {
                     write!(f, ": {reason}")?;
                 }
                 Ok(())
@@ -4527,15 +4524,18 @@ impl RunStore {
                     *holder_live,
                     call.clock,
                 ),
-                Reconciled::Uncertain { reason } => {
-                    crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
-                }
+                Reconciled::Uncertain { reason } => crate::settlement::record_recovery_failure(
+                    &directory,
+                    scope,
+                    &reason.to_string(),
+                    call.clock,
+                ),
                 Reconciled::Settling {
-                    blocking_reason: Some(_),
+                    held_reason: Some(_),
                     ..
                 }
                 | Reconciled::Abandoned { .. } => Ok(()),
-                _ => crate::settlement::clear_blocked(&directory, scope),
+                _ => crate::settlement::clear_held(&directory, scope),
             }
         })();
         if let Err(error) = progress {
@@ -4673,10 +4673,10 @@ impl RunStore {
                         },
                         finished_at: now,
                         failure: None,
-                        terminal_cause: if cancelled {
+                        cause: if cancelled {
                             None
                         } else {
-                            Some(TerminalCause::HandoffRefused)
+                            Some(CauseKind::LaunchHandoffRefused)
                         },
                         terminal_note: None,
                     },
@@ -4747,10 +4747,10 @@ impl RunStore {
                 },
                 finished_at: now,
                 failure: None,
-                terminal_cause: if cancelled {
+                cause: if cancelled {
                     None
                 } else {
-                    Some(TerminalCause::HandoffRefused)
+                    Some(CauseKind::LaunchHandoffRefused)
                 },
                 terminal_note: None,
             },

@@ -8,7 +8,7 @@
 use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, StateRoot, WaitBudget};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
 pub use provenant_records::graph::{
-    AttemptKey, AttemptOutcome, AttemptState, GraphOutcome, GraphStatus, NodeState,
+    AttemptKey, AttemptState, GraphAttemptOutcome, GraphOutcome, GraphStatus, NodeState,
 };
 use provenant_records::pause::PauseCause;
 use provenant_records::{CanonicalError, CanonicalV1, DecodeError, Limits};
@@ -325,7 +325,7 @@ pub const MAX_CANCEL_REASON_BYTES: usize = 256;
 const MAX_CHECKPOINT_BYTES: u64 = 32 * 1024 * 1024;
 /// Every JSON member costs at least two bytes, so the byte limit binds first.
 const MAX_CHECKPOINT_MEMBERS: usize = MAX_CHECKPOINT_BYTES as usize / 2;
-const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
+const MAX_ADVANCE_NOTE_BYTES: usize = 2_048;
 // Canonical-byte shares for runtime text stored in a checkpoint. The envelope
 // bound in `graph/envelope.rs` adds them up for each plan before admission.
 const RESULT_EXCERPT_BYTES: usize = 4_096;
@@ -511,6 +511,12 @@ pub trait AttemptOwner {
     /// Effective host/project policy for graph admission.
     fn graph_admission_policy(&self) -> provenant_records::policy::Policy {
         provenant_records::policy::Policy::default()
+    }
+
+    /// Host/project `on_stop` defaults, resolved once at graph admission and
+    /// sealed in the checkpoint. A node's own `on_stop` entry wins over them.
+    fn graph_on_stop_defaults(&self) -> provenant_records::OnStop {
+        provenant_records::OnStop::default()
     }
 
     /// Restore a writer's sealed deadline, or start its launch allowance before binding.
@@ -2735,7 +2741,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         AttemptObservation::Terminal {
             attempt_ref: Some(reference),
             launched: false,
-            outcome: AttemptOutcome::UsageLimited,
+            outcome: GraphAttemptOutcome::UsageLimited,
             ..
         } => owner
             .preparation_skipped_accounts(key, reference)
@@ -2782,7 +2788,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
     let quota_redraw = match &observation {
         AttemptObservation::Terminal {
             attempt_ref: Some(reference),
-            outcome: AttemptOutcome::UsageLimited,
+            outcome: GraphAttemptOutcome::UsageLimited,
             ..
         } if route.alias.is_some() && route.model.is_none() => {
             quota_redraw_budget(&checkpoint.nodes[node_index])
@@ -2845,7 +2851,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         outcome,
         ..
     } = &observation
-        && *outcome != AttemptOutcome::Succeeded
+        && *outcome != GraphAttemptOutcome::Succeeded
         && !steer_refused
         && let Some(successor) = owner.continuation(reference).map_err(GraphError::Run)?
     {
@@ -2967,8 +2973,8 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
             node.id
         );
         checkpoint.nodes[node_index].state = NodeState::Blocked;
-        checkpoint.nodes[node_index].advance_error_code = Some("steer_continuation_refused".into());
-        checkpoint.nodes[node_index].advance_error = Some(reason.clone());
+        checkpoint.nodes[node_index].advance_code = Some("steer_continuation_refused".into());
+        checkpoint.nodes[node_index].advance_note = Some(reason.clone());
         checkpoint.set_pause(
             provenant_records::pause::PauseCause::Stop(
                 provenant_records::StopCause::LaunchHandoffRefused,
@@ -3009,6 +3015,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     let catalogue = owner.catalogue();
     // Resolve once for this graph operation, before replay and expansion.
     let admission_policy = owner.graph_admission_policy();
+    let on_stop_defaults = owner.graph_on_stop_defaults();
     let unbounded = crate::config::GraphLimits {
         nodes: usize::MAX,
         edges: usize::MAX,
@@ -3113,6 +3120,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 instance_id,
                 ask_actor,
             );
+            checkpoint.on_stop_defaults = on_stop_defaults;
             if let Some(submission) = document.submission_patch.as_ref() {
                 let library = template::TemplateLibrary::bundled();
                 let resolvers = Default::default();
@@ -3258,7 +3266,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 status: GraphStatus::Cancelled,
                 outcome: None,
                 checkpoint,
-                advance_error: None,
+                advance_note: None,
             });
         }
         checkpoint.set_pause(PauseCause::StructuralLimit, &limit.to_string());
@@ -3580,10 +3588,10 @@ fn park_malformed_composite_delivery_review<R: AttemptOwner, J: GraphJournal>(
         "delivery review boundary {} settled {:?}",
         node.id, progress.state
     )];
-    if let Some(code) = &progress.advance_error_code {
+    if let Some(code) = &progress.advance_code {
         evidence.push(format!("boundary error code: {code}"));
     }
-    if let Some(error) = &progress.advance_error {
+    if let Some(error) = &progress.advance_note {
         evidence.push(format!("boundary error: {error}"));
     }
     for member_id in &node.composite_members {
@@ -3597,7 +3605,7 @@ fn park_malformed_composite_delivery_review<R: AttemptOwner, J: GraphJournal>(
             .is_some_and(|outputs| outputs.partial || outputs.findings_available != Some(true));
         if member.state != NodeState::Succeeded || partial {
             let detail = member
-                .advance_error
+                .advance_note
                 .as_deref()
                 .unwrap_or("incomplete panel member evidence");
             evidence.push(format!("member {member_id} {:?}: {detail}", member.state));

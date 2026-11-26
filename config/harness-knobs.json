@@ -15,6 +15,12 @@
       "lanes.cargo_cache_max",
       "lanes.ci_scope",
       "lanes.writer_dirty",
+      "lanes.settlement.declaration_missing",
+      "lanes.settlement.declaration_malformed",
+      "lanes.settlement.empty_result",
+      "lanes.settlement.uncommitted_work",
+      "lanes.settlement.stray_work",
+      "lanes.settlement.no_work",
       "lanes.read_source",
       "lanes.gh_budget",
       "lanes.isolation",
@@ -196,7 +202,13 @@
       "resource_sample_interval_ms": {"type": "int", "allowed": "0 to 60000 milliseconds", "min": 0, "max": 60000, "default": "0", "effect": "Interval for sampling lane resource use; zero disables sampling."},
       "admission_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Default admission deadline in seconds before launch."},
       "projects.{project}.review_exempt": {"type": "array", "allowed": "list of paths", "default": "host review_exempt", "effect": "Replace the host review-exempt paths for this project."},
-      "projects.{project}.admission_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Project admission deadline in seconds before launch."}
+      "projects.{project}.admission_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Project admission deadline in seconds before launch."},
+      "declaration_journal_bytes": {"type": "int", "allowed": "65536 to 16777216 bytes", "min": 65536, "max": 16777216, "default": "1048576", "effect": "Maximum canonical bytes in one attempt's declarations.jsonl. A call past the bound is refused with Full; the refusal names this key and its source. Below 10% remaining the receipt warns DECLARATION_JOURNAL_NEAR_FULL and still succeeds."},
+      "projects.{project}.declaration_journal_bytes": {"type": "int", "allowed": "65536 to 16777216 bytes", "min": 65536, "max": 16777216, "default": "host declaration_journal_bytes", "effect": "Replace the host declaration journal bound for this project; the project value wins and its source is named in a Full refusal."},
+      "declaration_relay_seconds": {"type": "int", "allowed": "1 to 300 seconds", "min": 1, "max": 300, "default": "10", "effect": "Seconds the lane's `provenant declare` waits for one reply from the host-bound declaration relay."},
+      "projects.{project}.declaration_relay_seconds": {"type": "int", "allowed": "1 to 300 seconds", "min": 1, "max": 300, "default": "host declaration_relay_seconds", "effect": "Replace the host declaration relay timeout for this project."},
+      "declaration_relay_retries": {"type": "int", "allowed": "0 to 5 retries", "min": 0, "max": 5, "default": "1", "effect": "Extra relay attempts after a transport failure. Retries reuse the same request_id, so they are idempotent; 0 disables retry."},
+      "projects.{project}.declaration_relay_retries": {"type": "int", "allowed": "0 to 5 retries", "min": 0, "max": 5, "default": "host declaration_relay_retries", "effect": "Replace the host declaration relay retry count for this project."}
     }
   },
   "host_land_settings": {
@@ -390,7 +402,9 @@
       "limits.concurrency": {"type": "int", "allowed": "0 or more", "default": "0", "effect": "Graph concurrency limit. Unset or zero uses host lane caps; the bundled configuration sets zero."},
       "decide_timeout_seconds": {"type": "int", "allowed": "1 to 18446744073709 seconds", "min": 1, "default": "300", "effect": "Maximum time a graph decision step may take before it is reported as timed out.", "max": 18446744073709},
       "launch_wait_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "55", "effect": "General launch and read/wait allowance for a graph node."},
-      "writer_provision_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "120", "effect": "Independent allowance for provisioning each writer in a graph; also bounds how long a launch waits for a contended writer lock."}
+      "writer_provision_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "120", "effect": "Independent allowance for provisioning each writer in a graph; also bounds how long a launch waits for a contended writer lock."},
+      "on_stop.<stop_cause>": {"type": "string", "allowed": "same_route, new_route, chair, or a step object", "default": "the stop table row", "effect": "Host default next step for one stop cause, resolved once at graph admission and sealed in the checkpoint. A node's own on_stop entry wins; a pinned cause ignores it and warns ON_STOP_PINNED_IGNORED."},
+      "projects.{project}.on_stop.<stop_cause>": {"type": "string", "allowed": "same_route, new_route, chair, or a step object", "default": "the stop table row", "effect": "Project default next step for one stop cause, resolved once at graph admission and sealed in the checkpoint. A node's own on_stop entry wins; a pinned cause ignores it and warns ON_STOP_PINNED_IGNORED."}
     }
   },
   "host_delivery_queue_settings": {
@@ -420,6 +434,12 @@
       "defaults.lane.max_context": {"type": "int", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Enforced largest context for a lane on this model."},
       "defaults.lane.max_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "unset", "effect": "Enforced most turns for a lane on this model."},
       "defaults.lane.stop_early_ok": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "false asks writers to report completion through the shared handoff."},
+      "defaults.lanes.settlement.declaration_missing": {"type": "enum", "default": "inherit lanes.settlement.declaration_missing", "effect": "Route-layer override for the missing-declaration action; rules.policy.lanes.settlement.declaration_missing uses the same values."},
+      "defaults.lanes.settlement.declaration_malformed": {"type": "enum", "default": "inherit lanes.settlement.declaration_malformed", "effect": "Route-layer override for the malformed-declaration action; rules.policy.lanes.settlement.declaration_malformed uses the same values."},
+      "defaults.lanes.settlement.empty_result": {"type": "enum", "default": "inherit lanes.settlement.empty_result", "effect": "Route-layer override for the empty-result action; rules.policy.lanes.settlement.empty_result uses the same values."},
+      "defaults.lanes.settlement.uncommitted_work": {"type": "enum", "default": "inherit lanes.settlement.uncommitted_work", "effect": "Route-layer override for the uncommitted-work action; rules.policy.lanes.settlement.uncommitted_work uses the same values."},
+      "defaults.lanes.settlement.stray_work": {"type": "enum", "default": "inherit lanes.settlement.stray_work", "effect": "Route-layer override for the stray-work action; rules.policy.lanes.settlement.stray_work uses the same values."},
+      "defaults.lanes.settlement.no_work": {"type": "enum", "default": "inherit lanes.settlement.no_work", "effect": "Route-layer override for no-work detection; rules.policy.lanes.settlement.no_work uses the same values."},
       "defaults.lane.access": {"type": "enum", "default": "inherit lanes.access", "effect": "Override host and project lane access for matching routes unless an explicit launch, template or tier knob wins. rules.policy.lane.access uses the same values."},
       "defaults.lane.user_skills": {"type": "enum", "default": "inherit domains.lanes.user_skills", "effect": "Override host and project user skill discovery for matching routes. rules.policy.lane.user_skills uses the same values."},
       "defaults.lane.read_only": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "true refuses write lanes on this model."},
@@ -566,6 +586,7 @@
       "policy.CONFINEMENT_SOURCE_AGENT_CONFIG_NONE": {"type": "enum", "allowed": "warn, off", "default": "off", "effect": "Project-local agent configuration is not a credential boundary; operators may opt into overlap warnings. The setting source is named in each warning."},
       "policy.CREDENTIAL_ROOTS_OVERLAP_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Under host access, credential roots that overlap lane roots or cannot be resolved precisely warn with their paths, effective access and source, then preparation proceeds; isolated access keeps the existing refusals. The setting source is named in each warning."},
       "policy.LAUNCH_NATIVE_AUTH_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Host access warns and uses native provider authentication when managed authentication is unavailable or bypassed. The effective access and its source are named."},
+      "policy.DECLARATION_JOURNAL_NEAR_FULL": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A declaration below 10% of its journal bound still succeeds and warns; the declaration is the sealed record, so a refusal would drop the lane's result. Off silences the warning without changing the bound. The setting source is named in each warning."},
       "policy.LAUNCH_FILTER_OPTIONAL_GRANTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Optional discovered grants that cannot be represented in SBPL are omitted and reported; required grants remain subject to confinement validation. Credential-overlapping discoveries warn with the path, effective access and source, and are retained under host access while isolated access keeps its omission. The setting source is named in each warning."},
       "policy.LAUNCH_LAUNCHSPEC_COMPLETE_TOOL_REQUIREMENTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unrepresentable optional write grants are omitted; unrepresentable library dependencies make the reported closure incomplete. The setting source is named in each warning."},
       "policy.PROJECT_PATHS_RESOLVE_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A configured optional project path whose canonical target cannot be represented is omitted with its setting key and reason. The setting source is named in each warning."},
@@ -633,7 +654,8 @@
       "policy.WORKTREE_BRANCH_ALIAS": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A case-alias branch collision warns; a directory/file ref conflict stays a git-isolation refusal. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.WORKTREE_MANAGED_PATH": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A requested worktree path that differs from the managed layout is used with a warning. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.PORTS_CONFIG_UNAVAILABLE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An unreadable or denied ports.json falls back to the compiled layout with a warning. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
-      "policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Incomplete provider identity evidence with no conflict warns and settles on the observed exit and result; a conflict still refuses. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."}
+      "policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Incomplete provider identity evidence with no conflict warns and settles on the observed exit and result; a conflict still refuses. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
+      "policy.SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A crash re-drive that assembles differing settlement evidence keeps the sealed copy and warns; the sealed copy always wins, so a strict refusal is not offered. The setting source is named in each warning."}
     }
   },
   "port_build_settings": {
@@ -848,7 +870,7 @@
     "fabric.accept_handoff": {
       "strict": true, "safe": false,
       "type": "bool", "default": false, "status": "wired",
-      "reader": "tools/front-door/src/handoff.rs",
+      "reader": "tools/front-door/src/session_handoff.rs",
       "effect": "Let a Fabric peer start a Claude session on this host through a session hand-off.",
       "trade_off": "Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."
     },
@@ -1066,6 +1088,42 @@
       "reader": "tools/front-door/crates/run/src/writer_dirty.rs, tools/front-door/src/fabric/graph_execution.rs",
       "effect": "What a writer dispatch does when its worktree holds uncommitted edits. wip_commit (default) preserves the edits of a worktree no live writer holds in a local WIP commit before launch, warns WORKTREE_ADOPTED_DIRTY naming the commit and records its id in the graph events. refuse refuses at graph submission before any plan node spends tokens, naming the dirty paths and this setting. continue_in_place keeps the edits and warns. A worktree another lane holds is always refused (boundary 2), as are credential and Git-internal roots under every value. The effective value and its source appear in the refusal and warning. Set with `provenant config set lanes.writer_dirty refuse` or under `[knobs]` in config.toml.",
       "trade_off": "wip_commit preserves work automatically but creates a commit before the plan node; refuse protects token spend but blocks a continued draft until the operator commits or overrides; continue_in_place is cheapest but leaves the writer to respect the edits."
+    },
+    "lanes.settlement.declaration_missing": {
+      "type": "enum", "values": ["review", "fail", "warn", "off"], "default": "review", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "What a model writer's missing declaration does. review (default) holds the lane for review; fail settles it as Failed with the policy source named; warn keeps the outcome and records the signal without a class; off drops it from the class so dependants release. Adapter writers owe no declaration. Sealed into settlement-evidence.json so a re-drive reproduces the decision.",
+      "trade_off": "warn/off suit routes whose model cannot reliably call tools; fail is an owner-configured stop, not a boundary."
+    },
+    "lanes.settlement.declaration_malformed": {
+      "type": "enum", "values": ["review", "fail", "warn", "off"], "default": "review", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "What declarations submitted with none accepted do. review (default) holds for review; fail settles Failed; warn keeps the outcome and records the signal without a class; off drops it from the class. The field diagnostics remain on the sealed fact under every value.",
+      "trade_off": "off hides a malformed channel from the class but the rejected lines stay sealed in the journal."
+    },
+    "lanes.settlement.empty_result": {
+      "type": "enum", "values": ["review", "fail", "warn"], "default": "review", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "What a writer's empty final result does. review (default) holds for review; fail settles Failed; warn keeps the outcome and records the signal without a class. A reader's empty result is always Failed and is not configurable, because its answer is its only product.",
+      "trade_off": "This is guidance for a model that commits its work but returns no text; files are never changed by any value."
+    },
+    "lanes.settlement.uncommitted_work": {
+      "type": "enum", "values": ["hold", "review", "warn", "off"], "default": "hold", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "What edits left on the writer worktree do. hold (default) settles Uncommitted; review holds for review; warn keeps the outcome and records the signal without a class; off drops it from the class. No value touches the files (boundary 2); domains.run.review_exempt still decides which paths count.",
+      "trade_off": "hold protects unreviewed edits; off is for routes whose host commits the work itself."
+    },
+    "lanes.settlement.stray_work": {
+      "type": "enum", "values": ["review", "warn", "off"], "default": "review", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "What an unattributed move in the primary checkout does. review (default) holds for review; warn keeps the outcome and retains PRIMARY_MOVED_UNATTRIBUTED; off skips the primary-checkout check entirely (PrimaryCheckout::NotChecked), saving its Git reads. No value touches the files.",
+      "trade_off": "off saves Git work but cannot see work made in the wrong checkout."
+    },
+    "lanes.settlement.no_work": {
+      "type": "enum", "values": ["detect", "off"], "default": "detect", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "Whether a declared stop_early with a known, unchanged head settles as stopped_no_work. detect (default) does; off keeps DeclaredStop/StoppedEarly. Unknown progress is never no-work under either value, and pushed-then-blocked stays Blocked.",
+      "trade_off": "off preserves the coarse declared stop for hosts that act on it; the pin-relative progress fact is still sealed."
     },
     "lanes.read_source": {
       "type": "string", "default": "auto", "status": "wired",

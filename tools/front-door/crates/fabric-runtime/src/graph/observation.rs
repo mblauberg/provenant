@@ -23,7 +23,7 @@ pub enum AttemptObservation {
     Unknown { attempt_ref: Option<String> },
     Terminal {
         attempt_ref: Option<String>,
-        outcome: AttemptOutcome,
+        outcome: GraphAttemptOutcome,
         launched: bool,
         result: Option<Box<crate::result_capture::CapturedResult>>,
         result_warning: Option<String>,
@@ -33,7 +33,11 @@ pub enum AttemptObservation {
         /// The stop cause the run sealed, if the attempt stopped.
         stop: Option<provenant_records::StopCause>,
         /// Exact settlement classification persisted by the run store.
-        settlement_reason: Option<provenant_records::run::SettlementReason>,
+        settlement_class: Option<provenant_records::run::SettlementClass>,
+        /// The exact typed cause the run sealed, copied into the graph's
+        /// attempt row at settlement. Boxed: a cause can carry two Git oids,
+        /// and this payload must not inflate every observed attempt.
+        cause: Option<Box<provenant_records::run::CauseKind>>,
     },
 }
 

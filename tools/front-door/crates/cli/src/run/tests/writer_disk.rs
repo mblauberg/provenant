@@ -417,7 +417,7 @@ fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn st
 
 #[test]
 fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(), String> {
-    use provenant_records::run::TerminalCause;
+    use provenant_records::run::CauseKind;
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
         critical_free: Some("100B".into()),
@@ -433,7 +433,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     .err()
     .ok_or("writer accepted insufficient disk")?;
     let refusal = disk_policy_refusal(check);
-    assert_eq!(refusal.terminal_cause, TerminalCause::DiskFloor);
+    assert_eq!(refusal.cause, CauseKind::DiskFloor);
     assert!(refusal.policy_code.is_none());
     assert_eq!(
         refusal.resource,
@@ -444,28 +444,25 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
         })
     );
     assert!(
-        TerminalCause::DiskFloor
+        CauseKind::DiskFloor
             .detail()
             .contains("provenant gc --apply")
     );
-    assert!(!TerminalCause::DiskFloor.detail().contains("access grants"));
+    assert!(!CauseKind::DiskFloor.detail().contains("access grants"));
     let unobserved = disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
     assert_eq!(
         unobserved.policy_code.as_deref(),
         Some("SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE")
     );
-    assert_eq!(
-        unobserved.terminal_cause,
-        TerminalCause::DiskObservationUnavailable
-    );
+    assert_eq!(unobserved.cause, CauseKind::DiskObservationUnavailable);
     assert!(unobserved.terminal_note.is_none());
     assert!(
-        !TerminalCause::DiskObservationUnavailable
+        !CauseKind::DiskObservationUnavailable
             .detail()
             .contains("HOST_ERROR_SENTINEL")
     );
     assert!(
-        TerminalCause::DiskObservationUnavailable
+        CauseKind::DiskObservationUnavailable
             .detail()
             .contains("restore the host disk observation")
     );

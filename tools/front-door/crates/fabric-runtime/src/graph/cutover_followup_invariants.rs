@@ -25,20 +25,25 @@ fn route(adapter: &str) -> Value {
 }
 
 fn terminal(
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     stop: Option<provenant_records::StopCause>,
     text: Option<&str>,
 ) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some("fixture/attempt".into()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         outcome,
         launched: true,
         result: text.map(|text| {
             let mut capture = crate::result_capture::ResultCapture::new(None);
             capture.push(text.as_bytes());
             let mut result = capture.finish();
-            result.handoff = provenant_records::handoff::Handoff::from_turns(text, &[]);
+            result.handoff = text
+                .split_once("```handoff\n")
+                .and_then(|(_, remainder)| remainder.split_once("\n```").map(|(json, _)| json))
+                .map_or(Ok(None), |json| {
+                    provenant_records::handoff::Handoff::from_json(json.as_bytes()).map(Some)
+                });
             Box::new(result)
         }),
         result_warning: None,
@@ -46,6 +51,7 @@ fn terminal(
         branch: None,
         commit: None,
         stop,
+        cause: None,
     }
 }
 
@@ -157,7 +163,7 @@ impl AttemptOwner for Owner {
         } = &mut observation
         {
             *attempt_ref = Some(format!("fixture/{}", self.routes.len()));
-            if access == AccessMode::WorktreeWrite && *outcome == AttemptOutcome::Succeeded {
+            if access == AccessMode::WorktreeWrite && *outcome == GraphAttemptOutcome::Succeeded {
                 *branch = Some("feature/x".into());
                 *commit = Some("1111111111111111111111111111111111111111".into());
             }
@@ -237,7 +243,7 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
             route: plan.nodes[0].routes[0].clone(),
             state: AttemptState::Terminal,
             attempt_ref: Some("provider/1".into()),
-            outcome: Some(AttemptOutcome::UsageLimited),
+            outcome: Some(GraphAttemptOutcome::UsageLimited),
             launch_actor: "chair".into(),
             input_cap: None,
             input_cap_source: None,
@@ -245,6 +251,7 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
             usage: None,
             settled: 1,
             stop: Some(StopCause::UsageLimited),
+            cause: None,
         });
         let same_model = ModelId::parse("claude/claude-sonnet-5-5").unwrap();
         let higher_model = ModelId::parse("claude/claude-opus-5-5").unwrap();
@@ -580,8 +587,8 @@ fn retried_land_node_files_a_fresh_inbox_id() {
     let document = land_retry_graph();
     let mut owner = Owner {
         observations: [
-            terminal(AttemptOutcome::Succeeded, None, None),
-            terminal(AttemptOutcome::Succeeded, None, Some("VERDICT: PASS")),
+            terminal(GraphAttemptOutcome::Succeeded, None, None),
+            terminal(GraphAttemptOutcome::Succeeded, None, Some("VERDICT: PASS")),
         ]
         .into(),
         reply: Some(chair_reply("hold")),
@@ -654,7 +661,7 @@ fn retried_loop_node_files_a_fresh_inbox_id() {
     let document = loop_retry_graph();
     let mut owner = Owner {
         observations: [terminal(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             None,
             Some("VERDICT: FAIL"),
         )]
@@ -703,7 +710,7 @@ fn retried_loop_node_files_a_fresh_inbox_id() {
 
     owner.reply = None;
     owner.observations.push_back(terminal(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         None,
         Some("VERDICT: FAIL"),
     ));

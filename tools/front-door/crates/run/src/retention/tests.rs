@@ -575,7 +575,7 @@ fn base_fourteen_migration_preserves_local_delivery_receipts() -> TestResult {
             )
             .is_err()
     );
-    assert_eq!(provenant_sqlite::stored_version(&store.db)?, 15);
+    assert_eq!(provenant_sqlite::stored_version(&store.db)?, 16);
     drop(store);
     let reopened = RunStore::open(&context, &call)?;
     assert_eq!(base_twelve_record(&reopened, remote_id)?, remote);

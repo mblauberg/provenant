@@ -575,12 +575,29 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
                 "publication",
                 data["publication"].as_str().or(lane_publication),
             ),
+            ("pushed", data["pushed_head"].as_str()),
+            ("declaration source", data["declaration_source"].as_str()),
             ("residual tree state", data["residual_tree"].as_str()),
         ] {
             if let Some(value) = value {
                 lines.push(format!("{label}: {value}"));
             }
         }
+    }
+    if full
+        && headed
+        && let Some(paths) = data
+            .get("uncommitted_paths")
+            .and_then(Value::as_array)
+            .filter(|paths| !paths.is_empty())
+    {
+        let listed = paths
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|path| plain_text(path, 256))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("uncommitted paths ({}): {listed}", paths.len()));
     }
     if full
         && headed
@@ -856,7 +873,7 @@ fn output_read(
         true,
     );
     if let (Some(data), Some(row)) = (data.as_object_mut(), json!(projected).as_object()) {
-        data.remove("settlement_reason");
+        data.remove("settlement_class");
         if let Some(grants) = data.get_mut("grants").and_then(Value::as_object_mut) {
             for field in ["write_grants", "read_only_writable"] {
                 if let Some(value) = row.get(field) {
@@ -1066,7 +1083,7 @@ fn output_read_part(
             "attempt_id": id,
             "state": state,
             "reason": reason,
-            "settlement_reason": record.settlement_reason,
+            "settlement_class": record.settlement_class,
             "part": format!("{:?}", command.part).to_lowercase(),
             "offset": chunk.offset,
             "next_offset": chunk.next_offset,
@@ -1097,6 +1114,15 @@ fn output_read_part(
             .flatten();
         data["writer_base"] = json!(base);
         data["writer_head"] = json!(record.head);
+        // Diagnostic Git evidence sealed at the cut; settle never read it.
+        let git = run::settlement_git(session.context.state_root.as_path(), &record)
+            .ok()
+            .flatten();
+        data["pushed_head"] = json!(git.as_ref().and_then(|git| git.pushed_head));
+        if let Some(git) = git.filter(|git| !git.uncommitted_paths.is_empty()) {
+            data["uncommitted_paths"] = json!(git.uncommitted_paths);
+        }
+        data["declaration_source"] = json!(record.declaration_source);
         data["residual_tree"] = residual_tree_evidence(session, &record, call);
         data["publication"] = match &record.delivery {
             Some(delivery)

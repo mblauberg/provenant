@@ -774,7 +774,7 @@ fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std:
             &cancel,
         )?;
         assert_eq!(status.status, GraphStatus::Paused);
-        let explanation = status.advance_error.unwrap();
+        let explanation = status.advance_note.unwrap();
         assert!(explanation.contains(id), "{explanation}");
         assert!(
             explanation.contains(&format!("provenant stop -- {id}")),
@@ -793,7 +793,7 @@ fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std:
         )?;
         assert!(
             retired
-                .advance_error
+                .advance_note
                 .unwrap()
                 .contains("unidentifiable work")
         );

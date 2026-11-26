@@ -947,10 +947,7 @@ mod tests {
             decoded.reason.as_deref(),
             Some("provider output is partial")
         );
-        assert_ne!(
-            decoded.terminal_cause,
-            Some(run::TerminalCause::IdentityMismatch)
-        );
+        assert_ne!(decoded.cause, Some(run::CauseKind::IdentityMismatch));
 
         let complete = make_frames()?;
         assert_eq!(
@@ -979,8 +976,8 @@ mod tests {
         // A complete but malformed record is lost framing, not a final
         // fragment: it settles as a line-specific capture defect.
         assert_eq!(
-            decoded.terminal_cause,
-            Some(run::TerminalCause::ProviderCaptureDefect { line: 2 })
+            decoded.cause,
+            Some(run::CauseKind::ProviderCaptureDefect { line: 2 })
         );
         assert!(decoded.reason.as_deref().is_some_and(|reason| {
             reason.contains("stdout.log line 2")

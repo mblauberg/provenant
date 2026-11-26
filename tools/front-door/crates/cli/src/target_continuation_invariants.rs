@@ -68,9 +68,9 @@ impl AttemptOwner for WrapUpOwner {
         Ok(AttemptObservation::Terminal {
             attempt_ref: Some(reference.into()),
             outcome: if key.attempt == 1 {
-                AttemptOutcome::TaskFailed
+                GraphAttemptOutcome::TaskFailed
             } else {
-                AttemptOutcome::Succeeded
+                GraphAttemptOutcome::Succeeded
             },
             launched: true,
             result: None,
@@ -78,8 +78,9 @@ impl AttemptOwner for WrapUpOwner {
             result_path: None,
             branch: None,
             commit: None,
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             stop: None,
+            cause: None,
         })
     }
 }
