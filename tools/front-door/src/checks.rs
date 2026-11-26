@@ -380,7 +380,7 @@ fn warn_on_attempt_scratch(roots: &provenant_core::Roots) {
     }
     let scratch = roots.state.as_path().join(provenant_run::ATTEMPT_SCRATCH);
     let mut census = provenant_os::disk::DiskReport::with_walk_budget(
-        scratch.clone().into(),
+        scratch.clone(),
         0,
         10_000,
         Duration::from_millis(500),
