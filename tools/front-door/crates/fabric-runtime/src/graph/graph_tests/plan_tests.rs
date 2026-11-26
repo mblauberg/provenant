@@ -1084,42 +1084,80 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
 
 #[test]
 fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
-    for output in [
-        "```handoff\n{}\n```".to_owned(),
-        // The handoff that ends the answer wins (#3910). Prose after a single
-        // block is tolerated (#3928); prose after a repeated last block is not.
-        format!("{STOP}\n{STOP}\nMore text"),
-        STOP.replace("stopped_early", "TOKEN_SENTINEL/private"),
-        STOP.trim_end_matches("\n```").to_owned(),
-        format!(
-            "```handoff\n{}\n```",
-            json!({"schema_version":1,"status":"stopped_early","note":"x".repeat(4097)})
-        ),
-    ] {
-        let mut doc = writer_graph();
-        doc.nodes[0].required_verdict = None;
-        doc.delivery = Some(provenant_records::run::DeliveryMode::Pr);
-        doc.integration_branch = Some("integration".into());
-        let mut owner = fixture_owner(&[&output, "checked"]);
-        let mut journal = MemoryJournal::default();
-        let run = advance(&doc, &mut owner, &mut journal).unwrap();
-        assert!(!run.checkpoint.successful());
-        let progress = &run.checkpoint.nodes[0];
-        assert_eq!(
-            progress.attempts.last().unwrap().stop,
-            Some(provenant_records::StopCause::HandoffMalformed)
-        );
-        assert!(
-            progress
-                .outputs
-                .as_ref()
-                .unwrap()
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("handoff_malformed"))
-        );
-        assert_eq!(owner.deliveries, 0);
-    }
+    // Declarations were submitted and none was accepted, so the sealed snapshot
+    // carries the rejection as a typed failure. Prose and fences in the answer
+    // are never parsed into a handoff.
+    let mut doc = writer_graph();
+    doc.nodes[0].required_verdict = None;
+    doc.delivery = Some(provenant_records::run::DeliveryMode::Pr);
+    doc.integration_branch = Some("integration".into());
+    let mut capture = crate::result_capture::ResultCapture::new(None);
+    capture.push(b"work finished without an accepted declaration\n```handoff\n{}\n```\n");
+    let mut result = capture.finish();
+    result.handoff = Err(provenant_records::handoff::HandoffError::new(
+        "status",
+        "expected status done, stopped_early or blocked",
+    ));
+    let clean = || {
+        let mut capture = crate::result_capture::ResultCapture::new(None);
+        capture.push(b"checked");
+        let mut result = capture.finish();
+        result.handoff = Ok(Some(
+            provenant_records::handoff::Handoff::from_json(
+                br#"{"schema_version":2,"status":"done","note":"checked","remaining":[],"decisions":[],"verify":[]}"#,
+            )
+            .unwrap(),
+        ));
+        result
+    };
+    let mut owner = FakeOwner {
+        observations: [
+            AttemptObservation::Terminal {
+                attempt_ref: None,
+                outcome: AttemptOutcome::Succeeded,
+                launched: true,
+                result: Some(Box::new(result)),
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMalformed),
+                stop: Some(provenant_records::StopCause::HandoffMalformed),
+            },
+            AttemptObservation::Terminal {
+                attempt_ref: None,
+                outcome: AttemptOutcome::Succeeded,
+                launched: true,
+                result: Some(Box::new(clean())),
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
+            },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert!(!run.checkpoint.successful());
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(
+        progress.attempts.last().unwrap().stop,
+        Some(provenant_records::StopCause::HandoffMalformed)
+    );
+    assert!(
+        progress
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("handoff_malformed"))
+    );
+    assert_eq!(owner.deliveries, 0);
 }
 
 #[test]

@@ -482,13 +482,32 @@ fn review_contract_accepts_verdict_followed_only_by_handoff() {
 fn review_contract_accepts_one_verdict_after_a_valid_closed_handoff() {
     let mut node = review("review.tests", "review");
     node.required_verdict = None;
-    let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"Reviewed\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
-    let response = format!(
-        "{}\n{handoff}\nVERDICT: PASS\n",
-        answer(json!([]), "").trim_end()
-    );
+    // The verdict is captured from the answer on its own. The handoff is the
+    // accepted declaration the host sealed, never a fence read from the text.
+    let response = format!("{}\nVERDICT: PASS\n", answer(json!([]), "").trim_end());
+    let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
+    capture.push(response.as_bytes());
+    let mut result = capture.finish();
+    result.handoff = Ok(Some(
+        provenant_records::handoff::Handoff::from_json(
+            br#"{"schema_version":2,"status":"done","note":"Reviewed","remaining":[],"decisions":[],"verify":[]}"#,
+        )
+        .unwrap(),
+    ));
     let mut owner = FakeOwner {
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, &response)].into(),
+        observations: [AttemptObservation::Terminal {
+            attempt_ref: None,
+            outcome: AttemptOutcome::Succeeded,
+            launched: true,
+            result: Some(Box::new(result)),
+            result_warning: None,
+            result_path: None,
+            branch: None,
+            commit: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            stop: None,
+        }]
+        .into(),
         ..Default::default()
     };
     let run = advance(

@@ -6,8 +6,6 @@
 use super::*;
 use provenant_records::{Continuation, NextStep, StopCause, StopFacts};
 
-const DECLARED_STOP_CODES: &[&str] = &["stopped_no_work", "writer_declared_stop"];
-
 /// A cancelled node keeps its failure: no restart follows a fenced stop.
 pub(super) fn fence_stopped(progress: &mut NodeProgress) {
     if progress.state == NodeState::Failed {
@@ -19,13 +17,20 @@ fn fenced(progress: &NodeProgress) -> bool {
     progress.stop_fence
 }
 
-/// A writer that declared its stop: settlement owes a restart or a chair
-/// pause, because a declared stop saved alone reads as settled work.
+/// A writer whose last attempt projected a declared stop: settlement owes a
+/// restart or a chair pause, because a declared stop saved alone reads as
+/// settled work. The projected outcome is the one fact, not the display code.
 fn declared(progress: &NodeProgress) -> bool {
     progress
-        .advance_error_code
-        .as_deref()
-        .is_some_and(|code| DECLARED_STOP_CODES.contains(&code))
+        .attempts
+        .last()
+        .and_then(|attempt| attempt.outcome)
+        .is_some_and(|outcome| {
+            matches!(
+                outcome,
+                AttemptOutcome::DeclaredStop | AttemptOutcome::StoppedNoWork
+            )
+        })
 }
 
 /// The stop a failed node's last launched attempt settled with. The owner's
