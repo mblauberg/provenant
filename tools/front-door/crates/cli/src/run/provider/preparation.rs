@@ -7547,14 +7547,14 @@ mod candidate_walk_regressions {
         ));
         assert!(!has_alternative_account(
             &pinned,
-            &[record("spent", &["gemini-3.8-flash"])],
+            &[record("spent", &["gemini-4-hydrogen"])],
             &refused,
             &policy,
             &catalogue,
         ));
         assert!(has_alternative_account(
             &pinned,
-            &[record("other", &["gemini-3.8-flash"])],
+            &[record("other", &["gemini-4-hydrogen"])],
             &refused,
             &policy,
             &catalogue,
@@ -7570,7 +7570,7 @@ mod candidate_walk_regressions {
         refused.insert(("agy".to_owned(), "other".to_owned()));
         assert!(!has_alternative_account(
             &pinned,
-            &[record("other", &["gemini-3.8-flash"])],
+            &[record("other", &["gemini-4-hydrogen"])],
             &refused,
             &policy,
             &catalogue,
@@ -7615,7 +7615,7 @@ mod candidate_walk_regressions {
             authority_ref: None,
             details: Some(provenant_quota::QuotaDetails {
                 extra: Default::default(),
-                models: vec!["gemini-3.8-flash".into()],
+                models: vec!["gemini-4-hydrogen".into()],
                 ..Default::default()
             }),
             windows: Vec::new(),
