@@ -1201,7 +1201,14 @@ pub use crate::ci::Ci;
 #[derive(Clone, Debug, Subcommand)]
 pub enum Adapter {
     /// Project the registry, compatibility and measured latency as JSON or text
-    Capabilities,
+    Capabilities {
+        /// Show only these adapter ids; an unknown id warns and is skipped (repeatable)
+        #[arg(long = "adapter", value_name = "ID")]
+        adapters: Vec<String>,
+        /// Skip the harness version probe; compatibility reports `version_unread`
+        #[arg(long)]
+        no_probe: bool,
+    },
 }
 #[derive(Clone, Debug, Subcommand)]
 pub enum Hook {

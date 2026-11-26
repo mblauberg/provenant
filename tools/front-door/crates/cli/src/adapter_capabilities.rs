@@ -4,12 +4,13 @@
 //! every enum spelling and every declaration's reason and source. The markdown
 //! view holds only static declarations so the checked section of
 //! `docs/specs/run-launch.md` never depends on the host.
+use provenant_config::overlays::OverlayWarning;
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
 use provenant_core::WallTime;
 use provenant_os::exec::SystemExecutor;
 use provenant_records::{
-    ADAPTER_SPECS, AdapterFact, AdapterSpec, AnsweringModelSource, HarnessInstall, Sourced,
-    TerminalEventStrength, UsageAttribution,
+    ADAPTER_SPECS, AdapterFact, AdapterSpec, AnsweringModelSource, GapAction, GapOrigin, GapRule,
+    HarnessInstall, SessionReference, Sourced, TerminalEventStrength, UsageAttribution,
     control::ControlSupport,
     run::{AttemptState, NetworkAccess},
 };
@@ -165,6 +166,36 @@ impl MatrixSettings {
     }
 }
 
+/// Per-call flags. An empty `adapters` means every row in registry order;
+/// `probe = false` is `--no-probe` and leaves every version unread.
+#[derive(Clone, Copy, Debug)]
+pub struct MatrixArgs<'a> {
+    pub adapters: &'a [String],
+    pub probe: bool,
+}
+
+impl Default for MatrixArgs<'_> {
+    fn default() -> Self {
+        Self {
+            adapters: &[],
+            probe: true,
+        }
+    }
+}
+
+fn sourced<T: Serialize>(value: &Sourced<T>) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "value".into(),
+        serde_json::to_value(&value.value).unwrap_or(Value::Null),
+    );
+    object.insert("layer".into(), json!(value.source.layer.as_str()));
+    if let Some(origin) = &value.source.origin {
+        object.insert("origin".into(), json!(origin));
+    }
+    Value::Object(object)
+}
+
 fn declaration(value: Value, reason: &'static str, source: &'static str) -> Value {
     json!({ "value": value, "reason": reason, "source": source })
 }
@@ -198,6 +229,33 @@ fn usage_declaration(value: AdapterFact<UsageAttribution>) -> Value {
         UsageAttribution::Session => "session",
     };
     declaration(json!(name), value.reason, value.source)
+}
+
+fn session_declaration(value: AdapterFact<SessionReference>) -> Value {
+    let name = match value.value {
+        SessionReference::Reported => "reported",
+        SessionReference::Inferred => "inferred",
+        SessionReference::Absent => "absent",
+    };
+    declaration(json!(name), value.reason, value.source)
+}
+
+fn caveat(value: &provenant_records::Caveat) -> Value {
+    json!({ "code": value.code, "note": value.note, "source": value.source })
+}
+
+fn gap_rule(rule: GapRule) -> Value {
+    let action = match rule.action {
+        GapAction::Warn => "warn",
+        GapAction::Off => "off",
+        GapAction::Refuse => "refuse",
+    };
+    let origin = match rule.origin {
+        GapOrigin::Default => "default",
+        GapOrigin::Policy => "policy",
+        GapOrigin::AdapterEntry => "adapter_entry",
+    };
+    json!({ "action": action, "origin": origin })
 }
 
 fn control_name(value: ControlSupport) -> &'static str {
@@ -257,6 +315,13 @@ fn capabilities(spec: &AdapterSpec) -> Value {
         "answering_model": answering_declaration(spec.capabilities.answering_model),
         "usage_attribution": usage_declaration(spec.capabilities.usage_attribution),
         "live_input": bool_declaration(spec.capabilities.live_input),
+        "session_reference": session_declaration(spec.capabilities.session_reference),
+        "caveats": spec
+            .capabilities
+            .caveats
+            .iter()
+            .map(caveat)
+            .collect::<Vec<_>>(),
     });
     if let Some(install) = spec.install {
         value["native"] = native(install);
@@ -269,6 +334,38 @@ fn capabilities(spec: &AdapterSpec) -> Value {
 fn p50(mut samples: Vec<u64>) -> Option<u64> {
     samples.sort_unstable();
     samples.get(samples.len() / 2).copied()
+}
+
+/// One adapter's latency samples. Each span is independent: a record missing
+/// `first_output_at` is skipped for that span only, and older rows never
+/// recorded it.
+#[derive(Default)]
+struct SpanSamples {
+    start: Vec<u64>,
+    first_output: Vec<u64>,
+    settle: Vec<u64>,
+    newest: Option<WallTime>,
+}
+
+fn span(from: &'static str, to: &'static str, samples: &[u64]) -> Value {
+    json!({
+        "from": from,
+        "to": to,
+        "p50_ms": p50(samples.to_vec()),
+        "samples": samples.len(),
+    })
+}
+
+fn render_measurements(samples: &SpanSamples) -> Value {
+    json!({
+        "samples": samples.start.len(),
+        "measured_at": samples.newest.map(|value| value.to_string()),
+        "spans": {
+            "start": span("queued_at", "started_at", &samples.start),
+            "first_output": span("started_at", "first_output_at", &samples.first_output),
+            "settle": span("last_output_at", "finished_at", &samples.settle),
+        }
+    })
 }
 
 fn measurements(store: Option<&RunStore>, settings: &MatrixSettings) -> BTreeMap<String, Value> {
@@ -292,9 +389,7 @@ fn measurements(store: Option<&RunStore>, settings: &MatrixSettings) -> BTreeMap
         owner: None,
         unseen_after: None,
     };
-    let mut samples: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    let mut settle: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    let mut newest: BTreeMap<String, WallTime> = BTreeMap::new();
+    let mut per_adapter: BTreeMap<String, SpanSamples> = BTreeMap::new();
     let mut read = 0u64;
     loop {
         let Ok(page) = store.lanes(&query, &call) else {
@@ -312,47 +407,48 @@ fn measurements(store: Option<&RunStore>, settings: &MatrixSettings) -> BTreeMap
             else {
                 continue;
             };
-            let (Some(started_at), Some(last_output_at)) = (lane.started_at, lane.last_output_at)
-            else {
-                continue;
-            };
-            let launch_ms = (started_at.as_micros() - lane.queued_at.as_micros()) / 1000;
-            let settle_ms = (finished_at.as_micros() - last_output_at.as_micros()) / 1000;
-            if launch_ms < 0 || settle_ms < 0 {
-                continue;
-            }
-            let launches = samples.entry(provider.to_owned()).or_default();
-            if launches.len() < max_samples {
-                launches.push(launch_ms as u64);
-            }
-            let settles = settle.entry(provider.to_owned()).or_default();
-            if settles.len() < max_samples {
-                settles.push(settle_ms as u64);
-            }
-            newest
-                .entry(provider.to_owned())
-                .and_modify(|value| {
-                    if finished_at > *value {
-                        *value = finished_at;
+            let samples = per_adapter.entry(provider.to_owned()).or_default();
+            let mut contributed = false;
+            if let Some(started_at) = lane.started_at {
+                let ms = (started_at.as_micros() - lane.queued_at.as_micros()) / 1000;
+                if ms >= 0 && samples.start.len() < max_samples {
+                    samples.start.push(ms as u64);
+                    contributed = true;
+                }
+                if let Some(first_output_at) = lane.first_output_at {
+                    let ms = (first_output_at.as_micros() - started_at.as_micros()) / 1000;
+                    if ms >= 0 && samples.first_output.len() < max_samples {
+                        samples.first_output.push(ms as u64);
+                        contributed = true;
                     }
-                })
-                .or_insert(finished_at);
+                }
+            }
+            if let Some(last_output_at) = lane.last_output_at {
+                let ms = (finished_at.as_micros() - last_output_at.as_micros()) / 1000;
+                if ms >= 0 && samples.settle.len() < max_samples {
+                    samples.settle.push(ms as u64);
+                    contributed = true;
+                }
+            }
+            if contributed && samples.newest.is_none_or(|value| finished_at > value) {
+                samples.newest = Some(finished_at);
+            }
         }
         match page.next {
             Some(next) if read < max_attempts => query.after = next,
             _ => break,
         }
     }
-    samples
-        .keys()
-        .map(|adapter| {
-            let value = json!({
-                "launch_ms_p50": p50(samples[adapter].clone()),
-                "settle_ms_p50": p50(settle[adapter].clone()),
-                "samples": samples[adapter].len(),
-                "measured_at": newest[adapter].to_string(),
-            });
-            (adapter.clone(), value)
+    per_adapter
+        .into_iter()
+        .map(|(adapter, samples)| {
+            if samples.start.is_empty()
+                && samples.first_output.is_empty()
+                && samples.settle.is_empty()
+            {
+                return (adapter, Value::Null);
+            }
+            (adapter, render_measurements(&samples))
         })
         .collect()
 }
@@ -366,14 +462,33 @@ fn which(name: &str) -> Option<std::path::PathBuf> {
 }
 
 /// The `data` of result envelope v2 for `provenant adapter capabilities --json`.
+/// Default options project every adapter with the version probe enabled.
 pub fn matrix(state: &Path, project: Option<&Path>, store: Option<&RunStore>) -> Value {
-    let (table, _) = CompatibilityTable::effective(state, project);
+    let (value, _) = matrix_with(state, project, store, &MatrixArgs::default());
+    value
+}
+
+/// The projection plus warnings for skipped overlay entries and unknown ids.
+pub fn matrix_with(
+    state: &Path,
+    project: Option<&Path>,
+    store: Option<&RunStore>,
+    args: &MatrixArgs<'_>,
+) -> (Value, Vec<OverlayWarning>) {
+    let (table, mut warnings) = CompatibilityTable::effective(state, project);
+    let (overlay, overlay_warnings) =
+        provenant_config::adapter_capabilities::effective(state, project);
+    warnings.extend(overlay_warnings);
     let resolved = resolve_config(state, project);
     let settings = resolved
         .as_ref()
         .map(MatrixSettings::from_resolved)
         .unwrap_or_default();
     let providers = resolved.as_ref().map(|config| &config.providers);
+    let project_key =
+        provenant_config::ports::project_key_for(project.unwrap_or(state)).unwrap_or_default();
+    let policy: provenant_records::policy::Policy =
+        provenant_config::policy::read(state, &project_key, &BTreeMap::new());
     let executor = SystemExecutor::new(1).ok();
     let cwd = project.unwrap_or(state);
     let cache = provenant_providers::version::VersionCache::new();
@@ -382,12 +497,20 @@ pub fn matrix(state: &Path, project: Option<&Path>, store: Option<&RunStore>) ->
     } else {
         BTreeMap::new()
     };
-    let adapters = ADAPTER_SPECS
-        .iter()
-        .map(|spec| {
-            let provider_settings = providers.and_then(|map| map.get(spec.identity.name));
-            let probe_enabled = provider_settings.is_none_or(|settings| settings.version_probe);
-            let version = provider_settings
+    let mut adapters = Vec::new();
+    for spec in ADAPTER_SPECS {
+        if !args.adapters.is_empty()
+            && !args
+                .adapters
+                .iter()
+                .any(|id| id.as_str() == spec.identity.name)
+        {
+            continue;
+        }
+        let provider_settings = providers.and_then(|map| map.get(spec.identity.name));
+        let configured_probe = provider_settings.is_none_or(|settings| settings.version_probe);
+        let version = if args.probe {
+            provider_settings
                 .filter(|settings| settings.version_probe)
                 .and_then(|settings| {
                     executor
@@ -403,32 +526,74 @@ pub fn matrix(state: &Path, project: Option<&Path>, store: Option<&RunStore>) ->
                                 settings.version_probe_timeout(spec.identity.name),
                             )
                         })
-                });
-            let mut assessment = table.assess(spec.identity.name, version.as_deref());
-            if !probe_enabled {
-                assessment.reason = Some(format!(
-                    "version probe disabled by providers.{}.version_probe",
-                    spec.identity.name
-                ));
-            }
-            json!({
-                "adapter": spec.identity.name,
-                "family": spec.identity.family,
-                "capabilities": capabilities(spec),
-                "compatibility": {
-                    "version": assessment.version,
-                    "status": status_name(assessment.status),
-                    "reason": assessment.reason,
-                    "issue": assessment.issue,
-                    "recommended_range": assessment.recommended_range,
-                    "layer": assessment.source.layer.as_str(),
-                    "origin": assessment.source.origin,
-                },
-                "measurements": measured.get(spec.identity.name).cloned().unwrap_or(Value::Null),
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({ "adapters": adapters })
+                })
+        } else {
+            None
+        };
+        let mut assessment = table.assess(spec.identity.name, version.as_deref());
+        if !args.probe {
+            assessment.reason = Some("probe skipped by --no-probe".into());
+        } else if !configured_probe {
+            assessment.reason = Some(format!(
+                "version probe disabled by providers.{}.version_probe",
+                spec.identity.name
+            ));
+        }
+        let effective = spec.with_overlay(&overlay);
+        let overlay_block = overlay
+            .entry(effective.identity.name)
+            .map_or(Value::Null, |entry| {
+                json!({
+                    "disabled": entry.disable.iter().map(|item| item.key()).collect::<Vec<_>>(),
+                    "reason": entry.reason.clone(),
+                    "layer": entry.source.layer.as_str(),
+                    "origin": entry.source.origin.clone(),
+                })
+            });
+        let gaps = overlay.gap_policy(effective.identity.name, &policy);
+        adapters.push(json!({
+            "adapter": effective.identity.name,
+            "family": effective.identity.family,
+            "capabilities": capabilities(&effective),
+            "overlay": overlay_block,
+            "on_gap": {
+                "model": gap_rule(gaps.model),
+                "effort": gap_rule(gaps.effort),
+                "image_input": gap_rule(gaps.image_input),
+            },
+            "compatibility": {
+                "version": assessment.version,
+                "status": status_name(assessment.status),
+                "reason": assessment.reason,
+                "issue": assessment.issue,
+                "recommended_range": assessment.recommended_range,
+                "layer": assessment.source.layer.as_str(),
+                "origin": assessment.source.origin,
+            },
+            "measurements": measured
+                .get(effective.identity.name)
+                .cloned()
+                .unwrap_or(Value::Null),
+        }));
+    }
+    for id in args.adapters {
+        if AdapterSpec::get(id).is_none() {
+            warnings.push(OverlayWarning::new(
+                provenant_records::Layer::Launch,
+                "adapter capabilities --adapter",
+                format!("unknown adapter `{id}`"),
+            ));
+        }
+    }
+    let value = json!({
+        "settings": {
+            "measurements": sourced(&settings.measurements),
+            "measurement_samples": sourced(&settings.samples),
+            "measurement_records": sourced(&settings.records),
+        },
+        "adapters": adapters,
+    });
+    (value, warnings)
 }
 
 fn cell(
@@ -456,8 +621,8 @@ fn bool_cell(value: AdapterFact<bool>, label: &str, notes: &mut Vec<String>) -> 
 /// Static declarations only: no host state, no compatibility table, no samples.
 pub fn markdown() -> String {
     let mut notes = Vec::new();
-    let header = "| Adapter | Model | Effort | Image input | Resume | Write | Network | Default network | Lane | Chair | Terminal event | Answering model | Usage attribution | Live input | Hooks | Answer delivery | Precompact context | Instructions |";
-    let separator = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|";
+    let header = "| Adapter | Model | Effort | Image input | Resume | Write | Network | Default network | Lane | Chair | Terminal event | Answering model | Usage attribution | Live input | Session reference | Hooks | Answer delivery | Precompact context | Instructions |";
+    let separator = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|";
     let mut rows = Vec::new();
     for spec in ADAPTER_SPECS {
         let launch = &spec.capabilities.launch;
@@ -477,6 +642,27 @@ pub fn markdown() -> String {
         } else {
             terminal_text.to_owned()
         };
+        let session = spec.capabilities.session_reference;
+        let session_text = match session.value {
+            SessionReference::Reported => "reported",
+            SessionReference::Inferred => "inferred",
+            SessionReference::Absent => "absent",
+        };
+        let session_cell = if session.value == SessionReference::Absent {
+            cell(
+                session_text,
+                Some((session.reason, session.source)),
+                &mut notes,
+            )
+        } else {
+            session_text.to_owned()
+        };
+        for caveat in spec.capabilities.caveats {
+            notes.push(format!(
+                "{}: {}; source={}",
+                caveat.code, caveat.note, caveat.source
+            ));
+        }
         let native = spec.install.map_or_else(
             || {
                 [
@@ -504,7 +690,7 @@ pub fn markdown() -> String {
             },
         );
         rows.push(format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             spec.identity.name,
             bool_cell(launch.model, "model", &mut notes),
             bool_cell(launch.effort, "effort", &mut notes),
@@ -527,6 +713,7 @@ pub fn markdown() -> String {
                 UsageAttribution::Session => "session",
             },
             bool_cell(spec.capabilities.live_input, "live input", &mut notes),
+            session_cell,
             native[0],
             native[1],
             native[2],
@@ -589,7 +776,7 @@ mod tests {
             let capabilities = object["capabilities"].as_object().unwrap();
             let mut declarations = Vec::new();
             for (key, value) in capabilities {
-                if key == "launch" || key == "control" || key == "native" {
+                if key == "launch" || key == "control" || key == "native" || key == "caveats" {
                     continue;
                 }
                 declarations.push(value.clone());
@@ -693,5 +880,158 @@ mod tests {
             Some("version probe disabled by providers.codex.version_probe")
         );
         Ok(())
+    }
+
+    #[test]
+    fn settings_block_reports_sourced_values() {
+        let value = matrix(std::path::Path::new("."), None, None);
+        let settings = value["settings"].as_object().unwrap();
+        assert_eq!(settings["measurements"]["value"], json!(true));
+        assert_eq!(settings["measurements"]["layer"], json!("default"));
+        assert!(settings["measurements"].get("origin").is_none());
+        assert_eq!(settings["measurement_samples"]["value"], json!(200));
+        assert_eq!(settings["measurement_records"]["value"], json!(2000));
+    }
+
+    #[test]
+    fn markdown_names_the_session_reference_and_footnotes_absent_rows() {
+        let text = markdown();
+        assert!(text.contains("| Session reference |"));
+        assert!(text.contains("absent[^"));
+        assert!(text.contains("raw output carries no session id"));
+    }
+
+    #[test]
+    fn every_adapter_has_overlay_gap_and_session_reference() {
+        let args = MatrixArgs {
+            adapters: &[],
+            probe: false,
+        };
+        let value = matrix_with(std::path::Path::new("."), None, None, &args).0;
+        for adapter in value["adapters"].as_array().unwrap() {
+            assert!(adapter["overlay"].is_null(), "{adapter}");
+            assert_eq!(adapter["on_gap"]["model"]["action"], json!("warn"));
+            assert_eq!(adapter["on_gap"]["model"]["origin"], json!("default"));
+            assert_eq!(adapter["on_gap"]["effort"]["action"], json!("warn"));
+            assert_eq!(adapter["on_gap"]["image_input"]["action"], json!("warn"));
+            assert!(adapter["capabilities"]["caveats"].is_array());
+            let session = &adapter["capabilities"]["session_reference"];
+            assert!(
+                session["reason"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty())
+            );
+            assert!(
+                session["source"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty())
+            );
+        }
+    }
+
+    #[test]
+    fn a_fixture_overlay_appears_and_turns_the_effective_fact_false()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&state)?;
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[[adapter_capabilities]]\nadapter = \"codex\"\ndisable = [\"image_input\"]\nreason = \"site policy\"\n",
+        )?;
+        let args = MatrixArgs {
+            adapters: &[],
+            probe: false,
+        };
+        let (value, warnings) = matrix_with(&state, None, None, &args);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let adapter = value["adapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["adapter"] == json!("codex"))
+            .expect("codex row");
+        assert_eq!(adapter["overlay"]["disabled"], json!(["image_input"]));
+        assert_eq!(adapter["overlay"]["reason"], json!("site policy"));
+        assert_eq!(adapter["overlay"]["layer"], json!("host"));
+        assert_eq!(
+            adapter["capabilities"]["launch"]["image_input"]["value"],
+            json!(false)
+        );
+        assert_eq!(
+            adapter["capabilities"]["launch"]["image_input"]["source"],
+            json!(provenant_records::OVERLAY_SOURCE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn no_probe_reports_version_unread() {
+        let args = MatrixArgs {
+            adapters: &[],
+            probe: false,
+        };
+        let value = matrix_with(std::path::Path::new("."), None, None, &args).0;
+        for adapter in value["adapters"].as_array().unwrap() {
+            assert_eq!(adapter["compatibility"]["status"], json!("version_unread"));
+            assert_eq!(
+                adapter["compatibility"]["reason"],
+                json!("probe skipped by --no-probe")
+            );
+        }
+    }
+
+    #[test]
+    fn measurements_off_gives_null() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&state)?;
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[domains.adapter.capabilities]\nmeasurements=false\n",
+        )?;
+        let value = matrix(&state, None, None);
+        assert_eq!(value["settings"]["measurements"]["value"], json!(false));
+        for adapter in value["adapters"].as_array().unwrap() {
+            assert!(adapter["measurements"].is_null());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fixture_timestamps_give_three_p50s() {
+        let samples = SpanSamples {
+            start: vec![1000, 3000, 2000],
+            first_output: vec![500, 700, 600],
+            settle: vec![300, 100, 200],
+            newest: None,
+        };
+        let value = render_measurements(&samples);
+        assert_eq!(value["samples"], json!(3));
+        assert_eq!(value["spans"]["start"]["from"], json!("queued_at"));
+        assert_eq!(value["spans"]["start"]["to"], json!("started_at"));
+        assert_eq!(value["spans"]["start"]["p50_ms"], json!(2000));
+        assert_eq!(value["spans"]["first_output"]["from"], json!("started_at"));
+        assert_eq!(
+            value["spans"]["first_output"]["to"],
+            json!("first_output_at")
+        );
+        assert_eq!(value["spans"]["first_output"]["p50_ms"], json!(600));
+        assert_eq!(value["spans"]["settle"]["from"], json!("last_output_at"));
+        assert_eq!(value["spans"]["settle"]["to"], json!("finished_at"));
+        assert_eq!(value["spans"]["settle"]["p50_ms"], json!(200));
+    }
+
+    #[test]
+    fn unknown_adapter_flag_warns_and_is_skipped() {
+        let unknown = vec!["no-such-adapter".to_owned()];
+        let args = MatrixArgs {
+            adapters: &unknown,
+            probe: false,
+        };
+        let (value, warnings) = matrix_with(std::path::Path::new("."), None, None, &args);
+        assert!(value["adapters"].as_array().unwrap().is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].reason.contains("unknown adapter"));
     }
 }

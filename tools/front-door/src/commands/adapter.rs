@@ -18,7 +18,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let command = inv.command.clone();
     let status = match command {
-        Command::Adapter(provenant_cli::Adapter::Capabilities) => {
+        Command::Adapter(provenant_cli::Adapter::Capabilities { adapters, no_probe }) => {
             let outcome = (|| -> Result<(Value, String), Box<dyn std::error::Error>> {
                 let resolved = crate::roots::resolve(
                     globals,
@@ -53,11 +53,27 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
                 let store = provenant_run::RunStore::open_read_only(&context, &call)
                     .ok()
                     .flatten();
-                let value = provenant_cli::adapter_capabilities::matrix(
+                let args = provenant_cli::adapter_capabilities::MatrixArgs {
+                    adapters: &adapters,
+                    probe: !no_probe,
+                };
+                let (value, warnings) = provenant_cli::adapter_capabilities::matrix_with(
                     resolved.roots.state.as_path(),
                     Some(&resolved.project),
                     store.as_ref(),
+                    &args,
                 );
+                // Under `--json` nothing goes to stderr, so skipped entries and
+                // unknown ids must reach the envelope as typed warnings.
+                for warning in warnings {
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::WarningCode("ADAPTER_CAPABILITIES_OVERLAY"),
+                            warning.to_string(),
+                        )
+                        .subject("adapter capabilities"),
+                    );
+                }
                 let human = human(&value);
                 Ok((value, human))
             })();
@@ -86,10 +102,10 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
 /// One block per adapter. A "no" value names the reason and its source; a yes
 /// value stays compact so a terminal reader can scan the matrix.
 fn human(value: &Value) -> String {
+    let mut lines = Vec::new();
     let Some(adapters) = value["adapters"].as_array() else {
         return String::new();
     };
-    let mut lines = Vec::new();
     for adapter in adapters {
         let name = adapter["adapter"].as_str().unwrap_or("unknown");
         let family = adapter["family"].as_str().unwrap_or("unknown");
@@ -105,16 +121,31 @@ fn human(value: &Value) -> String {
             ("answering model", "answering_model"),
             ("usage attribution", "usage_attribution"),
             ("live input", "live_input"),
+            ("session reference", "session_reference"),
         ] {
             let declaration = if matches!(
                 key,
-                "terminal_event" | "answering_model" | "usage_attribution" | "live_input"
+                "terminal_event"
+                    | "answering_model"
+                    | "usage_attribution"
+                    | "live_input"
+                    | "session_reference"
             ) {
                 &capabilities[key]
             } else {
                 &capabilities["launch"][key]
             };
             push_declaration(&mut lines, label, declaration);
+        }
+        if let Some(caveats) = capabilities["caveats"].as_array() {
+            for caveat in caveats {
+                lines.push(format!(
+                    "  caveat {}: {}; source={}",
+                    caveat["code"].as_str().unwrap_or(""),
+                    caveat["note"].as_str().unwrap_or(""),
+                    caveat["source"].as_str().unwrap_or("")
+                ));
+            }
         }
         if let Some(native) = capabilities.get("native") {
             lines.push("  native".to_owned());
@@ -127,23 +158,56 @@ fn human(value: &Value) -> String {
                 push_declaration(&mut lines, &format!("    {label}"), &native[key]);
             }
         }
+        if !adapter["overlay"].is_null() {
+            let overlay = &adapter["overlay"];
+            let disabled = overlay["disabled"]
+                .as_array()
+                .map_or_else(Vec::new, |items| {
+                    items
+                        .iter()
+                        .map(|item| item.as_str().unwrap_or("").to_owned())
+                        .collect::<Vec<_>>()
+                });
+            lines.push(format!(
+                "  overlay: disabled={} reason={} layer={} origin={}",
+                disabled.join(","),
+                overlay["reason"].as_str().unwrap_or("-"),
+                overlay["layer"].as_str().unwrap_or("-"),
+                overlay["origin"].as_str().unwrap_or("-")
+            ));
+        }
+        for (field, key) in [
+            ("model", "model"),
+            ("effort", "effort"),
+            ("image input", "image_input"),
+        ] {
+            lines.push(format!(
+                "  on_gap {field}: {} ({})",
+                adapter["on_gap"][key]["action"].as_str().unwrap_or("-"),
+                adapter["on_gap"][key]["origin"].as_str().unwrap_or("-")
+            ));
+        }
         let compatibility = &adapter["compatibility"];
         lines.push(format!(
-            "  compatibility: {} ({})",
+            "  compatibility: {} ({}) layer={} origin={}",
             compatibility["status"].as_str().unwrap_or("unknown"),
             compatibility["version"]
                 .as_str()
-                .unwrap_or("version not read")
+                .unwrap_or("version not read"),
+            compatibility["layer"].as_str().unwrap_or("-"),
+            compatibility["origin"].as_str().unwrap_or("-")
         ));
         let measurements = &adapter["measurements"];
         if measurements.is_null() {
             lines.push("  measurements: no samples".to_owned());
         } else {
+            let spans = &measurements["spans"];
             lines.push(format!(
-                "  measurements: launch p50 {} ms, settle p50 {} ms, {} samples",
-                measurements["launch_ms_p50"],
-                measurements["settle_ms_p50"],
-                measurements["samples"]
+                "  measurements: {} samples; start p50 {} ms, first output p50 {} ms, settle p50 {} ms",
+                measurements["samples"],
+                span_p50(&spans["start"]),
+                span_p50(&spans["first_output"]),
+                span_p50(&spans["settle"]),
             ));
         }
         lines.push(String::new());
@@ -151,9 +215,16 @@ fn human(value: &Value) -> String {
     lines.join("\n").trim_end().to_owned()
 }
 
+fn span_p50(span: &Value) -> String {
+    span["p50_ms"]
+        .as_u64()
+        .map_or_else(|| "n/a".to_owned(), |value| value.to_string())
+}
+
 fn push_declaration(lines: &mut Vec<String>, label: &str, declaration: &Value) {
     let value = &declaration["value"];
-    let is_no = *value == json!(false) || *value == json!("none");
+    let is_no = matches!(value, Value::Bool(false))
+        || matches!(value.as_str(), Some("none" | "absent" | "unreported"));
     if is_no {
         lines.push(format!(
             "  {label}: no — {}; source={}",
@@ -188,12 +259,20 @@ mod tests {
                         "resume": {"value": true, "reason": "declared", "source": "row"},
                         "write": {"value": true, "reason": "declared", "source": "row"}
                     },
-                    "terminal_event": {"value": "none", "reason": "process exit is the contract", "source": "row"},
-                    "answering_model": {"value": "stream", "reason": "declared", "source": "row"},
-                    "usage_attribution": {"value": "turn", "reason": "declared", "source": "row"},
-                    "live_input": {"value": false, "reason": "no live input", "source": "row"}
+                    "terminal_event": {"value": "absent", "reason": "process exit is the contract", "source": "row"},
+                    "answering_model": {"value": "unreported", "reason": "declared", "source": "row"},
+                    "usage_attribution": {"value": "attempt", "reason": "declared", "source": "row"},
+                    "live_input": {"value": false, "reason": "no live input", "source": "row"},
+                    "session_reference": {"value": "absent", "reason": "raw output carries no session id", "source": "row"},
+                    "caveats": []
                 },
-                "compatibility": {"status": "unknown", "version": null},
+                "overlay": null,
+                "on_gap": {
+                    "model": {"action": "warn", "origin": "default"},
+                    "effort": {"action": "warn", "origin": "default"},
+                    "image_input": {"action": "warn", "origin": "default"}
+                },
+                "compatibility": {"status": "version_unread", "version": null, "layer": "default", "origin": null},
                 "measurements": null
             }]
         });
@@ -201,7 +280,7 @@ mod tests {
         assert!(text.contains("configured commands take no model selector; source=row"));
         assert!(text.contains("model: no —"));
         assert!(text.contains("effort: yes"));
-        assert!(text.contains("compatibility: unknown"));
+        assert!(text.contains("compatibility: version_unread"));
         assert!(text.contains("measurements: no samples"));
     }
 }
