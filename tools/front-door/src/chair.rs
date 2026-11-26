@@ -1443,7 +1443,7 @@ mod tests {
     #[test]
     fn chair_hook_timeout_comes_from_the_hooks_domain() -> Result<(), super::Error> {
         use super::*;
-        use provenant_core::{PathResolver, RootInputs};
+        use provenant_core::RootInputs;
         let tmp = tempfile::tempdir()?;
         let home = tmp.path().canonicalize()?;
         let mut inputs = RootInputs::new(home.clone(), home.clone());
@@ -1465,7 +1465,7 @@ mod tests {
         };
         assert_eq!(hook_timeout_secs(&context), 10);
         std::fs::write(
-            context.roots.state.join("config.toml"),
+            context.roots.state.as_path().join("config.toml"),
             "schema_version = 1\n[domains.hooks]\ntimeout_secs = 7\n",
         )?;
         assert_eq!(hook_timeout_secs(&context), 7);

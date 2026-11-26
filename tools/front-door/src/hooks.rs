@@ -1590,6 +1590,39 @@ mod answer_delivery_tests {
         )
     }
 
+    // Inner helpers take a concrete deadline; derive it from the same setting
+    // the hook runtime uses instead of pinning a second, stale constant.
+    #[allow(dead_code)] // The worktree driver strips the #[test] items.
+    fn test_budget() -> Duration {
+        provenant_config::hook_budget(provenant_config::DEFAULT_HOOK_TIMEOUT_SECS)
+    }
+
+    #[test]
+    fn local_budget_follows_the_configured_timeout() -> Result<(), Error> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(&state)?;
+        }
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version = 1\n[domains.hooks]\ntimeout_secs = 7\n",
+        )?;
+        let globals = Globals {
+            state_dir: Some(state),
+            project: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let budget = local_budget(&globals, started);
+        assert_eq!(budget.timeout_secs, 7);
+        assert_eq!(budget.duration, Duration::from_millis(4200));
+        assert_eq!(budget.deadline, started + budget.duration);
+        assert!(budget.source.contains("config.toml"), "{}", budget.source);
+        Ok(())
+    }
+
     #[test]
     fn local_gate_modes_and_checkout() -> Result<(), Error> {
         use provenant_cli::domains::{LocalGateMode, LocalGateSettings};
@@ -1734,7 +1767,7 @@ mod answer_delivery_tests {
             answer_delivery_reply(
                 &globals,
                 event,
-                Instant::now() + LOCAL_BUDGET,
+                Instant::now() + test_budget(),
                 false,
                 Some(Harness::Claude),
                 &quiet_failure(),
@@ -1921,7 +1954,7 @@ mod answer_delivery_tests {
                     let result = answer_delivery_reply(
                         &globals,
                         event,
-                        Instant::now() + LOCAL_BUDGET,
+                        Instant::now() + test_budget(),
                         false,
                         Some(Harness::Claude),
                         &quiet_failure(),
@@ -2208,7 +2241,7 @@ mod answer_delivery_tests {
                 let result = answer_delivery_reply(
                     &globals,
                     event,
-                    Instant::now() + LOCAL_BUDGET,
+                    Instant::now() + test_budget(),
                     true,
                     client,
                     &quiet_failure(),
@@ -2286,7 +2319,7 @@ mod answer_delivery_tests {
         retry.delivery.attempts = 1;
         retry.delivery.last_attempt_at = Some(clock.wall_now()?);
         insert(&retry)?;
-        let deadline = Instant::now() + LOCAL_BUDGET;
+        let deadline = Instant::now() + test_budget();
         let (head, next, _) =
             store.read_hook_answer_page(&target, AnswerDeliveryState::Offered, None, deadline)?;
         assert_eq!(head.items.len(), 16);
@@ -2324,7 +2357,7 @@ mod answer_delivery_tests {
             clock.wall_now()?,
             "PostToolUse",
             &CommandPrefix::default(),
-            Instant::now() + LOCAL_BUDGET,
+            Instant::now() + test_budget(),
             &mut pending_marks,
         )?;
         assert_eq!(selected.items.len(), 1);
@@ -2334,17 +2367,17 @@ mod answer_delivery_tests {
             &root,
             &target,
             &pending_marks,
-            Instant::now() + LOCAL_BUDGET,
+            Instant::now() + test_budget(),
         )?;
         let (remaining, _, _) = store.read_hook_answer_page(
             &target,
             AnswerDeliveryState::Queued,
             None,
-            Instant::now() + LOCAL_BUDGET,
+            Instant::now() + test_budget(),
         )?;
         assert_eq!(remaining.items.len(), 1);
         assert_eq!(remaining.items[0].answer, small.answer);
-        let queued = store.read_queued_human_answers(&target, Instant::now() + LOCAL_BUDGET)?;
+        let queued = store.read_queued_human_answers(&target, Instant::now() + test_budget())?;
         assert_eq!(queued.items.len(), 2);
         // An acknowledgement between the page read and offer commit wins.
         db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.state','acknowledged','$.acknowledged_at','2026-10-28T00:00:00.000000Z') AS BLOB) WHERE answer=?1", [small.answer.id.to_string()])?;
@@ -2353,7 +2386,7 @@ mod answer_delivery_tests {
             &target,
             selected,
             clock.wall_now()?,
-            Instant::now() + LOCAL_BUDGET,
+            Instant::now() + test_budget(),
         )?;
         assert!(committed.items.is_empty());
         Ok(())
@@ -2690,6 +2723,6 @@ mod answer_delivery_tests {
         // until released. Returning None here therefore proves the timeout
         // branch; successful release/completion also excludes spawn failure.
         release.send(()).unwrap();
-        completion.recv_timeout(LOCAL_BUDGET).unwrap();
+        completion.recv_timeout(test_budget()).unwrap();
     }
 }

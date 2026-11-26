@@ -977,7 +977,7 @@ mod tests {
 
     #[test]
     fn doctor_reports_the_hook_timeout_source_and_recent_overruns() {
-        use provenant_core::{Clock, PathResolver, RootInputs};
+        use provenant_core::{Clock, RootInputs};
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let mut inputs = RootInputs::new(home.clone(), home.clone());
@@ -993,11 +993,11 @@ mod tests {
                 .unwrap();
         }
         std::fs::write(
-            roots.state.join("config.toml"),
+            roots.state.as_path().join("config.toml"),
             "schema_version = 1\n[domains.hooks]\ntimeout_secs = 7\n",
         )
         .unwrap();
-        let directory = roots.state.join("hooks/diagnostics");
+        let directory = roots.state.as_path().join("hooks/diagnostics");
         std::fs::create_dir_all(&directory).unwrap();
         let at = provenant_os::clock::SystemClock::new().wall_now().unwrap();
         let line = serde_json::json!({
