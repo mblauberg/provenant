@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::{
     Result, TestRig, code, install_fake_claude_auth, register_account, set_claude_config_dir,
@@ -127,12 +127,28 @@ fn fixture() -> Result<TestRig> {
     .join("\n");
     fs::write(&session, format!("{transcript}\n"))?;
     start_chair_session(&rig, "s1")?;
-    let ingested = rig.command(&["telemetry", "ingest", "--provider", "claude", "--json"])?;
-    assert_eq!(
-        code(&ingested),
-        0,
-        "{}",
-        String::from_utf8_lossy(&ingested.stderr.bytes)
+    // Chair start queues a detached incremental ingest worker and returns. The
+    // fixture must wait for that worker's rows instead of starting a second
+    // ingest against the same store, which races the child on a fast runner.
+    let rows = provenant_test_support::wait_for(
+        "detached chair ingest rows",
+        Duration::from_secs(30),
+        || {
+            let mut text = String::new();
+            if let Ok(entries) = fs::read_dir(rig.state.join("ingest")) {
+                for entry in entries.flatten() {
+                    if let Ok(part) = fs::read_to_string(entry.path()) {
+                        text.push_str(&part);
+                    }
+                }
+            }
+            text
+        },
+        |text| !text.trim().is_empty(),
+    )?;
+    assert!(
+        !rows.is_empty(),
+        "chair start did not ingest the fixture transcript"
     );
     Ok(rig)
 }

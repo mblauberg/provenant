@@ -395,9 +395,12 @@ stay read-only to lanes. The host imports verified objects and moves the branch
 by compare-and-swap ([launch custody](run-launch.md#admission-and-custody)). The
 lane Git wrapper binds commands that implicitly target its worktree; commands
 with an explicit repository selector, other repositories and transport endpoints
-pass through unchanged.
-- Why: ordinary Git works in the lane while other lanes' refs and the host's Git
-  behaviour stay protected.
+pass through unchanged. The wrapper unsets `LEFTHOOK` and warns then refuses
+`--no-verify` and `core.hooksPath` overrides before forwarding; a trailing
+value-taking option still reaches Git instead of aborting the wrapper.
+- Why: hooks are part of commit and push, so lane verification cannot be skipped
+  by a flag or a hook-path redirect; ordinary Git still works in the lane while
+  other lanes' refs and the host's Git behaviour stay protected.
 
 ### Native environment and sandbox tool stores
 

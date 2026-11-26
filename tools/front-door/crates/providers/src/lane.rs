@@ -557,6 +557,10 @@ _provenant_git_check_hook_bypass() {
                     _provenant_git_refuse_hook_bypass
                 fi ;;
         esac
+        # A trailing -c/--config-env has no value to walk past. dash treats a
+        # shift past the last argument as a fatal error, which would abort the
+        # wrapper and hide the Git command from the lane.
+        [ "$#" -gt 0 ] || break
         shift
     done
 }
@@ -1451,6 +1455,38 @@ mod tests {
                 .ok_or("missing hook bypass rule")?;
             assert!(warning < refusal, "warning must precede refusal: {stderr}");
         }
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_scans_a_trailing_config_option_without_aborting()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let git = dir.path().join("git");
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(&git, b"#!/bin/sh\nprintf '%s\\n' \"$*\"\n")?;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let run = |args: &[&str]| {
+            provenant_os::fixture::git_command_at(&wrapper)
+                .args(args)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+        };
+        // A value-taking option with no value still reaches Git: the scan must
+        // stop, not shift past the end of the argument list (dash exits there).
+        for args in [vec!["-c"], vec!["--config-env"]] {
+            let output = run(&args)?;
+            assert!(output.status.success(), "{args:?}");
+            assert_eq!(output.stdout, format!("{}\n", args.join(" ")).into_bytes());
+        }
+        // Consuming a real value must not skip a later bypass flag.
+        let refused = run(&["-c", "a=b", "--no-verify", "commit"])?;
+        assert_eq!(refused.status.code(), Some(2));
         Ok(())
     }
 
