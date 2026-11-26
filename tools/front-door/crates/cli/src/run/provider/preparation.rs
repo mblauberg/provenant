@@ -6047,7 +6047,7 @@ pub(super) fn prepare_candidates_inner(
         // that a resumed child stayed in its predecessor session.
         let continuation_expectation = match (
             effective_resume.is_some(),
-            spec.launch.stream.expected_session(),
+            spec.stream.expected_session(),
         ) {
             (true, Some(session)) => Some(run::ContinuationExpectation {
                 session: session.to_owned(),

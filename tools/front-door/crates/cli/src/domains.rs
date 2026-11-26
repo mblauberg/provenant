@@ -802,7 +802,7 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
 ]);
 
-static ENTRIES: [DomainSection; 11] = [
+static ENTRIES: &[DomainSection] = &[
     provenant_config::policy::SECTION,
     crate::wait::SECTION,
     crate::adapter_capabilities::SECTION,
@@ -816,7 +816,7 @@ static ENTRIES: [DomainSection; 11] = [
     crate::steward::SECTION,
     provenant_config::HOOKS_SECTION,
 ];
-pub static SECTIONS: DomainSections<Domains> = DomainSections::new(&ENTRIES);
+pub static SECTIONS: DomainSections<Domains> = DomainSections::new(ENTRIES);
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -924,6 +924,17 @@ mod tests {
             "deserializable domain settings without field metadata:\n{}",
             missing.join("\n")
         );
+    }
+
+    #[test]
+    fn adapter_capability_settings_are_registered() {
+        assert!(SECTIONS.entries.iter().any(|section| {
+            section.name == "adapter"
+                && section
+                    .fields
+                    .iter()
+                    .any(|field| field.path == "capabilities.measurements")
+        }));
     }
 
     // Spec: docs/specs/cli.md#configuration-schema-completeness

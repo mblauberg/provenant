@@ -220,6 +220,7 @@ pub(super) fn prepare_command(
                     ))
                 )
             })?
+            .capabilities
             .launch
             .default_network,
     );
