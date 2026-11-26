@@ -1986,6 +1986,10 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
 // patterns use the slice 12 spellings (`CauseKind`, `SettlementClass`); old names
 // are refused so a compatibility alias cannot silently reintroduce a decider.
 #[test]
+#[allow(
+    clippy::print_stderr,
+    reason = "Preserve the warn-only architecture growth advisory in this developer test."
+)]
 fn settlement_outcome_has_one_writer() -> Result<(), Box<dyn Error>> {
     const SETTLE_OWNER: &str = "crates/records/src/settlement/classify.rs";
     const EVIDENCE_OWNER: &str = "crates/records/src/settlement/mod.rs";
