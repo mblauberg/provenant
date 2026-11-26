@@ -42,6 +42,26 @@ port table or settings, never a name compiled into a reader.
   must not force a layout on the repository or collide with what it has.
 - Owner: `crates/config/src/repository_files.rs`, `crates/config/src/ports.rs`
 
+### The Git context is declared, not compiled in
+
+Every forge operation uses one resolved context: the remote, the default branch
+and the protected-branch set. They come from the `git.remote`,
+`git.default_branch` and `git.protected` port leaves, else from the checkout's
+branch upstream or sole remote, its remote HEAD, and the forge API. A declared
+default branch wins ahead of HEAD; with no HEAD to read, a declared protected
+set is authoritative. Handoff push and branch recreation, cloud fetch and
+`ls-remote`, GC upstream probing, PR base resolution and delivery all receive
+the resolved value rather than reading a local fallback. `provenant config ports`
+prints the effective remote, default branch and protected set with the layer and
+key that supplied each; a conventional `origin`/`main`/`master` may remain as a
+shown default but never decides behaviour for a repository that declares other
+names. There are no new refusals and no multi-remote workflows.
+
+- Why: a repository whose remote is not `origin` and whose default branch is not
+  `main` or `master` must get correct behaviour from every consumer.
+- Spec: `docs/specs/run-git.md#one-resolved-forge-context-per-command`
+- Owner: `crates/config/src/forge.rs`, `crates/config/src/ports.rs`
+
 ## Commands
 
 Command names may change freely, and an unknown command or flag fails with
