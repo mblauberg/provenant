@@ -342,6 +342,9 @@ fn settlement(row: &mut Row, run: &GraphRun) -> bool {
                 Some(GraphAttemptOutcome::Succeeded) => Cause::Check(CheckCause::Completed),
                 Some(GraphAttemptOutcome::AuthRequired) => Cause::Stop(StopCause::AuthRequired),
                 Some(GraphAttemptOutcome::UsageLimited) => Cause::Stop(StopCause::UsageLimited),
+                Some(GraphAttemptOutcome::ModelUnavailable) => {
+                    Cause::Stop(StopCause::ModelUnavailable)
+                }
                 Some(GraphAttemptOutcome::AdapterUnavailable) => {
                     Cause::Stop(StopCause::AdapterUnavailable)
                 }

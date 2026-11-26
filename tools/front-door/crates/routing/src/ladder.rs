@@ -403,21 +403,34 @@ pub(crate) fn pool<'a>(
 }
 
 fn stopped_tier(input: &DepletionInput<'_>) -> Option<String> {
-    input.stopped.tier.clone().or_else(|| {
-        input
-            .config
-            .depletion
-            .tiers
-            .iter()
-            .find(|tier| {
+    if let Some(tier) = &input.stopped.tier {
+        return Some(tier.clone());
+    }
+    let tiers = &input.config.depletion.tiers;
+    tiers
+        .iter()
+        .find(|tier| {
+            pool(input.catalogue, input.config, tier).is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|member| member.model == input.stopped.model)
+            })
+        })
+        .or_else(|| {
+            // An exact pin has no pool selection and need not be listed in any
+            // pool. Its family still names the tier that serves it: the first
+            // tier whose pool holds a model of that family stands in. The
+            // source of that default is the policy's configured `tiers` order.
+            let family = input.stopped.family.as_deref()?;
+            tiers.iter().find(|tier| {
                 pool(input.catalogue, input.config, tier).is_some_and(|members| {
-                    members
-                        .iter()
-                        .any(|member| member.model == input.stopped.model)
+                    members.iter().any(|member| {
+                        family_of(input.catalogue, &member.model).as_deref() == Some(family)
+                    })
                 })
             })
-            .cloned()
-    })
+        })
+        .cloned()
 }
 
 /// A route the ladder may offer: observed ready, not tried, not the account

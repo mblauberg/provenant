@@ -412,3 +412,13 @@ chair as an environment problem; `blocked_dependency` pauses as a wait. Neither 
 | `quarantined` | `chair` | no | 0 |
 | `steered` | `chair` | yes | 0 |
 | `unclassified` | `new_route` | no | 1 |
+
+`model_unavailable` is a route-level depletion, not an adapter failure. The
+typed outcome is preserved through settlement, and the stop moves to the next
+eligible candidate in the same tier as `usage_limited` does, with the rung,
+target and tier of the hand-off recorded on the restart. An exact model pinned
+without a pool still has a tier: the first tier in `depletion.tiers` whose pool
+serves the stopped model's family stands in, so a capacity stop can hand off.
+Only a pinned exact model with no fallback allowed refuses; that refusal names
+the setting that allows one — another entry in `node.routes` or an explicit
+`on_stop.model_unavailable = new_route`.

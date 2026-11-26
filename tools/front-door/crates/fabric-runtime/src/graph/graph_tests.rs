@@ -1076,6 +1076,7 @@ fn check_fallback(
             outcome,
             GraphAttemptOutcome::AuthRequired
                 | GraphAttemptOutcome::UsageLimited
+                | GraphAttemptOutcome::ModelUnavailable
                 | GraphAttemptOutcome::AdapterUnavailable
         );
     assert_eq!(

@@ -234,11 +234,16 @@ warns and forwards the exact invocation; host publication authority is separate.
 
 Capacity (`model_unavailable`) and account allowance (`quota_limited`) are
 separate outcomes. A capacity cooldown is an advisory selection preference that
-explicit models ignore; only a quota-limited outcome cools an account. An
-unclassified provider error settles as `Unclassified`, including after text and
-exit 0, keeps the provider message and is never recorded as usage-limited; a
-clean exit without an error still settles as `Succeeded`. Retries spend the
-single lineage allowance in [retry owner](retry-owner.md).
+explicit models ignore; only a quota-limited outcome cools an account. When the
+provider reports capacity for a launched candidate, the typed outcome stays
+distinct from an adapter failure: the depletion ladder hands the work to the
+next eligible candidate in the same tier and records the cause. An exact model
+pin has no pool selection, so its family names the stand-in tier from
+`depletion.tiers`. An unclassified provider error settles as `Unclassified`,
+including after text and exit 0, keeps the provider message and is never
+recorded as usage-limited; a clean exit without an error still settles as
+`Succeeded`. Retries spend the single lineage allowance in
+[retry owner](retry-owner.md).
 
 - Why: capacity and quota need different remedies without multiplying retries.
 

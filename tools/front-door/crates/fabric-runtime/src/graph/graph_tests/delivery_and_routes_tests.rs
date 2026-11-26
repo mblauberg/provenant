@@ -695,6 +695,13 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
             false,
         ),
         (
+            "reader unavailable model after launch",
+            AccessMode::ReadOnly,
+            true,
+            GraphAttemptOutcome::ModelUnavailable,
+            false,
+        ),
+        (
             "reader unavailable adapter after launch",
             AccessMode::ReadOnly,
             true,
