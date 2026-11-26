@@ -38,7 +38,6 @@ pub(crate) struct NodeDigest {
     pub wait_source: Option<String>,
     pub item: Option<String>,
     pub active_lane: Option<String>,
-    pub last_event_at: Option<String>,
     pub last_event_source: Option<String>,
 }
 
@@ -235,7 +234,6 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             let active_lane = (attempt_presence.as_deref() == Some("live"))
                 .then(|| text(&attempt["attempt_id"], 256))
                 .flatten();
-            let last_event_at = text(&attempt["last_event_at"], 128);
             let last_event_source = text(&attempt["last_event_source"], 128);
             let current_state = lane_state(
                 &state,
@@ -299,8 +297,14 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             if let Some(lane) = &active_lane {
                 line.push_str(&format!(" active_lane={lane}"));
             }
-            if let Some(event) = &last_event_at {
-                line.push_str(&format!(" last_event={event}"));
+            if stalled {
+                line.push_str(" stalled");
+            }
+            if stalled || last_event_at.is_some() {
+                line.push_str(&format!(
+                    " last_event={}",
+                    last_event_at.as_deref().unwrap_or("unknown")
+                ));
                 if let Some(source) = &last_event_source {
                     line.push_str(&format!(" ({source})"));
                 }
@@ -322,12 +326,6 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             }
             if let Some(presence) = &attempt_presence {
                 line.push_str(&format!(" attempt_presence={presence}"));
-            }
-            if stalled {
-                line.push_str(&format!(
-                    " stalled last_event={}",
-                    last_event_at.as_deref().unwrap_or("unknown")
-                ));
             }
             if let Some(verdict) = &review_verdict {
                 line.push_str(&format!(" verdict={verdict}"));
@@ -404,7 +402,6 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 wait_source,
                 item,
                 active_lane,
-                last_event_at,
                 last_event_source,
             })
         })
@@ -605,6 +602,36 @@ mod tests {
                 .contains("stalled last_event=2026-11-26T04:58:00Z")
         );
         assert!(!digest.settled, "a stall is not a settlement");
+    }
+
+    #[test]
+    fn delivery_and_stall_share_one_selected_attempt_event() {
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = json!(WorkKey::new(ProjectId::from_bytes([9; 16]), "g", "n", 1).unwrap());
+        for stalled in [false, true] {
+            let rows = vec![
+                json!({"kind":"node","work_key":key,"state":"running"}),
+                json!({"kind":"attempt","work_key":key,"state":"running","presence":"live",
+                    "stalled":stalled,"last_event_at":"2026-11-26T04:58:00Z",
+                    "last_event_source":"output"}),
+            ];
+            let digest = super::node_digests(&rows).remove(0);
+            assert_eq!(
+                digest.last_event_at.as_deref(),
+                Some("2026-11-26T04:58:00Z")
+            );
+            assert_eq!(digest.last_event_source.as_deref(), Some("output"));
+            assert_eq!(digest.line.matches("last_event=").count(), 1);
+            assert!(
+                digest
+                    .line
+                    .contains("last_event=2026-11-26T04:58:00Z (output)")
+            );
+            assert_eq!(digest.line.contains(" stalled last_event="), stalled);
+        }
     }
 
     #[test]

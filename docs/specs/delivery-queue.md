@@ -118,7 +118,7 @@ uncapped requests which need no waiter directory. Waiting items retain their pla
 and show why they wait. A park transition persists the corresponding graph wake
 with its state, so an interrupted transition can be replayed. `src/tick.rs` advances due graphs and retries pending
 observations; `src/fabric/graph_status.rs` and the existing inbox show item,
-phase, head, round, rung, active lane, last event, source, wait and parked handoff as the board. The checkpoint retains the bounded full writer handoff, including completed reports; the inbox request may show a truncated summary.
+phase, head, round, rung, active lane, last event, source, wait and parked handoff as the board. A stalled attempt and delivery progress share one selected-attempt last event and source in the digest. The checkpoint retains the bounded full writer handoff, including completed reports; the inbox request may show a truncated summary.
 
 Controls act on the exact graph and recorded revision with operation-idempotent
 receipts. `fix` is a chair intent mapped to `steer` for a live attempt or
