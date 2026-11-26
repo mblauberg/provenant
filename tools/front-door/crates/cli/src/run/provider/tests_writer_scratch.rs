@@ -960,6 +960,16 @@ printf 'agy 1.0.0\n'
                 provenant_os::fixture::run_git(&private, &["init", "--bare"])?;
                 std::fs::copy(project.join(".git/config"), private.join("config"))?;
                 std::fs::write(private.join("HEAD"), b"ref: refs/heads/writer\n")?;
+                let registration = private
+                    .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+                    .join(provenant_core::LANE_GIT_REGISTRATION);
+                std::fs::create_dir_all(&registration)?;
+                std::fs::copy(private.join("HEAD"), registration.join("HEAD"))?;
+                std::fs::write(registration.join("commondir"), b"../..\n")?;
+                std::fs::write(
+                    registration.join("gitdir"),
+                    format!("{}\n", worktree.join(".git").display()),
+                )?;
                 std::fs::create_dir_all(paths.temporary.join("candidate-0/git-objects"))?;
                 environment.push(("IDENTITY_PROBE".into(), "writer".into()));
                 environment.push(("EXPECTED_ADMIN".into(), admin.into_os_string()));
