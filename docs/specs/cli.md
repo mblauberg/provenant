@@ -484,7 +484,7 @@ Release checks inspect the artifact to be distributed as well as Git evidence.
 ### Check config reports warm-target provenance
 
 `check config` names the layer that set `build.target` when a layer other than
-the builtin changed the target keying, and warns when the toolchain recorded in
+the builtin changed the target identity, and warns when the toolchain recorded in
 a warm slot differs from the checkout's `rust-toolchain.toml` pin. These are
 findings: the check never rewarms a target or edits a slot record.
 

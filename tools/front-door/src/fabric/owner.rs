@@ -5568,6 +5568,7 @@ impl BoundGraphOwner<'_> {
     }
 }
 
+
 /// How a new graph attempt was admitted.
 enum StartedAttempt {
     /// Submitted; observe the attempt it created.
@@ -5897,3 +5898,4 @@ mod peer_handoff_tests;
 #[cfg(test)]
 #[path = "owner_recovery_rebuild_tests.rs"]
 mod recovery_rebuild_tests;
+

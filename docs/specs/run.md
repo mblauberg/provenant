@@ -87,12 +87,13 @@ index, refs, worktree files and mtimes are never written. Nothing in a slot is c
 and a nonzero `slot_changes` count is reported on stderr. Stream output maps slot paths to
 the worktree; no `--message-format` flag is injected.
 
-The slot's Cargo target is keyed by `build.target` (default `toolchain,worktree`).
-A `toolchain` component is derived from the job's resolved `rustc -vV` identity,
-not its channel string, so a warm cache built by another toolchain cannot be
-reused by a pinned build; a `worktree` component derives from the source
-checkout so workspace-member artifacts are never shared between worktrees. An
-empty key (`shared`) restores the legacy single target. `rustc -vV` release of
+The slot's Cargo target uses `build.target` (default `toolchain,worktree`).
+`toolchain` is derived from the compiler selected by Cargo, including an
+explicit `+toolchain` argument, so a warm cache built by another compiler
+cannot be reused by a pinned build. `worktree` sets a checkout-specific
+workspace-only rustc wrapper, giving workspace members separate fingerprints
+while dependencies stay in the shared target. An empty key (`shared`) restores
+the legacy shared target. `rustc -vV` release of
 the last warm job is kept in `slot.json`; `check config` reports the configured
 source layer and warns when that release differs from the repository's
 `rust-toolchain.toml` pin.
@@ -326,8 +327,9 @@ handoff closes the brief. For a writer the verified pushed delivery head is itse
 a published commit proves new work even when the sealed writer head is absent or still names the
 input commit (#4065). Neither a terminal cause nor a partial signal may call a lane with new
 commits `stopped_no_work`; with a done handoff and a moved head the node succeeds even when a stop
-or a provisional `failed` settlement reason was recorded. The same observed refs decide the advance
-code: `writer_declared_stop` when a stop left new commits, `stopped_no_work` only when it left none.
+or a provisional `failed` settlement reason was recorded. The attempt's classified outcome still
+prevents genuinely failed work from being promoted. The same observed refs decide the advance code:
+`writer_declared_stop` when a stop left new commits, `stopped_no_work` only when it left none.
 A real precondition failure on a successful-looking attempt is reported with its settlement reason
 as a named cause, never bare `other_failure`. Findings counts are not a writer success criterion:
 a writer without a findings contract is not failed for absent findings.

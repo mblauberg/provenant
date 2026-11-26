@@ -79,6 +79,7 @@ pub struct SlotPaths {
     pub root: PathBuf,
     pub repo: PathBuf,
     pub target: PathBuf,
+    pub workspace_wrapper: Option<PathBuf>,
     pub tmp: PathBuf,
     pub record: PathBuf,
     pub job: PathBuf,
@@ -92,6 +93,7 @@ impl SlotPaths {
         Self {
             repo: root.join("repo"),
             target: root.join("target"),
+            workspace_wrapper: None,
             tmp: root.join("tmp"),
             record: root.join("slot.json"),
             job: root.join("job.json"),
@@ -402,6 +404,7 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
     let target = resolve_target(job, context, &paths);
     warnings.extend(target.warnings);
     paths.target = paths.keyed_target(&target.key);
+    paths.workspace_wrapper = target.workspace_wrapper;
     record.warm_toolchain = target.toolchain.as_ref().map(|info| info.release.clone());
     record.warm_toolchain_key = target.toolchain.as_ref().map(|info| info.key());
     record.target_key = (!target.key.is_empty()).then(|| target.key.join("/"));
@@ -1122,6 +1125,7 @@ fn build_context(job: &Job, context: &RunContext) -> BuildContext {
 /// identity, so workspace members cannot be reused across worktrees.
 struct TargetResolution {
     key: Vec<String>,
+    workspace_wrapper: Option<PathBuf>,
     toolchain: Option<super::rust::ToolchainInfo>,
     warnings: Vec<String>,
 }
@@ -1133,6 +1137,7 @@ fn resolve_target(job: &Job, context: &RunContext, paths: &SlotPaths) -> TargetR
     if layout.value.is_empty() {
         return TargetResolution {
             key: Vec::new(),
+            workspace_wrapper: None,
             toolchain: None,
             warnings,
         };
@@ -1141,7 +1146,12 @@ fn resolve_target(job: &Job, context: &RunContext, paths: &SlotPaths) -> TargetR
     let env = super::rust::job_env(&job.env, &build_context, paths);
     let wants_toolchain = layout.value.contains(&BuildTargetKey::Toolchain);
     let toolchain = if wants_toolchain {
-        super::rust::probe_toolchain(&env, &paths.repo)
+        let argv = job
+            .steps
+            .first()
+            .map(|step| step.argv.as_slice())
+            .unwrap_or(&[]);
+        super::rust::probe_job_toolchain(&env, &paths.repo, argv)
     } else {
         None
     };
@@ -1156,6 +1166,7 @@ fn resolve_target(job: &Job, context: &RunContext, paths: &SlotPaths) -> TargetR
         } => repo_common_dir.as_path(),
     };
     let mut key = Vec::new();
+    let mut wrapper_path = None;
     for component in &layout.value {
         match component {
             BuildTargetKey::Toolchain => {
@@ -1163,14 +1174,70 @@ fn resolve_target(job: &Job, context: &RunContext, paths: &SlotPaths) -> TargetR
                     key.push(info.key());
                 }
             }
-            BuildTargetKey::Worktree => key.push(super::rust::worktree_key(checkout)),
+            BuildTargetKey::Worktree => match workspace_wrapper(paths, &build_context, checkout) {
+                Ok(wrapper) => wrapper_path = Some(wrapper),
+                Err(error) => {
+                    warnings.push(format!(
+                            "could not create per-worktree rustc wrapper; isolating the full Cargo target instead: {error}"
+                        ));
+                    key.push(super::rust::worktree_key(checkout));
+                }
+            },
         }
     }
     TargetResolution {
         key,
+        workspace_wrapper: wrapper_path,
         toolchain,
         warnings,
     }
+}
+
+#[cfg(unix)]
+fn workspace_wrapper(
+    paths: &SlotPaths,
+    context: &BuildContext,
+    checkout: &Path,
+) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::symlink;
+
+    let env = std::env::split_paths(&context.host_path)
+        .map(|directory| directory.join("env"))
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "env executable missing")
+        })?;
+    let directory = paths.root.join("workspace-wrappers");
+    fs::create_dir_all(&directory)?;
+    let wrapper = directory.join(super::rust::worktree_key(checkout));
+    let recreate = match fs::symlink_metadata(&wrapper) {
+        Ok(_) => fs::read_link(&wrapper).is_ok_and(|target| target != env),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error),
+    };
+    if recreate {
+        if fs::symlink_metadata(&wrapper).is_ok() {
+            fs::remove_file(&wrapper)?;
+        }
+        match symlink(&env, &wrapper) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(wrapper)
+}
+
+#[cfg(not(unix))]
+fn workspace_wrapper(
+    _paths: &SlotPaths,
+    _context: &BuildContext,
+    _checkout: &Path,
+) -> std::io::Result<PathBuf> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "per-worktree rustc wrapper is not supported on this platform",
+    ))
 }
 
 fn lane_port_plan(state: &Path) -> std::io::Result<Option<provenant_os::lane_ports::Plan>> {
@@ -1650,16 +1717,16 @@ mod tests {
     }
 
     #[test]
-    fn target_key_separates_worktrees_and_toolchains_under_the_slot() {
+    fn target_directory_key_separates_toolchains_and_shares_worktree_dependencies() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = SlotPaths::new(&tmp.path().join("home"), "project", 0);
         let shared = paths.keyed_target(&[]);
-        let first = paths.keyed_target(&["tc-1".into(), "worktree-a".into()]);
-        let other_worktree = paths.keyed_target(&["tc-1".into(), "worktree-b".into()]);
-        let other_toolchain = paths.keyed_target(&["tc-2".into(), "worktree-a".into()]);
+        let first = paths.keyed_target(&["tc-1".into()]);
+        let other_worktree = paths.keyed_target(&["tc-1".into()]);
+        let other_toolchain = paths.keyed_target(&["tc-2".into()]);
         assert_eq!(shared, paths.target);
         assert!(first.starts_with(&paths.target));
-        assert_ne!(first, other_worktree);
+        assert_eq!(first, other_worktree);
         assert_ne!(first, other_toolchain);
         assert!(!first.to_string_lossy().contains(".."));
     }

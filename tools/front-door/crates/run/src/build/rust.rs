@@ -140,6 +140,7 @@ pub fn job_env(
                         | "CARGO_TARGET_DIR"
                         | "CARGO_BUILD_TARGET_DIR"
                         | "CARGO_BUILD_BUILD_DIR"
+                        | "RUSTC_WORKSPACE_WRAPPER"
                         | "TMPDIR"
                         | "TMP"
                         | "TEMP"
@@ -158,6 +159,9 @@ pub fn job_env(
         ("PATH", context.host_path.as_os_str()),
     ] {
         result.push((k.into(), v.into()));
+    }
+    if let Some(wrapper) = &slot.workspace_wrapper {
+        result.push(("RUSTC_WORKSPACE_WRAPPER".into(), wrapper.as_os_str().into()));
     }
     if let Some(home) = &context.rustup_home {
         result.retain(|(key, _)| key != "RUSTUP_HOME");
@@ -294,14 +298,26 @@ pub fn toolchain_drift(pin: &str, warm: Option<&str>) -> Option<(String, String)
 /// Resolve the compiler a job will actually run from the same stable
 /// environment the job uses. Nothing here reads the caller's toolchain pin:
 /// the pin is only compared against this result when reporting drift.
-pub fn probe_toolchain(env: &[(OsString, OsString)], cwd: &Path) -> Option<ToolchainInfo> {
-    let output = Command::new("rustc")
+pub fn cargo_toolchain_selector(argv: &[OsString]) -> Option<OsString> {
+    let argument = argv.get(1)?.to_str()?;
+    argument.strip_prefix('+').map(OsString::from)
+}
+
+pub fn probe_toolchain(
+    env: &[(OsString, OsString)],
+    cwd: &Path,
+    selector: Option<&OsStr>,
+) -> Option<ToolchainInfo> {
+    let mut command = Command::new("rustc");
+    command
         .arg("-vV")
         .current_dir(cwd)
         .env_clear()
-        .envs(env.iter().cloned())
-        .output()
-        .ok()?;
+        .envs(env.iter().cloned());
+    if let Some(selector) = selector {
+        command.env("RUSTUP_TOOLCHAIN", selector);
+    }
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -320,6 +336,15 @@ pub fn probe_toolchain(env: &[(OsString, OsString)], cwd: &Path) -> Option<Toolc
     })
 }
 
+pub fn probe_job_toolchain(
+    env: &[(OsString, OsString)],
+    cwd: &Path,
+    argv: &[OsString],
+) -> Option<ToolchainInfo> {
+    let selector = cargo_toolchain_selector(argv);
+    probe_toolchain(env, cwd, selector.as_deref())
+}
+
 /// Stable identity for a source checkout. Workspace members are keyed by this
 /// so a worktree never reuses another worktree's member artifacts, while
 /// commit-sourced maintenance jobs share one identity across their runs.
@@ -336,6 +361,40 @@ pub fn worktree_key(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn target_probe_uses_the_toolchain_selected_by_cargo_argv() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let rustc = temp.path().join("rustc");
+        std::fs::write(
+            &rustc,
+            "#!/bin/sh\nprintf 'release: %s\\nhost: fixture-host\\ncommit: fixture-commit\\n' \"$RUSTUP_TOOLCHAIN\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let env = [
+            ("PATH".into(), temp.path().as_os_str().to_owned()),
+            ("RUSTUP_TOOLCHAIN".into(), "1.100.0".into()),
+        ];
+        let argv = ["cargo", "+1.99.1", "check"].map(OsString::from);
+        let resolved = super::probe_job_toolchain(&env, temp.path(), &argv).unwrap();
+        assert_eq!(resolved.release, "1.99.1");
+    }
+
+    #[test]
+    fn cargo_toolchain_selector_matches_the_invocation_prefix() {
+        assert_eq!(
+            super::cargo_toolchain_selector(&["cargo".into(), "+1.99.1".into()]),
+            Some("1.99.1".into())
+        );
+        assert_eq!(
+            super::cargo_toolchain_selector(&["cargo".into(), "check".into()]),
+            None
+        );
+    }
+
     use super::*;
     use crate::build::{JobKind, Origin, Output, SnapshotSource, Stack, Step};
     fn job(root: &Path, argv: &[&str]) -> Job {
@@ -502,7 +561,8 @@ mod tests {
             host_path: "/bin".into(),
             verify_base: None,
         };
-        let slot = super::super::slots::SlotPaths::new(Path::new("/home"), "p", 0);
+        let mut slot = super::super::slots::SlotPaths::new(Path::new("/home"), "p", 0);
+        slot.workspace_wrapper = Some("/slot/workspace-wrappers/worktree-a".into());
         let env = |lane: &str| {
             vec![
                 ("PROVENANT_LANE".into(), lane.into()),
@@ -516,6 +576,19 @@ mod tests {
         };
         let a = job_env(&env("a"), &context, &slot);
         assert_eq!(a, job_env(&env("b"), &context, &slot));
+        assert!(a.contains(&("CARGO_TARGET_DIR".into(), slot.target.as_os_str().into())));
+        assert!(a.contains(&(
+            "RUSTC_WORKSPACE_WRAPPER".into(),
+            "/slot/workspace-wrappers/worktree-a".into()
+        )));
+        let mut other_worktree = slot.clone();
+        other_worktree.workspace_wrapper = Some("/slot/workspace-wrappers/worktree-b".into());
+        let b = job_env(&env("b"), &context, &other_worktree);
+        assert!(b.contains(&("CARGO_TARGET_DIR".into(), slot.target.as_os_str().into())));
+        assert!(b.contains(&(
+            "RUSTC_WORKSPACE_WRAPPER".into(),
+            "/slot/workspace-wrappers/worktree-b".into()
+        )));
         assert!(a.contains(&("RUSTFLAGS".into(), "-Dwarnings".into())));
         assert!(a.contains(&("RUSTC_WRAPPER".into(), "/wrapper".into())));
         assert!(

@@ -832,6 +832,7 @@ fn advisory(
     0
 }
 
+
 fn provider_advisory_output(
     output: &[u8],
     moment: Moment,
@@ -1192,6 +1193,17 @@ fn append_session_warning(
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod disk_warning_tests {
+    #[test]
+    fn native_subagent_markers_abstain_from_chair_advisories() {
+        for marker in ["agent_id", "agent_transcript_path"] {
+            let input = format!(r#"{{"{marker}":"agent","hook_event_name":"SessionStart"}}"#);
+            assert!(super::hook_marks_subagent(input.as_bytes()), "{marker}");
+        }
+        assert!(!super::hook_marks_subagent(
+            br#"{"hook_event_name":"SessionStart"}"#
+        ));
+    }
+
     #[allow(unused_imports)] // Also included by the harness=false worktree driver.
     use super::{Moment, append_session_warning};
 

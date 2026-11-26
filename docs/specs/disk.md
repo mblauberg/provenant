@@ -78,9 +78,11 @@ attempts are never collected by a cap.
 
 Lanes do not build. Cargo targets here belong to the chair's warm check, CI or
 a person's worktree; the host never allocates one per lane. A warm slot target
-is keyed by `build.target` (default `toolchain,worktree`): a resolved
-`rustc -vV` component keeps toolchains apart, and a source-checkout component
-keeps workspace-member artifacts from crossing worktrees. Discard archives
+is keyed by `build.target` (default `toolchain,worktree`): `toolchain` uses the
+compiler selected by Cargo, including a `+toolchain` argument, and `worktree`
+sets Cargo's workspace-only rustc wrapper to a checkout-specific executable
+path. Workspace-member artifacts stay isolated while dependency artifacts
+remain in the shared toolchain target. Discard archives
 exclude ignored build output (`target/` and
 any `CACHEDIR.TAG` directory) and expire after `gc.discard_archive_retention`.
 In shared targets, unlocked `debug/incremental/*` sessions older than `gc.idle`

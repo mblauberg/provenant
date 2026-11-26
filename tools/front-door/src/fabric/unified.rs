@@ -1301,6 +1301,7 @@ fn enrich_status_rows_with_facts(
                 PeerResult::Run { data, .. } => match *data {
                     RunResult::Status {
                         attempt: record,
+                        presence,
                         lane_waits,
                         presence,
                         ..

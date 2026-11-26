@@ -797,8 +797,8 @@ pub struct BuildPort {
     pub overflow: String,
     #[serde(default = "default_build_clean")]
     pub clean: String,
-    /// Comma-separated identities that key the slot's Cargo target directory.
-    /// Defaults to `toolchain,worktree`; `shared` keeps the legacy single target.
+    /// Comma-separated identities for the slot's warm Cargo target.
+    /// Defaults to `toolchain,worktree`; `shared` keeps the legacy shared target.
     #[serde(default = "default_build_target")]
     pub target: String,
     #[serde(default)]
@@ -1029,8 +1029,8 @@ impl BuildPort {
         )
     }
 
-    /// Resolve `build.target` into an ordered, deduplicated list of target key
-    /// components. `shared` (or an empty value) keeps the legacy single target.
+    /// Resolve `build.target` into ordered, deduplicated target identities.
+    /// `shared` (or an empty value) keeps the legacy shared target.
     /// Unknown components warn and fall back to the builtin key list.
     pub fn target_layout(&self) -> ResolvedBuildValue<Vec<BuildTargetKey>> {
         let raw = self.target.trim();

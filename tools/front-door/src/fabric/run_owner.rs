@@ -2046,6 +2046,7 @@ impl BinaryRunOwner<'_> {
                 );
                 Ok(RunResult::Status {
                     extra: Default::default(),
+                    presence,
                     lane_waits: waits,
                     presence,
                     attempt,
