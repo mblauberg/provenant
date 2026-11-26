@@ -1334,7 +1334,7 @@ mod tests {
             .collect();
         assert_eq!(missing.len(), 1, "{warnings:?}");
         assert!(missing[0].message.contains(&id.to_string()));
-        let source = missing[0].source.as_ref().ok_or("missing fence source")?;
+        let source = &missing[0].source;
         assert_eq!(source.layer, provenant_records::Layer::Detected);
         assert!(
             source
