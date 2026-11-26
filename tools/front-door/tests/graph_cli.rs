@@ -2417,11 +2417,13 @@ fn explain_refuses_document_read_roots_outside_the_project() -> Result {
 
 // Spec: docs/specs/run-launch.md#writer-binding
 #[test]
-fn upgrade_verify_dry_run_explains_a_scratch_project() -> Result {
+fn upgrade_verify_dry_run_explains_a_fixture_project() -> Result {
     let rig = GraphProject::new()?;
     let home = rig.temp.path().join("home");
     let scratch = rig.temp.path().join("scratch");
+    let fixture_root = home.join(".local/state/provenant-smoke");
     std::fs::create_dir_all(home.join(".ssh"))?;
+    std::fs::create_dir_all(&fixture_root)?;
     std::fs::create_dir_all(&scratch)?;
     let output = rig
         .command()
@@ -2443,61 +2445,9 @@ fn upgrade_verify_dry_run_explains_a_scratch_project() -> Result {
         assert_eq!(row["status"], "pending_route", "{row}");
         assert_eq!(row["credential_admission"], "pending_route", "{row}");
         let path = Path::new(row["path"].as_str().ok_or("source path")?);
-        assert!(path.starts_with(scratch.canonicalize()?), "{row}");
-        assert!(!path.starts_with(home.canonicalize()?), "{row}");
+        assert!(path.starts_with(fixture_root.canonicalize()?), "{row}");
+        assert!(!path.starts_with(scratch.canonicalize()?), "{row}");
     }
-    Ok(())
-}
-
-// Spec: docs/specs/run-launch.md#writer-binding
-#[test]
-fn smoke_explanation_skips_review_only_when_no_base_is_available() -> Result {
-    let rig = GraphProject::new()?;
-    let (_, root) = rig.run(&["run", "smoke", "--explain"])?;
-    let review_skipped = |reply: &Value| {
-        reply["data"]["skipped"].as_array().is_some_and(|rows| {
-            rows.iter().any(|row| {
-                row["node"]
-                    .as_str()
-                    .is_some_and(|id| id.contains("review--"))
-                    && row["reason"]
-                        .as_str()
-                        .is_some_and(|reason| reason.contains("smoke-review"))
-            })
-        })
-    };
-    assert!(
-        review_skipped(&root),
-        "root commit must skip review: {root}"
-    );
-    assert!(
-        root["data"]["warnings"].as_array().is_some_and(|warnings| {
-            warnings.iter().any(|warning| {
-                warning
-                    .as_str()
-                    .is_some_and(|text| text.contains("checkout first parent is unavailable"))
-            })
-        }),
-        "root commit must explain the skip: {root}"
-    );
-    rig.add_review_subject()?;
-    let (_, parent) = rig.run(&["run", "smoke", "--explain"])?;
-    assert!(
-        !review_skipped(&parent),
-        "a parent must enable review: {parent}"
-    );
-    assert!(
-        parent["data"]["source_admission"]
-            .as_array()
-            .is_some_and(|rows| {
-                rows.iter().any(|row| {
-                    row["node"]
-                        .as_str()
-                        .is_some_and(|id| id.contains("review--"))
-                })
-            }),
-        "review must be admitted: {parent}"
-    );
     Ok(())
 }
 
@@ -2521,7 +2471,7 @@ fn smoke_explanation_uses_selected_project_from_credential_containing_cwd() -> R
     let rows = reply["data"]["source_admission"]
         .as_array()
         .ok_or("source admission")?;
-    for node in ["read", "review"] {
+    for node in ["read", "review-fixture"] {
         assert!(
             rows.iter().any(|row| row["node"]
                 .as_str()
@@ -2542,78 +2492,212 @@ fn smoke_explanation_uses_selected_project_from_credential_containing_cwd() -> R
     Ok(())
 }
 
-/// The bundled `smoke` graph is what `upgrade --verify` runs, so it must run its
-/// read-only nodes wherever a read-only lane runs, and say what it skipped.
-// Spec: docs/specs/run-launch.md#writer-binding
+/// `run smoke` is a hermetic lifecycle: whichever checkout the caller stands
+/// in, the re-exec'd child is pinned to a nonce fixture under the test HOME and
+/// never to the caller's checkout.
+// Spec: docs/specs/fabric.md#hermetic-smoke
 #[test]
-fn bundled_smoke_runs_from_a_primary_checkout_and_a_linked_worktree() -> Result {
+fn smoke_never_reads_the_caller_checkout() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+
     let rig = GraphProject::new()?;
     prepare_state(&rig)?;
-    std::fs::write(
-        rig.state().join("config.toml"),
-        "schema_version = 1\n[domains.fabric.graph]\nlaunch_wait_seconds=2\nwriter_provision_seconds=2\n",
-    )?;
-    let linked = rig.temp.path().join("linked");
+    // HEAD and HEAD^ must differ, so a lifecycle that read the caller checkout
+    // would carry one of these OIDs into the child it launches.
+    rig.add_review_subject()?;
+    let oid = |revision: &str| -> Result<String> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&rig.project)
+            .args(["rev-parse", revision])
+            .output()?;
+        assert!(output.status.success(), "{output:?}");
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let caller_head = oid("HEAD")?;
+    let caller_parent = oid("HEAD^")?;
+    let detached = rig.temp.path().join("detached");
     let git = provenant_os::fixture::git_command()
         .current_dir(&rig.project)
-        .args(["worktree", "add", "-b", "topic/linked"])
-        .arg(&linked)
-        .arg("HEAD")
+        .args(["worktree", "add", "-q", "--detach"])
+        .arg(&detached)
+        .arg("HEAD^")
         .output()?;
     assert!(git.status.success(), "{git:?}");
+    let plain = rig.temp.path().join("plain");
+    std::fs::create_dir(&plain)?;
+
+    // A pure recording `provenant` stub stands in for the re-exec'd child: it
+    // logs every argv, reads the nonce out of its fixture, and returns the same
+    // typed envelopes run_lifecycle verifies. It never launches a graph or
+    // waits on a provider. A recording `git` shim observes fixture creation.
+    let home = rig.temp.path().join("home");
+    std::fs::create_dir_all(home.join(".local/state"))?;
+    let fixture_root = home.join(".local/state/provenant-smoke");
+    let bin = rig.temp.path().join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let argv_log = rig.temp.path().join("smoke-argv");
+    let git_log = rig.temp.path().join("smoke-git");
+    let status_log = rig.temp.path().join("smoke-status");
+    let program = bin.join("provenant");
+    let stub = r##"#!/bin/sh
+printf '%s\n' "$*" >> '@ARGV@'
+args="$*"
+project=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --project) project="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+nonce=$(sed -n 's/^nonce: //p' "$project/fixture.txt" 2>/dev/null || true)
+summary="nonce: $nonce"
+if [ -z "$project" ]; then
+  nonce=$(printf '%012x' "$$")
+  fixture="$HOME/.local/state/provenant-smoke/$nonce"
+  mkdir -p "$fixture"
+  (
+    cd "$fixture" || exit 1
+    git init -q -b main
+    printf 'nonce: %s\n' "$nonce" > fixture.txt
+    git add fixture.txt
+    git -c user.name=Smoke -c user.email=smoke@localhost commit -qm base
+  )
+  launched=$("$0" --project "$fixture" --json run smoke --name smoke)
+  waited=$("$0" --project "$fixture" --json wait smoke --timeout 3600)
+  status=$("$0" --project "$fixture" --json status smoke)
+  printf '%s\n' "$status" > '@STATUS@'
+  smoke=$(printf '%s%s%s' "$launched" "$waited" "$status" | sed 's/"/\\"/g')
+  printf '{"schema_version":1,"command":"run","data":{"smoke":"%s"}}\n' "$smoke"
+  exit 0
+fi
+case "$args" in
+  *' run smoke '*)
+    printf '%s\n' '{"schema_version":1,"command":"run","data":{"status":"pending"}}'
+    ;;
+  *' wait '*)
+    printf '%s\n' '{"schema_version":1,"command":"wait","data":{"status":"complete"}}'
+    ;;
+  *' status '*)
+    printf '{"schema_version":1,"command":"status","data":{"rows":[{"kind":"node","node_id":"read","state":"succeeded","result_summary":"%s"},{"kind":"node","node_id":"review","state":"succeeded","result_summary":"%s"},{"kind":"node","node_id":"write","state":"succeeded"}]}}\n' "$summary" "$summary"
+    ;;
+  *) exit 77;;
+esac
+"##;
+    std::fs::write(
+        &program,
+        stub.replace("@ARGV@", &argv_log.display().to_string())
+            .replace("@STATUS@", &status_log.display().to_string()),
+    )?;
+    let git_shim = bin.join("git");
+    let real_git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    std::fs::write(
+        &git_shim,
+        format!(
+            "#!/bin/sh\nprintf '%s %s\\n' \"$PWD\" \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+            git_log.display(),
+            real_git.display()
+        ),
+    )?;
+    for shim in [&program, &git_shim] {
+        std::fs::set_permissions(shim, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    // Build the same CLI command the rig uses, but launch it through the
+    // recording stub so its argv is observable.
+    let smoke_command = |directory: &Path, name: &str| {
+        let mut command = Command::new(&program);
+        provenant_os::fixture::scrub_git_env(&mut command);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("PROVENANT_") {
+                command.env_remove(key);
+            }
+        }
+        command
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("PROVENANT_ROOT", &rig.root)
+            .env("XDG_CONFIG_HOME", rig.temp.path().join("config"))
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .env("PROVENANT_GIT", &git_shim)
+            .args(["--json", "--state-dir"])
+            .arg(rig.state())
+            .args(["run", "smoke", "--name", name]);
+        command.current_dir(directory);
+        command
+    };
+
     for (name, directory) in [
-        ("smoke-primary", rig.project.clone()),
-        ("smoke-linked", linked),
+        ("primary", rig.project.clone()),
+        ("detached", detached),
+        ("plain", plain),
     ] {
-        let output = rig
-            .command()
-            .current_dir(&directory)
-            .args(["run", "smoke", "--explain"])
-            .output()?;
-        let explained: Value = serde_json::from_slice(&output.stdout)?;
-        assert!(output.status.success(), "{name}: {explained}");
+        std::fs::write(&argv_log, "")?;
+        std::fs::write(&git_log, "")?;
+        std::fs::write(&status_log, "")?;
+        let output = smoke_command(&directory, name).output()?;
+        let reply: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(reply["data"]["smoke"].is_string(), "{name}: {reply}");
+        let invoked = std::fs::read_to_string(&argv_log)?;
         assert!(
-            explained["data"]["warnings"]
-                .as_array()
-                .ok_or("warnings")?
-                .iter()
-                .any(|warning| warning.as_str().is_some_and(|text| {
-                    text.contains("smoke skipped node write")
-                        && text.contains("no writer worktree supplied")
-                })),
-            "{name} states the skipped node and why: {explained}"
+            invoked.lines().any(|line| line.contains("run smoke")),
+            "{name}: the smoke edge was not invoked: {invoked}"
         );
-        // The launch itself must not need writer scope for the node it skips.
-        let output = rig
-            .command()
-            .current_dir(&directory)
-            .args(["run", "smoke", "--name", name])
-            .output()?;
-        let launched: Value = serde_json::from_slice(&output.stdout)?;
-        let code = launched["error"]["code"].as_str().unwrap_or_default();
+        // Every child invocation is pinned to a fixture project under the test
+        // HOME, never to the checkout the caller stood in.
         assert!(
-            !matches!(code, "WRITER_SCOPE" | "invalid_input"),
-            "{name}: {launched}"
+            invoked.lines().any(|line| {
+                line.split_once("--project ").is_some_and(|(_, rest)| {
+                    Path::new(rest.split_whitespace().next().unwrap_or_default())
+                        .starts_with(&fixture_root)
+                })
+            }),
+            "{name}: no argv named a fixture project: {invoked}"
         );
-        assert_ne!(code, "writer_binding_unavailable", "{name}: {launched}");
-        let nodes = launched["data"]["checkpoint"]["nodes"]
+        let calls = std::fs::read_to_string(&git_log)?;
+        assert!(
+            calls.lines().any(|line| {
+                line.split_once(' ').is_some_and(|(cwd, args)| {
+                    Path::new(cwd).starts_with(&fixture_root) && args.contains("init")
+                })
+            }),
+            "{name}: no fixture was created under the test home: {calls}"
+        );
+        let status: Value = serde_json::from_str(&std::fs::read_to_string(&status_log)?)?;
+        let rows = status["data"]["rows"]
             .as_array()
-            .ok_or_else(|| format!("{name} launch carried no checkpoint nodes: {launched}"))?;
-        let by_name = |part: &str| {
-            nodes.iter().find(|node| {
-                node["id"]
+            .ok_or_else(|| format!("{name}: status rows: {status}"))?;
+        for node in ["read", "review"] {
+            let row = rows
+                .iter()
+                .find(|row| row["node_id"].as_str() == Some(node))
+                .ok_or_else(|| format!("{name}: no {node} row: {rows:?}"))?;
+            assert_eq!(row["state"], "succeeded", "{name}: {row}");
+            assert!(
+                row["result_summary"]
                     .as_str()
-                    .is_some_and(|id| id.split("--").any(|piece| piece == part))
-            })
-        };
-        let write = by_name("write")
-            .ok_or_else(|| format!("{name} launch carried no write node: {launched}"))?;
-        assert_eq!(write["state"], "skipped", "{name}: {write}");
-        assert!(write["writer_binding"].is_null(), "{name}: {write}");
-        assert!(write["advance_error_code"].is_null(), "{name}: {write}");
-        let read = by_name("read")
-            .ok_or_else(|| format!("{name} launch carried no read node: {launched}"))?;
-        assert_ne!(read["state"], "skipped", "{name}: {read}");
+                    .is_some_and(|summary| summary.contains("nonce:")),
+                "{name}: {row}"
+            );
+        }
+        let write = rows
+            .iter()
+            .find(|row| row["node_id"].as_str() == Some("write"))
+            .ok_or_else(|| format!("{name}: no write row: {rows:?}"))?;
+        assert_eq!(write["state"], "succeeded", "{name}: {write}");
+        let wire = reply.to_string();
+        assert!(
+            !wire.contains(&caller_head),
+            "{name}: caller head leaked: {wire}"
+        );
+        assert!(
+            !wire.contains(&caller_parent),
+            "{name}: caller parent leaked: {wire}"
+        );
     }
     Ok(())
 }

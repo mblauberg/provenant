@@ -56,6 +56,7 @@ mod roots;
 mod scratch_dir;
 mod scratch_owner;
 mod settlement;
+mod smoke;
 mod staging_gc;
 mod state_handoff;
 mod status_wait;
