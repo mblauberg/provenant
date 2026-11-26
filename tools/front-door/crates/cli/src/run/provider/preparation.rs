@@ -299,7 +299,14 @@ fn has_alternative_account(
     route: &ResolvedRoute,
     availability: &[provenant_providers::AvailabilityRecord],
     refused: &std::collections::BTreeSet<(String, String)>,
+    policy: &provenant_routing::OfferEvidencePolicy<'_>,
+    catalogue: &provenant_routing::Catalogue,
 ) -> bool {
+    let Ok(model) =
+        provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+    else {
+        return false;
+    };
     availability.iter().any(|record| {
         record.adapter == route.adapter
             && record.account_key.as_deref() != route.account_key.as_deref()
@@ -307,7 +314,15 @@ fn has_alternative_account(
                 .account_key
                 .as_deref()
                 .is_some_and(|key| !refused.contains(&(record.adapter.clone(), key.to_owned())))
-            && provenant_providers::model_matches_offered(&route.model, &record.observed_models)
+            && record.account_key.as_deref().is_some_and(|key| {
+                provenant_routing::recorded_offer_models(
+                    policy.inputs(Some(record), &route.adapter, key),
+                    &model,
+                    catalogue,
+                    provenant_routing::OfferSupersedence::Allow,
+                )
+                .is_some_and(|evidence| evidence.serves)
+            })
     })
 }
 
@@ -4488,8 +4503,13 @@ pub(super) fn prepare_candidates_inner(
             // model-only pin with another account redraws, and automatic
             // alternatives keep their own readiness; both still prefer an
             // available route.
-            let alternative_account =
-                has_alternative_account(&route, &availability, &refused_accounts);
+            let alternative_account = has_alternative_account(
+                &route,
+                &availability,
+                &refused_accounts,
+                &offer_policy,
+                &catalogue,
+            );
             let pinned_advisory_route = pinned_advisory_candidate(
                 &task_request.choice,
                 &route,
@@ -7497,6 +7517,8 @@ mod candidate_walk_regressions {
     #[test]
     fn alternative_account_must_serve_the_pinned_model() {
         let pinned = route("legacy", "spent");
+        let policy = offer_policy(0);
+        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
         let record = |key: &str, models: &[&str]| provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: pinned.adapter.clone(),
@@ -7512,28 +7534,101 @@ mod candidate_walk_regressions {
             expires_unix_seconds: 1,
         };
         let refused = std::collections::BTreeSet::new();
-        assert!(!has_alternative_account(&pinned, &[], &refused));
+        assert!(!has_alternative_account(
+            &pinned,
+            &[],
+            &refused,
+            &policy,
+            &catalogue
+        ));
         assert!(!has_alternative_account(
             &pinned,
             &[record("spent", &["legacy"])],
-            &refused
+            &refused,
+            &policy,
+            &catalogue,
         ));
         assert!(has_alternative_account(
             &pinned,
             &[record("other", &["legacy"])],
-            &refused
+            &refused,
+            &policy,
+            &catalogue,
         ));
         assert!(!has_alternative_account(
             &pinned,
             &[record("other", &["unrelated"])],
-            &refused
+            &refused,
+            &policy,
+            &catalogue,
         ));
         let mut refused = std::collections::BTreeSet::new();
         refused.insert(("cursor".to_owned(), "other".to_owned()));
         assert!(!has_alternative_account(
             &pinned,
             &[record("other", &["legacy"])],
-            &refused
+            &refused,
+            &policy,
+            &catalogue,
+        ));
+    }
+
+    #[test]
+    fn alternative_account_uses_fresh_snapshot_offer_evidence() {
+        let pinned = route("legacy", "spent");
+        let availability = [provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "cursor".into(),
+            executable: "/fixture/cursor".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: "revision".into(),
+            account_key: Some("other".into()),
+            plan: None,
+            observed_models: Vec::new(),
+            observed_unix_seconds: 90,
+            expires_unix_seconds: 200,
+        }];
+        let scope = provenant_quota::AccountScope {
+            extra: Default::default(),
+            adapter: "cursor".into(),
+            account_key: "other".into(),
+            label: "other".into(),
+        };
+        let mut account = provenant_quota::AccountRecord::empty(scope.clone());
+        account.revision = 1;
+        account.snapshot = Some(provenant_quota::QuotaSnapshot {
+            extra: Default::default(),
+            schema_version: 1,
+            account: scope,
+            revision: 1,
+            status: provenant_quota::QuotaStatus::Available,
+            observed_unix_seconds: 80,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: Some(provenant_quota::QuotaDetails {
+                extra: Default::default(),
+                models: vec!["legacy".into()],
+                ..Default::default()
+            }),
+            windows: Vec::new(),
+        });
+        let accounts = [account];
+        let policy = provenant_routing::OfferEvidencePolicy {
+            accounts: &accounts,
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
+            quota_policies: &[],
+            catalogue_revision: "revision",
+            now_seconds: 100,
+        };
+        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
+        assert!(has_alternative_account(
+            &pinned,
+            &availability,
+            &std::collections::BTreeSet::new(),
+            &policy,
+            &catalogue,
         ));
     }
 

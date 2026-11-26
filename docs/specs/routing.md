@@ -97,6 +97,9 @@ recorded offers and their age, and names an offering account or
 `provenant quota tick` as the repair. The resolve selection line names the
 pinned account even when the account is refused, so another account of the same
 provider is never shown in its place.
+Selection and preparation pass the unmodified probe and snapshot through this
+owner; copying snapshot offers onto the probe would incorrectly assign the
+probe's observation age to the snapshot.
 
 `quota tick` refreshes listings for installed adapters with a registered
 account and an enabled quota probe, concurrently within the tick's remaining

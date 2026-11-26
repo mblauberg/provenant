@@ -770,7 +770,13 @@ fn known_quota_offers_withhold_an_unoffered_agy_account_unpinned()
     }
     // The isolated account has no usage probe: its availability offer list is
     // empty, but its quota snapshot records which models it actually offers.
-    let availability = [agy_account("home-agy"), agy_account("isolated-agy")];
+    let availability = [
+        agy_account("home-agy"),
+        provenant_providers::AvailabilityRecord {
+            observed_unix_seconds: 90,
+            ..agy_account("isolated-agy")
+        },
+    ];
     let account_with_offers = |key: &str, models: &[&str]| {
         let scope = provenant_quota::AccountScope {
             extra: Default::default(),
@@ -1202,6 +1208,7 @@ fn one_offer_owner_reports_source_age_and_supersedence() -> Result<(), Box<dyn s
     let model = ModelId::parse("agy/gemini-3.8-flash")?;
     let probe = provenant_providers::AvailabilityRecord {
         observed_models: vec!["gemini-3.8-flash".into(), "gemini-4-neon".into()],
+        observed_unix_seconds: 90,
         ..agy_account("owner-agy")
     };
     let ctx = context(&catalogue, &config, now()?);
@@ -1214,7 +1221,7 @@ fn one_offer_owner_reports_source_age_and_supersedence() -> Result<(), Box<dyn s
     )
     .expect("a fresh probe is offer evidence");
     assert_eq!(allowed.source, OfferSource::Probe);
-    assert_eq!(allowed.age_seconds, 20);
+    assert_eq!(allowed.age_seconds, 10);
     assert!(
         allowed.serves,
         "a listed model is never refused because its successor is listed"
@@ -1236,6 +1243,7 @@ fn one_offer_owner_reports_source_age_and_supersedence() -> Result<(), Box<dyn s
     // observation time is the age carried by the refusal.
     let unprobed = provenant_providers::AvailabilityRecord {
         observed_models: Vec::new(),
+        observed_unix_seconds: 90,
         ..agy_account("owner-agy")
     };
     let scope = provenant_quota::AccountScope {
