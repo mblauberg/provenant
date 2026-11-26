@@ -175,7 +175,10 @@ launch with no writer skips review with a sourced reason. Supply
 `--set diff_base=BASE` to override the review base; its source is shown in the
 warnings.
 The scratch
-project's host binding is removed when the verification ends, including on
+project is built under a home-relative state path rather than the system
+temporary directory, so a peer can project it as a cross-host project and the
+remote smoke reaches its reader; the `--dry-run` preview uses the same root.
+Its host binding is removed when the verification ends, including on
 failure, so the deleted fixture never
 becomes a registered project. The human view leads with one status line per host
 (`upgraded`, `verified` or `failed - reason`), the smoke host prints its graph
