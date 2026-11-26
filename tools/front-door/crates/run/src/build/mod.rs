@@ -9,6 +9,7 @@ pub mod ledger;
 pub mod local;
 pub mod pathmap;
 pub mod paths;
+pub mod prepare;
 pub(crate) mod process;
 pub mod queue;
 pub mod report;

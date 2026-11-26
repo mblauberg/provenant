@@ -833,6 +833,8 @@ pub struct RouteRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci_scope: Option<CiScopeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_verification: Option<LaneVerificationReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_policy: Option<PrPolicyReceipt>,
     /// The project's declared no-build checks and the layer/key that declared
     /// them, carried on the launch receipt beside `ci_scope` and `pr_policy`.
@@ -1153,6 +1155,23 @@ pub struct CiScopeReceipt {
     pub key: String,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+}
+
+/// The valid project-declared checks included in a writer's launch brief.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneVerificationReceipt {
+    pub checks: Vec<LaneVerificationCheckReceipt>,
+    pub source: crate::Source,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// One tier and command from `verify.lane`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneVerificationCheckReceipt {
+    pub tier: String,
+    pub argv: Vec<String>,
+    pub scope: String,
 }
 
 /// The lane's effective pull-request policy and the layer that set it.
@@ -3571,6 +3590,13 @@ mod tests {
             (
                 "ci_scope",
                 serde_json::json!({"value":"none","source":"default","key":"lanes.ci_scope"}),
+            ),
+            (
+                "lane_verification",
+                serde_json::json!({
+                    "checks":[{"tier":"T1","argv":["cargo","test"],"scope":"crate tests"}],
+                    "source":{"layer":"project","origin":".provenant/ports.json#verify.lane"}
+                }),
             ),
             (
                 "static_checks",

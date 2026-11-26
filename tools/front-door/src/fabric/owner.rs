@@ -5078,18 +5078,18 @@ impl BoundGraphOwner<'_> {
                                 ),
                             )
                         })?;
-            let default_capabilities = configured
+            let default_grants = configured
                 .domains
                 .lanes
                 .projects
                 .get(&self.factory.context.identity.project.to_string())
-                .map(|settings| settings.capabilities.as_slice())
+                .map(|settings| settings.grants.as_slice())
                 .unwrap_or_default();
             let mut capabilities = node
                 .capabilities
                 .unwrap_or_else(|| {
                     if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
-                        default_capabilities
+                        default_grants
                     } else {
                         &[]
                     }

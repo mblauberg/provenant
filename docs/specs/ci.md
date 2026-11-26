@@ -75,7 +75,12 @@ submodule on either side of the change.
 ## Skips are named
 
 A main-tier suite is deferred on a pull request unless the delta touches its
-declared pull-request paths or a full run is requested. Every Cargo package a
+declared pull-request paths or a full run is requested. The `ci:macos` PR label
+forces all macOS suites on the next run, before evidence reuse; dispatches also
+run them. `ci:full`, full dispatch and main run every suite. macOS Clippy paths
+cover every Rust file containing macOS-specific cfg, checked by
+`scripts/check-ci-suites`; cross-platform changes can still break macOS and
+main remains the backstop. Every Cargo package a
 main-tier suite's jobs name in a `package(=NAME)` test filter has at least one
 pull-request path inside that package's directory, either the whole crate or the
 narrow files its filtered tests cover; a glob shared across crates does not

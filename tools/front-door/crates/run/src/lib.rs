@@ -14,8 +14,6 @@ pub use completion::{
     BRIEF_PREAMBLE_KNOB, BriefLayer, BriefPreamble, BriefRole, BriefStaticCheck, BuildCap,
     LaneLocation, PreambleExtras, lane_preamble, lane_preamble_with, route_label,
 };
-mod verification;
-pub use verification::{VerificationResolution, conflict_cause};
 mod controls;
 pub use controls::release_progress;
 mod correlation;
@@ -38,6 +36,8 @@ pub use pr_contribution::{Contribution, Contributions, PullRequest, WEIGHT_ONE};
 pub mod reactions;
 pub use reactions::Reaction;
 mod reader;
+mod verification;
+pub use verification::{VerificationResolution, conflict_cause};
 mod retention;
 mod service;
 #[cfg(test)]

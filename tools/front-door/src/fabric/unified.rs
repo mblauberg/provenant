@@ -105,6 +105,118 @@ pub(crate) fn superseded_notice(
     )
 }
 
+/// The human label of a registered project: its checkout's directory name, or
+/// its stable project id when the path has no name to show.
+fn project_label(binding: &provenant_config::ProjectBinding) -> String {
+    binding
+        .common_dir()
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| binding.project_id().to_string())
+}
+
+/// The registered projects other than `selected` whose journal holds a graph
+/// that `target` names. The caller's own project wins at resolve time, so only
+/// a miss there reaches this search. Sorted by project id for a stable list.
+fn cross_project_matches(
+    roots: &provenant_core::Roots,
+    selected: provenant_core::ProjectId,
+    target: &provenant_cli::Target,
+) -> Result<Vec<provenant_config::ProjectBinding>, Box<dyn std::error::Error>> {
+    let mut bindings = provenant_config::registered_projects(roots)?
+        .into_iter()
+        .filter(|binding| binding.project_id() != selected)
+        .collect::<Vec<_>>();
+    bindings.sort_by_key(|binding| binding.project_id().to_string());
+    let mut matches = Vec::new();
+    for binding in bindings {
+        let project = binding.project_id();
+        let Ok(names) = FileJournal::reserved_graph_ids(&roots.state, project) else {
+            continue;
+        };
+        let resolved = provenant_cli::target::resolve(target, Want::Work, &names, |name| {
+            FileJournal::read_status_checkpoint(&roots.state, project, name)
+        });
+        match resolved {
+            Ok(_) => matches.push(binding),
+            // A whole unreadable graph stays addressable here, as it does in
+            // the caller's project: status names its retirement command.
+            Err(ResolveError::Read(error)) if target.node.is_none() && error.is_unreadable() => {
+                matches.push(binding)
+            }
+            Err(ResolveError::NotFound { .. }) => {}
+            Err(error) => return Err(target_fault(error).into()),
+        }
+    }
+    Ok(matches)
+}
+
+/// One note for a graph found outside the caller's project. It names the owning
+/// project in both the typed warning and the human view, so a reader never
+/// mistakes the rows for the caller's own graph.
+fn cross_project_notice(
+    target: &str,
+    binding: &provenant_config::ProjectBinding,
+) -> provenant_records::warning::Warning {
+    let id = binding.project_id();
+    provenant_records::warning::Warning::new(
+        provenant_records::warning::CROSS_PROJECT_TARGET_FOUND,
+        format!(
+            "{target} was found in project {} ({id}); showing that project's graph",
+            project_label(binding)
+        ),
+    )
+    .subject(target)
+}
+
+/// A refusal that lists every project holding the name, rather than guessing
+/// one. The caller can pick one with `--project PATH`.
+fn cross_project_ambiguity(
+    target: &provenant_cli::Target,
+    matches: &[provenant_config::ProjectBinding],
+) -> TargetFault {
+    let projects = matches
+        .iter()
+        .map(|binding| format!("{} ({})", project_label(binding), binding.project_id()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    TargetFault {
+        outcome: provenant_records::Outcome::Invalid,
+        code: "AMBIGUOUS_TARGET",
+        message: format!(
+            "{target} matches graphs in several projects: {projects}; pass --project PATH to select one"
+        ),
+    }
+}
+
+/// A read-only facade bound to one registered project. Status reads the matched
+/// graph through its owner's identity; only the project binding changes.
+fn project_factory(
+    factory: &Factory,
+    binding: &provenant_config::ProjectBinding,
+) -> Result<Factory, Box<dyn std::error::Error>> {
+    let context = provenant_cli::fabric::Context::open_for_project(
+        factory.context.roots.clone(),
+        &factory.home,
+        binding,
+    )?;
+    let cwd = context.project_root.clone();
+    Ok(Factory {
+        project_attribution: factory.project_attribution,
+        context,
+        clock: SystemClock::new(),
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?,
+        home: factory.home.clone(),
+        cwd,
+        assets: factory.assets.clone(),
+        host_launch: None,
+        workers: factory.workers,
+    })
+}
+
 impl Factory {
     /// The graph work a `NAME[/NODE[#N]]` selector names, or `None` when it
     /// names nothing, including a numbered attempt that has not launched.
@@ -1712,8 +1824,11 @@ pub(crate) fn unified_graph_command(
             ])?,
             _ => None,
         };
+        // One owning project per target when `status NAME` misses in the
+        // caller's project. An empty target list reads the caller's own graph.
+        let mut cross_project = vec![None; targets.len().max(1)];
         if let Some(factory) = factory.as_ref().filter(|factory| !factory.context.in_lane) {
-            for target in targets {
+            for (index, target) in targets.iter().enumerate() {
                 match resolve(
                     &factory.context.roots.state,
                     factory.context.identity.project,
@@ -1724,6 +1839,20 @@ pub(crate) fn unified_graph_command(
                     // graph path names its retirement command.
                     Err(ResolveError::Read(error))
                         if target.node.is_none() && error.is_unreadable() => {}
+                    Err(not_found @ ResolveError::NotFound { .. })
+                        if matches!(command, GraphCommand::Status) =>
+                    {
+                        let matches = cross_project_matches(
+                            &factory.context.roots,
+                            factory.context.identity.project,
+                            target,
+                        )?;
+                        match matches.len() {
+                            0 => return Err(target_fault(not_found).into()),
+                            1 => cross_project[index] = matches.into_iter().next(),
+                            _ => return Err(cross_project_ambiguity(target, &matches).into()),
+                        }
+                    }
                     result => {
                         result.map_err(target_fault)?;
                     }
@@ -1817,7 +1946,8 @@ pub(crate) fn unified_graph_command(
         let mut human = String::new();
         let mut next_steps: Vec<provenant_records::command_result::NextStep> = Vec::new();
         let mut superseded_next: Option<provenant_records::command_result::NextStep> = None;
-        for (selector, graph) in selectors {
+        for (index, (selector, graph)) in selectors.into_iter().enumerate() {
+            let owner = cross_project.get(index).and_then(Option::as_ref);
             let mut input = json!({"op":name,"id":selector});
             match &command {
                 GraphCommand::Status => {}
@@ -1855,15 +1985,24 @@ pub(crate) fn unified_graph_command(
                 documents.push(data);
                 continue;
             };
+            let project_reader = owner
+                .map(|binding| project_factory(factory, binding))
+                .transpose()?;
+            let reader = project_reader.as_ref().unwrap_or(factory);
             let budget = WaitBudget::cli(
-                factory.clock.mono_now(),
-                factory.context.config.graph.launch_wait_seconds,
+                reader.clock.mono_now(),
+                reader.context.config.graph.launch_wait_seconds,
             )?;
-            let mut data = factory.graph_document(input, budget, &cancel)?;
+            let mut data = reader.graph_document(input, budget, &cancel)?;
+            if let Some(binding) = owner {
+                let notice = cross_project_notice(&selector, binding);
+                human.push_str(&format!("note: {}\n", notice.message));
+                provenant_records::warning::warn(notice);
+            }
             if let (Some(rows), Some(graph)) = (data["rows"].as_array_mut(), graph)
-                && !factory.context.in_lane
+                && !reader.context.in_lane
             {
-                localise_worktree_actions(factory, graph, rows);
+                localise_worktree_actions(reader, graph, rows);
             }
             let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
             human.push_str(&render_graph_status(rows));
@@ -1879,8 +2018,8 @@ pub(crate) fn unified_graph_command(
             if matches!(command, GraphCommand::Status)
                 && let Some(name) = graph
                 && let Some(newest) = superseding_handle(
-                    &factory.context.roots.state,
-                    factory.context.identity.project,
+                    &reader.context.roots.state,
+                    reader.context.identity.project,
                     name,
                 )
             {
