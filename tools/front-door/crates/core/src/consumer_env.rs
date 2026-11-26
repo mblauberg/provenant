@@ -242,6 +242,13 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         "lanes launched in a project",
     ),
     var(
+        LANE_PROJECT,
+        Lane,
+        Evolving,
+        "The project the lane was launched in, as its host binding id. Provenant commands in the lane resolve their project from this binding, not from the working directory.",
+        "lanes launched in a project",
+    ),
+    var(
         WORKTREE_GITDIR,
         Lane,
         Evolving,

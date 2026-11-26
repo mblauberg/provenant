@@ -197,6 +197,33 @@ pub fn lookup_project_at_state(
     }))
 }
 
+/// Lookup only: the published binding for a project id the caller already
+/// holds, such as the id a lane's launch declared. Absent when no record is
+/// published; a record that names another project is invalid.
+pub fn lookup_project_by_id(
+    state: &Path,
+    project: ProjectId,
+) -> Result<Option<ProjectBinding>, ConfigError> {
+    let Some(projects) = existing_projects_at_state(state)? else {
+        return Ok(None);
+    };
+    let name = OsString::from(project.to_string());
+    let directory = match projects.open_verified_directory(&name) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    verify_directory(&directory, &project_binding_dir(state, project))?;
+    let Some(bytes) = read_binding_record(&directory)? else {
+        return Ok(None);
+    };
+    let record = decode_binding_record(&bytes)?;
+    if record.project != project {
+        return Err(ConfigError::InvalidProjectBinding);
+    }
+    binding_from_record(record).map(Some)
+}
+
 /// Remove one binding record so the host stops treating the project as
 /// registered. The private host-project directory and its settings stay, so a
 /// later bind of the same common directory reuses them; scheduled collection

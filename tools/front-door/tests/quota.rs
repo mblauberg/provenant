@@ -199,6 +199,8 @@ fn compact_view_bounds_rows_and_full_view_shows_all_configured_accounts() -> Res
 // Invariant: a lane reads quota and routing state but cannot mutate it.
 fn a_lane_reads_quota_but_cannot_mutate_it() -> Result {
     let mut rig = quota_rig()?;
+    let declared = rig.lane_project()?;
+    rig.env.push(declared);
     rig.env
         .push((provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()));
 

@@ -23,6 +23,8 @@ fn host(rig: &TestRig, args: &[&str]) -> Result<Value> {
 fn lane_environment(rig: &mut TestRig, attempt: AttemptId) -> Result {
     let children = rig.state.join("children").join(attempt.to_string());
     std::fs::create_dir_all(&children)?;
+    let declared = rig.lane_project()?;
+    rig.env.push(declared);
     rig.env.extend([
         (
             provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
@@ -34,6 +36,58 @@ fn lane_environment(rig: &mut TestRig, attempt: AttemptId) -> Result {
             attempt.to_string().into(),
         ),
     ]);
+    Ok(())
+}
+
+fn failure(rig: &TestRig, args: &[&str]) -> Result<Value> {
+    let output = rig.command(args)?;
+    assert_ne!(code(&output), 0, "{output:?}");
+    Ok(serde_json::from_slice(&output.stdout.bytes)?)
+}
+
+#[test]
+// Invariant: a read-only lane whose cwd is a pinned snapshot (a standalone
+// repository borrowing the source's objects) resolves its project through the
+// binding its launch declared, never by discovering a checkout from its cwd.
+fn a_snapshot_lane_resolves_its_project_through_the_declared_binding() -> Result {
+    let mut rig = TestRig::new()?;
+    let bound = host(&rig, &["fabric", "identity", "--json"])?;
+    let view = rig.root.join("pinned-view");
+    std::fs::create_dir(&view)?;
+    provenant_os::fixture::run_git(&view, &["init", "-q"])?;
+    std::fs::write(
+        view.join(".git/objects/info/alternates"),
+        format!("{}\n", rig.project.join(".git/objects").display()),
+    )?;
+    let project = std::mem::replace(&mut rig.project, view.clone());
+    // Outside a lane, discovery from the view still refuses its alternates.
+    let refused = failure(&rig, &["fabric", "identity", "--json"])?;
+    assert!(
+        refused.to_string().contains("alternate Git object stores"),
+        "{refused}"
+    );
+    rig.project = project;
+    lane_environment(&mut rig, AttemptId::from_bytes([21; 16]))?;
+    rig.project = view;
+    let identity = host(&rig, &["fabric", "identity", "--json"])?;
+    assert_eq!(identity["data"]["project"], bound["data"]["project"]);
+    assert_eq!(identity["data"]["common_dir"], bound["data"]["common_dir"]);
+    assert_eq!(
+        identity["data"]["cwd"],
+        rig.project.to_str().ok_or("view path")?
+    );
+
+    // A lane without the declared binding refuses and names what to repair.
+    rig.env
+        .retain(|(key, _)| key != provenant_core::consumer_env::LANE_PROJECT);
+    let missing = failure(&rig, &["fabric", "identity", "--json"])?;
+    let message = missing["error"]["message"].as_str().ok_or("message")?;
+    assert!(message.contains("PROVENANT_LANE_PROJECT"), "{missing}");
+    assert!(
+        message.contains(rig.state.to_str().ok_or("state path")?),
+        "{missing}"
+    );
+    assert!(message.contains("relaunch the lane"), "{missing}");
     Ok(())
 }
 
@@ -76,11 +130,6 @@ fn lane_messaging_uses_the_host_attempt_actor_and_closes_with_the_endpoint() -> 
     let project = rig.home.join("repo");
     std::fs::rename(&rig.project, &project)?;
     rig.project = project;
-    for (key, value) in &mut rig.env {
-        if key == "PROVENANT_ROOT" {
-            *value = rig.project.clone().into();
-        }
-    }
     let identity = host(&rig, &["fabric", "identity", "--json"])?;
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());

@@ -87,6 +87,7 @@ port commands, and `caller` ones are read only from the caller.
 | `PROVENANT_LANE_HEAD` | lane | evolving | The branch the writer lane delivers to. | lanes whose task names a head branch |
 | `PROVENANT_LANE_BASE` | lane | evolving | The branch the lane's head is based on. | lanes whose task names both a head and a base |
 | `PROVENANT_PRIMARY_CHECKOUT` | lane | evolving | The project's primary checkout: the directory holding the common Git directory. | lanes launched in a project |
+| `PROVENANT_LANE_PROJECT` | lane | evolving | The project the lane was launched in, as its host binding id. Provenant commands in the lane resolve their project from this binding, not from the working directory. | lanes launched in a project |
 | `PROVENANT_WORKTREE_GITDIR` | lane | evolving | The linked worktree's private Git directory. | writer lanes, and read-only lanes whose worktree has a private Git directory |
 | `PROVENANT_SESSION_ID` | caller | evolving | Names the chair session the chair log records. When unset, settlement finds the session the chair saved. | set by the caller |
 | `PROVENANT_PORT_PHASE` | port_command | evolving | The admission phase the command runs for. | admission port commands |
@@ -117,6 +118,11 @@ port commands, and `caller` ones are read only from the caller.
 
 - Why: a repository's scripts detect and adapt to a lane only through these names.
 - Owner: `crates/core/src/consumer_env.rs`
+- `PROVENANT_LANE_PROJECT` is set by `crates/cli/src/run/provider/project_paths.rs`
+  (`apply_to`), which model lane preparation (`preparation.rs`) and command
+  lane preparation (`command.rs`) both call. In a lane, Fabric contexts
+  (`crates/cli/src/fabric/lane_project.rs`) read only this binding: a missing
+  or unreadable binding refuses and names the variable and the binding path.
 
 ## State root
 

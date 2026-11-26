@@ -497,6 +497,23 @@ impl TestRig {
         }
         Ok(rig)
     }
+    /// The `PROVENANT_LANE_PROJECT` entry a lane launched in this rig's
+    /// project receives. Binds the project on the host first, as a launch does.
+    pub fn lane_project(&self) -> Result<(OsString, OsString)> {
+        let mut inputs = provenant_core::RootInputs::new(self.home.clone(), self.assets.clone());
+        inputs.state_dir = Some(self.state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let common = fs::canonicalize(self.project.join(".git"))?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(common)?,
+        )?;
+        Ok((
+            provenant_core::consumer_env::LANE_PROJECT.into(),
+            binding.project_id().to_string().into(),
+        ))
+    }
+
     /// Exercise commands whose contract requires an absent state root.
     pub fn without_state(self) -> Result<Self> {
         fs::remove_file(self.state.join("config.toml"))?;

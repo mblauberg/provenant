@@ -40,6 +40,8 @@ fn config_advisories_are_silent_in_answer_delivery_hooks() -> Result {
 fn recorded_claude_lane_events_use_native_protocol_and_stay_quiet() -> Result {
     let mut rig = TestRig::new()?;
     // Exercise the lane's pinned Git and private temporary directory too.
+    let declared = rig.lane_project()?;
+    rig.env.push(declared);
     rig.env
         .push((provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()));
     publish_checkpoint(&rig)?;
