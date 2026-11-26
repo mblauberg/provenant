@@ -868,8 +868,10 @@ mod tests {
         );
         forge.review_gate_contexts = vec!["verdict".into()];
         let mut build = evidence(GateResult::Passed, None);
+        build.commit = "h1".into();
         build.checks[0].name = "build".into();
         let mut verdict = evidence(GateResult::Pending, None);
+        verdict.commit = "h1".into();
         verdict.checks[0].name = "verdict".into();
         forge.check_runs.insert("h1".into(), vec![build, verdict]);
 
