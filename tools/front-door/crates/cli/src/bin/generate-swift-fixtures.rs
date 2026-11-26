@@ -209,7 +209,7 @@ mod fixtures {
                "finished_at": "2026-11-02T02:00:00.000000Z", "reason": null})
     }
 
-    fn console() -> Result<Vec<(&'static str, Value)>, String> {
+    pub(super) fn console() -> Result<Vec<(&'static str, Value)>, String> {
         use provenant_cli::console::projection as p;
 
         // The fixture chair's checkpoint is only the template H1, with no
