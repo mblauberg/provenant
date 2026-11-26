@@ -246,7 +246,11 @@ from, or the existing linked checkout's HEAD immediately before the write, unles
 A manual smoke launch with no writer has no scratch commit to review, so review is skipped with a
 reason and the other eligible nodes continue. A node may name a small project-relative fixture;
 the host stages its bytes with the task, so a peer places the same file in its own candidate
-scratch and the brief names its path instead of leaking a caller path. The upgrade smoke fixture
+scratch and the brief names its path instead of leaking a caller path. A remotely placed reader
+binds the receiving peer's checkout `HEAD` as its source and `HEAD^` as its review base, so
+sender-only commits do not prevent the reader from seeing the peer's tree. If Git cannot resolve
+that evidence, the peer warns and falls back to the sender's pins; this does not refuse the launch.
+The upgrade smoke fixture
 carries a fresh random fact that exists only in those staged bytes, never in a committed tree or
 the bundled template, so a reader that reconstructs the answer from source cannot report it; the
 review asserts that exact token against the read lane's report.

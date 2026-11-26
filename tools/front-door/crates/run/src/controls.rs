@@ -1303,13 +1303,39 @@ impl RunStore {
         }
     }
 
-    /// Persist one idempotent steer for an exact running attempt. Settlement
-    /// delivers it at the next turn boundary without interrupting this attempt.
+    /// Persist one idempotent steer for an exact running attempt. The default
+    /// delivery queues the turn at the next boundary without interrupting this
+    /// attempt. `steer_now` asks for the session-preserving restart instead.
     pub fn steer(
         &self,
         id: AttemptId,
         operation_id: OperationId,
         text: &str,
+        call: &Request<'_>,
+    ) -> Result<SteerReceipt> {
+        self.steer_inner(id, operation_id, text, false, call)
+    }
+
+    /// Persist a steer and interrupt through custody once the session identity
+    /// is durable, so settlement resumes the same session with the text. The
+    /// text is durable before any stop is requested, so a custody race cannot
+    /// lose the accepted instruction.
+    pub fn steer_now(
+        &self,
+        id: AttemptId,
+        operation_id: OperationId,
+        text: &str,
+        call: &Request<'_>,
+    ) -> Result<SteerReceipt> {
+        self.steer_inner(id, operation_id, text, true, call)
+    }
+
+    fn steer_inner(
+        &self,
+        id: AttemptId,
+        operation_id: OperationId,
+        text: &str,
+        now: bool,
         call: &Request<'_>,
     ) -> Result<SteerReceipt> {
         if text.trim().is_empty() || text.len() > provenant_records::control::CONTROL_TEXT_BYTES {
@@ -1436,10 +1462,13 @@ impl RunStore {
                 }
             });
         }
-        // The accepted text is durable. A steer never interrupts the running
-        // attempt: settlement delivers the queued turn at the next turn
-        // boundary, continuing a retained session or using the configured
-        // fresh-with-handoff fallback. No stop intent is written here.
+        // The accepted text is durable before any interrupt. Only `--now`
+        // requests a `Steered` stop, and only once the session identity is
+        // durable; the default path leaves the attempt running for settlement
+        // to deliver the queued turn at its next boundary.
+        if now {
+            let _ = self.request_steer_stop_if_ready(id, call);
+        }
         Ok(if already_queued {
             SteerReceipt::AlreadyQueued {
                 message_id: intent.message_id,
@@ -1942,12 +1971,38 @@ impl RunStore {
         })
     }
 
+    /// Request a `Steered` stop only when the running attempt holds a durable,
+    /// validated session for its exact route. Interrupting without one would
+    /// cancel the attempt and strand the accepted text, so this is the gate for
+    /// the `--now` restart path; queued delivery never calls it.
+    fn request_steer_stop_if_ready(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
+        if !self.steer_session_available(id, call)? {
+            return Ok(false);
+        }
+        let record = self.record(id, call)?;
+        let directory = self.attempt_dir(id, false)?;
+        let stopped = match custody::reattach(directory.try_clone()?, Self::scope(&record)) {
+            Ok(handle) => custody::stop(&handle, StopReason::Steered),
+            Err(CustodyError::Filesystem(error)) if error.is_not_found() => custody::request_stop(
+                directory,
+                Self::scope(&record),
+                record.verified_owner.unwrap_or(self.context.actor_id),
+                StopReason::Steered,
+            ),
+            Err(error) => Err(error),
+        };
+        match stopped {
+            Ok(StopReceipt::Requested | StopReceipt::AlreadyRequested)
+            | Err(CustodyError::StopConflict) => Ok(true),
+            Err(error) => Err(RunError::Io(std::io::Error::other(error.to_string()))),
+        }
+    }
+
     /// Whether this running attempt holds a validated, live provider session
     /// bound to its exact route (provider, model, effort, account and
-    /// host-native lane). When it does, settlement can deliver a queued steer
-    /// by continuing that session; otherwise it uses the configured
-    /// fresh-with-handoff fallback. Either way a steer is queued without
-    /// interrupting the attempt, so this is evidence, not a delivery gate.
+    /// host-native lane). For queued delivery this is evidence for how
+    /// settlement delivers the turn, not a gate on acceptance; for `--now` it
+    /// is the condition for requesting the interrupt.
     pub fn steer_session_available(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
         let record = self.record(id, call)?;
         if !matches!(record.state, AttemptState::Running { .. }) {
