@@ -309,6 +309,42 @@ fn without_done(text: &str) -> &str {
     text.strip_suffix(DONE_FENCE).unwrap_or(text)
 }
 
+/// Declare the answer's handoff through the lane's `provenant declare`, as
+/// the brief asks: the journal is the only channel settlement reads, so the
+/// fence stays in the answer only as the prose tests compare. A fence that is
+/// not a schema v2 object with a status (a cut-off or empty block) declares
+/// nothing, like a model that never declared.
+fn declared(answer: String) -> Result<String> {
+    let Some(payload) = answer
+        .rsplit_once("```handoff\n")
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .and_then(|(body, _)| serde_json::from_str::<Value>(body).ok())
+        .filter(|payload| payload["status"].is_string())
+    else {
+        return Ok(answer);
+    };
+    let mut child = std::process::Command::new("provenant")
+        .args(["declare", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("declare stdin")?
+        .write_all(&serde_json::to_vec(&payload)?)?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "fixture declaration refused: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(answer)
+}
+
 fn fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|v| v == "login") && args.get(2).is_some_and(|v| v == "status") {
@@ -558,7 +594,7 @@ fn fixture() -> Result {
         } else {
             "OK".to_owned()
         };
-        let answer = format!("{answer}{DONE_FENCE}");
+        let answer = declared(format!("{answer}{DONE_FENCE}"))?;
         for frame in [
             json!({"type":"system","subtype":"init","session_id":"fixture-session"}),
             json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":answer}],"usage":{"input_tokens":1,"output_tokens":1}}}),
@@ -644,7 +680,7 @@ fn fixture() -> Result {
             );
             for frame in [
                 json!({"type":"thread.started","thread_id":STEER_SESSION}),
-                json!({"type":"item.completed","item":{"type":"agent_message","text":format!("finished in the resumed worktree{DONE_FENCE}")}}),
+                json!({"type":"item.completed","item":{"type":"agent_message","text":declared(format!("finished in the resumed worktree{DONE_FENCE}"))?}}),
                 json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
             ] {
                 writeln!(io::stdout(), "{frame}")?;
@@ -688,7 +724,7 @@ fn fixture() -> Result {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             for frame in [
-                json!({"type":"item.completed","item":{"type":"agent_message","text":format!("finished in the first turn{DONE_FENCE}")}}),
+                json!({"type":"item.completed","item":{"type":"agent_message","text":declared(format!("finished in the first turn{DONE_FENCE}"))?}}),
                 json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
             ] {
                 writeln!(io::stdout(), "{frame}")?;
@@ -811,7 +847,7 @@ fn fixture() -> Result {
             json!({"type":"item.completed","item":{"type":"command_execution",
                 "command":"rg TOKEN=\" source.rs",
                 "aggregated_output":format!("TOKEN=\"{token}\nnext line")}}),
-            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("Final answer: credential {token}{DONE_FENCE}")}}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":declared(format!("Final answer: credential {token}{DONE_FENCE}"))?}}),
             json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
         ] {
             if prompt.contains("corrupt") && frame["item"]["type"] == "command_execution" {
@@ -944,6 +980,7 @@ fn fixture() -> Result {
     } else {
         format!("OK{DONE_FENCE}")
     };
+    let answer = declared(answer)?;
     for frame in [
         json!({"type":"thread.started","thread_id":session}),
         json!({"type":"item.completed","item":{"type":"agent_message","text":answer}}),
