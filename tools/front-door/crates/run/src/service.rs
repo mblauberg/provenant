@@ -1111,6 +1111,7 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
             network: task.access.network,
             write,
             skill_location: task.profile.require_skill_location,
+            gap_policy: provenant_records::GapPolicy::default(),
         });
         check.refusal().map_or(Ok(()), |decision| {
             Err(input_error(ErrorKind::Unsupported, decision.to_string()))
