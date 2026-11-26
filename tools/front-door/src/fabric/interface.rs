@@ -2590,6 +2590,10 @@ impl Factory {
         // sources that writer compares base..pushed head instead of an empty
         // range. A plain writer stays advisory: only a node-sourced review
         // needs the base to be present before launch.
+        // Admission now resolves its own git internally; this later lookup of a
+        // reused worktree's upstream/merge-base still needs the executable, so
+        // bind it here rather than relying on a name that no longer exists.
+        let git = provenant_os::git::git_executable();
         let mut reused_writer_bases = Vec::new();
         for node in &document.nodes {
             if node.access == AccessMode::WorktreeWrite && node.worktree.is_some() {

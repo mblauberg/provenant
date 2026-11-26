@@ -1,6 +1,6 @@
 #[allow(unused_imports)] // The worktree driver includes the peer harness without libtest.
 use super::*;
-use provenant_fabric_runtime::graph::{self, FileJournal, SourceBinding};
+use provenant_fabric_runtime::graph::{self, FileJournal};
 use provenant_fabric_runtime::runs::SubmissionReceipt;
 use serde_json::json;
 
@@ -441,7 +441,12 @@ fn peer_reader_is_pinned_to_the_initiator_subject() -> TestResult {
     .ok_or("receiver graph missing")?;
     let node = execution.document.nodes.first().ok_or("receiver node")?;
     let bound = node.source.as_ref().and_then(|binding| match binding {
-        SourceBinding::Commit { commit } => Some(commit.as_str()),
+        // This module is also compiled under `feature = "fixture"` without
+        // libtest, where the `#[test]` bodies are absent and a top-level
+        // import would be unused. Keep the path at its single use site.
+        provenant_fabric_runtime::graph::SourceBinding::Commit { commit } => {
+            Some(commit.as_str())
+        }
         _ => None,
     });
     assert_eq!(
