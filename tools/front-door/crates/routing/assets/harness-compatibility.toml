@@ -1,0 +1,16 @@
+# Bundled harness-version compatibility table.
+#
+# Schema: one [[harness_compatibility]] row per adapter, keyed by `adapter`.
+#   adapter     = "codex"
+#   provenant   = ">=2.9"          # optional; applies only when this build matches
+#   recommended = ">=0.60"         # optional; advisory version floor
+#   ranges = [
+#     { range = "<0.50", status = "unsupported", reason = "…", issue = 1234 },
+#   ]
+#
+# `range` is a comma-separated list of >=, >, <, <= and = comparators over
+# MAJOR[.MINOR[.PATCH]]. The first matching row decides the status; an unreadable
+# version is "unknown" and no match is "supported". Overlay rows in host and
+# project config.toml replace a bundled row by adapter.
+#
+# Link every entry to its issue. No entries are bundled today.

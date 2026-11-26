@@ -1440,3 +1440,21 @@ strength = "warn"
 refusable = true
 knob = "policy.PR_ATTEMPT_STATE"
 justification = "Opening a pull request is not an authority act: an attempt that did not end succeeded or review_required warns and opens from its recorded branch and head; refuse selects a configured stop."
+
+[[rule]]
+code = "HARNESS_VERSION_UNSUPPORTED"
+site = "routing/src/compatibility.rs#policy_code"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.HARNESS_VERSION_UNSUPPORTED"
+justification = "A harness version an overlay marks unsupported warns by default; refuse selects a configured stop at launch and in check providers."
+
+[[rule]]
+code = "HARNESS_VERSION_BROKEN"
+site = "routing/src/compatibility.rs#policy_code"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.HARNESS_VERSION_BROKEN"
+justification = "A harness version an overlay marks broken warns by default; refuse selects a configured stop at launch and in check providers."
