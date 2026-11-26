@@ -802,7 +802,10 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
 ]);
 
-static ENTRIES: [DomainSection; 11] = [
+// A slice keeps the section count derived from the entries themselves. A
+// hand-maintained array length went stale when two branches each added a
+// section, breaking the build; there is no length here to forget to update.
+const ENTRIES: &[DomainSection] = &[
     provenant_config::policy::SECTION,
     crate::wait::SECTION,
     crate::smoke::SECTION,
@@ -816,7 +819,7 @@ static ENTRIES: [DomainSection; 11] = [
     crate::steward::SECTION,
     provenant_config::HOOKS_SECTION,
 ];
-pub static SECTIONS: DomainSections<Domains> = DomainSections::new(&ENTRIES);
+pub static SECTIONS: DomainSections<Domains> = DomainSections::new(ENTRIES);
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -895,6 +898,25 @@ mod tests {
                 .map(move |path| format!("domains.{name}.{path}"))
         })
         .collect()
+    }
+
+    // An integration that drops a section silently loses its defaults and
+    // origins. Pin the full set by name so a merge cannot keep only one side's
+    // additions (the smoke and hooks sections are the two that collided).
+    #[test]
+    fn every_domain_section_is_registered_once() {
+        let expected = [
+            "policy", "wait", "smoke", "accounts", "quota", "routing", "fabric", "run", "pr",
+            "lanes", "steward", "hooks",
+        ];
+        for name in expected {
+            let count = SECTIONS
+                .entries
+                .iter()
+                .filter(|section| section.name == name)
+                .count();
+            assert_eq!(count, 1, "domain section {name} must be registered once");
+        }
     }
 
     // Spec: docs/specs/cli.md#configuration-schema-completeness
