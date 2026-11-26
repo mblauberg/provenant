@@ -423,11 +423,15 @@ mod forge_context_tests {
     #[test]
     fn declared_protected_set_holds_when_the_remote_has_no_head() {
         use provenant_records::provenance::Layer;
+        use std::os::unix::fs::DirBuilderExt;
 
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path().join("state");
         let project = temp.path().join("project");
-        std::fs::create_dir_all(&state).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&state)
+            .unwrap();
         std::fs::create_dir_all(project.join(".git/refs/remotes")).unwrap();
         std::fs::write(
             project.join(".git/config"),
@@ -456,7 +460,7 @@ mod forge_context_tests {
         let push = HostDeliveryContext::destination(crate::DeliveryMode::Push, "lane", &forge)
             .expect("destination")
             .expect("push request");
-        assert_eq!(push.remote, "upstream");
+        assert_eq!(push.remote.to_string(), "upstream");
         assert_eq!(push.branch, "lane");
     }
 }
