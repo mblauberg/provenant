@@ -1255,8 +1255,10 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         ) {
                             match error {
                                 loops::DecisionExtensionError::Structural(limit) => {
-                                    checkpoint
-                                        .set_pause(PauseCause::StructuralLimit, &limit.to_string());
+                                    // A structural pause owns the graph; an
+                                    // active expansion pause with a different
+                                    // cause must yield before it is saved.
+                                    checkpoint.pause_structural(&limit.to_string());
                                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                                 }
                                 loops::DecisionExtensionError::Invalid(reason) => {

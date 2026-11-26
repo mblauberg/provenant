@@ -2189,6 +2189,37 @@ fn invalid_planner_result_remains_paused_when_every_attempt_has_settled() {
     );
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn a_structural_pause_takes_ownership_from_an_active_expansion_pause() {
+    // A refused planner expansion leaves the node owning an
+    // InvalidPlanExpansion graph pause.
+    let document = planner(1);
+    let run = advance(
+        &document,
+        &mut fixture_owner(&["not a fragment"]),
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
+    );
+    assert!(run.checkpoint.expansion_pause_owns_graph_pause());
+
+    // A loop decision extension then exceeds a host limit. The structural
+    // pause takes over the graph and the expansion pause yields, so the
+    // checkpoint the tick reads never carries a disagreeing pair (#4106).
+    let mut checkpoint = run.checkpoint;
+    checkpoint.pause_structural("limits.nodes");
+    assert_eq!(checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+    assert!(checkpoint.expansion_pause_owns_graph_pause());
+    assert!(checkpoint.nodes.iter().all(|node| !matches!(
+        node.expansion_cause,
+        Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+    )));
+}
+
 #[test]
 fn structured_blocks_survive_real_result_head_truncation() {
     for repetitions in [800, 4000] {

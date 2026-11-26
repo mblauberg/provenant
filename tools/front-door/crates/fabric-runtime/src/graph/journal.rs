@@ -1665,9 +1665,10 @@ impl FileJournal {
         .map_err(|error: JournalError| error.for_graph(&error_graph_id))
     }
 
-    /// An unreadable checkpoint is reported once and then skipped by later
-    /// ticks over the same bytes, independently of advance errors. A changed
-    /// record is reported again. Only a genuinely absent record returns `None`.
+    /// An unreadable or semantically inconsistent checkpoint is reported once
+    /// and then skipped by later ticks over the same bytes, independently of
+    /// advance errors. A changed record is reported again. Only a genuinely
+    /// absent record returns `None`.
     pub fn read_checkpoint_for_tick(
         root: &StateRoot,
         project: ProjectId,
@@ -1676,7 +1677,8 @@ impl FileJournal {
         Ok(load_checkpoint_for_tick(root, project, graph_id)?.map(|stored| stored.checkpoint))
     }
 
-    /// Retire an unreadable record under its graph lock without releasing other fences.
+    /// Retire an unreadable or semantically quarantined record under its graph
+    /// lock without releasing other fences.
     pub fn retire_unreadable(
         root: &StateRoot,
         project: ProjectId,
@@ -1686,6 +1688,25 @@ impl FileJournal {
         clock: &dyn Clock,
         cleanup: impl FnOnce(Option<&GraphCheckpoint>) -> Result<(), Box<dyn Error>>,
     ) -> Result<bool, Box<dyn Error>> {
+        fn retire_bad_record(
+            directory: &Directory,
+            graph_id: &str,
+            cleanup: impl FnOnce(Option<&GraphCheckpoint>) -> Result<(), Box<dyn Error>>,
+        ) -> Result<bool, Box<dyn Error>> {
+            let bytes = read_checkpoint_bytes(directory, graph_id)
+                .map_err(|error| error.for_graph(graph_id))?;
+            let recovered = bytes.as_deref().and_then(|bytes| {
+                let bytes = prompt_store::rehydrate(directory, graph_id, bytes).ok()?;
+                decode_verified_checkpoint(&bytes, graph_id, bytes.len() as u64).ok()
+            });
+            cleanup(recovered.as_ref().map(|stored| &stored.checkpoint))?;
+            directory.unlink(OsStr::new(&format!("graph-{graph_id}.json")))?;
+            directory
+                .sync()
+                .map_err(JournalError::DurabilityUnconfirmed)?;
+            let _ = directory.unlink(&unreadable_marker_name(graph_id));
+            Ok(true)
+        }
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId.for_graph(graph_id).into());
         }
@@ -1694,11 +1715,14 @@ impl FileJournal {
             Err(error) if error.is_not_found() => return Ok(false),
             Err(error) => return Err(error.into()),
         };
-        // A readable checkpoint needs no retirement. Inspect the atomic
-        // snapshot first so an ordinary stop never waits on a live graph writer
-        // before it can persist its independent cancellation request.
+        // A consistent checkpoint needs no retirement, readable or not. Inspect
+        // the atomic snapshot first so an ordinary stop never waits on a live
+        // graph writer before it can persist its cancellation request.
         match load_checkpoint(&directory, graph_id) {
-            Ok(_) => return Ok(false),
+            Ok(Some(stored)) if stored.checkpoint.expansion_pause_owns_graph_pause() => {
+                return Ok(false);
+            }
+            Ok(_) => {}
             Err(error) if !error.is_unreadable() => return Err(error.into()),
             Err(_) => {}
         }
@@ -1711,20 +1735,9 @@ impl FileJournal {
             clock,
         )?;
         match load_checkpoint(&directory, graph_id) {
-            Err(error) if error.is_unreadable() => {
-                let bytes = read_checkpoint_bytes(&directory, graph_id)
-                    .map_err(|error| error.for_graph(graph_id))?;
-                let recovered = bytes.as_deref().and_then(|bytes| {
-                    let bytes = prompt_store::rehydrate(&directory, graph_id, bytes).ok()?;
-                    decode_verified_checkpoint(&bytes, graph_id, bytes.len() as u64).ok()
-                });
-                cleanup(recovered.as_ref().map(|stored| &stored.checkpoint))?;
-                directory.unlink(OsStr::new(&format!("graph-{graph_id}.json")))?;
-                directory
-                    .sync()
-                    .map_err(JournalError::DurabilityUnconfirmed)?;
-                let _ = directory.unlink(&unreadable_marker_name(graph_id));
-                Ok(true)
+            Err(error) if error.is_unreadable() => retire_bad_record(&directory, graph_id, cleanup),
+            Ok(Some(stored)) if !stored.checkpoint.expansion_pause_owns_graph_pause() => {
+                retire_bad_record(&directory, graph_id, cleanup)
             }
             Err(error) => Err(error.for_graph(graph_id).into()),
             Ok(_) => Ok(false),
@@ -2254,9 +2267,10 @@ fn quarantine_unreadable_once(
     true
 }
 
-/// Load a checkpoint for a host tick read. Unreadable records are quarantined
-/// once and skipped on later ticks over the same bytes. Only a genuinely absent
-/// record returns `None`; a first sighting of corrupt bytes reports a typed
+/// Load a checkpoint for a host tick read. Unreadable records and readable
+/// checkpoints whose expansion pause disagrees with the graph pause are
+/// quarantined once and skipped on later ticks over the same bytes. Only a
+/// genuinely absent record returns `None`; a first sighting reports a typed
 /// notice, and a transport or lock error keeps its own cause.
 fn load_checkpoint_for_tick(
     root: &StateRoot,
@@ -2281,6 +2295,17 @@ fn load_checkpoint_for_tick(
         }
     };
     match decode_checkpoint_in(&directory, &bytes, graph_id) {
+        Ok(stored) if !stored.checkpoint.expansion_pause_owns_graph_pause() => {
+            // The bytes are readable but the pause pair disagrees. Quarantine
+            // it on the same byte key as a decode failure so a tick reports it
+            // once and `provenant stop -- NAME` is the named next step (#4106).
+            let reason = "invalid_expansion_pause";
+            if quarantine_unreadable_once(&directory, graph_id, &bytes, reason) {
+                Err(UnreadableCheckpointNotice(graph_id.to_owned(), reason).into())
+            } else {
+                Ok(None)
+            }
+        }
         Ok(stored) => {
             let _ = directory.unlink(&unreadable_marker_name(graph_id));
             Ok(Some(stored))

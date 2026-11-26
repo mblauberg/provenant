@@ -2487,6 +2487,44 @@ impl GraphCheckpoint {
             .map(provenant_records::pause::Pause::reason)
     }
 
+    /// Whether the graph pause and the active expansion pause agree (#4106).
+    ///
+    /// Only one expansion pause may be active, and when one is it must carry
+    /// the graph's typed cause. With no active expansion pause an
+    /// `InvalidPlanExpansion` graph pause would have no owner at all. This is
+    /// checked both when a stored checkpoint is admitted and when a tick reads
+    /// it, so a disagreeing pair is quarantined instead of repeated forever.
+    pub(crate) fn expansion_pause_owns_graph_pause(&self) -> bool {
+        let active: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.expansion_cause,
+                    Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+                )
+            })
+            .collect();
+        match active.len() {
+            0 => {
+                self.pause_cause()
+                    != Some(provenant_records::pause::PauseCause::InvalidPlanExpansion)
+            }
+            1 => Some(plans::expansion_pause_cause(active[0])) == self.pause_cause(),
+            _ => false,
+        }
+    }
+
+    /// Pause the graph for a structural limit, yielding any active expansion
+    /// pause so the typed graph pause always has a single consistent owner.
+    pub(super) fn pause_structural(&mut self, reason: &str) {
+        self.deactivate_expansion_pauses();
+        self.set_pause(
+            provenant_records::pause::PauseCause::StructuralLimit,
+            reason,
+        );
+    }
+
     pub(super) fn deactivate_expansion_pauses(&mut self) {
         for node in &mut self.nodes {
             if let Some(NodeDecisionCause::PlanExpansionPaused { active, .. }) =

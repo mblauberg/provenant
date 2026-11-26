@@ -2044,8 +2044,7 @@ pub(super) fn refresh_structure_pause(
             structural_limit_reason(expanded, plan, limits)
         };
     if let Some(reason) = &structural_pause {
-        checkpoint.deactivate_expansion_pauses();
-        checkpoint.set_pause(PauseCause::StructuralLimit, reason);
+        checkpoint.pause_structural(reason);
     }
 
     structural_pause
