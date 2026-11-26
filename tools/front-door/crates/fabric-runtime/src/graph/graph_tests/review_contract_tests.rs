@@ -1469,7 +1469,7 @@ fn round_two_missing_invariant_is_refused_at_graph_settlement() {
         .unwrap();
     assert_eq!(check.state, NodeState::Failed);
     assert_eq!(
-        check.advance_error_code.as_deref(),
+        check.advance_code.as_deref(),
         Some("review_invariant_missing")
     );
     assert!(
