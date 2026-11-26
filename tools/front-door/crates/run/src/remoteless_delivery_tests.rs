@@ -39,7 +39,7 @@ fn writer() -> WriterRequest {
 /// a name the resolver accepts, such as `team/upstream`, is usable here too.
 #[test]
 fn destination_is_parsed_once_with_the_single_remote_grammar() -> FixtureResult<()> {
-    let good = serde_json::to_value(&request(
+    let good = serde_json::to_value(request(
         DeliveryMode::Push,
         Destination::from_name("origin").expect("fixture remote"),
     ))?;
