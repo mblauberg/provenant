@@ -71,8 +71,54 @@ pub(crate) struct FixtureMarker {
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum SmokeVerdict {
     Passed,
-    Failed { row: String, reason: String },
-    Unverified { reason: String },
+    Failed {
+        row: String,
+        reason: String,
+    },
+    /// Not verified: `cause` is the declared reason and `reason` names that
+    /// cause and its fix.
+    Unverified {
+        cause: UnverifiedCause,
+        reason: String,
+    },
+}
+
+/// Why a smoke result could not be verified. Each cause has its own warning
+/// code and remedy, so an unverified result never reports a generic cause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnverifiedCause {
+    /// The peer does not speak the smoke fixture protocol.
+    PeerBelowProtocol,
+}
+
+impl UnverifiedCause {
+    /// The warning code this cause reports under.
+    pub(crate) fn code(self) -> provenant_records::warning::WarningCode {
+        match self {
+            Self::PeerBelowProtocol => SMOKE_PEER_FIXTURE_UNSUPPORTED,
+        }
+    }
+
+    /// The fix when the configured policy makes this cause a failure.
+    pub(crate) fn remedy(self) -> String {
+        match self {
+            Self::PeerBelowProtocol => format!(
+                "run provenant upgrade on the peer, or set {UNVERIFIED_KEY}=warn to report without failing"
+            ),
+        }
+    }
+}
+
+/// The unverified result for a peer below the smoke fixture protocol.
+fn peer_below_protocol(host: &str) -> SmokeVerdict {
+    SmokeVerdict::Unverified {
+        cause: UnverifiedCause::PeerBelowProtocol,
+        reason: format!(
+            "peer {host} is below smoke protocol {}; run provenant upgrade there, or set {UNVERIFIED_KEY}=fail to make this a gate",
+            provenant_fabric_runtime::hosts::SMOKE_FIXTURE_PROTOCOL
+        ),
+    }
 }
 
 /// One measured phase of a lifecycle. The five names are fixed: fixture,
@@ -705,9 +751,7 @@ pub(crate) fn run_lifecycle(
                 warnings.push(format!(
                     "smoke peer {host} cannot verify a fixture: {error}"
                 ));
-                verdict = SmokeVerdict::Unverified {
-                    reason: "the peer fixture could not be checked".into(),
-                };
+                verdict = peer_below_protocol(host);
             }
             Err(error) => {
                 let _ = remove_fixture(state, home, &nonce, &root);
@@ -912,14 +956,8 @@ pub(crate) fn run_lifecycle(
     let local_cleanup = remove_fixture(state, home, &nonce, &root);
     let cleanup_result = peer_cleanup.and(local_cleanup);
     cleanup_phase.1 = clock.mono_now();
-    if matches!(verdict, SmokeVerdict::Unverified { .. }) {
-        warn(
-            Warning::new(
-                SMOKE_PEER_FIXTURE_UNSUPPORTED,
-                "the peer could not verify the smoke fixture",
-            )
-            .once_per_change(),
-        );
+    if let SmokeVerdict::Unverified { cause, reason } = &verdict {
+        warn(Warning::new(cause.code(), reason.clone()).once_per_change());
     }
     if !warnings.is_empty() {
         if !output.is_empty() {
@@ -1197,9 +1235,17 @@ mod tests {
     #[test]
     fn unverified_exit_policy_is_configurable_and_sourced() {
         let origin = SmokeOrigin::compiled(Default::default());
-        let unverified = SmokeVerdict::Unverified {
-            reason: "peer below protocol".into(),
+        let unverified = peer_below_protocol("peer");
+        let SmokeVerdict::Unverified { cause, reason } = &unverified else {
+            panic!("a peer below protocol is unverified");
         };
+        assert_eq!(cause.code(), SMOKE_PEER_FIXTURE_UNSUPPORTED);
+        assert!(
+            reason.contains("peer peer is below smoke protocol")
+                && reason.contains("provenant upgrade")
+                && reason.contains(UNVERIFIED_KEY),
+            "{reason}"
+        );
         let warn = Settings::default();
         assert!(verdict_exit(&unverified, "report", &warn, &origin).is_ok());
         let fail = Settings {

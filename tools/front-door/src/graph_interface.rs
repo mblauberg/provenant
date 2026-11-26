@@ -736,19 +736,19 @@ fn smoke_lifecycle(
                     false,
                 )
             }
-            crate::smoke::SmokeVerdict::Unverified { .. } => {
+            crate::smoke::SmokeVerdict::Unverified { cause, .. } => {
                 let text = outcome.text();
                 if settings.unverified == provenant_cli::smoke::Unverified::Fail {
                     let mut result =
                         CommandResult::new("run", Outcome::Failed, serde_json::Value::Null);
                     result.error = Some(provenant_records::CommandError::new(
-                        "SMOKE_UNVERIFIED",
+                        cause.code().0,
                         format!(
                             "{text}\nsource: {}",
                             origin.describe(provenant_cli::smoke::UNVERIFIED_KEY)
                         ),
                         None,
-                        "the peer could not verify the smoke fixture; use a peer with SMOKE_FIXTURE_PROTOCOL or set domains.smoke.unverified=warn",
+                        cause.remedy(),
                     ));
                     return crate::emit(&result, globals, "", false);
                 }
