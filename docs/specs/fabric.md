@@ -202,10 +202,13 @@ equal to a ladder hand-off appear once among successors.
 `run --explain` reports a `node_routes` row for each launchable node with the
 effective adapter, model and effort and the source of each (`node field`,
 `policy`, `pool` or `default`). An exact node field or a configured named route
-resolves to one spelling; a pool is shown as its candidate models without
+resolves to one spelling; a pool is shown as candidate entries without
 drawing a pick, because the weighted selection, account and credential decision
 remain launch-only. The row's `selection` names that boundary, so pool routing
-can be checked before launch.
+can be checked before launch. Each pool candidate includes its model, adapter,
+effective effort and the source of each value; a node-level effort applies to
+every candidate. Model-less adapter routes report their provider in `adapter`
+and preserve the configured entry separately as `route_name`.
 - Why: a model id may itself contain `/`, so re-parsing a stored id silently
   changes which model runs.
 - Owner: `crates/routing/src/catalog.rs`,

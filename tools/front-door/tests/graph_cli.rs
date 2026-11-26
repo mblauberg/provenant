@@ -1374,8 +1374,12 @@ fn explain_reports_each_nodes_route_with_its_sources() -> Result {
         "nodes": [
             {"id":"exact","prompt":"inspect","access":"read_only",
              "route":{"adapter":"opencode","model":full,"effort":"high"}},
+            {"id":"named-adapter","prompt":"inspect","access":"read_only",
+             "route":{"adapter":"codex","name":"configured-entry"}},
             {"id":"pooled","prompt":"inspect","access":"read_only",
-             "route":{"alias":"senior"}}
+             "route":{"alias":"senior"}},
+            {"id":"pooled-override","prompt":"inspect","access":"read_only",
+             "route":{"alias":"senior","effort":"low"}}
         ]
     }))?;
     let (_, explained) = rig.run(&[
@@ -1396,17 +1400,53 @@ fn explain_reports_each_nodes_route_with_its_sources() -> Result {
     assert_eq!(exact["model"], full, "{exact}");
     assert_eq!(exact["effort"], "high", "{exact}");
     assert_eq!(exact["sources"]["model"], "node field", "{exact}");
+    let named = rows
+        .iter()
+        .find(|row| row["node"] == "named-adapter")
+        .ok_or_else(|| format!("named adapter route: {rows:?}"))?;
+    assert_eq!(named["adapter"], "codex", "{named}");
+    assert_eq!(named["route_name"], "configured-entry", "{named}");
     let pooled = rows
         .iter()
         .find(|row| row["node"] == "pooled")
         .ok_or_else(|| format!("pool route: {rows:?}"))?;
     assert_eq!(pooled["selection"], "pool", "{pooled}");
     assert_eq!(pooled["sources"]["model"], "pool", "{pooled}");
+    assert_eq!(pooled["sources"]["effort"], "pool", "{pooled}");
+    let candidates = pooled["candidates"]
+        .as_array()
+        .ok_or_else(|| format!("pool candidates: {pooled}"))?;
+    assert!(!candidates.is_empty(), "{pooled}");
     assert!(
-        pooled["candidates"]
+        candidates.iter().any(|candidate| {
+            candidate["model"].is_string()
+                && candidate["adapter"].is_string()
+                && candidate["effort"].is_string()
+                && candidate["sources"]["effort"] == "pool"
+        }),
+        "pool candidates retain member effort and provenance: {pooled}"
+    );
+    for effort in ["medium", "high"] {
+        assert!(
+            candidates.iter().any(|candidate| {
+                candidate["effort"] == effort && candidate["sources"]["effort"] == "pool"
+            }),
+            "pool candidate effort {effort} is visible with pool provenance: {pooled}"
+        );
+    }
+    let overridden = rows
+        .iter()
+        .find(|row| row["node"] == "pooled-override")
+        .ok_or_else(|| format!("overridden pool route: {rows:?}"))?;
+    assert!(
+        overridden["candidates"]
             .as_array()
-            .is_some_and(|candidates| !candidates.is_empty()),
-        "{pooled}"
+            .is_some_and(|candidates| {
+                candidates.iter().all(|candidate| {
+                    candidate["effort"] == "low" && candidate["sources"]["effort"] == "node field"
+                })
+            }),
+        "node effort overrides every pool candidate: {overridden}"
     );
     Ok(())
 }
