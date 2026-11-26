@@ -47,6 +47,8 @@ pub(crate) struct Check {
     /// Exact commit SHA returned by GitHub for this check.
     pub head: String,
     pub name: String,
+    /// GitHub's check-run ID, which lets a repair identify the exact failed job.
+    pub job_id: Option<String>,
     /// `pass`, `fail`, `cancel`, `pending` or `skipping`.
     pub bucket: String,
     /// The GitHub App that reported a check run; legacy statuses have none.
@@ -1217,6 +1219,10 @@ fn parse_bodies<'a>(
             checks.push(Check {
                 head: commit.into(),
                 name: run.get("name")?.as_str()?.into(),
+                job_id: run
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .map(|id| id.to_string()),
                 bucket: bucket.into(),
                 app: run["app"]["id"].as_u64(),
                 app_slug: run["app"]["slug"].as_str().map(str::to_owned),
@@ -1258,6 +1264,7 @@ fn parse_bodies<'a>(
             checks.push(Check {
                 head: commit.into(),
                 name: name.into(),
+                job_id: None,
                 bucket: bucket.into(),
                 app: None,
                 app_slug: None,

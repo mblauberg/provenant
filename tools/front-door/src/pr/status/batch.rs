@@ -469,6 +469,7 @@ pub(crate) fn line_from_entry(entry: &Entry) -> Line {
         .map(|check| observer::Check {
             head: entry.head.clone(),
             name: check.name.clone(),
+            job_id: None,
             bucket: check.bucket.clone(),
             app: None,
             app_slug: None,

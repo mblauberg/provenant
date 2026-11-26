@@ -215,7 +215,9 @@ pub enum HookTimeoutUnit {
 macro_rules! hook_actions {
     ($( $action:ident => $command:literal ),+ $(,)?) => {
         /// Provenant hook handler independent of a provider's wire event name.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        /// Ordered by declaration so it can key the managed-hook sets that
+        /// decide which retired leaves transfer ownership.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
         pub enum HookAction { $( $action, )+ }
         impl HookAction {
             pub const ALL: &'static [Self] = &[ $( Self::$action, )+ ];
@@ -226,6 +228,18 @@ macro_rules! hook_actions {
             /// event carries it is per adapter; neither event grants policy.
             pub const fn is_answer_delivery(self) -> bool {
                 matches!(self, Self::PreToolUse | Self::PostToolUse)
+            }
+            /// The action declared to replace `self` when a release retires the
+            /// native event that carried it. Answer delivery is the only
+            /// identity that has moved between events; other actions have no
+            /// replacement and are simply dropped when retired. A retired leaf's
+            /// ownership transfers to this action and no other.
+            pub const fn declared_replacement(self) -> Option<Self> {
+                match self {
+                    Self::PreToolUse => Some(Self::PostToolUse),
+                    Self::PostToolUse => Some(Self::PreToolUse),
+                    _ => None,
+                }
             }
         }
     };

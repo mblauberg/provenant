@@ -1518,12 +1518,6 @@ pub(crate) fn peer_submit_graph(
           "settlement_retries":retry}],
     }))
     .map_err(|_| FacadeError::StateCorrupt)?;
-    // Preserve the origin's semantic role so review launches use the same
-    // comparison-base path as local graph nodes, including exact model routes.
-    document.nodes[0].role = origin.role.clone();
-    // Carry the sender-staged fixture bytes, not a sender path, so the peer
-    // places exactly the same fixture in its own candidate scratch.
-    document.nodes[0].fixture_bytes = task.fixture.clone();
     // A remote reader must read the peer's own checkout. The sender's pinned
     // head names a commit in the sender's scratch project, which the peer
     // clone may never have seen: the source view materialiser refuses an
@@ -1551,6 +1545,12 @@ pub(crate) fn peer_submit_graph(
         });
         (head, base)
     };
+    // Preserve the origin's semantic role so review launches use the same
+    // comparison-base path as local graph nodes, including exact model routes.
+    document.nodes[0].role = origin.role.clone();
+    // Carry the sender-staged fixture bytes, not a sender path, so the peer
+    // places exactly the same fixture in its own candidate scratch.
+    document.nodes[0].fixture_bytes = task.fixture.clone();
     document.review_base = if peer_writer {
         None
     } else {

@@ -283,6 +283,7 @@ mod tests {
         Check {
             head: "head".into(),
             name: name.into(),
+            job_id: None,
             bucket: bucket.into(),
             app: None,
             app_slug: None,

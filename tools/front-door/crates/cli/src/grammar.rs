@@ -79,6 +79,8 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<Hosts>,
     },
+    /// Report host health, installed hook settings and recent hook timeouts
+    Doctor,
     /// Show and edit configuration
     #[command(subcommand)]
     Config(Config),
@@ -862,6 +864,15 @@ pub struct Cancel {
     /// Reason to record (up to 256 bytes)
     #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
     pub reason: Option<String>,
+    /// Apply this existing stop operation as a revisioned delivery queue control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Stable ID for replaying this queue control
+    #[arg(long, requires = "queue_control", value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Resume {
@@ -877,6 +888,23 @@ pub struct Resume {
     /// Raise a graph limit or budget (KEY=VALUE) on a graph target; may be repeated
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,
+    /// Apply this existing retry operation as a revisioned delivery queue control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Stable ID for replaying this queue control
+    #[arg(long, requires = "queue_control", value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum QueueControlAction {
+    Accept,
+    Fix,
+    Retry,
+    Drop,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Reconcile {
@@ -1018,6 +1046,9 @@ pub struct Ingest {
     /// Ingest transcripts written, and messages stamped, from this date or timestamp, or a span such as 1d ago
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
+    /// Resume from the durable cursor instead of rescanning a time window
+    #[arg(long)]
+    pub incremental: bool,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Mileage {
@@ -1410,8 +1441,11 @@ pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str>
 #[derive(Clone, Debug, Args)]
 pub struct Status {
     /// Active custody of this chair and unattended items, across projects unless --project is set
-    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all"])]
+    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all", "adoptable"])]
     pub mine: bool,
+    /// Unattended custody open to adoption, across projects unless --project is set
+    #[arg(long, conflicts_with_all = ["mine", "targets", "session_stream", "all"])]
+    pub adoptable: bool,
     /// Exact chair session for the custody view (used by the session-start digest)
     #[arg(long = "session", requires = "mine")]
     pub custody_session: Option<String>,

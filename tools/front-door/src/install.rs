@@ -2380,6 +2380,17 @@ fn smoke_project(runner: &UpgradeRunner, scratch: &Path) -> Result<SmokeProject,
     ] {
         smoke_git(runner, project, &args)?;
     }
+    // The staged fixture carries a fact that exists in no committed tree and
+    // no source file. A reader that reconstructs the answer from the checkout
+    // or the bundled template cannot report it; only reading the staged bytes
+    // can. This is an uncommitted scratch edit by design: the graph stages the
+    // working-file bytes while its source view reads the committed head.
+    let nonce = provenant_os::fs::entropy_128().map_err(|error| error.to_string())?;
+    std::fs::write(
+        project.join("fixture.txt"),
+        format!("smoke fact {}\n", provenant_core::hex(&nonce[..8])),
+    )
+    .map_err(|error| error.to_string())?;
     Ok(SmokeProject { directory, base })
 }
 

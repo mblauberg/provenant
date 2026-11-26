@@ -1289,3 +1289,141 @@ fn oversized_blocking_findings_remain_retrievable_with_the_verdict() {
         run.checkpoint
     );
 }
+
+fn delivery_review_panel() -> GraphDocument {
+    let panel = json!({
+        "id":"panel",
+        "kind":"composite",
+        "access":"read_only",
+        "composite":{
+            "min_successful":1,
+            "reduce_verdict":true,
+            "nodes":[review("review.tests", "tests"), review("review.correctness", "correctness")],
+            "exports":[
+                {"node":"tests","outputs":["findings","result","verdict"]},
+                {"node":"correctness","outputs":["findings","result","verdict"]}
+            ]
+        },
+        "delivery_review":DeliveryReviewSpec::default()
+    });
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2,
+        "graph_id":"delivery-review-panel",
+        "nodes":[panel]
+    }))
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+    document
+}
+
+#[test]
+fn malformed_composite_delivery_review_parks_failed_and_partial_members_on_replay() {
+    for failed_member in [true, false] {
+        let document = delivery_review_panel();
+        let expanded = plans::expand(&document, &[], &[], &plans::generous()).unwrap();
+        let (plan, positions) = validate_flat_plan(&expanded, &plans::generous()).unwrap();
+        let mut checkpoint = transitions::initial_checkpoint(
+            &expanded,
+            &plan,
+            "composite-review-park-replay".into(),
+            None,
+            None,
+            None,
+        );
+        let boundary = positions["panel"];
+        let members = plan.nodes[boundary].composite_members.clone();
+        assert!(members.len() >= 2);
+        for (ordinal, member_id) in members.iter().enumerate() {
+            let progress = &mut checkpoint.nodes[positions[member_id]];
+            progress.state = NodeState::Succeeded;
+            progress.outputs = Some(NodeOutputs {
+                verdict: Some("VERDICT: PASS".into()),
+                findings_available: Some(true),
+                ..Default::default()
+            });
+            if ordinal == 0 && failed_member {
+                progress.state = NodeState::Failed;
+                progress.outputs = None;
+                progress.advance_error_code = Some("review_failed".into());
+                progress.advance_error = Some("panel member failed".into());
+            } else if ordinal == 0 {
+                let outputs = progress.outputs.as_mut().unwrap();
+                outputs.partial = true;
+                outputs.findings_available = Some(false);
+            }
+        }
+
+        let mut owner = FakeOwner::default();
+        let mut journal = MemoryJournal::default();
+        let mut transition_ids = Vec::new();
+        for _ in 0..2 {
+            composites::settle::<FakeOwner, MemoryJournal>(
+                boundary,
+                &plan,
+                &positions,
+                &mut checkpoint,
+                &mut journal,
+            )
+            .unwrap();
+            assert!(park_malformed_composite_delivery_review(
+                &expanded,
+                boundary,
+                &plan,
+                &positions,
+                &mut owner,
+                &mut journal,
+                &mut checkpoint,
+            )
+            .unwrap());
+            transition_ids.push(
+                checkpoint.nodes[boundary]
+                    .delivery_park
+                    .as_ref()
+                    .unwrap()
+                    .transition_id
+                    .clone(),
+            );
+        }
+
+        let parked = checkpoint.nodes[boundary].delivery_park.as_ref().unwrap();
+        assert_eq!(parked.reason, provenant_records::graph::ParkReason::ReviewEvidence);
+        assert_eq!(transition_ids[0], transition_ids[1]);
+        assert!(parked.attempt_key.is_none());
+        assert!(parked.evidence.iter().any(|entry| entry.starts_with("member ")));
+    }
+
+    let document = delivery_review_panel();
+    let expanded = plans::expand(&document, &[], &[], &plans::generous()).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &plans::generous()).unwrap();
+    let mut checkpoint = transitions::initial_checkpoint(
+        &expanded,
+        &plan,
+        "composite-review-valid-fail".into(),
+        None,
+        None,
+        None,
+    );
+    let boundary = positions["panel"];
+    for member_id in &plan.nodes[boundary].composite_members {
+        let progress = &mut checkpoint.nodes[positions[member_id]];
+        progress.state = NodeState::Succeeded;
+        progress.outputs = Some(NodeOutputs {
+            verdict: Some("VERDICT: FAIL".into()),
+            findings_available: Some(true),
+            ..Default::default()
+        });
+    }
+    let mut journal = MemoryJournal::default();
+    composites::settle::<FakeOwner, MemoryJournal>(
+        boundary,
+        &plan,
+        &positions,
+        &mut checkpoint,
+        &mut journal,
+    )
+    .unwrap();
+    assert!(!review::malformed_composite_delivery_evidence(
+        &plan.nodes[boundary],
+        &checkpoint.nodes[boundary],
+    ));
+}
