@@ -612,8 +612,8 @@ mod fixtures {
         let tree_edges =
             p::tree_edges(&tree_nodes).ok_or_else(|| "synthetic tree edges failed".to_owned())?;
         let mut tree_nodes = tree_nodes;
-        p::tree_finalize_nodes(&mut tree_nodes, &tree_edges, false, true)
-            .ok_or_else(|| "synthetic tree finalization failed".to_owned())?;
+        p::tree_finalise_nodes(&mut tree_nodes, &tree_edges, false, true)
+            .ok_or_else(|| "synthetic tree finalisation failed".to_owned())?;
         let tree_usage = p::tree_usage_totals(&tree_nodes)
             .ok_or_else(|| "synthetic tree usage totals failed".to_owned())?;
         let tree_totals = p::tree_totals(tree_nodes.len(), 0, &tree_usage);

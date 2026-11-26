@@ -233,7 +233,7 @@ pub(super) fn read_inner(
         || !unfetched.is_empty()
         || !conflicts.is_empty()
         || edges.iter().any(|edge| edge["parent_status"] == "missing");
-    super::projection::tree_finalize_nodes(&mut nodes, &edges, include_store_path, detail)
+    super::projection::tree_finalise_nodes(&mut nodes, &edges, include_store_path, detail)
         .ok_or(Error::Encode)?;
     let usage = super::projection::tree_usage_totals(&nodes).ok_or(Error::Encode)?;
     let totals = super::projection::tree_totals(seen.len(), duplicate_count, &usage);

@@ -245,7 +245,7 @@ pub fn tree_children(edges: &[Value], project_id: &Value, parent: &Value) -> Vec
 }
 
 /// Apply the display fields derived from tree edges and hide optional detail.
-pub fn tree_finalize_nodes(
+pub fn tree_finalise_nodes(
     nodes: &mut [Value],
     edges: &[Value],
     include_store_path: bool,
@@ -310,7 +310,7 @@ pub fn tree_usage_totals(nodes: &[Value]) -> Option<Value> {
 
 #[cfg(test)]
 #[test]
-fn tree_finalization_and_usage_totals_follow_projected_nodes_and_edges() {
+fn tree_finalisation_and_usage_totals_follow_projected_nodes_and_edges() {
     let mut nodes = vec![
         json!({
             "lane_id":{"project_id":"project-1","attempt_id":"parent"},
@@ -329,7 +329,7 @@ fn tree_finalization_and_usage_totals_follow_projected_nodes_and_edges() {
     ];
     let edges = tree_edges(&nodes).expect("tree edges");
 
-    tree_finalize_nodes(&mut nodes, &edges, false, false).expect("tree nodes finalize");
+    tree_finalise_nodes(&mut nodes, &edges, false, false).expect("tree nodes finalise");
     assert_eq!(nodes[0]["children"][0]["attempt_id"], "child");
     assert_eq!(nodes[0]["status"], "succeeded");
     assert_eq!(nodes[0]["title"], "parent task");
@@ -1427,7 +1427,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (value, known, missing) = detail_usage(&usage).expect("typed usage serializes");
+        let (value, known, missing) = detail_usage(&usage).expect("typed usage serialises");
 
         assert_eq!(value["tokens"]["input"], 12);
         assert_eq!(known, ["input"]);
