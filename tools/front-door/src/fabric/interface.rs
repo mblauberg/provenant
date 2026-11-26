@@ -2066,7 +2066,14 @@ impl Factory {
         // Review ranges are launch controls: resolve them on the host before
         // admitting a graph, and bind immutable object IDs into its identity.
         let review_launch = declared.accepts_review_range();
-        let review_subject = self.review_subject(input, review_launch, cancel)?;
+        // The bundled smoke graph pins its review to the writer's scratch
+        // commit in the template itself. The host's checkout-derived default
+        // subject would point that review back at the caller and make a smoke
+        // check as expensive as the release commit it was launched from, so
+        // leave range resolution to the template for a bundled smoke launch.
+        let bundled_smoke = input.get("template").and_then(Value::as_str) == Some("smoke")
+            && library.layer("smoke") == Some(Layer::Default);
+        let review_subject = self.review_subject(input, review_launch && !bundled_smoke, cancel)?;
         let review_pin = review_subject
             .as_ref()
             .map(|subject| json!({"base":subject.base,"head":subject.head}));
@@ -2874,133 +2881,15 @@ impl Factory {
             parameters["integration_branch"] = branch.clone();
         }
         if bundled_smoke {
-            let is_remote = input
-                .get("host")
-                .and_then(Value::as_str)
-                .is_some_and(|h| !h.is_empty() && !matches!(h, "local" | "localhost"));
-            let controls = smoke_writer
-                .as_object()
-                .is_some_and(|node| !node.is_empty());
-            if controls {
-                // A remote graph must not retain or transmit a caller path.
-                // `--branch`/`--base` name a worktree the peer creates in its
-                // own clone, so they are admitted; only a caller path is not.
-                if is_remote && first_control == Some(&"worktree") {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                        "worktree".into(),
-                    )));
-                }
-                // A control and a `--set` of the same binding are two
-                // answers to one question.
-                if ["worktree", "write_attempt"]
-                    .iter()
-                    .any(|name| overrides.get(*name).is_some())
-                {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                        "set".into(),
-                    )));
-                }
-                parameters["worktree"] = smoke_writer["worktree"].clone();
-                if let Some(attempt) = smoke_writer.get("attempt") {
-                    parameters["write_attempt"] = attempt.clone();
-                }
-            }
-            // A peer-owned writer is provisioned from a branch and a base ref,
-            // never from a caller path. Drop the host path while retaining the
-            // branch intent so the peer can create its own worktree.
-            if is_remote {
-                parameters["worktree"] = json!("");
-            }
-            let requested = parameters.get("smoke-write").is_some();
-            let write_disabled = requested && parameters["smoke-write"] == json!(false);
-            // A remote launch carries no caller worktree. Provision a scratch
-            // branch from a sourced default so verification exercises the
-            // remote writer even when the caller supplies no --branch; an
-            // explicit --branch/--base or --set write_attempt still wins.
-            if is_remote
-                && !write_disabled
-                && !parameters
-                    .get("write_attempt")
-                    .and_then(|attempt| attempt.get("new_worktree"))
-                    .is_some()
-            {
-                let branch = input
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|name| !name.is_empty())
-                    .map(|name| format!("smoke/{name}"))
-                    .unwrap_or_else(|| "smoke/verify".to_owned());
-                let explicit_base = input
-                    .get("base")
-                    .and_then(Value::as_str)
-                    .filter(|base| !base.is_empty())
-                    .map(str::to_owned);
-                let base = explicit_base.as_deref().unwrap_or(DEFAULT_WRITER_BASE);
-                let mut attempt = parameters
-                    .get("write_attempt")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                let object = attempt.as_object_mut().ok_or_else(|| {
-                    FacadeError::invalid(InvalidInputDetail::Field("write_attempt".into()))
-                })?;
-                let mut provision = json!({"branch":branch,"base":base});
-                if explicit_base.is_none() {
-                    provision["default_base"] = json!(true);
-                }
-                object.insert("new_worktree".into(), provision);
-                parameters["write_attempt"] = attempt;
-                input_warnings.push(format!(
-                    "remote smoke writer uses scratch branch {branch} from {base} (source: default smoke placement); pass --branch B --base REF to override"
-                ));
-            }
-            // Without an explicit base, a first parent supplies a distinct
-            // review range. A root commit (or unavailable Git) has no such
-            // range, so omit review rather than launching an empty one.
-            if parameters
-                .get("diff_base")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .is_empty()
-            {
-                if let Some(base) = provenant_os::git::git_executable()
-                    .and_then(|git| provenant_run::resolve_git_base(&git, &self.cwd, "HEAD^").ok())
-                {
-                    parameters["diff_base"] = json!(base);
-                    input_warnings.push(format!(
-                        "smoke review uses base {base} (source: checkout first parent); pass --set diff_base=BASE to override"
-                    ));
-                } else {
-                    parameters["smoke-review"] = json!(false);
-                    input_warnings.push(
-                        "smoke skipped review: no diff_base supplied and checkout first parent is unavailable; pass --set diff_base=BASE to enable review".into(),
-                    );
-                }
-            }
-            let peer_owned_writer = is_remote
-                && parameters
-                    .get("write_attempt")
-                    .and_then(|attempt| attempt.get("new_worktree"))
-                    .is_some();
-            if !requested {
-                let worktree = parameters
-                    .get("worktree")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                parameters["smoke-write"] =
-                    json!(peer_owned_writer || (!is_remote && !worktree.is_empty()));
-            }
-            if parameters["smoke-write"] != json!(true) {
-                let reason = if requested {
-                    "smoke-write is not enabled"
-                } else if is_remote {
-                    "remote placement needs --branch B to provision a peer-owned worktree; caller paths are not accepted"
-                } else {
-                    "no writer worktree supplied; pass --worktree PATH or --branch B to run it"
-                };
-                input_warnings.push(format!(
-                    "smoke skipped node write: {reason}; other eligible nodes still run"
-                ));
-            }
+            smoke::configure(
+                self,
+                input,
+                &mut parameters,
+                &overrides,
+                &smoke_writer,
+                first_control.copied(),
+                input_warnings,
+            )?;
         }
         node["with"] = parameters;
         Ok(TemplateLaunch {
@@ -4196,6 +4085,8 @@ fn route_choice(input: &Value, raw: Option<&Value>) -> Result<Option<RouteChoice
 
 #[path = "interface_route.rs"]
 mod route;
+#[path = "interface_smoke.rs"]
+mod smoke;
 use route::override_tier;
 
 fn add(row: &mut Value, key: &str, value: u64) {
