@@ -2410,19 +2410,20 @@ fn same_selected_ready(route: &ResolvedRoute, next: ResolvedRoute) -> Option<Res
 }
 
 #[cfg(test)]
+fn offer_policy(now: i64) -> provenant_routing::OfferEvidencePolicy<'static> {
+    provenant_routing::OfferEvidencePolicy {
+        accounts: &[],
+        freshness: &provenant_quota::DEFAULT_FRESHNESS,
+        quota_policies: &[],
+        catalogue_revision: "revision",
+        now_seconds: now,
+    }
+}
+
+#[cfg(test)]
 mod stale_readiness_tests {
     use super::*;
     use std::cell::Cell;
-
-    fn offer_policy(now: i64) -> provenant_routing::OfferEvidencePolicy<'static> {
-        provenant_routing::OfferEvidencePolicy {
-            accounts: &[],
-            freshness: &provenant_quota::DEFAULT_FRESHNESS,
-            quota_policies: &[],
-            catalogue_revision: "revision",
-            now_seconds: now,
-        }
-    }
 
     #[test]
     fn model_outside_the_accounts_offered_list_is_refused_with_that_list() {
