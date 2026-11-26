@@ -2920,7 +2920,11 @@ impl RunStore {
             .applied_route
             .as_ref()
             .and_then(|r| r.provider.as_deref())
-            == Some("codex")
+            .and_then(provenant_records::AdapterSpec::get)
+            .is_some_and(|s| {
+                s.capabilities.usage_attribution.value
+                    == provenant_records::UsageAttribution::Session
+            })
         {
             let prior_id = self.request(record.attempt_id, call).map(|request| {
                 if request.fresh_continuation.is_none() {
