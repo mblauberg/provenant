@@ -36,7 +36,9 @@ reconcile active work and report its disposition.
 Before compaction, handoff or a long interruption, rewrite a checkpoint near
 2 KiB from the [checkpoint template](templates/checkpoint.template.md), with
 the standing record and an Intent section as the
-[continuity contract](references/continuity.md) sets out. Save it with
+[continuity contract](references/continuity.md) sets out, plus a Now section for
+current focus. The session-start hook keeps Intent and Now intact when its
+output is bounded; derived state shrinks first. Save it with
 `provenant workflow session save` and append milestones with
 `provenant chair log append`; `--help` on each gives the flags. An explicit
 `--project PATH` selects where the checkpoint lands: when it names another

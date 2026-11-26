@@ -13,6 +13,8 @@ const SECTION_LINES: usize = 8;
 const FIELD_LIMIT: usize = 160;
 pub const DIGEST_LIMIT: usize = 3 * 1024;
 pub const BLOCK_LIMIT: usize = 6 * 1024;
+/// The custody section title, shared by the digest and the autosave document.
+pub const CUSTODY_TITLE: &str = "Active custody";
 /// Longest next-page command shown as a runnable command.
 const NEXT_PAGE_LIMIT: usize = 512;
 
@@ -303,7 +305,7 @@ impl SessionState {
         let mut sections = Vec::new();
         if !self.custody.is_empty() || self.custody_more.is_some() {
             sections.push(Section {
-                title: "Active custody".into(),
+                title: CUSTODY_TITLE.into(),
                 lines: self.custody.clone(),
                 more: 0,
                 partial: self.custody_more.clone(),
@@ -562,6 +564,29 @@ pub fn has_chair_text(chair: &str) -> bool {
     !chair.trim().is_empty()
 }
 
+/// Drop the `### Active custody` section from a rendered autosave document.
+/// When the digest is shown it already carries custody; repeating the same
+/// derived list below the chair's notes wastes the bounded hook output. The
+/// chair's own prose is never touched: only the autosave's `###` section goes.
+pub fn without_custody(markdown: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in markdown.lines() {
+        if let Some(title) = line.strip_prefix("### ") {
+            inside = title.trim_end() == CUSTODY_TITLE;
+            if inside {
+                continue;
+            }
+        }
+        if inside {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim_end().to_owned()
+}
+
 /// What a hook needs from the saved checkpoint before collecting state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Baseline {
@@ -591,6 +616,17 @@ mod tests {
             branch: None,
             reason: None,
         }
+    }
+
+    #[test]
+    fn without_custody_removes_only_the_autosave_custody_section() {
+        let document = "## Provenant session state\nAuto-saved: now\n\n### Active custody\n- lane A is mine\n\n### Lanes in flight (1)\n- g/a#1\n";
+        let stripped = without_custody(document);
+        assert!(!stripped.contains("Active custody"), "{stripped}");
+        assert!(!stripped.contains("lane A is mine"), "{stripped}");
+        assert!(stripped.contains("Auto-saved: now"), "{stripped}");
+        assert!(stripped.contains("### Lanes in flight (1)"), "{stripped}");
+        assert!(stripped.contains("- g/a#1"), "{stripped}");
     }
 
     #[test]
