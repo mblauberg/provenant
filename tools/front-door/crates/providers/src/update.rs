@@ -289,19 +289,6 @@ fn command(provider: &str, executable: &Path, setting: &ProviderUpdate) -> Optio
     }
 }
 
-fn version(executor: &dyn Executor, executable: &Path, cwd: &Path) -> Option<String> {
-    let argv = [executable.into(), "--version".into()];
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
-    options.stdout = StreamPolicy::Capture { limit: 128 };
-    options.stderr = StreamPolicy::Discard;
-    let result = executor.execute(options).ok()?;
-    if result.termination != Termination::Exit(0) || result.timed_out || result.stdout.truncated {
-        return None;
-    }
-    let text = std::str::from_utf8(&result.stdout.bytes).ok()?.trim();
-    (!text.is_empty() && !text.chars().any(char::is_control)).then(|| text.to_owned())
-}
-
 /// A busy provider is left for the next event, without spending its interval.
 /// Output from updaters is discarded; only bounded version strings are retained.
 pub fn check(
@@ -413,7 +400,7 @@ fn check_inner(
         save(&dir, &record_name(provider), &record)?;
         return Ok(Some((&record).into()));
     };
-    if let Some(old_version) = version(executor, executable, state) {
+    if let Some(old_version) = crate::version::probe(executor, executable, state) {
         record.old_version = Some(old_version.clone());
         record.new_version = Some(old_version);
     }
@@ -436,7 +423,7 @@ fn check_inner(
     let succeeded =
         result.is_ok_and(|out| out.termination == Termination::Exit(0) && !out.timed_out);
     record.new_version =
-        version(executor, executable, state).or_else(|| record.old_version.clone());
+        crate::version::probe(executor, executable, state).or_else(|| record.old_version.clone());
     record.outcome = if succeeded { "updated" } else { "failed" }.into();
     save(&dir, &record_name(provider), &record)?;
     Ok(Some((&record).into()))

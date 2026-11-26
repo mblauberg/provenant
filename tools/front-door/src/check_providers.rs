@@ -7,13 +7,22 @@ use provenant_fabric_runtime::{
     coordination::facade::GraphInput,
     graph::{AttemptOutcome, GraphRun, NodeState},
 };
+use provenant_os::exec::SystemExecutor;
 use provenant_providers::host::LocalSignin;
 use provenant_quota::{QuotaStatus, ReadinessReason};
-use provenant_records::{CommandResult, Outcome, StopCause};
-use provenant_routing::{Catalogue, ModelId};
+use provenant_records::{
+    CommandResult, Layer, Outcome, StopCause,
+    policy::{Facts, Policy},
+};
+use provenant_routing::{
+    Catalogue, ModelId,
+    compatibility::{self, CompatibilityStatus},
+};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const PROMPT: &str = "Reply with exactly one word: OK. Do not use tools, read files, change files, run commands or perform any other work.";
@@ -531,15 +540,119 @@ fn live(
     }
 }
 
+static VERSIONS: OnceLock<provenant_providers::version::VersionCache> = OnceLock::new();
+
+/// One harness-version finding, from the same assessment and policy check the
+/// launch path uses. The layer names the config row that set the status.
+#[derive(Clone, Debug, Serialize)]
+struct Finding {
+    adapter: String,
+    version: Option<String>,
+    status: CompatibilityStatus,
+    reason: Option<String>,
+    issue: Option<u64>,
+    recommended: Option<String>,
+    source: Layer,
+    policy: Option<String>,
+    blocks: bool,
+}
+
+impl Finding {
+    fn human(&self) -> String {
+        format!(
+            "adapter={} version={} status={} reason={} issue={} source={} policy={}",
+            self.adapter,
+            self.version.as_deref().unwrap_or("-"),
+            status_text(self.status),
+            self.reason.as_deref().unwrap_or("-"),
+            self.issue
+                .map_or_else(|| "-".into(), |issue| issue.to_string()),
+            self.source.as_str(),
+            self.policy.as_deref().unwrap_or("-")
+        )
+    }
+}
+
+fn status_text(status: CompatibilityStatus) -> &'static str {
+    match status {
+        CompatibilityStatus::Supported => "supported",
+        CompatibilityStatus::Unsupported => "unsupported",
+        CompatibilityStatus::Broken => "broken",
+        CompatibilityStatus::Unknown => "unknown",
+    }
+}
+
+/// One finding per installed adapter whose declared compatibility status is
+/// unsupported or broken, resolved through the shared policy table.
+fn compatibility_findings(
+    state: &Path,
+    project: &Path,
+) -> Result<Vec<Finding>, Box<dyn std::error::Error>> {
+    let (table, _warnings) = compatibility::Table::effective(state, Some(project));
+    let project_key = provenant_config::ports::project_key_for(project).unwrap_or_default();
+    let policy: Policy = provenant_config::policy::read(state, &project_key, &BTreeMap::new());
+    let Ok(executor) = SystemExecutor::new(1) else {
+        return Ok(Vec::new());
+    };
+    let cache = VERSIONS.get_or_init(provenant_providers::version::VersionCache::new);
+    let mut findings = Vec::new();
+    for spec in provenant_records::ADAPTER_SPECS {
+        let Some(executable) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .filter(|path| path.is_absolute())
+            .map(|path| path.join(spec.binary))
+            .find(|path| provenant_os::sys::is_executable(path))
+        else {
+            continue;
+        };
+        let version = cache.read(&executor, &executable, state);
+        let assessment = table.assess(spec.name, version.as_deref());
+        let Some(code) = compatibility::policy_code(assessment.status) else {
+            continue;
+        };
+        let mut detail = format!(
+            "{} {} is {}",
+            assessment.adapter,
+            version.as_deref().unwrap_or("an unreadable version"),
+            status_text(assessment.status)
+        );
+        if let Some(reason) = assessment.reason.as_deref() {
+            detail.push_str(&format!(": {reason}"));
+        }
+        if let Some(issue) = assessment.issue {
+            detail.push_str(&format!("; issue #{issue}"));
+        }
+        detail.push_str(&format!("; source={}", assessment.source.as_str()));
+        let effect = policy.check(code, Facts::violation(detail));
+        let blocks = effect.blocks();
+        let policy = effect.message().map(str::to_owned);
+        findings.push(Finding {
+            adapter: assessment.adapter,
+            version: assessment.version,
+            status: assessment.status,
+            reason: assessment.reason,
+            issue: assessment.issue,
+            recommended: assessment.recommended,
+            source: assessment.source,
+            policy,
+            blocks,
+        });
+    }
+    Ok(findings)
+}
+
 #[derive(Serialize)]
 struct Report {
     live: bool,
     settings: Settings,
     rows: Vec<Row>,
+    findings: Vec<Finding>,
 }
 impl Report {
     fn exit(&self) -> u8 {
-        u8::from(self.rows.iter().any(|row| row.status == Verdict::Fail))
+        u8::from(
+            self.rows.iter().any(|row| row.status == Verdict::Fail)
+                || self.findings.iter().any(|finding| finding.blocks),
+        )
     }
 }
 
@@ -553,6 +666,7 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
         )?;
         let mut rows = select(inventory(&resolved.roots)?, &args.routes)?;
         let config = provenant_cli::config_reads::read_for(&resolved.roots, "check providers")?;
+        let findings = compatibility_findings(resolved.roots.state.as_ref(), &resolved.project)?;
         let (wait, origin) = provenant_cli::wait::Settings::resolved(&config);
         let cadence = origin.local_cadence(&wait);
         let cadence = &cadence;
@@ -586,6 +700,7 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
             live: args.live,
             settings,
             rows,
+            findings,
         })
     })();
     match result {
@@ -634,6 +749,9 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
                     row.pools.join(","),
                     row.observation.as_deref().unwrap_or("-")
                 );
+            }
+            for finding in &report.findings {
+                human += &format!("{}\n", finding.human());
             }
             crate::emit(
                 &CommandResult::new(
