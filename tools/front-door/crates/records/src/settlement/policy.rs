@@ -78,6 +78,21 @@ impl SettlementPolicy {
     }
 }
 
+/// The route layer of settlement policy. Routing declares these under
+/// `model_policy.defaults.lane.settlement` and `rules.policy.lane.settlement`;
+/// the holder reads the resolved value from the sealed route. Every field is
+/// optional, so an absent field leaves the lower layers in place.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "snake_case")]
+pub struct RouteSettlement {
+    pub handoff_missing: Option<SignalAction>,
+    pub handoff_malformed: Option<SignalAction>,
+    pub empty_result: Option<SignalAction>,
+    pub uncommitted_work: Option<SignalAction>,
+    pub stray_work: Option<SignalAction>,
+    pub no_work: Option<NoWork>,
+}
+
 /// A non-default action that changed an outcome or a class, with the source
 /// that chose it. Built only inside the classifier.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

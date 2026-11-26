@@ -3080,6 +3080,15 @@ impl RunStore {
             return Err(RunError::Validation("request changed after launch"));
         }
         let task = request.task;
+        // Resolve once from the sealed profile; the same value is sealed with
+        // the evidence and the stray check reads it before it runs.
+        let (settlement_policy, settlement_warnings) = crate::settlement_policy::resolve(
+            &crate::settlement_policy::SettlementConfig::from_profile(&task.profile),
+            None,
+        );
+        for warning in settlement_warnings {
+            provenant_records::warning::warn(warning);
+        }
         // A stop at the runtime deadline is a typed timeout, whatever partial
         // output the provider left, and the lane stays resumable.
         let typed_deadline = decoded.outcome == Outcome::TimedOut
@@ -3483,7 +3492,11 @@ impl RunStore {
                     // lane. Without bound-branch commits the work may be in the
                     // primary checkout, so the lane is held for review. The
                     // disposition travels as evidence; settle decides.
-                    if uncommitted.is_none() && decoded.outcome == Outcome::Succeeded {
+                    if uncommitted.is_none()
+                        && decoded.outcome == Outcome::Succeeded
+                        && settlement_policy.stray_work.value
+                            != provenant_records::settlement::policy::SignalAction::Off
+                    {
                         let stray = self.writer_stray(
                             &record,
                             writer,
@@ -3792,7 +3805,7 @@ impl RunStore {
                     .and_then(|marker| stall_stop_cause(exit.stop_reason, cancelled, marker)),
                 identity: provider_identity(exit, &decoded, &policy),
             },
-            policy: provenant_records::settlement::policy::SettlementPolicy::shipped(),
+            policy: settlement_policy,
         };
         let (evidence, digest) = match crate::evidence::read_evidence(attempt)? {
             Some(sealed) => sealed,

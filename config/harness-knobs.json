@@ -16,6 +16,12 @@
       "lanes.ci_scope",
       "lanes.verification",
       "lanes.writer_dirty",
+      "lanes.settlement.handoff_missing",
+      "lanes.settlement.handoff_malformed",
+      "lanes.settlement.empty_result",
+      "lanes.settlement.uncommitted_work",
+      "lanes.settlement.stray_work",
+      "lanes.settlement.no_work",
       "lanes.read_source",
       "lanes.gh_budget",
       "lanes.isolation",
@@ -411,6 +417,12 @@
       "defaults.lane.max_context": {"type": "int", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Enforced largest context for a lane on this model."},
       "defaults.lane.max_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "unset", "effect": "Enforced most turns for a lane on this model."},
       "defaults.lane.stop_early_ok": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "false asks writers to report completion through the shared handoff."},
+      "defaults.lane.settlement.handoff_missing": {"type": "enum", "values": ["review", "fail", "warn", "off"], "default": "inherit lanes.settlement.handoff_missing", "effect": "Route-layer override for the missing-declaration action; rules.policy.lane.settlement.handoff_missing uses the same values."},
+      "defaults.lane.settlement.handoff_malformed": {"type": "enum", "values": ["review", "fail", "warn", "off"], "default": "inherit lanes.settlement.handoff_malformed", "effect": "Route-layer override for the malformed-declaration action; rules.policy.lane.settlement.handoff_malformed uses the same values."},
+      "defaults.lane.settlement.empty_result": {"type": "enum", "values": ["review", "fail", "warn"], "default": "inherit lanes.settlement.empty_result", "effect": "Route-layer override for the empty-result action; rules.policy.lane.settlement.empty_result uses the same values."},
+      "defaults.lane.settlement.uncommitted_work": {"type": "enum", "values": ["hold", "review", "warn", "off"], "default": "inherit lanes.settlement.uncommitted_work", "effect": "Route-layer override for the uncommitted-work action; rules.policy.lane.settlement.uncommitted_work uses the same values."},
+      "defaults.lane.settlement.stray_work": {"type": "enum", "values": ["review", "warn", "off"], "default": "inherit lanes.settlement.stray_work", "effect": "Route-layer override for the stray-work action; rules.policy.lane.settlement.stray_work uses the same values."},
+      "defaults.lane.settlement.no_work": {"type": "enum", "values": ["detect", "off"], "default": "inherit lanes.settlement.no_work", "effect": "Route-layer override for no-work detection; rules.policy.lane.settlement.no_work uses the same values."},
       "defaults.lane.access": {"type": "enum", "default": "inherit lanes.access", "effect": "Override host and project lane access for matching routes unless an explicit launch, template or tier knob wins. rules.policy.lane.access uses the same values."},
       "defaults.lane.user_skills": {"type": "enum", "default": "inherit domains.lanes.user_skills", "effect": "Override host and project user skill discovery for matching routes. rules.policy.lane.user_skills uses the same values."},
       "defaults.lane.read_only": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "true refuses write lanes on this model."},
@@ -1042,6 +1054,42 @@
       "reader": "tools/front-door/crates/run/src/writer_dirty.rs, tools/front-door/src/fabric/graph_execution.rs",
       "effect": "What a writer dispatch does when its worktree holds uncommitted edits. wip_commit (default) preserves the edits of a worktree no live writer holds in a local WIP commit before launch, warns WORKTREE_ADOPTED_DIRTY naming the commit and records its id in the graph events. refuse refuses at graph submission before any plan node spends tokens, naming the dirty paths and this setting. continue_in_place keeps the edits and warns. A worktree another lane holds is always refused (boundary 2), as are credential and Git-internal roots under every value. The effective value and its source appear in the refusal and warning. Set with `provenant config set lanes.writer_dirty refuse` or under `[knobs]` in config.toml.",
       "trade_off": "wip_commit preserves work automatically but creates a commit before the plan node; refuse protects token spend but blocks a continued draft until the operator commits or overrides; continue_in_place is cheapest but leaves the writer to respect the edits."
+    },
+    "lanes.settlement.handoff_missing": {
+      "type": "enum", "values": ["review", "fail", "warn", "off"], "default": "review", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "What a model writer's missing declaration does. review (default) holds the lane for review; fail settles it as Failed with the policy source named; warn keeps the outcome and records the signal without a class; off drops it from the class so dependants release. Adapter writers owe no declaration. Sealed into settlement-evidence.json so a re-drive reproduces the decision.",
+      "trade_off": "warn/off suit routes whose model cannot reliably call tools; fail is an owner-configured stop, not a boundary."
+    },
+    "lanes.settlement.handoff_malformed": {
+      "type": "enum", "values": ["review", "fail", "warn", "off"], "default": "review", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "What declarations submitted with none accepted do. review (default) holds for review; fail settles Failed; warn keeps the outcome and records the signal without a class; off drops it from the class. The field diagnostics remain on the sealed fact under every value.",
+      "trade_off": "off hides a malformed channel from the class but the rejected lines stay sealed in the journal."
+    },
+    "lanes.settlement.empty_result": {
+      "type": "enum", "values": ["review", "fail", "warn"], "default": "review", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "What a writer's empty final result does. review (default) holds for review; fail settles Failed; warn keeps the outcome and records the signal without a class. A reader's empty result is always Failed and is not configurable, because its answer is its only product.",
+      "trade_off": "This is guidance for a model that commits its work but returns no text; files are never changed by any value."
+    },
+    "lanes.settlement.uncommitted_work": {
+      "type": "enum", "values": ["hold", "review", "warn", "off"], "default": "hold", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "What edits left on the writer worktree do. hold (default) settles Uncommitted; review holds for review; warn keeps the outcome and records the signal without a class; off drops it from the class. No value touches the files (boundary 2); domains.run.review_exempt still decides which paths count.",
+      "trade_off": "hold protects unreviewed edits; off is for routes whose host commits the work itself."
+    },
+    "lanes.settlement.stray_work": {
+      "type": "enum", "values": ["review", "warn", "off"], "default": "review", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "What an unattributed move in the primary checkout does. review (default) holds for review; warn keeps the outcome and retains PRIMARY_MOVED_UNATTRIBUTED; off skips the primary-checkout check entirely (PrimaryCheckout::NotChecked), saving its Git reads. No value touches the files.",
+      "trade_off": "off saves Git work but cannot see work made in the wrong checkout."
+    },
+    "lanes.settlement.no_work": {
+      "type": "enum", "values": ["detect", "off"], "default": "detect", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/settlement_policy.rs, tools/front-door/crates/records/src/settlement/classify.rs",
+      "effect": "Whether a declared stop_early with a known, unchanged head settles as stopped_no_work. detect (default) does; off keeps DeclaredStop/StoppedEarly. Unknown progress is never no-work under either value, and pushed-then-blocked stays Blocked.",
+      "trade_off": "off preserves the coarse declared stop for hosts that act on it; the pin-relative progress fact is still sealed."
     },
     "lanes.read_source": {
       "type": "string", "default": "auto", "status": "wired",

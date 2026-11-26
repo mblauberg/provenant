@@ -43,6 +43,7 @@ mod service;
 #[cfg(test)]
 mod service_tests;
 pub mod settlement;
+pub mod settlement_policy;
 mod short_temporary;
 mod store;
 mod telemetry_context;

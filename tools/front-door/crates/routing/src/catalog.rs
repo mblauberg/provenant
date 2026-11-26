@@ -1071,6 +1071,30 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("model_policy.defaults.lane.max_context", 1, i64::MAX),
     FieldMetadata::int("model_policy.defaults.lane.max_turns", 1, i64::MAX),
     FieldMetadata::new("model_policy.defaults.lane.stop_early_ok", "bool"),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lane.settlement.handoff_missing",
+        &["review", "fail", "warn", "off"],
+    ),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lane.settlement.handoff_malformed",
+        &["review", "fail", "warn", "off"],
+    ),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lane.settlement.empty_result",
+        &["review", "fail", "warn"],
+    ),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lane.settlement.uncommitted_work",
+        &["hold", "review", "warn", "off"],
+    ),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lane.settlement.stray_work",
+        &["review", "warn", "off"],
+    ),
+    FieldMetadata::enumeration(
+        "model_policy.defaults.lane.settlement.no_work",
+        &["detect", "off"],
+    ),
     FieldMetadata::new("model_policy.defaults.lane.read_only", "bool"),
     FieldMetadata::enumeration("model_policy.defaults.lane.access", &["host", "isolated"]),
     FieldMetadata::enumeration(
