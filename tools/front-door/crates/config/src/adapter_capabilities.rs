@@ -9,7 +9,7 @@
 //! An entry may only narrow a row's facts: `disable` names capabilities to
 //! switch off, and `on_gap` sets the action for a degradable gap. Widening a
 //! fact is not expressible. Write, network, resume and skill-location gaps
-//! always refuse, so they have no `on_gap` key.
+//! always refuse, so an `on_gap` key for them warns and is skipped.
 use provenant_records::{
     AdapterOverride, AdapterSpec, CapabilityOverlay, GapAction, LaunchField, OverridableCapability,
     Source,
@@ -32,6 +32,8 @@ struct EntryAsset {
 
 /// Decode one layer row. Every invalid part is reported and skips the whole
 /// entry: a partially applied narrowing would overstate what the owner asked.
+/// A refuse-only `on_gap` key is the exception: its gap refuses either way, so
+/// only the key is skipped.
 fn decode_entry(
     row: EntryAsset,
     source: Source,
@@ -65,12 +67,14 @@ fn decode_entry(
             "effort" => LaunchField::Effort,
             "image_input" => LaunchField::ImageInput,
             "write" | "network" | "resume" | "skill_location" => {
+                // The gap refuses whatever the key says, so skipping only the
+                // key leaves the entry exactly as narrow as the owner asked.
                 warnings.push(OverlayWarning::new(
                     source.layer,
-                    key,
+                    key.clone(),
                     "write, network, resume and skill-location gaps always refuse",
                 ));
-                return None;
+                continue;
             }
             _ => {
                 warnings.push(OverlayWarning::new(
@@ -240,11 +244,17 @@ mod tests {
     }
 
     #[test]
-    fn a_refuse_only_gap_is_skipped_with_its_fixed_text() {
+    fn a_refuse_only_gap_key_is_skipped_with_its_fixed_text() {
         let (overlay, warnings) = decode(
-            "[[adapter_capabilities]]\nadapter = \"codex\"\non_gap = { write = \"refuse\" }\n",
+            "[[adapter_capabilities]]\nadapter = \"codex\"\ndisable = [\"model\"]\non_gap = { write = \"off\", effort = \"off\" }\n",
         );
-        assert!(overlay.entries.is_empty());
+        // The entry and its other parts survive; only the refuse-only key goes.
+        assert_eq!(overlay.entries.len(), 1);
+        assert_eq!(overlay.entries[0].disable, [OverridableCapability::Model]);
+        assert_eq!(
+            overlay.entries[0].on_gap,
+            [(LaunchField::Effort, GapAction::Off)]
+        );
         assert_eq!(warnings.len(), 1);
         assert_eq!(
             warnings[0].reason,
