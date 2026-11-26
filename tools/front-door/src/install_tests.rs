@@ -137,14 +137,17 @@ fn preflight_warns_with_count_and_path_for_unregistered_legacy_custody()
 }
 
 #[test]
-fn preflight_warns_and_names_live_attempts_when_record_format_changes()
+fn preflight_warns_and_names_live_attempts_after_delivery_record_format_change()
 -> Result<(), Box<dyn std::error::Error>> {
     use super::*;
     use provenant_core::{AttemptId, ProjectId};
     use provenant_os::clock::SystemClock;
 
     let tmp = tempfile::tempdir()?;
-    let roots = roots_with_receipt(tmp.path(), Some(provenant_records::LIVE_RECORD_FORMAT - 1))?;
+    // Format 11 is the installed format before typed delivery destinations.
+    // Keeping it literal makes this test fail if the live format is not bumped.
+    const PRIOR_LIVE_RECORD_FORMAT: u32 = 11;
+    let roots = roots_with_receipt(tmp.path(), Some(PRIOR_LIVE_RECORD_FORMAT))?;
     let attempt = AttemptId::from_bytes([4; 16]);
     create_live_attempt(&roots, ProjectId::from_bytes([1; 16]), attempt)?;
 
@@ -158,7 +161,7 @@ fn preflight_warns_and_names_live_attempts_when_record_format_changes()
     let warning = warn_live_record_change(&roots, &context)
         .expect("a format change with live attempts warns");
     let current = provenant_records::LIVE_RECORD_FORMAT;
-    let change = format!("format {} → {current}", current - 1);
+    let change = format!("format {PRIOR_LIVE_RECORD_FORMAT} → {current}");
     assert!(warning.contains(&change), "{warning}");
     assert!(warning.contains("live attempts:"), "{warning}");
     assert!(warning.contains(&attempt.to_string()), "{warning}");
