@@ -992,6 +992,14 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             for child in &spec.body {
                 let mut child = child.clone();
                 let local = child.id.clone();
+                if let Some((dependencies, settled)) = outer_dependencies.get(&local) {
+                    child
+                        .depends_on
+                        .retain(|parent| !dependencies.contains(parent));
+                    child
+                        .after_settled
+                        .retain(|parent| !settled.contains(parent));
+                }
                 if child.source.is_none()
                     && let Some(source) = previous_head_sources.get(&local)
                 {

@@ -1238,24 +1238,12 @@ fn queue_conflict_recheck_matches_a_bounded_round_and_reactivates_composite_reba
                  "condition":{"type":"conflict","target":{"node":"rebase_publish"}}},
                 {"id":"rebase_ci","kind":"gate","access":"read_only","depends_on":["rebase_conflict"],
                  "condition":{"type":"ci","target":{"node":"rebase_publish"}}},
-                {"id":"ci_repair","access":"worktree_write","worktree":"lane","prompt":"repair",
-                 "source":{"type":"head","node":"publish"},"depends_on":["ci"],
-                 "inputs":[{"node":"ci","outputs":["findings","commit"]}],
-                 "route":{"adapter":"fixture","model":"fixture/model"}},
-                {"id":"ci_hygiene","kind":"hygiene","access":"worktree_write","worktree":"lane",
-                 "depends_on":["ci_repair"],"source":{"type":"node","node":"ci_repair"}},
-                {"id":"ci_publish","kind":"publish","access":"worktree_write","worktree":"lane",
-                 "depends_on":["ci_hygiene"],"source":{"type":"node","node":"ci_hygiene"}},
-                {"id":"ci_conflict","kind":"gate","access":"read_only","depends_on":["ci_publish"],
-                 "condition":{"type":"conflict","target":{"node":"ci_publish"}}},
-                {"id":"ci_refresh","kind":"gate","access":"read_only","depends_on":["ci_conflict"],
-                 "condition":{"type":"ci","target":{"node":"ci_publish"}}},
                 {"id":"ci","kind":"gate","access":"read_only","depends_on":["conflict"],
-                 "on_fail":"ci_repair","condition":{"type":"ci","target":{"node":"publish"}}},
+                 "condition":{"type":"ci","target":{"node":"publish"}}},
                 {"id":"done","kind":"gate","access":"read_only",
                  "depends_on":["ci"],
                  "after_settled":["conflict","rebase","rebase_hygiene","rebase_publish","rebase_conflict",
-                                  "rebase_ci","ci_repair","ci_hygiene","ci_publish","ci_conflict","ci_refresh"],
+                                  "rebase_ci"],
                  "condition":{"type":"ci","target":{"node":"publish"}}}
             ]}
         }))
@@ -1545,6 +1533,7 @@ fn queue_conflict_recheck_replays_into_a_later_recovery_round() {
         reason: Some("CONFLICTING".into()),
         on_fail: Some("rebase".into()),
     });
+    replay.nodes[positions["rebase--r1--republish"]].state = NodeState::Succeeded;
     replay.nodes[first_until_index].state = NodeState::Failed;
     replay.nodes[first_until_index].gate = Some(GateResult {
         extra: Default::default(),

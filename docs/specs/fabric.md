@@ -224,7 +224,8 @@ expansion binds a source or gate target that was inherited as an ordering-only
 edge, the source's success requirement replaces that ordering edge; a retry of
 failed hygiene retains its settled-only source edge. Dependencies inherited
 from an enclosing composite are checked against the full expanded graph and
-remain attached to each round.
+remain attached to each round under their original graph identities, rather than
+being renamed into the loop namespace.
 
 ### Implementation planning
 

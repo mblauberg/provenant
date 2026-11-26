@@ -384,7 +384,7 @@ fn loop_body_preserves_an_outer_node_source_and_entry_dependency() {
             {"id":"cycle", "kind":"loop", "access":"read_only",
              "depends_on":["ready"], "loop":{"max_rounds":1,"until":"done","body":[
                 {"id":"reader", "access":"read_only", "prompt":"read writer output",
-                 "route":{"alias":"fixture"}, "source":{"type":"node","node":"writer"}},
+                 "route":{"alias":"fixture"}, "depends_on":["writer"], "source":{"type":"node","node":"writer"}},
                 {"id":"done", "kind":"gate", "access":"read_only",
                  "depends_on":["reader"], "condition":{"type":"budget"}}
              ]}}
@@ -404,6 +404,8 @@ fn loop_body_preserves_an_outer_node_source_and_entry_dependency() {
     ));
     assert!(reader.depends_on.contains(&"writer".to_owned()));
     assert!(reader.depends_on.contains(&"ready".to_owned()));
+    assert!(!reader.depends_on.contains(&"cycle--r1--writer".to_owned()));
+    assert!(validate_flat_plan(&expanded, &Default::default()).is_ok());
 }
 
 // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
@@ -2222,6 +2224,7 @@ fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
     let gate_index = positions["delivery--r1--conflict"];
     let rebase_index = positions["delivery--r1--rebase"];
     let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    checkpoint.nodes[positions["publish"]].state = NodeState::Succeeded;
     checkpoint.nodes[gate_index].state = NodeState::Failed;
     checkpoint.nodes[gate_index].outputs = Some(NodeOutputs::default());
     checkpoint.nodes[gate_index].gate = Some(GateResult {
