@@ -609,14 +609,13 @@ impl RunStore {
             permission_plan_digest: task.authority_digest,
             key,
             requester,
-            // OpenCode stores answering-model evidence in its shared XDG data
-            // directory. The guardian otherwise starts with an empty environment
-            // and no Registry home; retain the absolute path selected at launch.
-            config_environment: if provider == "opencode" {
-                vec!["XDG_DATA_HOME".into()]
-            } else {
-                vec![]
-            },
+            // The guardian starts with a stripped environment, so only the
+            // variables a spec declares for its own evidence survive.
+            config_environment: provenant_records::AdapterSpec::get(provider)
+                .into_iter()
+                .flat_map(|spec| spec.guardian_environment)
+                .map(|name| (*name).into())
+                .collect(),
             argv: plan.argv,
             environment: plan.environment,
             cwd: plan.cwd,

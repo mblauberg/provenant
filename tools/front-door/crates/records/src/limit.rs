@@ -420,7 +420,7 @@ impl LaneLimits {
             source: budget.source,
             counted: usage.fresh_tokens(),
             reported_input: usage.input_including_cache(),
-            basis: if spec.is_some_and(|spec| spec.session_wide_usage)
+            basis: if spec.is_some_and(|spec| spec.usage_scope == crate::UsageAttribution::Session)
                 && usage.per_attempt != Some(true)
             {
                 "session".into()

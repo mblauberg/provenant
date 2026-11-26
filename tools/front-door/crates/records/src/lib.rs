@@ -7,8 +7,9 @@ pub use adapters::{
     COMMAND_OUTPUT_TAIL_BYTES, CapabilitySupport, ClientEnvMarkers, GithubAuth, HarnessInstall,
     HookAction, HookEvent, HookProtocol, HookTimeoutUnit, INSTRUCTION_ASSET, LaunchCapabilities,
     LaunchField, LaunchRequest, LoginObservation, LoginReprobe, ModelListingFormat,
-    ModelObservation, NamedEntry, NativeAuthWarning, QuotaProbeKind, SetupRoot, SkillLocation,
-    StreamContract, UnsupportedLaunch, UpdateCommand, normalise_model_id,
+    ModelObservation, NamedEntry, NativeAuthWarning, QuotaProbeKind, RetainedArtifact, SetupRoot,
+    SkillLocation, StdoutCapture, StreamContract, UnsupportedLaunch, UpdateCommand,
+    UsageAttribution, normalise_model_id,
 };
 
 /// The instruction content bound into this product build and projected into

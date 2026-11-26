@@ -63,13 +63,17 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
             .map_or(0, |limit| limit.value)
     };
     CapturePlan {
-        stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. } if provider == "command")
-        {
-            provenant_supervisor::custody::StreamMode::Tail {
-                limit: provenant_records::COMMAND_OUTPUT_TAIL_BYTES as u64,
+        stdout: match &task.route {
+            crate::RequestedRoute::Adapter { provider, .. }
+                if provenant_records::AdapterSpec::get(provider).is_some_and(|spec| {
+                    spec.stdout_capture == provenant_records::StdoutCapture::Tail
+                }) =>
+            {
+                provenant_supervisor::custody::StreamMode::Tail {
+                    limit: provenant_records::COMMAND_OUTPUT_TAIL_BYTES as u64,
+                }
             }
-        } else {
-            CapturePlan::default().stdout
+            _ => CapturePlan::default().stdout,
         },
         wall_ms: enforced(&limits.deadline_seconds).saturating_mul(1000),
         token_budget: enforced(&limits.token_budget),

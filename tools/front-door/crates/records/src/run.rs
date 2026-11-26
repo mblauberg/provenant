@@ -2943,13 +2943,15 @@ pub fn serialise_public_attempt<S: serde::Serializer>(
 }
 
 impl AttemptRecord {
-    /// Usage attributable to this attempt; unmarked Codex totals are session-wide.
+    /// Usage attributable to this attempt; unmarked totals of a session-scoped
+    /// adapter are session-wide.
     pub fn effective_usage(&self) -> UsageRecord {
         if self
             .applied_route
             .as_ref()
             .and_then(|route| route.provider.as_deref())
-            == Some("codex")
+            .and_then(crate::AdapterSpec::get)
+            .is_some_and(|spec| spec.usage_scope == crate::UsageAttribution::Session)
             && self.usage.per_attempt != Some(true)
         {
             UsageRecord::default()

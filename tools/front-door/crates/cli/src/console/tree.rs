@@ -436,8 +436,8 @@ mod tests {
         request.parent = None;
         request.parent_attempt = None;
         other_store.create(&prepared(4, request)?, &call)?;
-        // Historical codex totals are session-wide, so they are not counted
-        // against one lane. A stated bucket on a per-attempt lane is counted.
+        // A session-attributed adapter (Codex here) reports totals that cannot
+        // be counted against one lane. A per-attempt bucket is counted.
         // Spec: docs/specs/cli.md#nested-tree
         let mut observed = store.record(AttemptId::from_bytes([1; 16]), &call)?;
         observed.applied_route = Some(provenant_records::run::RouteRecord {

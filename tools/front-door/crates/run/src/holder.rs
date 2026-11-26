@@ -18,7 +18,7 @@ use provenant_supervisor::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-fn codex_attempt_usage(
+fn session_attempt_usage(
     usage: &mut UsageRecord,
     session: Option<&str>,
     prior: Option<(Option<&str>, &UsageRecord)>,
@@ -2920,7 +2920,8 @@ impl RunStore {
             .applied_route
             .as_ref()
             .and_then(|r| r.provider.as_deref())
-            == Some("codex")
+            .and_then(provenant_records::AdapterSpec::get)
+            .is_some_and(|spec| spec.usage_scope == provenant_records::UsageAttribution::Session)
         {
             let prior_id = self.request(record.attempt_id, call).map(|request| {
                 if request.fresh_continuation.is_none() {
@@ -2932,7 +2933,7 @@ impl RunStore {
             let prior = prior_id.and_then(|id| id.map(|id| self.record(id, call)).transpose());
             let baseline_unknown = prior.is_err();
             let prior = prior.ok().flatten();
-            codex_attempt_usage(
+            session_attempt_usage(
                 &mut decoded.usage,
                 decoded.session.as_deref(),
                 prior.as_ref().map(|p| (p.session.as_deref(), &p.usage)),

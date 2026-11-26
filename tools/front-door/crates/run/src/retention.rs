@@ -20,13 +20,17 @@ const HISTORY: &str = AttemptFile::ProviderHistory.name();
 pub const TOMBSTONE: &str = ".provider-gc-";
 const PAYLOAD_LOW_WATER_RATIO: (u64, u64) = (3, 4);
 
-// These are fetched or generated again by Codex at startup. Sessions and
-// history databases deliberately do not appear here. Other adapters need
-// evidence of regenerability before adding a row.
+// Declarative cleanup data, not adapter-identity policy: these name paths that
+// are fetched or generated again at startup, keyed by the recorded provider.
+// Sessions and history databases deliberately do not appear here. Other
+// adapters need evidence of regenerability before adding a row.
 const PROVIDER_CACHES: &[(&str, &[&str])] = &[(
     "codex",
     &["cache", "plugins", "skills", "models_cache.json"],
 )];
+// Declarative credential paths disposed before history is archived. The
+// permission-checked Claude config path and the nested OpenCode auth link are
+// path facts, not branches on an adapter name.
 const CREDENTIALS: &[&str] = &[
     "auth.json",
     ".credentials.json",
@@ -2008,10 +2012,8 @@ fn expire(
             }
             let candidate = subdir(&state, name, false)?;
             let provider = candidate_provider(&candidate)?;
-            if !matches!(
-                provider.as_str(),
-                "codex" | "claude" | "cursor" | "opencode"
-            ) {
+            let spec = provenant_records::AdapterSpec::get(&provider);
+            if !spec.is_some_and(|spec| spec.archive_transcripts) {
                 // Until an adapter's transcript layout is established, keep
                 // its unclassified payload as history rather than lose it.
                 state.rename_noreplace(name, &history, name)?;
@@ -2030,31 +2032,42 @@ fn expire(
                     candidate.sync()?;
                 }
             }
-            for (parent, artifact) in [(".cursor", "chats"), ("data", "opencode")] {
+            for artifact in spec.into_iter().flat_map(|spec| spec.retained_artifacts) {
                 if !keep_going() {
                     return Err(RunError::Cancelled);
                 }
-                if let Some(source) = existing(&candidate, parent)? {
-                    match source.metadata_at(OsStr::new(artifact), false) {
+                if let Some(source) = existing(&candidate, artifact.parent)? {
+                    match source.metadata_at(OsStr::new(artifact.name), false) {
                         Ok(_) => {
-                            if artifact == "opencode"
-                                && let Some(data) = existing(&source, artifact)?
+                            if let Some(nested) = existing(&source, artifact.name)?
+                                && !artifact.scrub.is_empty()
                             {
                                 // The launcher places an authentication link here.
                                 // Never archive it if earlier credential cleanup was refused.
                                 let first = report.removed.len();
-                                dispose(&data, OsStr::new("auth.json"), false, report, keep_going)?;
+                                for credential in artifact.scrub {
+                                    dispose(
+                                        &nested,
+                                        OsStr::new(credential),
+                                        false,
+                                        report,
+                                        keep_going,
+                                    )?;
+                                }
                                 prefix_removals(
                                     report,
                                     first,
-                                    &PathBuf::from(STATE).join(name).join(parent).join(artifact),
+                                    &PathBuf::from(STATE)
+                                        .join(name)
+                                        .join(artifact.parent)
+                                        .join(artifact.name),
                                 );
                             }
-                            let target = subdir(&archive, OsStr::new(parent), true)?;
+                            let target = subdir(&archive, OsStr::new(artifact.parent), true)?;
                             source.rename_noreplace(
-                                OsStr::new(artifact),
+                                OsStr::new(artifact.name),
                                 &target,
-                                OsStr::new(artifact),
+                                OsStr::new(artifact.name),
                             )?;
                             target.sync()?;
                             source.sync()?;

@@ -261,7 +261,12 @@ worktree writes, reads of the primary and sibling checkouts, explicit read roots
 credential denials and network reach (open by default) for every adapter. Every launch finalises
 the host Cargo home and lane target through the one environment path. Private harness instruction
 files receive the global rules compiled into the binary. Native integration differences belong to
-`AdapterSpec`, with a reason and source for an unavailable capability. Read-only write exceptions
+`AdapterSpec`, with a reason and source for an unavailable capability. Guardian environment
+passthrough, stdout framing, which provider-private artifacts retention archives (and which
+credentials it scrubs first), and whether usage is turn- or session-attributed are also adapter
+facts: launch, settlement and retention read them from the spec and never branch on an adapter
+name, so adding a harness is one row plus one module. Chair telemetry is deliberately
+single-harness and names its one identity explicitly. Read-only write exceptions
 come from user-owned configuration, stay within verified repository paths, are recorded on the
 attempt, and exclude Git and provider control paths. Host-native launches keep confinement and
 provenance but cannot resume a provider session or select model-specific controls.

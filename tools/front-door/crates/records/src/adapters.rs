@@ -592,9 +592,42 @@ pub enum StreamContract {
     Raw,
 }
 
+/// How settled stdout is retained for one adapter. Command entries stream
+/// unbounded output, so their tail is kept; provider streams keep their frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdoutCapture {
+    Frames,
+    Tail,
+}
+
+/// A provider-private directory archived with a recorded attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetainedArtifact {
+    /// Directory below the candidate that holds the artifact.
+    pub parent: &'static str,
+    /// Name of the artifact directory below `parent`.
+    pub name: &'static str,
+    /// Credential files disposed before the directory is archived, never archived.
+    pub scrub: &'static [&'static str],
+}
+
+/// Whether an adapter's usage total belongs to one turn or to the running
+/// session when no attempt marks it as per-attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageAttribution {
+    Turn,
+    Session,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AdapterSpec {
     pub stdout: StreamContract,
+    /// Host variables the guardian copies from the launch environment so the
+    /// adapter can find its own answered-model evidence. The guardian starts
+    /// with a stripped environment, so anything else is deliberately dropped.
+    pub guardian_environment: &'static [&'static str],
+    /// How this adapter's settled stdout is retained.
+    pub stdout_capture: StdoutCapture,
     pub id: Harness,
     pub name: &'static str,
     /// Format of a supported CLI model listing.
@@ -716,9 +749,9 @@ pub struct AdapterSpec {
     pub usage: UsageSemantics,
     /// Provider-specific explanation when writer token budgets cannot stop it.
     pub token_budget_notice: Option<&'static str>,
-    /// Usage totals are session-wide unless an attempt marks them per-attempt,
-    /// so they cannot be attributed to one attempt by default.
-    pub session_wide_usage: bool,
+    /// Whether this adapter's totals are session-wide unless an attempt marks
+    /// them per-attempt. Readers ask the spec rather than naming an adapter.
+    pub usage_scope: UsageAttribution,
     /// Config-deprecation notices can arrive on stderr as well as the event
     /// stream; the host folds both into one warning per attempt.
     pub stderr_config_notices: bool,
@@ -739,6 +772,13 @@ pub struct AdapterSpec {
     pub relocated_session_state: bool,
     /// Copy only session files when retaining private state.
     pub copy_sessions_only: bool,
+    /// Whether recognised transcript files may be archived individually. Where
+    /// an adapter's private-state layout is not established, the whole
+    /// candidate is kept as history rather than guessed at.
+    pub archive_transcripts: bool,
+    /// Provider-private directories archived with a recorded attempt, with any
+    /// credential files disposed before they are archived.
+    pub retained_artifacts: &'static [RetainedArtifact],
     pub quota_probe: QuotaProbeKind,
     /// Missing monthly observations constrain allowance pacing for this adapter.
     pub monthly_allowance: bool,
@@ -962,6 +1002,8 @@ adapter_specs! { $;
         name: "claude",
         usage: UsageSemantics::new(UsageScope::Cumulative, false, true),
         stdout: StreamContract::ProviderJsonl,
+        guardian_environment: &[],
+        stdout_capture: StdoutCapture::Frames,
         model_listing: None,
         default_models: None,
         model_id_prefix: None,
@@ -1043,7 +1085,7 @@ adapter_specs! { $;
         answer_from_text: true,
         result_event_usage: true,
         token_budget_notice: None,
-        session_wide_usage: false,
+        usage_scope: UsageAttribution::Turn,
         stderr_config_notices: false,
         exit_route: false,
         stderr_quota: false,
@@ -1054,6 +1096,8 @@ adapter_specs! { $;
         user_sessions: false,
         relocated_session_state: true,
         copy_sessions_only: false,
+        archive_transcripts: true,
+        retained_artifacts: &[],
         quota_probe: QuotaProbeKind::HttpGet,
         monthly_allowance: false,
         quota_credits: true,
@@ -1085,6 +1129,8 @@ adapter_specs! { $;
         name: "codex",
         usage: UsageSemantics::new(UsageScope::Step, true, true),
         stdout: StreamContract::ProviderJsonl,
+        guardian_environment: &[],
+        stdout_capture: StdoutCapture::Frames,
         model_listing: Some(ModelListingFormat::CodexJson),
         default_models: None,
         model_id_prefix: None,
@@ -1177,7 +1223,7 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: Some("Codex writer token budgets are checked at completed-turn boundaries; a turn cannot be interrupted mid-flight"),
-        session_wide_usage: true,
+        usage_scope: UsageAttribution::Session,
         stderr_config_notices: true,
         exit_route: false,
         stderr_quota: false,
@@ -1188,6 +1234,8 @@ adapter_specs! { $;
         user_sessions: false,
         relocated_session_state: false,
         copy_sessions_only: true,
+        archive_transcripts: true,
+        retained_artifacts: &[],
         quota_probe: QuotaProbeKind::Command,
         monthly_allowance: false,
         quota_credits: true,
@@ -1219,6 +1267,8 @@ adapter_specs! { $;
         name: "cursor",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::ProviderJsonl,
+        guardian_environment: &[],
+        stdout_capture: StdoutCapture::Frames,
         model_listing: Some(ModelListingFormat::CursorText),
         default_models: Some(&["auto", "composer-*", "grok-*"]),
         model_id_prefix: None,
@@ -1309,7 +1359,7 @@ adapter_specs! { $;
         answer_from_text: true,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
+        usage_scope: UsageAttribution::Turn,
         stderr_config_notices: false,
         exit_route: false,
         stderr_quota: false,
@@ -1320,6 +1370,12 @@ adapter_specs! { $;
         user_sessions: false,
         relocated_session_state: true,
         copy_sessions_only: false,
+        archive_transcripts: true,
+        retained_artifacts: &[RetainedArtifact {
+            parent: ".cursor",
+            name: "chats",
+            scrub: &[],
+        }],
         quota_probe: QuotaProbeKind::HttpGet,
         monthly_allowance: true,
         quota_credits: false,
@@ -1351,6 +1407,8 @@ adapter_specs! { $;
         name: "agy",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::ProviderJsonl,
+        guardian_environment: &[],
+        stdout_capture: StdoutCapture::Frames,
         model_listing: Some(ModelListingFormat::AgyText),
         default_models: None,
         model_id_prefix: Some("agy/"),
@@ -1442,7 +1500,7 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
+        usage_scope: UsageAttribution::Turn,
         stderr_config_notices: false,
         exit_route: false,
         stderr_quota: false,
@@ -1453,6 +1511,8 @@ adapter_specs! { $;
         user_sessions: false,
         relocated_session_state: false,
         copy_sessions_only: false,
+        archive_transcripts: false,
+        retained_artifacts: &[],
         quota_probe: QuotaProbeKind::Command,
         monthly_allowance: false,
         quota_credits: false,
@@ -1484,6 +1544,8 @@ adapter_specs! { $;
         name: "opencode",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::ProviderJsonl,
+        guardian_environment: &["XDG_DATA_HOME"],
+        stdout_capture: StdoutCapture::Frames,
         model_listing: Some(ModelListingFormat::OpencodeText),
         default_models: None,
         model_id_prefix: Some("opencode/"),
@@ -1570,7 +1632,7 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
+        usage_scope: UsageAttribution::Turn,
         stderr_config_notices: false,
         exit_route: false,
         stderr_quota: true,
@@ -1581,6 +1643,12 @@ adapter_specs! { $;
         user_sessions: false,
         relocated_session_state: true,
         copy_sessions_only: false,
+        archive_transcripts: true,
+        retained_artifacts: &[RetainedArtifact {
+            parent: "data",
+            name: "opencode",
+            scrub: &["auth.json"],
+        }],
         quota_probe: QuotaProbeKind::LocalLedger,
         monthly_allowance: false,
         quota_credits: true,
@@ -1615,6 +1683,8 @@ adapter_specs! { $;
         name: "command",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::Raw,
+        guardian_environment: &[],
+        stdout_capture: StdoutCapture::Tail,
         model_listing: None,
         default_models: None,
         model_id_prefix: None,
@@ -1673,7 +1743,7 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
+        usage_scope: UsageAttribution::Turn,
         stderr_config_notices: false,
         exit_route: true,
         stderr_quota: false,
@@ -1684,6 +1754,8 @@ adapter_specs! { $;
         user_sessions: false,
         relocated_session_state: false,
         copy_sessions_only: false,
+        archive_transcripts: false,
+        retained_artifacts: &[],
         quota_probe: QuotaProbeKind::None,
         monthly_allowance: false,
         quota_credits: false,
@@ -1717,6 +1789,8 @@ adapter_specs! { $;
         name: "host-native",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::ProviderJsonl,
+        guardian_environment: &[],
+        stdout_capture: StdoutCapture::Frames,
         model_listing: None,
         default_models: None,
         model_id_prefix: None,
@@ -1775,7 +1849,7 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
+        usage_scope: UsageAttribution::Turn,
         stderr_config_notices: false,
         exit_route: false,
         stderr_quota: false,
@@ -1786,6 +1860,8 @@ adapter_specs! { $;
         user_sessions: false,
         relocated_session_state: false,
         copy_sessions_only: false,
+        archive_transcripts: false,
+        retained_artifacts: &[],
         quota_probe: QuotaProbeKind::None,
         monthly_allowance: false,
         quota_credits: false,
@@ -1818,6 +1894,8 @@ adapter_specs! { $;
         name: "fixture-provider",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
         stdout: StreamContract::ProviderJsonl,
+        guardian_environment: &[],
+        stdout_capture: StdoutCapture::Frames,
         model_listing: None,
         default_models: None,
         model_id_prefix: None,
@@ -1876,7 +1954,7 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
+        usage_scope: UsageAttribution::Turn,
         stderr_config_notices: false,
         exit_route: true,
         stderr_quota: false,
@@ -1887,6 +1965,8 @@ adapter_specs! { $;
         user_sessions: false,
         relocated_session_state: false,
         copy_sessions_only: false,
+        archive_transcripts: false,
+        retained_artifacts: &[],
         quota_probe: QuotaProbeKind::None,
         monthly_allowance: false,
         quota_credits: false,
@@ -1919,6 +1999,55 @@ adapter_specs! { $;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Launch, settlement and retention read these facts instead of naming an
+    /// adapter. A new adapter must declare them in its row, not in a branch.
+    #[test]
+    fn adapter_identity_facts_are_declared_on_specs() {
+        let guardian = |name: &str| AdapterSpec::get(name).unwrap().guardian_environment;
+        assert_eq!(guardian("opencode"), &["XDG_DATA_HOME"][..]);
+        assert!(guardian("codex").is_empty());
+
+        let capture = |name: &str| AdapterSpec::get(name).unwrap().stdout_capture;
+        assert_eq!(capture("command"), StdoutCapture::Tail);
+        assert_eq!(capture("codex"), StdoutCapture::Frames);
+
+        let artifacts = |name: &str| AdapterSpec::get(name).unwrap().retained_artifacts;
+        assert_eq!(
+            artifacts("opencode"),
+            &[RetainedArtifact {
+                parent: "data",
+                name: "opencode",
+                scrub: &["auth.json"],
+            }][..]
+        );
+        assert_eq!(
+            artifacts("cursor"),
+            &[RetainedArtifact {
+                parent: ".cursor",
+                name: "chats",
+                scrub: &[],
+            }][..]
+        );
+
+        assert_eq!(
+            AdapterSpec::get("codex").unwrap().usage_scope,
+            UsageAttribution::Session
+        );
+        assert_eq!(
+            AdapterSpec::get("claude").unwrap().usage_scope,
+            UsageAttribution::Turn
+        );
+        // Established transcript layouts are explicit. Agy's is not, so its
+        // unclassified candidate stays whole rather than being archived.
+        for name in ["codex", "claude", "cursor", "opencode"] {
+            assert!(
+                AdapterSpec::get(name).unwrap().archive_transcripts,
+                "{name}"
+            );
+        }
+        assert!(!AdapterSpec::get("agy").unwrap().archive_transcripts);
+    }
 
     #[test]
     fn account_and_session_facts_are_consistent() {

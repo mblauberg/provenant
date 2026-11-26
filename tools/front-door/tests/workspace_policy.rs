@@ -1374,8 +1374,10 @@ fn adapter_policy_detects_provider_and_config_identity_branches() -> Result<(), 
     Ok(())
 }
 
-/// Adapter policy belongs to the records registry; hooks are declarative
-/// provider command data. Test fixtures may still name their provider.
+/// Adapter policy belongs to the records registry; launch, settlement,
+/// retention and telemetry hold declarative data, not adapter-identity policy.
+/// Test fixtures may still name their provider. Production code reads adapter
+/// facts from `AdapterSpec`; a new name branch is a policy change and fails here.
 #[test]
 fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1388,10 +1390,21 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let comparison = adapter_identity_comparison()?;
     let mut sources = Vec::new();
     // Every production crate that can dispatch on adapter identity is in scope.
-    // Providers and config declare their own adapter bindings and name adapters
-    // in declarative data and diagnostics, so only identity comparisons are
-    // policy there; the routing/cli/quota side has no such declarations.
-    for name in ["cli", "routing", "quota", "providers", "config"] {
+    // Providers and config declare their own adapter bindings; run, records and
+    // telemetry hold declarative paths and chair-only identity data. Those
+    // crates still must not branch on an adapter name, so the identity-comparison
+    // check applies there; the routing/cli/quota side has no such declarations
+    // and is checked for bare literals too.
+    for name in [
+        "cli",
+        "routing",
+        "quota",
+        "providers",
+        "config",
+        "run",
+        "records",
+        "telemetry",
+    ] {
         rust_sources(&root.join("crates").join(name).join("src"), &mut sources)?;
     }
     rust_sources(&root.join("src"), &mut sources)?;
@@ -1406,7 +1419,10 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
         let declarative = path.starts_with(root.join("src"))
             || path == root.join("crates/cli/src/hooks.rs")
             || path.starts_with(root.join("crates/providers/src"))
-            || path.starts_with(root.join("crates/config/src"));
+            || path.starts_with(root.join("crates/config/src"))
+            || path.starts_with(root.join("crates/run/src"))
+            || path.starts_with(root.join("crates/records/src"))
+            || path.starts_with(root.join("crates/telemetry/src"));
         let checks: Vec<_> = if declarative {
             vec![&comparison]
         } else {
@@ -1428,7 +1444,12 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
                 || (path.ends_with("run/status.rs")
                     && source[found.end()..].starts_with(": cursor"))
                 || (path.ends_with("run/provider/preparation.rs")
-                    && source[found.end()..].starts_with(':'));
+                    && source[found.end()..].starts_with(':'))
+                // Chair telemetry reads Claude Code's native transcript only.
+                // This single-harness identity is deliberate, not a dispatch
+                // branch: adding a second chair harness requires a new ingest.
+                || (path.ends_with("telemetry/src/usage.rs")
+                    && line_text.contains("event.unit != \"claude\""));
             if non_adapter_literal {
                 continue;
             }
