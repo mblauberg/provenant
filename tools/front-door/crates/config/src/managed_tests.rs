@@ -1332,6 +1332,92 @@ fn upgrade_without_hooks_on_registers_the_replacement_claude_answer_hook() {
     );
 }
 
+/// A retired action hands ownership only to its declared replacement, not to
+/// the whole declared set. A managed leaf the user deleted by hand must stay
+/// deleted, while answer delivery's replacement is still registered.
+#[test]
+fn upgrade_without_hooks_on_keeps_a_managed_leaf_the_user_removed() {
+    let mut f = Fixture::new();
+    f.targets.harnesses = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    )
+    .harnesses;
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let hook = f.targets.harnesses[0].hook_file.clone().unwrap();
+    let (retired, delivered, delivered_value) = seed_retired_claude_answer_hook(&f, &hook);
+
+    // The user deletes a different managed leaf. The receipt still lists it,
+    // but the settings file no longer holds its value.
+    let removed = f
+        .targets
+        .hook_specs
+        .iter()
+        .find(|spec| spec.harness == Harness::Claude && spec.action == HookAction::PreCompact)
+        .unwrap();
+    let removed_value = crate::hooks::value(removed, &f.targets).unwrap();
+    let removed_selector =
+        crate::hooks::selector(removed, removed_value["command"].as_str().unwrap()).unwrap();
+    let settings = fs::read(&hook).unwrap();
+    fs::write(
+        &hook,
+        crate::hooks::set(&settings, &removed_selector, None).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        crate::hooks::get(&fs::read(&hook).unwrap(), &removed_selector)
+            .unwrap()
+            .is_none()
+    );
+
+    f.targets.hooks = false; // Omission keeps the recorded ownership.
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let bytes = fs::read(&hook).unwrap();
+    let settings = String::from_utf8(bytes.clone()).unwrap();
+    // The declared replacement is registered under the transferred ownership.
+    assert_eq!(
+        crate::hooks::get(&bytes, &delivered).unwrap(),
+        Some(delivered_value),
+        "{settings}"
+    );
+    // The leaf the user removed is not re-added.
+    assert!(
+        crate::hooks::get(&bytes, &removed_selector)
+            .unwrap()
+            .is_none(),
+        "{settings}"
+    );
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .any(|entry| entry.selector == delivered),
+        "{receipt:?}"
+    );
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .all(|entry| entry.selector != removed_selector),
+        "{receipt:?}"
+    );
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .all(|entry| entry.selector != retired),
+        "{receipt:?}"
+    );
+}
+
 /// Rewrite a freshly installed Claude settings file and receipt into the shape
 /// an install from before the answer-delivery move left behind: the owned
 /// `PreToolUse` leaf present, the `PostToolUse` leaf absent. The settings JSON
