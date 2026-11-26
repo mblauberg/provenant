@@ -197,6 +197,7 @@ mod tests {
     fn effective_catalogue_model_is_canonicalised_at_the_entry_point() {
         let layer = provenant_config::OverlayLayer {
             source: provenant_config::Layer::Host,
+            path: "state/config.toml".into(),
             text: "[[catalogue.models]]\nmodel = 'opencode/opencode/overlay-only-model'\nevidence_ref = 'owner fact'\n"
                 .to_owned(),
         };
