@@ -501,9 +501,11 @@ warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`; it never acts as `live
 
 A writer's base is selected separately by `lanes.writer_base`: `default_branch`
 resolves the remote the read-source resolver finds (never a hard-coded
-`origin`), `checkout` keeps the caller HEAD fallback and any Git ref pins that
-ref. Explicit `--base` always wins. The run result reports `writer_base` with its
-commit and source, and a fallback warning names the key that chose it. Graph
+`origin`), `checkout` pins the caller HEAD at admission and any Git ref pins that
+ref. Explicit `--base` always wins. The admitted commit is the one provisioning
+creates the writer branch from (a peer placement resolves its own). The run
+result reports `writer_base` with its commit and source, and a fallback warning
+names the key that chose it. Graph
 subject policy itself is always pinned; `follow_latest` applies only to a wait
 and to the local `live` read choice.
 

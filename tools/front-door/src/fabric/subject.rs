@@ -359,6 +359,7 @@ impl Factory {
                 .then(|| {
                     stale_head_warning(
                         &git,
+                        self.context.roots.state.as_path(),
                         &self.cwd,
                         pull_subject.head_ref_name.as_deref(),
                         pull_subject.head_ref_oid,
@@ -572,7 +573,8 @@ impl Factory {
                     extra: Default::default(),
                     base: None,
                     head: selected.commit,
-                    origin: ref_origin(&selected.reference),
+                    origin: fixture_origin(&self.context.project_root)
+                        .unwrap_or_else(|| ref_origin(&selected.reference)),
                     pinned_at,
                     policy: SubjectPolicy::Pinned,
                     repository: None,
@@ -632,7 +634,8 @@ impl Factory {
                 extra: Default::default(),
                 base: None,
                 head,
-                origin: SubjectOrigin::LocalRef { name },
+                origin: fixture_origin(&self.context.project_root)
+                    .unwrap_or(SubjectOrigin::LocalRef { name }),
                 pinned_at,
                 policy: SubjectPolicy::FollowLatest,
                 repository: None,
@@ -654,6 +657,12 @@ impl Factory {
             writer_warnings,
         })
     }
+}
+
+/// A smoke fixture project's origin, from its ownership marker; any other
+/// checkout has none and keeps its ref origin.
+fn fixture_origin(project: &Path) -> Option<SubjectOrigin> {
+    crate::smoke::fixture_nonce(project).map(|nonce| SubjectOrigin::Fixture { nonce })
 }
 
 /// Read a local ref with Git, returning trimmed stdout only on a clean exit.
@@ -708,6 +717,7 @@ fn local_config_get(git: &Path, cwd: &Path, key: &str) -> Option<String> {
 /// head lacks, name both SHAs: a push may not have propagated to the forge yet.
 fn stale_head_warning(
     git: &Path,
+    state: &Path,
     cwd: &Path,
     head_ref_name: Option<&str>,
     forge_head: provenant_core::GitOid,
@@ -718,7 +728,12 @@ fn stale_head_warning(
         local_config_get(git, cwd, &format!("branch.{branch}.remote")).filter(|name| {
             !name.is_empty() && provenant_confinement::repo::GitRefName::branch(name).is_ok()
         });
-    let remote = configured.unwrap_or_else(|| "origin".to_owned());
+    // The branch's own upstream remote, else the configured forge remote;
+    // never an assumed `origin`.
+    let remote = configured.or_else(|| {
+        provenant_cli::run::resolved_forge_remote(state, cwd)
+            .map(|remote| remote.as_str().to_owned())
+    })?;
     let reference = format!("refs/remotes/{remote}/{branch}");
     let tip = local_git(
         git,
@@ -1360,8 +1375,10 @@ pub(super) fn resolve_writer_base(
             )
         };
         return match &choice.value {
+            // `checkout` names the caller checkout's HEAD; resolving it here
+            // lets provisioning and identity start from the same commit.
             WriterBaseSetting::Checkout => WriterBase {
-                commit: None,
+                commit: git.and_then(|git| provenant_run::resolve_git_base(git, cwd, "HEAD").ok()),
                 source: WriterBaseSource::CallerCheckout,
                 warning: None,
             },
@@ -1489,6 +1506,32 @@ pub(super) fn bind_read_source(node: &mut GraphNode, commit: &str) {
     if let Some(loop_spec) = &mut node.loop_body {
         for child in &mut loop_spec.body {
             bind_read_source(child, commit);
+        }
+    }
+}
+
+/// Carry the admitted writer base into every defaulted provisioning intent,
+/// so the worktree a `--branch` launch creates starts from the
+/// `lanes.writer_base` commit its identity names instead of re-deriving the
+/// forge default. An explicit `--base` is not defaulted and stays as given;
+/// an existing remote branch tip still wins during provisioning.
+pub(super) fn bind_provisioning_base(node: &mut GraphNode, commit: &str) {
+    if let Some(spec) = node
+        .attempt
+        .as_mut()
+        .and_then(|attempt| attempt.new_worktree.as_mut())
+        && spec.default_base
+    {
+        spec.base = commit.into();
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_provisioning_base(child, commit);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_provisioning_base(child, commit);
         }
     }
 }

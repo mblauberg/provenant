@@ -139,6 +139,17 @@ impl SmokeOutcome {
 
 /// A nonce is the only path input. It is always twelve lowercase hex digits,
 /// so a caller can never name a path outside the fixture root.
+/// The nonce of the smoke fixture rooted at `project`, read from its
+/// ownership marker. Admission records it as the subject's fixture origin, so
+/// a smoke graph's provenance names the fixture rather than a local ref.
+pub(crate) fn fixture_nonce(project: &Path) -> Option<String> {
+    let bytes = std::fs::read(project.join(".git").join("provenant-smoke.json")).ok()?;
+    serde_json::from_slice::<FixtureMarker>(&bytes)
+        .ok()
+        .filter(|marker| marker.schema_version == 1 && valid_nonce(&marker.nonce))
+        .map(|marker| marker.nonce)
+}
+
 fn valid_nonce(nonce: &str) -> bool {
     nonce.len() == 12
         && nonce
@@ -460,12 +471,13 @@ fn peer_fixture_matches(
     Ok(())
 }
 
-/// A unique graph name for this lifecycle invocation, under the configured
-/// branch prefix. The prefix has already passed Git ref validation.
-fn smoke_graph_name(prefix: &str) -> String {
+/// The graph name for one smoke run: a fixed `smoke-` prefix, never the
+/// configured branch prefix, because a graph name is a path segment and the
+/// branch prefix (default `smoke/`) carries a slash.
+fn smoke_graph_name() -> String {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     format!(
-        "{prefix}{}-{}",
+        "smoke-{}-{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     )
@@ -704,7 +716,7 @@ pub(crate) fn run_lifecycle(
         }
     }
     fixture_phase.1 = clock.mono_now();
-    let graph = smoke_graph_name(&settings.branch_prefix);
+    let graph = smoke_graph_name();
     let fixture = fixture_root(home, &root).join(&nonce);
     let program = program.as_os_str().to_owned();
     let mut run = vec![

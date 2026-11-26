@@ -1,7 +1,7 @@
 //! Document-based graph service shared by the CLI and the lane relay.
 use super::subject::{
     ReadPlan, SubjectAdmission, WRITER_BASE_KNOB, WriterBaseChoice, WriterBaseSetting,
-    bind_read_source,
+    bind_provisioning_base, bind_read_source,
 };
 use super::*;
 use provenant_fabric_runtime::graph::{
@@ -2562,6 +2562,14 @@ impl Factory {
                 .filter(|_| read == ReadPlan::Pinned)
                 .map(|subject| subject.head)
         });
+        // A local writer provisions its new worktree from the admitted base.
+        // A peer resolves its own default, since this commit may not exist in
+        // its clone; `default_base` tells it to.
+        if !remote && let Some(commit) = writer_base.map(|commit| commit.to_string()) {
+            for node in &mut document.nodes {
+                bind_provisioning_base(node, &commit);
+            }
+        }
         if let Some(commit) = read_commit.map(|commit| commit.to_string()) {
             for node in &mut document.nodes {
                 bind_read_source(node, &commit);

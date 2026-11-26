@@ -417,8 +417,9 @@ launch is a writer when a node that will run writes a worktree — not one launc
 names the ref, the commit and the layer that chose it; `read_source` on the launch result and the
 explain status names the same commit. Absent or unusable Git evidence stays advisory and never
 refuses the launch. The `lanes.writer_base` knob chooses that default: `default_branch` resolves
-the remote the read-source resolver finds (never a hard-coded `origin`), `checkout` keeps the
-caller HEAD fallback, and any other value is a Git ref. Explicit `--base` always wins; an
+the remote the read-source resolver finds (never a hard-coded `origin`), `checkout` pins the
+caller HEAD at admission, and any other value is a Git ref; provisioning creates the branch from
+the admitted commit. Explicit `--base` always wins; an
 unresolvable value warns and falls back to the caller checkout, naming the key and its source.
 The run result reports `writer_base` with its commit and source.
 - Why: file:line evidence from a stale working tree reports findings upstream has fixed, and a

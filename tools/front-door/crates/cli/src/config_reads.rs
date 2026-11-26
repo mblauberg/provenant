@@ -32,7 +32,7 @@ reads! {
     "doctor" => ["fabric", "accounts", "quota", "routing", "hooks"],
     "hosts doctor" => ["fabric", "accounts", "quota", "routing", "hooks"], "fabric" => ["fabric", "routing", "accounts", "lanes", "run", "quota", "policy", "wait"],
     "fabric context" => ["fabric", "wait"],
-    "install" => ["accounts", "fabric", "hooks"], "upgrade" => ["accounts", "fabric"],
+    "install" => ["accounts", "fabric", "hooks"], "upgrade" => ["accounts", "fabric", "smoke"],
     "hooks" => ["hooks"],
     "uninstall" => ["accounts", "fabric"],
     // `init` resolves its port table and forge context directly; it reads no
@@ -40,7 +40,8 @@ reads! {
     "init" => [],
     "route" => ["routing", "accounts", "quota", "policy", "fabric"],
     "route preferences" => ["routing"],
-    "run" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "wait"],
+    // `run smoke` and `upgrade --verify` share the smoke lifecycle and its domain.
+    "run" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "wait", "smoke"],
     "run admission" => ["policy"],
     "status" => ["fabric"], "wait" => ["wait", "fabric"],
     "land" => ["pr", "routing", "fabric", "run"],

@@ -2033,6 +2033,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }
             return Ok(Some(tip.to_string()));
         }
+        // Admission already resolved `lanes.writer_base` into this intent;
+        // only an unresolved default (a peer, or no Git evidence) is
+        // re-derived from the forge default here.
+        if default_base && let Ok(admitted) = provenant_core::GitOid::parse(reference) {
+            return Ok(Some(admitted.to_string()));
+        }
         if default_base {
             let (base, warnings) = provenant_confinement::worktrees::with_context_using_facts(
                 &self.factory.context.roots,
