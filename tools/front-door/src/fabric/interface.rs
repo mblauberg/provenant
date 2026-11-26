@@ -2875,7 +2875,7 @@ impl Factory {
                 &mut parameters,
                 &overrides,
                 &smoke_writer,
-                first_control.map(|field| *field),
+                first_control.copied(),
                 input_warnings,
             )?;
         }
