@@ -124,20 +124,12 @@ impl Default for MatrixSettings {
     }
 }
 
-/// Resolve the binary's closed configuration aggregate once for a matrix read.
-fn resolve_config(
-    state: &Path,
-    project: Option<&Path>,
-) -> Option<provenant_config::ResolvedConfig<crate::domains::Domains>> {
-    let base = project.unwrap_or(state);
-    let mut inputs = provenant_core::RootInputs::new(base.to_path_buf(), base.to_path_buf());
-    inputs.state_dir = Some(state.to_path_buf());
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver).ok()?;
-    provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS).ok()
-}
-
 impl MatrixSettings {
-    fn from_resolved(resolved: &provenant_config::ResolvedConfig<crate::domains::Domains>) -> Self {
+    /// The effective settings from the caller's resolved configuration, with
+    /// the layer and origin of each value.
+    pub fn from_resolved(
+        resolved: &provenant_config::ResolvedConfig<crate::domains::Domains>,
+    ) -> Self {
         let settings = &resolved.domains.adapter.capabilities;
         let source = |key: &str| crate::config_reads::origin_source(resolved.origins.get(key), key);
         Self {
@@ -154,15 +146,6 @@ impl MatrixSettings {
                 source: source("domains.adapter.capabilities.measurement_records"),
             },
         }
-    }
-
-    /// The effective settings for one matrix read; an unreadable configuration
-    /// leaves every value at its compiled default, reported as the default layer.
-    pub fn resolve(state: &Path, project: Option<&Path>) -> Self {
-        resolve_config(state, project)
-            .as_ref()
-            .map(Self::from_resolved)
-            .unwrap_or_default()
     }
 }
 
@@ -453,15 +436,20 @@ fn which(name: &str) -> Option<std::path::PathBuf> {
 
 /// The `data` of result envelope v2 for `provenant adapter capabilities --json`.
 /// Default options project every adapter with the version probe enabled.
+/// Without a resolved configuration every setting is its compiled default.
 pub fn matrix(state: &Path, project: Option<&Path>, store: Option<&RunStore>) -> Value {
-    let (value, _) = matrix_with(state, project, store, &MatrixArgs::default());
+    let (value, _) = matrix_with(state, project, None, store, &MatrixArgs::default());
     value
 }
 
 /// The projection plus warnings for skipped overlay entries and unknown ids.
+/// `config` is the caller's resolved configuration; the command reads it once
+/// through `config_reads` with the real roots, and `None` uses the compiled
+/// defaults.
 pub fn matrix_with(
     state: &Path,
     project: Option<&Path>,
+    config: Option<&provenant_config::ResolvedConfig<crate::domains::Domains>>,
     store: Option<&RunStore>,
     args: &MatrixArgs<'_>,
 ) -> (Value, Vec<OverlayWarning>) {
@@ -469,12 +457,10 @@ pub fn matrix_with(
     let (overlay, overlay_warnings) =
         provenant_config::adapter_capabilities::effective(state, project);
     warnings.extend(overlay_warnings);
-    let resolved = resolve_config(state, project);
-    let settings = resolved
-        .as_ref()
+    let settings = config
         .map(MatrixSettings::from_resolved)
         .unwrap_or_default();
-    let providers = resolved.as_ref().map(|config| &config.providers);
+    let providers = config.map(|config| &config.providers);
     let project_key =
         provenant_config::ports::project_key_for(project.unwrap_or(state)).unwrap_or_default();
     let policy: provenant_records::policy::Policy =
@@ -719,6 +705,20 @@ pub fn markdown() -> String {
 mod tests {
     use super::*;
 
+    /// Resolve the written host config through the same reader the command
+    /// uses, with distinct home, checkout and state roots.
+    fn configured(
+        temp: &tempfile::TempDir,
+        state: &Path,
+    ) -> Result<provenant_config::ResolvedConfig<crate::domains::Domains>, Box<dyn std::error::Error>>
+    {
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(state.to_path_buf());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        Ok(crate::config_reads::read_for(&roots, "adapter")?)
+    }
+
     const SPEC: &str = "../../../../docs/specs/run-launch.md";
 
     fn spec() -> String {
@@ -824,7 +824,8 @@ mod tests {
             state.join("config.toml"),
             "schema_version=1\n[domains.adapter.capabilities]\nmeasurements=false\nmeasurement_samples=12\nmeasurement_records=30\n",
         )?;
-        let settings = MatrixSettings::resolve(&state, None);
+        let config = configured(&temp, &state)?;
+        let settings = MatrixSettings::from_resolved(&config);
         assert!(!settings.measurements.value);
         assert_eq!(settings.samples.value, 12);
         assert_eq!(settings.records.value, 30);
@@ -879,7 +880,7 @@ mod tests {
             adapters: &[],
             probe: false,
         };
-        let value = matrix_with(std::path::Path::new("."), None, None, &args).0;
+        let value = matrix_with(std::path::Path::new("."), None, None, None, &args).0;
         for adapter in value["adapters"].as_array().unwrap() {
             assert!(adapter["overlay"].is_null(), "{adapter}");
             assert_eq!(adapter["on_gap"]["model"]["action"], json!("warn"));
@@ -915,7 +916,7 @@ mod tests {
             adapters: &[],
             probe: false,
         };
-        let (value, warnings) = matrix_with(&state, None, None, &args);
+        let (value, warnings) = matrix_with(&state, None, None, None, &args);
         assert!(warnings.is_empty(), "{warnings:?}");
         let adapter = value["adapters"]
             .as_array()
@@ -943,7 +944,7 @@ mod tests {
             adapters: &[],
             probe: false,
         };
-        let value = matrix_with(std::path::Path::new("."), None, None, &args).0;
+        let value = matrix_with(std::path::Path::new("."), None, None, None, &args).0;
         for adapter in value["adapters"].as_array().unwrap() {
             assert_eq!(adapter["compatibility"]["status"], json!("version_unread"));
             assert_eq!(
@@ -962,7 +963,9 @@ mod tests {
             state.join("config.toml"),
             "schema_version=1\n[domains.adapter.capabilities]\nmeasurements=false\n",
         )?;
-        let value = matrix(&state, None, None);
+        let config = configured(&temp, &state)?;
+        let args = MatrixArgs::default();
+        let value = matrix_with(&state, None, Some(&config), None, &args).0;
         assert_eq!(value["settings"]["measurements"]["value"], json!(false));
         for adapter in value["adapters"].as_array().unwrap() {
             assert!(adapter["measurements"].is_null());
@@ -1001,7 +1004,7 @@ mod tests {
             adapters: &unknown,
             probe: false,
         };
-        let (value, warnings) = matrix_with(std::path::Path::new("."), None, None, &args);
+        let (value, warnings) = matrix_with(std::path::Path::new("."), None, None, None, &args);
         assert!(value["adapters"].as_array().unwrap().is_empty());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].reason.contains("unknown adapter"));

@@ -20,6 +20,7 @@ macro_rules! reads {
 }
 reads! {
     "help" => [], "root" => [], "process-tree" => [], "ci" => [],
+    "adapter" => ["adapter"],
     "events" => ["fabric"], "notes" => ["fabric"],
     "ask" => ["fabric", "accounts"], "inbox" => ["fabric", "accounts"],
     "answer" => ["fabric", "accounts"], "accounts" => ["accounts"],

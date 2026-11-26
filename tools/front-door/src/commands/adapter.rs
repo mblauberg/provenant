@@ -57,9 +57,28 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
                     adapters: &adapters,
                     probe: !no_probe,
                 };
+                // An unreadable configuration warns and the matrix reports
+                // compiled defaults, each sourced as the default layer.
+                let config = match provenant_cli::config_reads::read_for(&resolved.roots, "adapter")
+                {
+                    Ok(config) => Some(config),
+                    Err(error) => {
+                        provenant_records::warning::warn(
+                            provenant_records::warning::Warning::new(
+                                provenant_records::warning::CONFIG_KEY_IGNORED,
+                                format!(
+                                    "configuration unreadable; using compiled defaults: {error}"
+                                ),
+                            )
+                            .subject("adapter capabilities"),
+                        );
+                        None
+                    }
+                };
                 let (value, warnings) = provenant_cli::adapter_capabilities::matrix_with(
                     resolved.roots.state.as_path(),
                     Some(&resolved.project),
+                    config.as_ref(),
                     store.as_ref(),
                     &args,
                 );
