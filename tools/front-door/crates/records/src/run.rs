@@ -1169,23 +1169,21 @@ pub struct StaticCheckReceipt {
     pub cwd: String,
     #[serde(default)]
     pub timeout_seconds: u64,
+    /// The layer and file/key that declared this check.
+    #[serde(default)]
+    pub source: crate::Layer,
+    #[serde(default)]
+    pub key: String,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
 
-/// The no-build checks declared for a writer and where the list came from.
-/// Config merging replaces arrays wholesale, so the list has one source (the
-/// layer and key that declared `verify.static_checks`) rather than a source per
-/// entry (Spec: docs/specs/run-launch.md#layered-brief-preamble).
+/// The no-build checks declared for a writer.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StaticChecksReceipt {
     #[serde(default)]
     pub checks: Vec<StaticCheckReceipt>,
-    #[serde(default)]
-    pub source: crate::Layer,
-    #[serde(default)]
-    pub key: String,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -3678,9 +3676,9 @@ mod tests {
                 serde_json::json!({
                     "checks":[{
                         "argv":["scripts/check-extra-fields"],"cwd":".","timeout_seconds":30,
+                        "source":"project","key":".provenant/ports.json#verify.static_checks",
                         "future_nested":{"kept":true}
                     }],
-                    "source":"project","key":".provenant/ports.json#verify.static_checks",
                     "future_nested":{"kept":true}
                 }),
             ),

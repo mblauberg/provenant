@@ -212,10 +212,11 @@ table): each has an `argv`, a repository-relative `cwd` and a `timeout_seconds` 
 or empty list adds no text and invents no tier for other stacks; an invalid entry warns and is
 dropped rather than refusing the launch. The list is labelled with the layer and exact file and
 key that declared it. Host and bound host-project declarations name their resolved ports file;
-project declarations use the stable `.provenant/ports.json` path. That same sourced list is
-recorded as `static_checks` on the launch receipt beside `ci_scope` and `pr_policy`. Config
-merging replaces arrays wholesale, so one source covers the list rather than each entry. A
-failure is reported in the handoff and does not refuse the push; CI still gates the merge.
+project declarations use the stable `.provenant/ports.json` path. That same list is recorded as
+`static_checks` on the launch receipt beside `ci_scope` and `pr_policy`; each surviving check
+entry carries that layer and file/key source. Config merging replaces arrays wholesale, so entries
+in the effective list share one source. A failure is reported in the handoff and does not refuse
+the push; CI still gates the merge.
 Readers get neither the list nor its receipt.
 - Why: standing rules belong in one owned file per layer, not repeated in every brief, and a
   writer should run the cheap checks the project declares before CI does.

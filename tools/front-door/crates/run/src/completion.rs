@@ -742,11 +742,11 @@ impl BriefPreamble {
                     argv: check.argv.clone(),
                     cwd: check.cwd.display().to_string(),
                     timeout_seconds: check.timeout_seconds,
+                    source: layer,
+                    key: key.clone(),
                     extra: Default::default(),
                 })
                 .collect(),
-            source: layer,
-            key,
             extra: Default::default(),
         })
     }
@@ -1288,16 +1288,15 @@ mod tests {
             .expect("host source is present");
         assert_eq!(host_source.layer, Layer::Host);
         assert_eq!(host_source.origin.as_deref(), Some(host_origin.as_str()));
-        assert!(
-            host_brief
-                .static_checks_paragraph()
-                .contains(&format!("source: host; {host_origin}"))
-        );
+        assert!(host_brief.static_checks_paragraph().contains(&format!(
+            "source: {}; {host_origin}",
+            host_source.layer.description()
+        )));
         let host_receipt = host_brief
             .static_checks_receipt()
             .expect("host checks reach the receipt");
-        assert_eq!(host_receipt.source, Layer::Host);
-        assert_eq!(host_receipt.key, host_origin);
+        assert_eq!(host_receipt.checks[0].source, Layer::Host);
+        assert_eq!(host_receipt.checks[0].key, host_origin);
 
         let project_git = project.path().join(".git");
         std::fs::create_dir_all(&project_git).unwrap();
@@ -1328,8 +1327,8 @@ mod tests {
         let host_project_receipt = host_project_brief
             .static_checks_receipt()
             .expect("host-project checks reach the receipt");
-        assert_eq!(host_project_receipt.source, Layer::HostProject);
-        assert_eq!(host_project_receipt.key, host_project_origin);
+        assert_eq!(host_project_receipt.checks[0].source, Layer::HostProject);
+        assert_eq!(host_project_receipt.checks[0].key, host_project_origin);
     }
 
     /// An absent or empty `verify.static_checks` declaration adds no preamble
@@ -1372,10 +1371,10 @@ mod tests {
         }
     }
 
-    /// The declared tier reaches the launch receipt as one sourced list, beside
-    /// `ci_scope` and `pr_policy`. Invalid entries are dropped from both the
-    /// preamble and the receipt; one source covers the list because config
-    /// merging replaces arrays wholesale.
+    /// The declared tier reaches the launch receipt beside `ci_scope` and
+    /// `pr_policy`, with its source on each entry. Invalid entries are dropped
+    /// from both the preamble and receipt; config arrays replace wholesale, so
+    /// each surviving entry carries the same source.
     /// Spec: docs/specs/run-launch.md#layered-brief-preamble
     #[test]
     fn declared_static_checks_reach_the_launch_receipt_with_source() {
@@ -1389,6 +1388,7 @@ mod tests {
                     "static_checks": [
                         {"argv": ["scripts/check-extra-fields"], "cwd": ".", "timeout_seconds": 30},
                         {"argv": [], "cwd": ".", "timeout_seconds": 30},
+                        {"argv": ["scripts/check-citations"], "cwd": ".", "timeout_seconds": 60},
                     ],
                 },
             }))
@@ -1406,12 +1406,17 @@ mod tests {
         let receipt = brief
             .static_checks_receipt()
             .expect("a declared tier has a receipt");
-        assert_eq!(receipt.checks.len(), 1, "{receipt:?}");
+        assert_eq!(receipt.checks.len(), 2, "{receipt:?}");
         assert_eq!(receipt.checks[0].argv, ["scripts/check-extra-fields"]);
         assert_eq!(receipt.checks[0].cwd, ".");
         assert_eq!(receipt.checks[0].timeout_seconds, 30);
-        assert_eq!(receipt.source, Layer::Project);
-        assert_eq!(receipt.key, ".provenant/ports.json#verify.static_checks");
+        for check in &receipt.checks {
+            assert_eq!(check.source, Layer::Project, "{check:?}");
+            assert_eq!(
+                check.key, ".provenant/ports.json#verify.static_checks",
+                "{check:?}"
+            );
+        }
     }
 
     /// A review or read-only lane never renders the `Static checks:` paragraph,
