@@ -1123,6 +1123,56 @@ fn budget_stop_case(
     })
 }
 
+#[test]
+fn budget_stop_does_not_commit_with_an_operation_in_the_candidate_registration()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let case = budget_stop_case(&[], false)?;
+    let path = case.fixture.writer.worktree.join("unfinished.txt");
+    std::fs::write(&path, "keep for recovery\n")?;
+    let registration = case
+        .scratch
+        .join("git-common")
+        .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+        .join(provenant_core::LANE_GIT_REGISTRATION);
+    assert!(registration.is_dir(), "candidate Git uses its registration");
+    std::fs::write(
+        registration.join("CHERRY_PICK_HEAD"),
+        format!("{}\n", case.launch.base),
+    )?;
+
+    let tip_before = private_git(
+        &case.fixture,
+        &case.scratch,
+        &case.git,
+        &["rev-parse", "HEAD"],
+    )?;
+    let index_before = private_git(&case.fixture, &case.scratch, &case.git, &["write-tree"])?;
+    let result = case.launch.commit_budget_stop(&case.attempt)?;
+
+    assert!(
+        result.committed.is_none(),
+        "unfinished operations must not commit"
+    );
+    assert!(result.note.contains("cherry-pick"), "{}", result.note);
+    assert_eq!(
+        private_git(
+            &case.fixture,
+            &case.scratch,
+            &case.git,
+            &["rev-parse", "HEAD"]
+        )?,
+        tip_before,
+        "the candidate branch stays unchanged"
+    );
+    assert_eq!(
+        private_git(&case.fixture, &case.scratch, &case.git, &["write-tree"])?,
+        index_before,
+        "the candidate index stays unchanged"
+    );
+    assert_eq!(std::fs::read_to_string(path)?, "keep for recovery\n");
+    Ok(())
+}
+
 fn advance_host_lane(
     case: &BudgetStopCase,
 ) -> std::result::Result<GitOid, Box<dyn std::error::Error>> {

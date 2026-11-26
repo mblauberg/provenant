@@ -260,6 +260,17 @@ struct MergeState {
 /// worktree registration. An absent registration is not an error: some launches
 /// select the common dir directly and keep their per-worktree files there.
 fn registered_merge_head(source: &ObjectSource) -> Result<Option<Vec<u8>>> {
+    let Some(registration) = registered_directory(source)? else {
+        return Ok(None);
+    };
+    match registration.read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn registered_directory(source: &ObjectSource) -> Result<Option<Directory>> {
     let registry = match source
         .refs
         .open_verified_directory(OsStr::new(provenant_core::LANE_GIT_WORKTREES_DIR))
@@ -268,17 +279,59 @@ fn registered_merge_head(source: &ObjectSource) -> Result<Option<Vec<u8>>> {
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let registration =
-        match registry.open_verified_directory(OsStr::new(provenant_core::LANE_GIT_REGISTRATION)) {
-            Ok(registration) => registration,
-            Err(error) if error.is_not_found() => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-    match registration.read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024) {
-        Ok(raw) => Ok(Some(raw)),
+    match registry.open_verified_directory(OsStr::new(provenant_core::LANE_GIT_REGISTRATION)) {
+        Ok(registration) => Ok(Some(registration)),
         Err(error) if error.is_not_found() => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+/// A candidate Git operation and the per-worktree directory that owns it.
+pub(crate) struct LocatedGitOperation {
+    pub marker: provenant_confinement::worktrees::GitOperationMarker,
+    pub directory: Directory,
+}
+
+/// Inspect the lane registration first, then the common directory for Git
+/// calls that selected `GIT_DIR` directly instead of the linked-worktree gitdir.
+pub(crate) fn incomplete_git_operation(
+    source: &ObjectSource,
+    expected_merge: Option<&[u8]>,
+) -> Result<Option<LocatedGitOperation>> {
+    if let Some(registration) = registered_directory(source)?
+        && let Some(marker) = provenant_confinement::worktrees::incomplete_git_operation(
+            &registration,
+            expected_merge,
+        )?
+    {
+        return Ok(Some(LocatedGitOperation {
+            marker,
+            directory: registration,
+        }));
+    }
+    let Some(marker) =
+        provenant_confinement::worktrees::incomplete_git_operation(&source.refs, expected_merge)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(LocatedGitOperation {
+        marker,
+        directory: source.refs.try_clone()?,
+    }))
+}
+
+/// Read the branch recorded by a rebase in the lane registration, with common
+/// directory fallback for direct Git calls.
+pub(crate) fn rebase_operation_ref(source: &ObjectSource) -> Result<Option<String>> {
+    if let Some(registration) = registered_directory(source)?
+        && let Some(reference) =
+            provenant_confinement::worktrees::rebase_operation_ref(&registration)
+    {
+        return Ok(Some(reference));
+    }
+    Ok(provenant_confinement::worktrees::rebase_operation_ref(
+        &source.refs,
+    ))
 }
 
 fn merge_state(source: &ObjectSource, repo: &VerifiedRepo) -> Result<Option<MergeState>> {
