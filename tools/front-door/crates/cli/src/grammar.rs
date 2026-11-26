@@ -754,7 +754,7 @@ pub struct GraphRunArgs {
     /// keep their higher precedence
     #[arg(long)]
     pub no_sandbox: bool,
-    /// Explain the compiled graph without starting work
+    /// Explain the compiled graph and each node's route without starting work
     #[arg(long)]
     pub explain: bool,
 }

@@ -2780,6 +2780,7 @@ impl Factory {
                     }));
                 }
             }
+            let node_routes = self.explain_node_routes(&expanded.nodes);
             let source_admission = self.explain_source_admission(&expanded.nodes)?;
             let refused = source_admission
                 .iter()
@@ -2801,6 +2802,7 @@ impl Factory {
                     "source": base.source.label(),
                 })),
                 "reused_writer_bases": reused_writer_bases,
+                "node_routes": node_routes,
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,
@@ -3035,6 +3037,166 @@ impl Factory {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         })
+    }
+
+    /// Read-only route preview for `run --explain`. An exact node route or a
+    /// policy's configured model resolves to one spelling; a pool is shown as
+    /// its candidates, because the weighted pick, account and credential stay
+    /// launch-only. Every value names the field, policy, pool or default that
+    /// supplied it so pool routing can be checked before launch.
+    fn explain_node_routes(
+        &self,
+        nodes: &[provenant_fabric_runtime::graph::GraphNode],
+    ) -> Vec<Value> {
+        use provenant_fabric_runtime::graph::{GraphRoute, GraphRouteSelector};
+        let listed = provenant_cli::route::provider_check_routes(&self.context.roots).ok();
+        let optional = |value: Option<String>| value.map_or(Value::Null, Value::String);
+        let adapter_of = |model: &str| model.split_once('/').map(|(adapter, _)| adapter.to_owned());
+        let mut rows = Vec::new();
+        for node in nodes {
+            if !provenant_fabric_runtime::graph::when::holds(&node.when)
+                || node.composite.is_some()
+                || node.condition.is_some()
+                || node.decide.is_some()
+            {
+                continue;
+            }
+            let declared: Vec<Option<&GraphRoute>> = node
+                .routes
+                .as_ref()
+                .map(|routes| routes.iter().map(Some).collect())
+                .unwrap_or_else(|| vec![node.route.as_ref()]);
+            for (index, route) in declared.into_iter().enumerate() {
+                let Some(route) = route else {
+                    rows.push(json!({
+                        "node": node.id, "index": index,
+                        "adapter": Value::Null, "model": Value::Null, "effort": Value::Null,
+                        "sources": {"adapter":"default","model":"default","effort":"default"},
+                        "selection": "default", "candidates": []
+                    }));
+                    continue;
+                };
+                let effort = route.effort.clone();
+                let node_effort = effort.is_some();
+                let (adapter, model, resolved_effort, sources, selection, candidates): (
+                    Value,
+                    Value,
+                    Value,
+                    Value,
+                    &str,
+                    Value,
+                ) = match route.selector() {
+                    GraphRouteSelector::Model(model) => (
+                        adapter_of(model).map_or(Value::Null, Value::String),
+                        Value::String(model.to_owned()),
+                        optional(effort),
+                        json!({
+                            "adapter":"node field","model":"node field",
+                            "effort": if node_effort { "node field" } else { "default" }
+                        }),
+                        "node field",
+                        json!([]),
+                    ),
+                    GraphRouteSelector::Adapter(name) => (
+                        Value::String(name.to_owned()),
+                        Value::Null,
+                        optional(effort),
+                        json!({
+                            "adapter":"node field","model":"node field",
+                            "effort": if node_effort { "node field" } else { "default" }
+                        }),
+                        "node field",
+                        json!([]),
+                    ),
+                    GraphRouteSelector::Alias(alias) => {
+                        let alias = alias.unwrap_or_default();
+                        match listed
+                            .as_ref()
+                            .and_then(|list| list.named_routes.get(alias))
+                        {
+                            Some(named) => {
+                                let model = named.model.as_str().to_owned();
+                                let policy_effort = effort.clone().or_else(|| named.effort.clone());
+                                (
+                                    adapter_of(&model).map_or(Value::Null, Value::String),
+                                    Value::String(model.clone()),
+                                    optional(policy_effort),
+                                    json!({
+                                        "adapter":"policy","model":"policy",
+                                        "effort": if node_effort { "node field" }
+                                            else if named.effort.is_some() { "policy" }
+                                            else { "default" },
+                                        "origin": named.source.clone(),
+                                    }),
+                                    "policy",
+                                    json!([model]),
+                                )
+                            }
+                            None => match listed.as_ref().and_then(|list| list.pools.get(alias)) {
+                                Some(pool) => {
+                                    let models: Vec<String> = pool
+                                        .iter()
+                                        .map(|member| member.model.as_str().to_owned())
+                                        .collect();
+                                    let common_effort = pool
+                                        .first()
+                                        .and_then(|member| member.effort.clone())
+                                        .filter(|value| {
+                                            pool.iter()
+                                                .all(|member| member.effort.as_ref() == Some(value))
+                                        });
+                                    let common_adapter = models
+                                        .first()
+                                        .and_then(|model| adapter_of(model))
+                                        .filter(|adapter| {
+                                            models.iter().all(|model| {
+                                                adapter_of(model).as_deref()
+                                                    == Some(adapter.as_str())
+                                            })
+                                        });
+                                    (
+                                        common_adapter.map_or(Value::Null, Value::String),
+                                        Value::Null,
+                                        optional(effort.or(common_effort.clone())),
+                                        json!({
+                                            "adapter":"pool","model":"pool",
+                                            "effort": if node_effort { "node field" }
+                                                else if common_effort.is_some() { "pool" }
+                                                else { "default" },
+                                            "origin": format!("pool {alias}"),
+                                        }),
+                                        "pool",
+                                        json!(models),
+                                    )
+                                }
+                                None => (
+                                    Value::Null,
+                                    Value::Null,
+                                    optional(effort),
+                                    json!({
+                                        "adapter":"default","model":"default",
+                                        "effort": if node_effort { "node field" } else { "default" }
+                                    }),
+                                    "default",
+                                    json!([]),
+                                ),
+                            },
+                        }
+                    }
+                };
+                rows.push(json!({
+                    "node": node.id,
+                    "index": index,
+                    "adapter": adapter,
+                    "model": model,
+                    "effort": resolved_effort,
+                    "sources": sources,
+                    "selection": selection,
+                    "candidates": candidates,
+                }));
+            }
+        }
+        rows
     }
 
     /// Inspect source and state admission without preparing a provider. The

@@ -1363,6 +1363,54 @@ fn node_route_table_reaches_explain_with_one_full_model_spelling() -> Result {
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#one-model-spelling-per-route
+#[test]
+fn explain_reports_each_nodes_route_with_its_sources() -> Result {
+    let rig = GraphProject::new()?;
+    let full = "opencode/opencode/hy4-flash-free";
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "node-route-sources",
+        "nodes": [
+            {"id":"exact","prompt":"inspect","access":"read_only",
+             "route":{"adapter":"opencode","model":full,"effort":"high"}},
+            {"id":"pooled","prompt":"inspect","access":"read_only",
+             "route":{"alias":"senior"}}
+        ]
+    }))?;
+    let (_, explained) = rig.run(&[
+        "run",
+        "--file",
+        document.to_str().ok_or("document path")?,
+        "--explain",
+    ])?;
+    assert!(explained["error"].is_null(), "{explained}");
+    let rows = explained["data"]["node_routes"]
+        .as_array()
+        .ok_or_else(|| format!("node routes: {explained}"))?;
+    let exact = rows
+        .iter()
+        .find(|row| row["node"] == "exact")
+        .ok_or_else(|| format!("exact route: {rows:?}"))?;
+    assert_eq!(exact["adapter"], "opencode", "{exact}");
+    assert_eq!(exact["model"], full, "{exact}");
+    assert_eq!(exact["effort"], "high", "{exact}");
+    assert_eq!(exact["sources"]["model"], "node field", "{exact}");
+    let pooled = rows
+        .iter()
+        .find(|row| row["node"] == "pooled")
+        .ok_or_else(|| format!("pool route: {rows:?}"))?;
+    assert_eq!(pooled["selection"], "pool", "{pooled}");
+    assert_eq!(pooled["sources"]["model"], "pool", "{pooled}");
+    assert!(
+        pooled["candidates"]
+            .as_array()
+            .is_some_and(|candidates| !candidates.is_empty()),
+        "{pooled}"
+    );
+    Ok(())
+}
+
 // Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
 #[test]
 fn silent_provider_is_visible_in_status_and_ends_wait() -> Result {

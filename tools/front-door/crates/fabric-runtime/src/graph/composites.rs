@@ -124,7 +124,35 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
             }
             aliases
         };
-        let writer_aliases = aliases(links(false), inherited);
+        // An authored writer id is the local name inside its enclosing
+        // composite or loop scope. Resolve it to the same expanded leaf as
+        // the composite id that exports that writer: a `with.writer` naming
+        // `fix` and a writer expanded as `task--fix` are the same authority.
+        // A local name shared by two writers stays unresolved so the whole
+        // plan can report the candidate ids instead of guessing one.
+        let mut local_writers: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+        for id in &writers {
+            if let Some((_, local)) = id.rsplit_once("--") {
+                match local_writers.entry(local) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(Some(id.as_str()));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if entry.get().is_some_and(|target| target != id.as_str()) {
+                            entry.insert(None);
+                        }
+                    }
+                }
+            }
+        }
+        let mut writer_aliases = aliases(links(false), inherited);
+        for (local, target) in local_writers {
+            if let Some(target) = target
+                && !writer_aliases.contains_key(local)
+            {
+                writer_aliases.insert(local.to_owned(), target.to_owned());
+            }
+        }
         let result_aliases = aliases(links(true), inherited_results);
         let bind = |id: &mut String, aliases: &BTreeMap<String, String>| {
             if let Some(target) = aliases.get(id) {
