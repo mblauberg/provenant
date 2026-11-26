@@ -533,12 +533,21 @@ mod remote_of_tests {
     /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     #[test]
     fn base_fallback_uses_the_declared_remote_not_origin() {
+        use std::os::unix::fs::DirBuilderExt;
+
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path().join("state");
         let project = temp.path().join("project");
-        std::fs::create_dir_all(&state).unwrap();
-        std::fs::create_dir_all(project.join(".git")).unwrap();
-        std::fs::write(project.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+        // The host state is a run store: private, as in production.
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&state)
+            .unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        // A real checkout, not a hand-written .git/config: `remote_of`
+        // revalidates the repository before it reads a branch tracking key.
+        provenant_os::fixture::run_git(&project, &["init", "-q"]).unwrap();
         std::fs::create_dir_all(project.join(".provenant")).unwrap();
         std::fs::write(
             project.join(".provenant/ports.json"),
