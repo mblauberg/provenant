@@ -33,9 +33,6 @@ const TITLE: &str = "# Session checkpoint";
 #[error("could not serialize checkpoint frontmatter")]
 pub struct TemplateError(#[source] serde_saphyr::SerializeError);
 
-/// The frontmatter a first save gets when neither the input nor the previous
-/// revision carries a typed standing record. Empty lists are explicit: an
-/// omitted `waiting_on_owner` must never read as "nothing waits".
 fn body(markdown: &str) -> &str {
     let end = header_end(markdown).ok().flatten().unwrap_or(0);
     &markdown[end..]
@@ -117,6 +114,8 @@ fn frontmatter_values(header: Option<&str>) -> Option<Map<String, Value>> {
     }
 }
 
+/// An empty typed standing record for when neither header supplies a valid one.
+/// Empty lists are explicit so `waiting_on_owner` is never omitted.
 fn empty_standing() -> Value {
     serde_json::json!({
         "schema_version": 1,
