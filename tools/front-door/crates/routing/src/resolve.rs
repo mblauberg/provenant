@@ -2558,7 +2558,7 @@ fn candidate(
             }
             Err(gap) => {
                 degrade_warnings.push(gap.degrade_warning());
-                if gap.field() == provenant_records::LaunchField::Effort {
+                if gap.decision().field() == provenant_records::LaunchField::Effort {
                     (None, effort)
                 } else {
                     (effort, dropped_effort)

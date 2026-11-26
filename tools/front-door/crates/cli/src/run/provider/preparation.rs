@@ -4079,7 +4079,7 @@ pub(super) fn prepare_candidates_inner(
             // Advisory gaps degrade: drop the control and record a warning
             // naming the adapter row as source.
             push_launch_warning(&mut route, gap.degrade_warning());
-            if gap.field() == provenant_records::LaunchField::Effort {
+            if gap.decision().field() == provenant_records::LaunchField::Effort {
                 route.effort = None;
             }
         }

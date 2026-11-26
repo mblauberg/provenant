@@ -605,7 +605,11 @@ fn exact_pin_with_unsupported_effort_launches_without_it() -> TestResult {
         effort: Some("high".into()),
     };
     let record = Service::new(&store).dispatch(input, temp.path(), &call)?;
-    assert_ne!(record.state, OperationState::Refused);
+    let state = &record.state;
+    assert!(
+        matches!(state, AttemptState::Queued { .. }),
+        "the launch must be admitted, not refused: {state:?}"
+    );
     Ok(())
 }
 
