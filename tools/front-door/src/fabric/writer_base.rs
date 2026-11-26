@@ -126,7 +126,7 @@ pub(super) fn resolve_reused_worktree_base(
     let worktree = node.worktree.as_deref().filter(|path| !path.is_empty())?;
     let git = git?;
     let path = absolute(project_root, worktree);
-    if let Some(commit) = provenant_run::resolve_git_base(git, &path, "HEAD@{upstream}").ok() {
+    if let Ok(commit) = provenant_run::resolve_git_base(git, &path, "HEAD@{upstream}") {
         return Some(WriterBase {
             commit: Some(commit),
             source: WriterBaseSource::WorktreeUpstream,
