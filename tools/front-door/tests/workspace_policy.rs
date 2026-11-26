@@ -1908,7 +1908,6 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         // report and node-sourced panel helpers, plus #4066's authored repair
         // writer resolution and per-node route preview, grew this owner. The
         // 4500 ceiling is the next 250-band above size + 100, with headroom.
-
         ("src/fabric/interface.rs", 4500),
         // Peer fixture transport and writer boundary coverage (#3979).
         ("src/fabric/owner.rs", 6000),
