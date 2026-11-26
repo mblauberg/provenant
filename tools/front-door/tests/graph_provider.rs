@@ -2905,19 +2905,30 @@ fn distinct_branch_writer_launches_start_without_shared_waits() -> Result {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert_eq!(node["launch_retry"], Value::Null, "{response}");
-            graph_ids.push(
+            graph_ids.push((
                 response["data"]["checkpoint"]["graph_id"]
                     .as_str()
                     .ok_or("graph id")?
                     .to_owned(),
-            );
+                node["id"].as_str().ok_or("node id")?.to_owned(),
+            ));
         }
         for index in 0..2 {
             await_fixture_marker(&live.join(format!("{index}-ready")))?;
         }
         // Every provider now holds its distinct worktree lease at once.
         fs::write(live.join("release"), b"release")?;
-        for graph in graph_ids {
+        // Local attempt completion is observed separately from graph advancement.
+        // Drive the host settlement owner after both attempts finish, instead of
+        // depending on a scheduled tick racing the graph wait.
+        for (graph, node) in &graph_ids {
+            let target = format!("{graph}/{node}#1");
+            let waited = rig.command(&["wait", &target, "--timeout", "30s", "--json"])?;
+            assert_eq!(code(&waited), 0, "{target}: {waited:?}");
+        }
+        let tick = rig.command(&["tick", "--json"])?;
+        assert_eq!(code(&tick), 0, "graph settlement tick: {tick:?}");
+        for (graph, _) in graph_ids {
             let waited = rig.command(&["wait", &graph, "--timeout", "30s", "--json"])?;
             assert_eq!(
                 code(&waited),

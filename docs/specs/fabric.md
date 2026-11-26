@@ -654,7 +654,7 @@ committed checkpoint independently. `graph::checkpoint_digest` and
 `graph::graph_plan_digest` own the identities; hand-built fixtures use
 `FileJournal::prepare_fixture_checkpoint`, and production saves never repair a
 supplied plan digest. An active expansion pause and the graph pause must agree:
-a structural pause yields any active expansion pause, a settled fallback
+a structural or stop pause yields any active expansion pause, a settled fallback
 refreshes the pause it consumed, and a disagreeing pair is quarantined once by
 the tick rather than saved again. Corrupt-checkpoint reporting and quarantine
 are in [state](state.md#graph-checkpoints-cover-persisted-text). Landing skips unusable

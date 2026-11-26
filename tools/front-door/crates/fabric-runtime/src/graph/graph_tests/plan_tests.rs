@@ -2195,23 +2195,37 @@ fn a_structural_pause_takes_ownership_from_an_active_expansion_pause() {
     // A refused planner expansion leaves the node owning an
     // InvalidPlanExpansion graph pause.
     let document = planner(1);
-    let run = advance(
-        &document,
-        &mut fixture_owner(&["not a fragment"]),
-        &mut MemoryJournal::default(),
-    )
-    .unwrap();
+    let mut journal = MemoryJournal::default();
+    let mut owner = fixture_owner(&["not a fragment"]);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(
         run.checkpoint.pause_cause(),
         Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(run.checkpoint.expansion_pause_owns_graph_pause());
+    assert!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .any(|node| !node.state.settled())
+    );
 
-    // A loop decision extension then exceeds a host limit. The structural
-    // pause takes over the graph and the expansion pause yields, so the
-    // checkpoint the tick reads never carries a disagreeing pair (#4106).
-    let mut checkpoint = run.checkpoint;
-    checkpoint.pause_structural("limits.nodes");
+    // A later scheduler pass sees tighter host limits while the dependent
+    // node is pending. It must persist a consistent structural pause (#4106).
+    let limits = crate::config::GraphLimits {
+        nodes: 1,
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    let checkpoint = journal.0.as_ref().unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
     assert!(checkpoint.expansion_pause_owns_graph_pause());
     assert!(checkpoint.nodes.iter().all(|node| !matches!(
