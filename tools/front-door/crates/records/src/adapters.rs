@@ -3159,3 +3159,419 @@ mod gap_policy_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod batch_invariant_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// A path-shaped source is checked against the workspace; a URL or a config
+    /// key is documentation, not a file in this tree.
+    fn source_exists(source: &str, front_door: &Path, label: &str) {
+        let path = source.split('#').next().unwrap_or(source);
+        if path.starts_with("crates/")
+            || path.starts_with("src/")
+            || path.starts_with("tests/")
+            || path.starts_with("config/")
+        {
+            assert!(
+                front_door.join(path).exists(),
+                "{label}: source {path} does not exist under tools/front-door"
+            );
+        }
+    }
+
+    fn absent_fact<T: PartialEq>(fact: AdapterFact<T>, absent: T, label: &str, front_door: &Path) {
+        if fact.value != absent {
+            return;
+        }
+        let label = format!("{label} ({})", fact.reason);
+        assert_ne!(fact.reason, ADAPTER_ROW_REASON, "{label}");
+        assert!(!fact.reason.trim().is_empty(), "{label}");
+        assert!(!fact.source.trim().is_empty(), "{label}");
+        source_exists(fact.source, front_door, &label);
+    }
+
+    /// Invariant 1: every absent fact names a reason other than the row default
+    /// and a non-empty source; path-shaped sources exist. Caveat sources too.
+    #[test]
+    fn absent_facts_are_sourced_and_path_sources_exist() {
+        let front_door = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for spec in ADAPTER_SPECS {
+            let name = spec.identity.name;
+            let launch = spec.capabilities.launch;
+            let caps = spec.capabilities;
+            for (fact, label) in [
+                (launch.model, "model"),
+                (launch.effort, "effort"),
+                (launch.image_input, "image input"),
+                (launch.resume, "resume"),
+                (launch.write, "write"),
+                (caps.live_input, "live input"),
+            ] {
+                absent_fact(fact, false, &format!("{name}: {label}"), &front_door);
+            }
+            absent_fact(
+                caps.terminal_event,
+                TerminalEventStrength::Absent,
+                &format!("{name}: terminal event"),
+                &front_door,
+            );
+            absent_fact(
+                caps.answering_model,
+                AnsweringModelSource::Unreported,
+                &format!("{name}: answering model"),
+                &front_door,
+            );
+            absent_fact(
+                caps.session_reference,
+                SessionReference::Absent,
+                &format!("{name}: session reference"),
+                &front_door,
+            );
+            absent_fact(
+                spec.retention.transcript_layout,
+                false,
+                &format!("{name}: transcript layout"),
+                &front_door,
+            );
+            if let Some(install) = spec.install {
+                for (fact, label) in [
+                    (install.native.hooks, "hooks"),
+                    (install.native.answer_delivery, "answer delivery"),
+                    (install.native.precompact_context, "precompact context"),
+                    (install.native.instructions, "instructions"),
+                ] {
+                    absent_fact(fact, false, &format!("{name}: {label}"), &front_door);
+                }
+            }
+            for caveat in caps.caveats {
+                let label = format!("{name}: caveat {}", caveat.code);
+                assert!(!caveat.code.is_empty(), "{label}");
+                assert!(!caveat.note.is_empty(), "{label}");
+                assert!(!caveat.source.is_empty(), "{label}");
+                source_exists(caveat.source, &front_door, &label);
+            }
+        }
+    }
+
+    /// Invariant 2: raw framing and an absent terminal event are the same set.
+    #[test]
+    fn raw_framing_iff_absent_terminal_event() {
+        for spec in ADAPTER_SPECS {
+            assert_eq!(
+                spec.launch.framing == StreamFraming::Raw,
+                spec.capabilities.terminal_event.value == TerminalEventStrength::Absent,
+                "{}",
+                spec.identity.name
+            );
+        }
+    }
+
+    /// Invariant 3: one gap per field in order, degrading exactly the three
+    /// input fields. The table is exhaustive over `LaunchField`.
+    #[test]
+    fn every_absent_field_decides_by_field_in_order() {
+        let expected = [
+            (LaunchField::Model, LaunchAction::Degrade),
+            (LaunchField::Effort, LaunchAction::Degrade),
+            (LaunchField::ImageInput, LaunchAction::Degrade),
+            (LaunchField::Resume, LaunchAction::Refuse),
+            (LaunchField::Network, LaunchAction::Refuse),
+            (LaunchField::Write, LaunchAction::Refuse),
+            (LaunchField::SkillLocation, LaunchAction::Refuse),
+        ];
+        for (field, action) in expected {
+            assert_eq!(field.default_action(), action, "{field:?}");
+        }
+        let row = AdapterSpec::get("command").unwrap();
+        let spec = AdapterSpec {
+            launch: AdapterLaunch {
+                skill_location: None,
+                ..row.launch
+            },
+            capabilities: Capabilities {
+                launch: LaunchCapabilities {
+                    model: AdapterFact::unsupported("no model", ADAPTER_ROW_SOURCE),
+                    effort: AdapterFact::unsupported("no effort", ADAPTER_ROW_SOURCE),
+                    image_input: AdapterFact::unsupported("no images", ADAPTER_ROW_SOURCE),
+                    resume: AdapterFact::unsupported("no resume", ADAPTER_ROW_SOURCE),
+                    write: AdapterFact::unsupported("no write", ADAPTER_ROW_SOURCE),
+                    network: &[],
+                    ..row.capabilities.launch
+                },
+                ..row.capabilities
+            },
+            ..*row
+        };
+        let check = spec.check_launch(&LaunchRequest {
+            model: Some("model"),
+            effort: Some("high"),
+            image_input: true,
+            resume: true,
+            network: Some(NetworkAccess::Open),
+            write: true,
+            skill_location: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            check.gaps.iter().map(|gap| gap.field).collect::<Vec<_>>(),
+            expected.iter().map(|(field, _)| *field).collect::<Vec<_>>()
+        );
+        for gap in &check.gaps {
+            assert_eq!(gap.action, gap.field.default_action(), "{gap:?}");
+        }
+    }
+
+    /// Invariant 4: no row claims live input without a live control lane.
+    #[test]
+    fn live_input_requires_a_live_control_lane() {
+        for spec in ADAPTER_SPECS {
+            if spec.capabilities.control.lane != ControlSupport::LiveInjection {
+                assert!(
+                    !spec.capabilities.live_input.value,
+                    "{} declares live input without a live lane",
+                    spec.identity.name
+                );
+            }
+        }
+    }
+
+    /// Invariant 5: an artifact layout is declared only with a known layout.
+    #[test]
+    fn retained_artifacts_require_a_known_transcript_layout() {
+        for spec in ADAPTER_SPECS {
+            if !spec.retention.artifacts.is_empty() {
+                assert!(
+                    spec.retention.transcript_layout.value,
+                    "{}",
+                    spec.identity.name
+                );
+            }
+        }
+    }
+
+    /// Invariant 9: a resumable adapter exposes a provider session id.
+    #[test]
+    fn resume_requires_a_reported_session_reference() {
+        for spec in ADAPTER_SPECS {
+            if spec.capabilities.launch.resume.value {
+                assert_ne!(
+                    spec.capabilities.session_reference.value,
+                    SessionReference::Absent,
+                    "{} declares resume without a session id",
+                    spec.identity.name
+                );
+            }
+        }
+    }
+
+    /// Invariant 10: raw output never claims a source for the answering model.
+    #[test]
+    fn raw_framing_never_claims_an_answering_model() {
+        for spec in ADAPTER_SPECS {
+            if spec.launch.framing == StreamFraming::Raw {
+                assert_eq!(
+                    spec.capabilities.answering_model.value,
+                    AnsweringModelSource::Unreported,
+                    "{}",
+                    spec.identity.name
+                );
+            }
+        }
+    }
+
+    /// Invariant 11: an overlay can only narrow, never widen, any row's facts.
+    #[test]
+    fn an_overlay_never_turns_a_fact_true() {
+        use crate::{Layer, Source};
+        let overlay = CapabilityOverlay {
+            entries: ADAPTER_SPECS
+                .iter()
+                .map(|spec| AdapterOverride {
+                    adapter: spec.identity.name.to_owned(),
+                    disable: OverridableCapability::ALL.to_vec(),
+                    reason: Some("batch invariant".to_owned()),
+                    on_gap: vec![],
+                    source: Source {
+                        layer: Layer::Host,
+                        origin: Some(OVERLAY_SOURCE.to_owned()),
+                    },
+                })
+                .collect(),
+        };
+        for spec in ADAPTER_SPECS {
+            let narrowed = spec.with_overlay(&overlay);
+            for (index, fact) in [
+                narrowed.capabilities.launch.model,
+                narrowed.capabilities.launch.effort,
+                narrowed.capabilities.launch.image_input,
+                narrowed.capabilities.launch.resume,
+                narrowed.capabilities.launch.write,
+                narrowed.capabilities.live_input,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert!(
+                    !fact.value,
+                    "{}: fact {index} was widened",
+                    spec.identity.name
+                );
+            }
+        }
+    }
+
+    /// Invariant 12: no gap setting changes a refuse-only field's action.
+    #[test]
+    fn no_gap_setting_changes_a_refuse_only_field() {
+        use crate::{
+            Layer, Source,
+            policy::{Policy, Source as PolicySource, Strength},
+        };
+        use std::collections::BTreeMap;
+
+        fn request(field: LaunchField) -> LaunchRequest<'static> {
+            match field {
+                LaunchField::Resume => LaunchRequest {
+                    resume: true,
+                    ..Default::default()
+                },
+                LaunchField::Network => LaunchRequest {
+                    network: Some(NetworkAccess::Open),
+                    ..Default::default()
+                },
+                LaunchField::Write => LaunchRequest {
+                    write: true,
+                    ..Default::default()
+                },
+                LaunchField::SkillLocation => LaunchRequest {
+                    skill_location: true,
+                    ..Default::default()
+                },
+                _ => panic!("{field:?} is not a refuse-only field"),
+            }
+        }
+
+        let row = AdapterSpec::get("command").unwrap();
+        let spec = AdapterSpec {
+            capabilities: Capabilities {
+                launch: LaunchCapabilities {
+                    network: &[],
+                    ..row.capabilities.launch
+                },
+                ..row.capabilities
+            },
+            ..*row
+        };
+        for action in [GapAction::Warn, GapAction::Off, GapAction::Refuse] {
+            let strength = match action {
+                GapAction::Warn => Strength::Warn,
+                GapAction::Off => Strength::Off,
+                GapAction::Refuse => Strength::Refuse,
+            };
+            let mut policy = Policy::default();
+            policy.overlay(
+                &BTreeMap::from([
+                    ("LAUNCH_MODEL_UNSUPPORTED".to_string(), strength),
+                    ("LAUNCH_EFFORT_UNSUPPORTED".to_string(), strength),
+                    ("LAUNCH_IMAGE_INPUT_UNSUPPORTED".to_string(), strength),
+                ]),
+                PolicySource::Host,
+            );
+            for field in [
+                LaunchField::Resume,
+                LaunchField::Network,
+                LaunchField::Write,
+                LaunchField::SkillLocation,
+            ] {
+                let overlay = CapabilityOverlay {
+                    entries: vec![AdapterOverride {
+                        adapter: row.identity.name.to_owned(),
+                        disable: vec![],
+                        reason: None,
+                        on_gap: vec![(field, action)],
+                        source: Source {
+                            layer: Layer::Project,
+                            origin: Some(OVERLAY_SOURCE.to_owned()),
+                        },
+                    }],
+                };
+                let check = spec.check_launch(&LaunchRequest {
+                    gap_policy: overlay.gap_policy(row.identity.name, &policy),
+                    ..request(field)
+                });
+                let gap = check
+                    .gaps
+                    .iter()
+                    .find(|gap| gap.field == field)
+                    .unwrap_or_else(|| panic!("{field:?} produced no gap"));
+                assert_eq!(gap.action, LaunchAction::Refuse, "{field:?} {action:?}");
+                assert_eq!(gap.origin, GapOrigin::Default, "{field:?} {action:?}");
+                assert!(gap.warn, "{gap:?}");
+            }
+        }
+    }
+
+    /// Invariant 13: every configurable key in the batch names a documented
+    /// knob with a default and allowed values.
+    #[test]
+    fn every_configurable_key_is_documented_with_a_default() {
+        let registry: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json"))
+                .expect("knob registry");
+        let documented = registry["documented_fields"]
+            .as_array()
+            .expect("documented_fields");
+        for key in [
+            "policy.LAUNCH_MODEL_UNSUPPORTED",
+            "policy.LAUNCH_EFFORT_UNSUPPORTED",
+            "policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED",
+            "policy.HARNESS_VERSION_UNSUPPORTED",
+            "policy.HARNESS_VERSION_BROKEN",
+            "providers.{provider}.version_probe",
+            "providers.{provider}.version_probe_timeout_seconds",
+            "domains.adapter.capabilities.measurements",
+            "domains.adapter.capabilities.measurement_samples",
+            "domains.adapter.capabilities.measurement_records",
+        ] {
+            assert!(
+                documented.iter().any(|value| value.as_str() == Some(key)),
+                "{key} is not a documented field"
+            );
+        }
+        let policies = registry["policy_rules"]["settings"]
+            .as_object()
+            .expect("policy rules");
+        for code in [
+            "LAUNCH_MODEL_UNSUPPORTED",
+            "LAUNCH_EFFORT_UNSUPPORTED",
+            "LAUNCH_IMAGE_INPUT_UNSUPPORTED",
+            "HARNESS_VERSION_UNSUPPORTED",
+            "HARNESS_VERSION_BROKEN",
+        ] {
+            let knob = format!("policy.{code}");
+            let rule = policies
+                .get(&knob)
+                .unwrap_or_else(|| panic!("{knob} undocumented"));
+            assert_eq!(rule["default"].as_str(), Some("warn"), "{knob}");
+            assert!(
+                !rule["allowed"].as_str().unwrap_or_default().is_empty(),
+                "{knob}"
+            );
+        }
+        let domain = registry["domain_adapter_settings"]["settings"]
+            .as_object()
+            .expect("adapter settings");
+        for key in ["measurements", "measurement_samples", "measurement_records"] {
+            let rule = domain
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} undocumented"));
+            assert!(!rule["default"].is_null(), "{key}");
+            assert!(
+                !rule["allowed"].as_str().unwrap_or_default().is_empty(),
+                "{key}"
+            );
+        }
+    }
+}
