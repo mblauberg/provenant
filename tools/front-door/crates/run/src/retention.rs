@@ -591,19 +591,19 @@ impl RunStore {
                         // After the configured grace the scratch is collectible
                         // under fresh lock and continuation checks below.
                         Err(error) => {
-                            if matches!(error, RunError::Validation(_)) {
-                                if let Some(policy) = scratch {
-                                    return self.collect_grace_scratch(
-                                        &id,
-                                        now,
-                                        dry_run,
-                                        policy,
-                                        call,
-                                        scan,
-                                        &mut temporary_sizes,
-                                        &mut report,
-                                    );
-                                }
+                            if matches!(error, RunError::Validation(_))
+                                && let Some(policy) = scratch
+                            {
+                                return self.collect_grace_scratch(
+                                    &id,
+                                    now,
+                                    dry_run,
+                                    policy,
+                                    call,
+                                    scan,
+                                    &mut temporary_sizes,
+                                    &mut report,
+                                );
                             }
                             return Err(error);
                         }
