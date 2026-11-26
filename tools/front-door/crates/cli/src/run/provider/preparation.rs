@@ -7467,7 +7467,7 @@ mod candidate_walk_regressions {
         let availability = [provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: pinned.adapter.clone(),
-            executable: "/fixture/cursor".into(),
+            executable: "/fixture/agy".into(),
             version: "fixture".into(),
             last_update: None,
             fixture_ref: "fixture".into(),
@@ -7518,17 +7518,19 @@ mod candidate_walk_regressions {
 
     #[test]
     fn alternative_account_must_serve_the_pinned_model() {
-        let pinned = route("legacy", "spent");
+        let mut pinned = route("legacy", "spent");
+        pinned.adapter = "agy".into();
+        pinned.catalogue_revision = "revision".into();
         let policy = offer_policy(0);
         let catalogue = provenant_routing::Catalogue::bundled().unwrap();
         let record = |key: &str, models: &[&str]| provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: pinned.adapter.clone(),
-            executable: "/fixture/cursor".into(),
+            executable: "/fixture/agy".into(),
             version: "fixture".into(),
             last_update: None,
             fixture_ref: "fixture".into(),
-            catalogue_revision: "fixture".into(),
+            catalogue_revision: pinned.catalogue_revision.clone(),
             account_key: Some(key.into()),
             plan: None,
             observed_models: models.iter().map(|model| (*model).to_owned()).collect(),
@@ -7577,10 +7579,12 @@ mod candidate_walk_regressions {
 
     #[test]
     fn alternative_account_uses_fresh_snapshot_offer_evidence() {
-        let pinned = route("legacy", "spent");
+        let mut pinned = route("legacy", "spent");
+        pinned.adapter = "agy".into();
+        pinned.catalogue_revision = "revision".into();
         let availability = [provenant_providers::AvailabilityRecord {
             schema_version: 1,
-            adapter: "cursor".into(),
+            adapter: pinned.adapter.clone(),
             executable: "/fixture/cursor".into(),
             version: "fixture".into(),
             last_update: None,
@@ -7594,7 +7598,7 @@ mod candidate_walk_regressions {
         }];
         let scope = provenant_quota::AccountScope {
             extra: Default::default(),
-            adapter: "cursor".into(),
+            adapter: pinned.adapter.clone(),
             account_key: "other".into(),
             label: "other".into(),
         };
@@ -7621,7 +7625,7 @@ mod candidate_walk_regressions {
             accounts: &accounts,
             freshness: &provenant_quota::DEFAULT_FRESHNESS,
             quota_policies: &[],
-            catalogue_revision: "revision",
+            catalogue_revision: &pinned.catalogue_revision,
             now_seconds: 100,
         };
         let catalogue = provenant_routing::Catalogue::bundled().unwrap();
