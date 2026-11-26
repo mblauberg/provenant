@@ -185,7 +185,7 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
         return Err("attempt is not terminal".into());
     };
     assert_eq!(
-        state.terminal_cause(),
+        state.cause(),
         Some(CauseKind::CloudPlacementRemoved)
     );
     assert!(

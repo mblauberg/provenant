@@ -222,7 +222,7 @@ pub(super) struct Fake {
     /// The outcome a decode reports; success when unset.
     pub(super) outcome: Option<Outcome>,
     /// The terminal cause a decode reports.
-    pub(super) terminal_cause: Option<CauseKind>,
+    pub(super) cause: Option<CauseKind>,
     /// Evidence diagnostic for outcomes such as `Unsettled` that require one.
     pub(super) reason: Option<String>,
     /// Provider session the decode reports, for terminal continuation tests.
@@ -312,7 +312,7 @@ impl Providers for Fake {
         assert_eq!(applied.effort, route().effort);
         self.decoded.set(self.decoded.get() + 1);
         Ok(Decoded {
-            terminal_cause: self.terminal_cause,
+            cause: self.cause,
             outcome: self.outcome.unwrap_or(Outcome::Succeeded),
             result: self
                 .answer

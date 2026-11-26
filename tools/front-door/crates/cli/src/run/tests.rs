@@ -246,7 +246,7 @@ fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
     )?;
     assert_eq!(decoded.session.as_deref(), Some("s1"));
     assert_ne!(
-        decoded.terminal_cause,
+        decoded.cause,
         Some(run::CauseKind::IdentityMismatch)
     );
 
@@ -267,7 +267,7 @@ fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
         false,
     )?;
     assert_eq!(
-        mismatch.terminal_cause,
+        mismatch.cause,
         Some(run::CauseKind::IdentityMismatch)
     );
     Ok(())
@@ -308,7 +308,7 @@ fn resumed_provider_requires_matching_observed_session() -> Result<(), Box<dyn s
     );
     let decoded = decode(fresh.as_bytes())?;
     assert_eq!(
-        decoded.terminal_cause,
+        decoded.cause,
         Some(run::CauseKind::IdentityMismatch)
     );
 
@@ -323,7 +323,7 @@ fn resumed_provider_requires_matching_observed_session() -> Result<(), Box<dyn s
     );
     let decoded = decode(conflict.as_bytes())?;
     assert_eq!(
-        decoded.terminal_cause,
+        decoded.cause,
         Some(run::CauseKind::IdentityMismatch)
     );
     Ok(())

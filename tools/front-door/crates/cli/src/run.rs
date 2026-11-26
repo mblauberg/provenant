@@ -993,7 +993,7 @@ impl Registry<'_> {
             .and_then(provenant_records::AdapterSpec::get)
             .is_some_and(|spec| spec.result_event_usage);
         let failed = |reason: &str| run::Decoded {
-            terminal_cause: None,
+            cause: None,
             outcome: run::Outcome::Failed,
             result: String::new(),
             complete: false,
@@ -1008,7 +1008,7 @@ impl Registry<'_> {
             partial_signals: Vec::new(),
         };
         let unproven = |reason: &str| run::Decoded {
-            terminal_cause: None,
+            cause: None,
             outcome: run::Outcome::Unsettled,
             result: String::new(),
             complete: false,
@@ -1024,7 +1024,7 @@ impl Registry<'_> {
                 "provider capture evidence defect at stdout.log line {line}; replay incomplete: {}",
                 provenant_core::bounded_line(error, 512)
             ));
-            decoded.terminal_cause = Some(run::CauseKind::ProviderCaptureDefect { line });
+            decoded.cause = Some(run::CauseKind::ProviderCaptureDefect { line });
             decoded
         };
         // Only lost framing is missing evidence. A complete frame that reports a
@@ -1078,7 +1078,7 @@ impl Registry<'_> {
                 Ok(decoded) => events.extend(decoded),
                 Err(provenant_providers::ProviderError::IdentityMismatch) => {
                     let mut decoded = failed("provider identity mismatch");
-                    decoded.terminal_cause = Some(run::CauseKind::IdentityMismatch);
+                    decoded.cause = Some(run::CauseKind::IdentityMismatch);
                     return Ok(decoded);
                 }
                 Err(error @ provenant_providers::ProviderError::MalformedFrame { line }) => {
@@ -1127,7 +1127,7 @@ impl Registry<'_> {
             Ok(outcome) => outcome,
             Err(provenant_providers::ProviderError::IdentityMismatch) => {
                 let mut decoded = failed("provider identity mismatch");
-                decoded.terminal_cause = Some(run::CauseKind::IdentityMismatch);
+                decoded.cause = Some(run::CauseKind::IdentityMismatch);
                 return Ok(decoded);
             }
             Err(
@@ -1252,7 +1252,7 @@ impl Registry<'_> {
             outcome.model()
         };
         let mut decoded = run::Decoded {
-            terminal_cause: None,
+            cause: None,
             outcome: run::Outcome::Failed,
             result: String::new(),
             complete: true,
@@ -1416,7 +1416,7 @@ impl Registry<'_> {
                 let reason = if lane_token && registered_token {
                     crate::quota::registered_lane_token_diagnostic(entries, adapter.id(), key)
                 } else if lane_token {
-                    decoded.terminal_cause = Some(run::CauseKind::LaneTokenLost);
+                    decoded.cause = Some(run::CauseKind::LaneTokenLost);
                     crate::quota::lane_token_lost_diagnostic(entries, adapter.id(), key)
                 } else if config.is_some() {
                     crate::quota::account_login_diagnostic(
@@ -1464,7 +1464,7 @@ impl Registry<'_> {
             });
         }
         if decoded.outcome == run::Outcome::Succeeded && early_stop {
-            decoded.terminal_cause = Some(run::CauseKind::ProviderEarlyStop);
+            decoded.cause = Some(run::CauseKind::ProviderEarlyStop);
             decoded.reason = Some(
                 provenant_records::diagnostic::ProviderFailureFact::EarlyStop
                     .reason()
@@ -1502,7 +1502,7 @@ impl Registry<'_> {
         {
             decoded.outcome = run::Outcome::QuotaLimited;
             if pool.as_deref() == Some("opencode-free") {
-                decoded.terminal_cause = Some(run::CauseKind::FreePoolQuota);
+                decoded.cause = Some(run::CauseKind::FreePoolQuota);
             }
             let fact = provenant_records::diagnostic::ProviderFailureFact::Quota {
                 free_pool: pool.as_deref() == Some("opencode-free"),

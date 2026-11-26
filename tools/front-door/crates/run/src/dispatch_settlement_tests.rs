@@ -60,7 +60,7 @@ fn budget_completion_never_overrides_unsettled_provider_evidence() -> TestResult
             let fake = Fake {
             observed: Some(route()),
             outcome: Some(Outcome::Unsettled),
-            terminal_cause: Some(CauseKind::ProviderCaptureDefect { line: 3 }),
+            cause: Some(CauseKind::ProviderCaptureDefect { line: 3 }),
             reason: Some("provider capture evidence defect at stdout.log line 3; replay incomplete".into()),
             complete: Some(false),
             // Even a done declaration cannot repair missing provider evidence.
@@ -73,7 +73,7 @@ fn budget_completion_never_overrides_unsettled_provider_evidence() -> TestResult
                     record.state,
                     AttemptState::Terminal {
                         outcome: Outcome::Unsettled,
-                        terminal_cause: Some(CauseKind::ProviderCaptureDefect { line: 3 }),
+                        cause: Some(CauseKind::ProviderCaptureDefect { line: 3 }),
                         ..
                     }
                 ),
@@ -856,7 +856,7 @@ fn incomplete_identity_evidence_preserves_settlement_failures() -> TestResult {
             let record = store.finish(id, &dir, &observed, &fake, &call)?;
             let AttemptState::Terminal {
                 outcome,
-                terminal_cause,
+                cause,
                 ..
             } = record.state
             else {
@@ -864,7 +864,7 @@ fn incomplete_identity_evidence_preserves_settlement_failures() -> TestResult {
             };
             assert_eq!(outcome, Outcome::Failed);
             assert_eq!(
-                terminal_cause,
+                cause,
                 route_mismatch.then_some(CauseKind::IdentityMismatch)
             );
         }
@@ -927,7 +927,7 @@ fn identity_observations_warn_when_missing_and_hold_when_contradictory() -> Test
         assert_eq!(record.observed_route, observed_route);
         let AttemptState::Terminal {
             outcome,
-            terminal_cause,
+            cause,
             stop,
             ..
         } = &record.state
@@ -943,10 +943,10 @@ fn identity_observations_warn_when_missing_and_hold_when_contradictory() -> Test
                     .contains(&PartialSignal::IdentityUnobserved)
             );
             assert!(stop.is_none());
-            assert_eq!(*terminal_cause, None);
+            assert_eq!(*cause, None);
         } else {
             assert_eq!(*outcome, Outcome::Failed);
-            assert_eq!(*terminal_cause, Some(CauseKind::IdentityMismatch));
+            assert_eq!(*cause, Some(CauseKind::IdentityMismatch));
             assert_eq!(
                 stop.as_ref().map(|stop| stop.cause()),
                 Some(provenant_records::StopCause::IdentityMismatch)

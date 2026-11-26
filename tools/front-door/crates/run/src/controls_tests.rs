@@ -96,7 +96,7 @@ fn interrupted_writer_preparation_projects_typed_rejection()
     assert!(store.writer_fences()?.is_empty());
     let terminal = store.record(id, &call)?;
     let AttemptState::Terminal {
-        terminal_cause,
+        cause,
         terminal_note,
         outcome,
         ..
@@ -105,7 +105,7 @@ fn interrupted_writer_preparation_projects_typed_rejection()
         return Err("interrupted preparation did not settle".into());
     };
     assert_eq!(*outcome, Outcome::Rejected);
-    assert_eq!(*terminal_cause, Some(CauseKind::LaunchHandoffRefused));
+    assert_eq!(*cause, Some(CauseKind::LaunchHandoffRefused));
     assert_eq!(*terminal_note, None);
     let projected = provenant_records::wire::lane::LaneRow::project(&terminal, Default::default());
     assert_eq!(
@@ -606,7 +606,7 @@ fn steered_claude_without_a_session_starts_a_fresh_turn() -> TestResult {
         store.record(id, &call)?.state,
         AttemptState::Terminal {
             outcome: Outcome::Uncommitted,
-            terminal_cause: None,
+            cause: None,
             ..
         }
     ));
@@ -738,7 +738,7 @@ fn steer_replays_are_idempotent_and_natural_settlement_adopts_all_intents() -> T
         running.state,
         AttemptState::Terminal {
             outcome: Outcome::Uncommitted,
-            terminal_cause: None,
+            cause: None,
             ..
         }
     ));
@@ -1535,7 +1535,7 @@ fn sealed_live_identity_conflict_fences_a_queued_successor() -> TestResult {
             finished.state,
             AttemptState::Terminal {
                 outcome: actual_outcome,
-                terminal_cause: actual_cause,
+                cause: actual_cause,
                 ..
             } if actual_outcome == outcome && actual_cause == cause
         ));
@@ -1722,7 +1722,7 @@ fn eof_fragment_only_continues_after_a_confirmed_intentional_stop() -> TestResul
             finished.state,
             AttemptState::Terminal {
                 outcome: actual_outcome,
-                terminal_cause: actual_cause,
+                cause: actual_cause,
                 ..
             } if actual_outcome == outcome && actual_cause == cause
         ));
@@ -2037,7 +2037,7 @@ fn explicit_cancel_after_delivered_steer_keeps_the_stop_and_blocks_successor() -
         terminal.state,
         AttemptState::Terminal {
             outcome: Outcome::Cancelled,
-            terminal_cause: Some(CauseKind::Steered),
+            cause: Some(CauseKind::Steered),
             ..
         }
     ));

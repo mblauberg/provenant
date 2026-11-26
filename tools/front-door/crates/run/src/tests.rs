@@ -1334,7 +1334,7 @@ fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
         record.state,
         AttemptState::Terminal {
             outcome: Outcome::ReviewRequired,
-            terminal_cause: Some(CauseKind::IdentityMismatch),
+            cause: Some(CauseKind::IdentityMismatch),
             ..
         }
     ));

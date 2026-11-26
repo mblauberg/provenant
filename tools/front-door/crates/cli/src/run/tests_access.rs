@@ -445,7 +445,7 @@ fn quota_reason_uses_safe_fact_without_provider_message() {
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
         assert_eq!(
-            decoded.terminal_cause,
+            decoded.cause,
             Some(run::CauseKind::FreePoolQuota)
         );
         let reason = decoded.reason.as_deref().unwrap();

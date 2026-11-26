@@ -1371,9 +1371,9 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 finished.state,
                 AttemptState::Terminal {
                     outcome: Outcome::Cancelled,
-                    terminal_cause,
+                    cause,
                     ..
-                } if terminal_cause == steered.then_some(CauseKind::Steered)
+                } if cause == steered.then_some(CauseKind::Steered)
             ));
             let (child, warnings) =
                 provenant_records::warning::capture(|| store.prepare_steer_continuation(id, &call));
@@ -1475,14 +1475,14 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         if blocked {
             // A blocked writer seals one typed stop.
             let AttemptState::Terminal {
-                terminal_cause,
+                cause,
                 stop,
                 ..
             } = &finished.state
             else {
                 panic!("not terminal")
             };
-            assert_eq!(*terminal_cause, Some(CauseKind::Blocked));
+            assert_eq!(*cause, Some(CauseKind::Blocked));
             let stop = stop.as_ref().ok_or("stop")?;
             assert_eq!(stop.cause(), provenant_records::StopCause::Blocked);
             assert_eq!(stop.note(), Some(note));
@@ -1535,7 +1535,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
             Some(provenant_records::run::SettlementReason::DeclaredStop)
         );
         let AttemptState::Terminal {
-            terminal_cause,
+            cause,
             outcome,
             reason,
             ..
@@ -1545,12 +1545,12 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
         };
         assert_eq!(*outcome, Outcome::ReviewRequired);
         assert_eq!(
-            *terminal_cause,
+            *cause,
             (!changed).then_some(CauseKind::StoppedNoWork)
         );
         let row = LaneRow::project(&finished, LaneProjectionFacts::default());
         assert_eq!(
-            row.terminal_cause,
+            row.cause,
             (!changed).then_some(CauseKind::StoppedNoWork)
         );
         assert!(
@@ -2090,7 +2090,7 @@ fn writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff()
     let fake = crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::Failed));
     let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
     let AttemptState::Terminal {
-        terminal_cause,
+        cause,
         outcome,
         reason,
         ..
@@ -2099,7 +2099,7 @@ fn writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff()
         panic!("attempt must be terminal");
     };
     assert_eq!(*outcome, Outcome::ReviewRequired, "reason: {reason:?}");
-    assert_eq!(*terminal_cause, Some(CauseKind::ContextHandoff));
+    assert_eq!(*cause, Some(CauseKind::ContextHandoff));
     // Only a declared stop: the owner maps this to the graph's restart.
     assert_eq!(
         finished.partial_signals,
@@ -2242,10 +2242,10 @@ fn writer_that_lost_its_lane_token_settles_on_its_handoff()
         };
         let mut fake =
             crate::dispatch_tests::Fake::with_observed(Some(route()), Some(provider_outcome));
-        fake.terminal_cause = Some(CauseKind::LaneTokenLost);
+        fake.cause = Some(CauseKind::LaneTokenLost);
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
         let AttemptState::Terminal {
-            terminal_cause,
+            cause,
             stop,
             outcome,
             reason,
@@ -2261,7 +2261,7 @@ fn writer_that_lost_its_lane_token_settles_on_its_handoff()
         };
         assert_eq!(*outcome, expected_outcome, "reason: {reason:?}");
         if host_outcome == Outcome::AuthRequired {
-            assert_eq!(*terminal_cause, Some(CauseKind::LaneTokenLost));
+            assert_eq!(*cause, Some(CauseKind::LaneTokenLost));
         }
         let stop = stop.as_ref().ok_or("stop")?;
         let expected_stop = match host_outcome {
@@ -2953,7 +2953,7 @@ fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std
         return Ok(());
     }
     let AttemptState::Terminal {
-        terminal_cause,
+        cause,
         outcome,
         reason,
         ..
@@ -2962,7 +2962,7 @@ fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std
         panic!("attempt must be terminal");
     };
     assert_eq!(outcome, Outcome::TimedOut, "reason: {reason:?}");
-    assert_eq!(terminal_cause, Some(CauseKind::TokenBudget));
+    assert_eq!(cause, Some(CauseKind::TokenBudget));
     let reason_text = reason.expect("terminal attempt has reason");
     assert!(
         reason_text.contains("token budget reached: provider stopped after passing"),

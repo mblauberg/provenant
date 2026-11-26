@@ -37,7 +37,7 @@ fn terminal_replay_keeps_typed_stream_identity_mismatch() -> Result<(), Box<dyn 
             Registry::default().decode_captures(&route, stdout, &[], &exit, temp.path(), None)?;
         assert_eq!(decoded.outcome, run::Outcome::Failed, "{provider}");
         assert_eq!(
-            decoded.terminal_cause,
+            decoded.cause,
             Some(run::CauseKind::IdentityMismatch),
             "{provider}"
         );
@@ -75,7 +75,7 @@ fn terminal_replay_never_classifies_a_prefix_before_an_unread_final_answer()
             &route, stream.as_bytes(), &[], &clean_exit(), temp.path(), None,
         )?;
         assert_eq!(decoded.outcome, run::Outcome::Unsettled);
-        assert_eq!(decoded.terminal_cause,
+        assert_eq!(decoded.cause,
             Some(run::CauseKind::ProviderCaptureDefect { line }));
         assert!(!decoded.complete);
         assert!(decoded.result.is_empty(), "progress is not a result");
@@ -1147,7 +1147,7 @@ fn malformed_replay_frame_reports_evidence_defect_naming_the_line() {
 
     assert_eq!(decoded.outcome, run::Outcome::Unsettled);
     assert_eq!(
-        decoded.terminal_cause,
+        decoded.cause,
         Some(run::CauseKind::ProviderCaptureDefect { line: 2 })
     );
     let reason = decoded.reason.as_deref().unwrap();
@@ -1402,7 +1402,7 @@ fn claude_lane_auth_failure_reports_a_lost_lane_token_for_its_account()
         None
     );
     assert_eq!(
-        decoded.terminal_cause,
+        decoded.cause,
         Some(run::CauseKind::LaneTokenLost)
     );
     let reason = decoded.reason.unwrap();
@@ -1465,7 +1465,7 @@ fn claude_lane_auth_failure_with_registered_token_settles_without_continuation()
         None,
     )?;
     assert_eq!(decoded.outcome, run::Outcome::AuthRequired);
-    assert_eq!(decoded.terminal_cause, None);
+    assert_eq!(decoded.cause, None);
     let reason = decoded.reason.unwrap();
     assert!(reason.contains("pro [claude]"), "{reason}");
     assert!(

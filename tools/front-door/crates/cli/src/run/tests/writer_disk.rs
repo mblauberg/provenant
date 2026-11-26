@@ -433,7 +433,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     .err()
     .ok_or("writer accepted insufficient disk")?;
     let refusal = disk_policy_refusal(check);
-    assert_eq!(refusal.terminal_cause, CauseKind::DiskFloor);
+    assert_eq!(refusal.cause, CauseKind::DiskFloor);
     assert!(refusal.policy_code.is_none());
     assert_eq!(
         refusal.resource,
@@ -455,7 +455,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
         Some("SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE")
     );
     assert_eq!(
-        unobserved.terminal_cause,
+        unobserved.cause,
         CauseKind::DiskObservationUnavailable
     );
     assert!(unobserved.terminal_note.is_none());

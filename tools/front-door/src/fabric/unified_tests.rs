@@ -2010,7 +2010,7 @@ fn graph_failure_rows_preserve_the_owner_cause_and_action() {
     ] {
         let mut rows = vec![
             json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null, "cause_code":"adapter_unavailable"}),
-            json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "terminal_cause":cause, "reason":reason}),
+            json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "cause":cause, "reason":reason}),
         ];
         project_attempt_failure(&mut rows[1]);
         assert_eq!(rows[1]["cause_code"], code);
@@ -2040,7 +2040,7 @@ fn graph_failure_rows_preserve_the_owner_cause_and_action() {
 fn launch_refusal_propagates_cause_and_retry_to_node() {
     let mut rows = vec![
         json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null}),
-        json!({"kind":"attempt", "id":"g/a#1", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "terminal_cause":"launch_handoff_refused", "reason":"repository lock busy"}),
+        json!({"kind":"attempt", "id":"g/a#1", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "cause":"launch_handoff_refused", "reason":"repository lock busy"}),
     ];
     project_attempt_failure(&mut rows[1]);
     project_node_failures(&mut rows);

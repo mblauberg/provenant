@@ -1284,7 +1284,7 @@ pub(crate) fn enrich_status_rows_within(
 /// Keep graph cause codes scalar even when a closed terminal cause has data.
 /// Decode the declaration before selecting its tag: arbitrary object keys are
 /// not safe diagnostics.
-fn terminal_cause_code(value: &Value) -> Option<String> {
+fn cause_code(value: &Value) -> Option<String> {
     let _: provenant_records::run::CauseKind = serde_json::from_value(value.clone()).ok()?;
     match value {
         Value::String(code) => Some(code.clone()),
@@ -1294,7 +1294,7 @@ fn terminal_cause_code(value: &Value) -> Option<String> {
 }
 
 fn project_attempt_failure(row: &mut Value) {
-    if let Some(code) = terminal_cause_code(&row["terminal_cause"]) {
+    if let Some(code) = cause_code(&row["cause"]) {
         row["cause_code"] = json!(code);
         if code == "launch_handoff_refused" {
             if let Some(id) = row["id"].as_str() {
@@ -1336,7 +1336,7 @@ fn project_node_failures(rows: &mut [Value]) {
                 ),
                 (
                     row["graph_state"].clone(),
-                    terminal_cause_code(&row["terminal_cause"]).map_or(Value::Null, Value::String),
+                    cause_code(&row["cause"]).map_or(Value::Null, Value::String),
                     row["reason"].clone(),
                     row["next"].clone(),
                 ),

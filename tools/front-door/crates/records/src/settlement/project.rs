@@ -18,14 +18,14 @@ use crate::run::{
 pub fn graph_outcome(record: &AttemptRecord) -> Option<AttemptOutcome> {
     let AttemptState::Terminal {
         outcome,
-        terminal_cause,
+        cause,
         ..
     } = &record.state
     else {
         return None;
     };
     let outcome = *outcome;
-    let cause = *terminal_cause;
+    let cause = *cause;
     let launched = record.provider_launched.unwrap_or(true);
 
     // A refusal happened before custody, so it describes route policy, not the

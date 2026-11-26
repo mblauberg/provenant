@@ -370,7 +370,7 @@ impl Store {
                     detail: serde_json::json!({"host":host,"source_project":event.project_id,
                         "sequence":event.sequence,"revision":event.revision,"state":state["state"],
                         "outcome":state["outcome"],"exit_code":state["exit_code"],
-                        "finished_at":state["finished_at"],"terminal_cause":state["terminal_cause"]}),
+                        "finished_at":state["finished_at"],"cause":state["cause"]}),
                     extra: Default::default(),
                 };
                 events::append_observation(tx, &observation, WallTime::from_micros(0)?)?;

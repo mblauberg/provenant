@@ -592,7 +592,7 @@ mod tests {
             }),
             json!({
                 "kind":"attempt","work_key":key,"state":"terminal",
-                "outcome":"rejected","terminal_cause":"launch_handoff_refused",
+                "outcome":"rejected","cause":"launch_handoff_refused",
                 "cause_code":"launch_handoff_refused","result_path":null,
                 "reason":"writer lineage: invalid run record: graph predecessor writer or source"
             }),

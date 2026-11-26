@@ -1149,7 +1149,7 @@ impl PrepareError {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
-                terminal_cause: cause,
+                cause: cause,
                 terminal_note: note,
                 message,
                 host_message: None,
@@ -1243,7 +1243,7 @@ impl PrepareError {
                     boundary_class,
                     policy_code,
                     resource: candidate_resource,
-                    terminal_cause: provenant_records::run::CauseKind::RouteResolutionRefused,
+                    cause: provenant_records::run::CauseKind::RouteResolutionRefused,
                     terminal_note: None,
                     message,
                     host_message,
@@ -1251,7 +1251,7 @@ impl PrepareError {
                     fallback_outcome,
                 });
                 if refusal.auth_required() {
-                    refusal.terminal_cause =
+                    refusal.cause =
                         provenant_records::run::CauseKind::AccountLoginRequired;
                 }
                 refusal
@@ -1359,7 +1359,7 @@ impl PrepareError {
                 if let Some(policy_code) = policy_code {
                     refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::None;
                     refusal.policy_code = Some(policy_code);
-                    refusal.terminal_cause =
+                    refusal.cause =
                         provenant_records::run::CauseKind::AccessPolicyRefused;
                 } else {
                     refusal.boundary_class = match &error {
@@ -1465,10 +1465,10 @@ fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
     ] {
         let refusal = error.into_refusal();
         assert_eq!(
-            refusal.terminal_cause,
+            refusal.cause,
             CauseKind::WriterPinMismatch { pinned, head }
         );
-        let text = refusal.terminal_cause.diagnostic(true);
+        let text = refusal.cause.diagnostic(true);
         assert!(text.contains(&pinned.to_string()), "{text}");
         assert!(text.contains(&head.to_string()), "{text}");
         assert!(!text.contains(CauseKind::LaunchHandoffRefused.detail()));
@@ -1607,7 +1607,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert_eq!(home.boundary_class, BoundaryClass::None);
     assert!(home.policy_code.is_none());
     assert_eq!(
-        home.terminal_cause,
+        home.cause,
         provenant_records::run::CauseKind::LaunchHandoffRefused
     );
     let extensions =
@@ -1986,7 +1986,7 @@ impl PlanCheckError {
         refusal.resource = skipped.guard_resource.clone();
         refusal.skipped_routes.push(skipped);
         if let Self::ReadOnly(ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)) = self {
-            refusal.terminal_cause =
+            refusal.cause =
                 provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe;
             refusal.message = diagnostic
                 .detail
@@ -2835,7 +2835,7 @@ mod stale_readiness_tests {
             None,
         )?;
         assert_eq!(
-            prior.terminal_cause,
+            prior.cause,
             Some(run::CauseKind::LaneTokenLost)
         );
         let stale = provenant_providers::AvailabilityRecord {
@@ -2915,7 +2915,7 @@ mod stale_readiness_tests {
         .into_refusal();
         assert!(refusal.auth_required());
         assert_eq!(
-            refusal.terminal_cause,
+            refusal.cause,
             provenant_records::run::CauseKind::AccountLoginRequired
         );
         assert_eq!(
@@ -7003,7 +7003,7 @@ mod refusal_cause_tests {
         let refusal =
             route_resolution_refusal(crate::route::DispatchError::from(error)).into_refusal();
         assert_eq!(
-            refusal.terminal_cause,
+            refusal.cause,
             provenant_records::run::CauseKind::AccountLoginRequired
         );
         assert_eq!(
@@ -7035,7 +7035,7 @@ mod refusal_cause_tests {
         );
         let refusal = route_resolution_refusal(error).into_refusal();
         assert_eq!(
-            refusal.terminal_cause,
+            refusal.cause,
             provenant_records::run::CauseKind::RouteResolutionRefused
         );
         assert_eq!(
@@ -8033,7 +8033,7 @@ fn binding_refusal_preserves_local_repair_and_closed_route_guard() {
         Some(provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe)
     );
     assert_eq!(
-        refusal.terminal_cause,
+        refusal.cause,
         provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe
     );
 }

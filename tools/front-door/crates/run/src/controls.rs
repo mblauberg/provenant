@@ -4496,7 +4496,7 @@ impl RunStore {
                         },
                         finished_at: now,
                         failure: None,
-                        terminal_cause: if cancelled {
+                        cause: if cancelled {
                             None
                         } else {
                             Some(CauseKind::LaunchHandoffRefused)
@@ -4570,7 +4570,7 @@ impl RunStore {
                 },
                 finished_at: now,
                 failure: None,
-                terminal_cause: if cancelled {
+                cause: if cancelled {
                     None
                 } else {
                     Some(CauseKind::LaunchHandoffRefused)

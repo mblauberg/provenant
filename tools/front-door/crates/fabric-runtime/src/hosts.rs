@@ -2472,7 +2472,7 @@ mod tests {
             trace: Default::default(),
             change: provenant_records::run::AttemptState::Terminal {
                 extra: Default::default(),
-                terminal_cause: None,
+                cause: None,
                 terminal_note: None,
                 stop: Some(stop.clone()),
                 outcome: provenant_records::run::Outcome::Failed,

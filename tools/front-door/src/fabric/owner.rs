@@ -1829,7 +1829,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 && matches!(
                     &record.state,
                     provenant_records::run::AttemptState::Terminal {
-                        terminal_cause: Some(provenant_records::run::CauseKind::SpawnFailure),
+                        cause: Some(provenant_records::run::CauseKind::SpawnFailure),
                         ..
                     }
                 ))
@@ -4146,7 +4146,7 @@ impl BoundGraphOwner<'_> {
                     .map(|(_, receipt)| receipt)
                     .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
-                let preparation_cause = attempt.state.terminal_cause();
+                let preparation_cause = attempt.state.cause();
                 // The sealed stop, else the cause the outcome names.
                 let stop = attempt
                     .state
@@ -4284,7 +4284,7 @@ impl BoundGraphOwner<'_> {
                     },
                     stop,
                     settlement_reason: attempt.settlement_reason,
-                    cause: attempt.state.terminal_cause(),
+                    cause: attempt.state.cause(),
                 })
             }
             _ => Ok(AttemptObservation::Pending {

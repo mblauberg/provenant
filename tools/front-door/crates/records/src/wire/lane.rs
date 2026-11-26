@@ -117,7 +117,7 @@ lane_row! {
         ], &[("head", string()), ("ahead", unsigned()), ("dirty_paths", unsigned())]);
         warnings: Vec<String> => array(string());
         write_grants: Value => nullable(array(grant_schema()));
-        terminal_cause: crate::run::CauseKind => terminal_cause_schema();
+        cause: crate::run::CauseKind => terminal_cause_schema();
         host: String => string();
         title: String => string();
         requested_priority: i64 => integer();
@@ -180,7 +180,7 @@ impl LaneRow {
             AttemptState::Terminal {
                 outcome,
                 reason,
-                terminal_cause,
+                cause,
                 terminal_note,
                 ..
             } => (
@@ -190,7 +190,7 @@ impl LaneRow {
                     .unwrap_or_default(),
                 // A refusal that recorded no cause is reported as unrecorded, never
                 // as an access-policy refusal the host did not observe.
-                terminal_cause
+                cause
                     .or_else(|| {
                         (*outcome == crate::run::Outcome::Rejected)
                             .then_some(crate::run::CauseKind::Unrecorded)
@@ -371,7 +371,7 @@ impl LaneRow {
                 }
                 SettlementReason::DeclaredStop => match &lane.state {
                     AttemptState::Terminal {
-                        terminal_cause: Some(crate::run::CauseKind::StoppedNoWork),
+                        cause: Some(crate::run::CauseKind::StoppedNoWork),
                         ..
                     } => Some(crate::run::CauseKind::StoppedNoWork.detail()),
                     _ => Some("the lane stopped with work remaining; inspect its result"),
@@ -406,7 +406,7 @@ impl LaneRow {
             lane.state,
             AttemptState::Terminal {
                 outcome: crate::run::Outcome::Unsettled,
-                terminal_cause: Some(crate::run::CauseKind::ProviderCaptureDefect { .. }),
+                cause: Some(crate::run::CauseKind::ProviderCaptureDefect { .. }),
                 ..
             }
         ) {
@@ -534,11 +534,11 @@ impl LaneRow {
             } else {
                 lane.settlement_reason
             },
-            terminal_cause: if git_import_failure.is_some() {
+            cause: if git_import_failure.is_some() {
                 Some(crate::run::CauseKind::SettlementFailure)
             } else {
                 match &lane.state {
-                    AttemptState::Terminal { terminal_cause, .. } => *terminal_cause,
+                    AttemptState::Terminal { cause, .. } => *cause,
                     _ => None,
                 }
             },
@@ -799,7 +799,7 @@ mod terminal_cause_tests {
             every_terminal_cause_is_covered(cause);
             let state = AttemptState::Terminal {
                 extra: Default::default(),
-                terminal_cause: Some(cause),
+                cause: Some(cause),
                 terminal_note: Some("fixture scoped note".into()),
                 stop: None,
                 outcome: Outcome::Failed,
@@ -837,7 +837,7 @@ mod terminal_cause_tests {
     fn a_rejection_without_a_recorded_cause_is_unrecorded() {
         let state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: Outcome::Rejected,

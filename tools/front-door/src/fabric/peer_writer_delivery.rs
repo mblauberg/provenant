@@ -398,7 +398,7 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
     ] {
         let state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome,
@@ -411,7 +411,7 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
     }
     let succeeded = AttemptState::Terminal {
         extra: Default::default(),
-        terminal_cause: None,
+        cause: None,
         terminal_note: None,
         stop: None,
         outcome: Outcome::Succeeded,

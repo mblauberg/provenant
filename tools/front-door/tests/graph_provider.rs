@@ -1194,7 +1194,7 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
                     &record.state,
                     provenant_run::AttemptState::Terminal {
                         outcome: provenant_run::Outcome::Uncommitted,
-                        terminal_cause: None,
+                        cause: None,
                         ..
                     }
                 ),
@@ -2207,7 +2207,7 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     if !cfg!(target_os = "macos") {
         assert_eq!(lane["state"], "rejected", "{lane}");
         assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
-        assert_eq!(lane["terminal_cause"], "unsupported_platform", "{lane}");
+        assert_eq!(lane["cause"], "unsupported_platform", "{lane}");
         assert!(lane["started_at"].is_null(), "{lane}");
         assert!(lane["applied_route"].is_null(), "{lane}");
         assert!(account.join("refreshed").exists());
@@ -2441,7 +2441,7 @@ fn writer_fixture_diagnostics(rig: &TestRig) -> String {
                         serde_json::from_slice::<Value>(&bytes).ok().map(|value| {
                             json!({
                                 "state":value["state"], "outcome":value["outcome"],
-                                "reason":value["reason"], "terminal_cause":value["terminal_cause"]
+                                "reason":value["reason"], "cause":value["cause"]
                             })
                             .to_string()
                         })
@@ -3780,7 +3780,7 @@ fn persisted_attempt_with(
         running.resolved_route = None;
         running.state = provenant_run::AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: provenant_run::Outcome::Lost,
@@ -6357,7 +6357,7 @@ fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() ->
             );
         } else {
             assert_eq!(lane["state"], "succeeded", "{lane}");
-            assert!(lane["terminal_cause"].is_null(), "{lane}");
+            assert!(lane["cause"].is_null(), "{lane}");
             let warnings: Vec<provenant_records::run::PartialSignal> =
                 serde_json::from_value(lane["partial_signals"].clone())?;
             assert!(warnings.contains(&provenant_records::run::PartialSignal::IdentityUnobserved));

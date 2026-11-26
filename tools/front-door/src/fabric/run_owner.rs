@@ -97,7 +97,7 @@ mod output_projection_tests {
             "outcome":"permission_denied",
             "exit_code":null,
             "finished_at":WallTime::from_micros(2).unwrap(),
-            "terminal_cause":"project_binding_directory_unsafe",
+            "cause":"project_binding_directory_unsafe",
             "terminal_note":private_repair,
             "reason":format!("{private_path} has unsafe ownership or permissions")
         }));
@@ -119,7 +119,7 @@ mod output_projection_tests {
             "outcome":"permission_denied",
             "exit_code":null,
             "finished_at":WallTime::from_micros(3).unwrap(),
-            "terminal_cause":"access_policy_refused",
+            "cause":"access_policy_refused",
             "terminal_note":user_text.clone(),
             "reason":user_text
         }));
@@ -148,7 +148,7 @@ mod output_projection_tests {
                 revision: sequence,
                 change: AttemptState::Terminal {
                     extra: Default::default(),
-                    terminal_cause: Some(cause),
+                    cause: Some(cause),
                     terminal_note: Some(note),
                     stop: None,
                     outcome: Outcome::PermissionDenied,
@@ -186,7 +186,7 @@ mod output_projection_tests {
         assert!(matches!(
             &remote[0].change,
             AttemptState::Terminal {
-                terminal_cause: Some(CauseKind::ProjectBindingDirectoryUnsafe),
+                cause: Some(CauseKind::ProjectBindingDirectoryUnsafe),
                 ..
             }
         ));
@@ -195,7 +195,7 @@ mod output_projection_tests {
             AttemptState::Terminal {
                 reason: Some(reason),
                 terminal_note: Some(note),
-                terminal_cause: Some(CauseKind::AccessPolicyRefused),
+                cause: Some(CauseKind::AccessPolicyRefused),
                 ..
             } if reason == &user_prompt && note == &user_prompt
         ));
@@ -905,10 +905,10 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
         other => run_kind_facade(other),
     }
 }
-fn terminal_cause(
+fn cause(
     lane: &provenant_run::AttemptRecord,
 ) -> Option<provenant_records::run::CauseKind> {
-    lane.state.terminal_cause()
+    lane.state.cause()
 }
 /// Only positive sealed evidence of a pre-launch refusal can reject a replay.
 pub(crate) fn durable_launch_refusal(
@@ -920,7 +920,7 @@ pub(crate) fn durable_launch_refusal(
             lane.provider_launched == Some(false)
                 && lane.settlement_reason == Some(SettlementReason::PreLaunchRefusal)
                 && matches!(lane.state, AttemptState::Terminal { .. })
-                && (terminal_cause(lane).is_some_and(|cause| {
+                && (cause(lane).is_some_and(|cause| {
                     matches!(
                         cause,
                         CauseKind::DiskFloor
@@ -1028,7 +1028,7 @@ pub(crate) fn launch_refusal(
                     .collect::<Vec<_>>()
                     .join("; ");
                 let reason = if pacing.is_empty() {
-                    terminal_cause(lane)
+                    cause(lane)
                         .map(|cause| cause.detail())
                         .unwrap_or("pacing reserve refused")
                 } else {

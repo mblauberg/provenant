@@ -24,7 +24,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
                     boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                     policy_code: None,
                     resource: None,
-                    terminal_cause: CauseKind::DiskFloor,
+                    cause: CauseKind::DiskFloor,
                     terminal_note: Some("99 bytes available; gc.critical_free is 100 bytes (source: host configuration)".into()),
                     message: "HOST_DISK_ERROR_SENTINEL".into(),
                 host_message: None,
@@ -120,10 +120,10 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         } else {
             CauseKind::RouteResolutionRefused
         };
-        let AttemptState::Terminal { terminal_cause, .. } = &record.state else {
+        let AttemptState::Terminal { cause, .. } = &record.state else {
             return Err("not terminal".into());
         };
-        assert_eq!(*terminal_cause, Some(cause));
+        assert_eq!(*cause, Some(cause));
         let (_, label) = LaneRow::state_and_label(&record.state);
         let label = label.ok_or("missing human label")?;
         assert_eq!(label, cause.reason());
@@ -171,7 +171,7 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
     store.refuse_queued(run.attempt_id, "child proposal is invalid", &call)?;
     let record = store.record(run.attempt_id, &call)?;
     let AttemptState::Terminal {
-        terminal_cause,
+        cause,
         outcome,
         ..
     } = &record.state
@@ -179,7 +179,7 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
         return Err("not terminal".into());
     };
     assert_eq!(*outcome, Outcome::Rejected);
-    assert_eq!(*terminal_cause, Some(CauseKind::Unrecorded));
+    assert_eq!(*cause, Some(CauseKind::Unrecorded));
     let (_, reason) = LaneRow::state_and_reason(&record.state);
     assert_eq!(reason.as_deref(), Some(CauseKind::Unrecorded.detail()));
     Ok(())
@@ -191,7 +191,7 @@ fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
     const REASON: &str = "launch preparation failed: Git setup: no Git remote is declared and none can be inferred; remotes seen: [\"origin\", \"pr\"]; did you mean origin?";
     let state = AttemptState::Terminal {
         extra: Default::default(),
-        terminal_cause: Some(CauseKind::PreparationRefused),
+        cause: Some(CauseKind::PreparationRefused),
         terminal_note: Some(CauseKind::preparation_note(REASON)),
         stop: None,
         outcome: Outcome::Rejected,
@@ -279,7 +279,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
     // The status reason reads this same typed note and cause.
     let state = AttemptState::Terminal {
         extra: Default::default(),
-        terminal_cause: Some(CauseKind::PreparationRefused),
+        cause: Some(CauseKind::PreparationRefused),
         terminal_note: Some(note),
         stop: None,
         outcome: Outcome::Rejected,

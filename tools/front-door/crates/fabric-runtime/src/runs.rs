@@ -431,7 +431,7 @@ mod tests {
                 |records| {
                     records[0].state = AttemptState::Terminal {
                         extra: Default::default(),
-                        terminal_cause: None,
+                        cause: None,
                         terminal_note: None,
                         stop: None,
                         outcome: Outcome::Succeeded,
@@ -458,7 +458,7 @@ mod tests {
     fn input_required_wakes_all_without_waiting_for_a_sibling() {
         let input = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: Outcome::InputRequired,

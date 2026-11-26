@@ -1785,7 +1785,7 @@ pub enum AttemptState {
         #[serde(flatten)]
         extra: crate::ExtraFields,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        terminal_cause: Option<CauseKind>,
+        cause: Option<CauseKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_note: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1806,9 +1806,9 @@ impl AttemptState {
         }
     }
 
-    pub fn terminal_cause(&self) -> Option<CauseKind> {
+    pub fn cause(&self) -> Option<CauseKind> {
         match self {
-            Self::Terminal { terminal_cause, .. } => *terminal_cause,
+            Self::Terminal { cause, .. } => *cause,
             _ => None,
         }
     }
@@ -3259,7 +3259,7 @@ mod tests {
         for (base, field, value, malformed) in [
             (
                 base.clone(),
-                "terminal_cause",
+                "cause",
                 serde_json::json!("token_budget"),
                 serde_json::json!("unknown"),
             ),

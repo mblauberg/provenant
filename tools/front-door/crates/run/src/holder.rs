@@ -192,7 +192,7 @@ fn provider_identity(
                 exit.stop_reason,
                 Some(StopReason::ExplicitCancellation | StopReason::Steered)
             ))
-        && decoded.terminal_cause != Some(CauseKind::IdentityMismatch);
+        && decoded.cause != Some(CauseKind::IdentityMismatch);
     IdentityEvidence {
         conflict: exit.provider_identity_conflict,
         incomplete,
@@ -298,7 +298,7 @@ mod identity_policy_tests {
             exit.provider_identity_evidence_incomplete = true;
             exit.provider_identity_conflict = conflict;
             let decoded = Decoded {
-                terminal_cause: None,
+                cause: None,
                 outcome: Outcome::Succeeded,
                 result: "valid result".into(),
                 complete: true,
@@ -610,7 +610,7 @@ mod identity_policy_tests {
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
         let AttemptState::Terminal {
             outcome,
-            terminal_cause,
+            cause,
             reason,
             ..
         } = &finished.state
@@ -618,7 +618,7 @@ mod identity_policy_tests {
             return Err("first settlement must be terminal".into());
         };
         assert_eq!(*outcome, Outcome::ReviewRequired, "reason: {reason:?}");
-        assert_eq!(*terminal_cause, Some(CauseKind::IdentityMismatch));
+        assert_eq!(*cause, Some(CauseKind::IdentityMismatch));
         let reason = reason.as_deref().ok_or("mismatch reason")?;
         assert!(reason.contains("fixture/model"), "{reason}");
         assert!(reason.contains("fixture/other"), "{reason}");
@@ -1713,7 +1713,7 @@ impl RunStore {
                 .as_ref()
                 .ok_or(RunError::Validation("pending import lacks writer"))?;
             let cancel = driver.cancellation();
-            let budget_stop = record.state.terminal_cause() == Some(CauseKind::TokenBudget);
+            let budget_stop = record.state.cause() == Some(CauseKind::TokenBudget);
             let preservation_stop = crate::settlement::PreservationStop::from_terminal_record(
                 attempt,
                 &record,
@@ -1845,7 +1845,7 @@ impl RunStore {
             &record.state,
             AttemptState::Terminal {
                 outcome: Outcome::ReviewRequired,
-                terminal_cause: Some(CauseKind::TokenBudget),
+                cause: Some(CauseKind::TokenBudget),
                 ..
             }
         );
@@ -1973,13 +1973,13 @@ impl RunStore {
             call.clock,
         )?;
         let record = self.record(id, call)?;
-        let (outcome, terminal_cause, finished_at) = match &record.state {
+        let (outcome, cause, finished_at) = match &record.state {
             AttemptState::Terminal {
                 outcome,
-                terminal_cause,
+                cause,
                 finished_at,
                 ..
-            } => (*outcome, *terminal_cause, *finished_at),
+            } => (*outcome, *cause, *finished_at),
             _ => return Ok(None),
         };
         let intents = self.steer_intent(id, call)?;
@@ -2004,9 +2004,9 @@ impl RunStore {
         // follow-up: creating one after success hides the successful attempt
         // behind a successor that never launches and fails at preparation
         // (#3987). Explicit stops and other terminal failures never continue.
-        let natural_settlement = terminal_cause.is_none()
+        let natural_settlement = cause.is_none()
             && matches!(outcome, Outcome::ReviewRequired | Outcome::Uncommitted);
-        if terminal_cause != Some(CauseKind::Steered) && !natural_settlement {
+        if cause != Some(CauseKind::Steered) && !natural_settlement {
             self.record_steer_not_continued(
                 id,
                 provenant_records::run::SteeringCause::TerminalStop,
@@ -2015,7 +2015,7 @@ impl RunStore {
             return Ok(None);
         }
         let policy = self.resume_policy(id, call)?;
-        self.check_steer_session(&record, terminal_cause, fresh_with_handoff, call, &policy)?;
+        self.check_steer_session(&record, cause, fresh_with_handoff, call, &policy)?;
         let previous_context = record
             .context
             .as_ref()
@@ -2158,7 +2158,7 @@ impl RunStore {
     fn check_steer_session(
         &self,
         record: &AttemptRecord,
-        terminal_cause: Option<CauseKind>,
+        cause: Option<CauseKind>,
         fresh_with_handoff: bool,
         call: &Request<'_>,
         _policy: &provenant_records::policy::Policy,
@@ -2177,7 +2177,7 @@ impl RunStore {
             return Err(RunError::SteerSessionUnavailable);
         }
         let ready = self.steer_session_ready(id, call)?;
-        if terminal_cause == Some(CauseKind::Steered) && ready.is_none() && !fresh_with_handoff
+        if cause == Some(CauseKind::Steered) && ready.is_none() && !fresh_with_handoff
         {
             return Err(RunError::SteerSessionUnavailable);
         }
@@ -2850,7 +2850,7 @@ impl RunStore {
         let mut decoded = match (&record.applied_route, exit.never_spawned) {
             // Cancelled before spawn; keep the guardian's own reason too.
             (_, true) if cancelled => Decoded {
-                terminal_cause: None,
+                cause: None,
                 outcome: Outcome::Cancelled,
                 result: String::new(),
                 complete: true,
@@ -2866,7 +2866,7 @@ impl RunStore {
                 )),
             },
             (_, true) => Decoded {
-                terminal_cause: Some(CauseKind::SpawnFailure),
+                cause: Some(CauseKind::SpawnFailure),
                 outcome: Outcome::Rejected,
                 result: String::new(),
                 complete: true,
@@ -2939,7 +2939,7 @@ impl RunStore {
             && exit.stop_reason.is_none()
             && matches!(exit.termination, Some(Termination::Signal(_)))
         {
-            decoded.terminal_cause = Some(CauseKind::ProcessCrash);
+            decoded.cause = Some(CauseKind::ProcessCrash);
         }
         // The declaration journal is the only handoff channel. Provider prose,
         // fences and turn boundaries are never read here.
@@ -3022,7 +3022,7 @@ impl RunStore {
             // result the host retained, so seal the substitution complete.
             // A non-empty but truncated answer never enters here: its decoded
             // completeness stands, and the later gate rejects it as success.
-            decoded.terminal_cause = None;
+            decoded.cause = None;
             if let Some(handoff) = &handoff {
                 decoded.result = handoff.fenced();
             }
@@ -3113,7 +3113,7 @@ impl RunStore {
             && (decoded.outcome == Outcome::TimedOut
                 || exit.termination != Some(Termination::Exit(0)))
         {
-            decoded.terminal_cause = Some(CauseKind::TokenBudget);
+            decoded.cause = Some(CauseKind::TokenBudget);
             let budget = record.limits.as_ref().and_then(|l| l.token_budget.as_ref());
             let limit = format!(
                 "token budget reached: provider stopped after passing {} tokens (source: {})",
@@ -3139,7 +3139,7 @@ impl RunStore {
             );
             let blocked = stopped.status == provenant_records::handoff::HandoffStatus::Blocked;
             if blocked {
-                decoded.terminal_cause = Some(CauseKind::Blocked);
+                decoded.cause = Some(CauseKind::Blocked);
             }
             decoded.result = stopped.fenced();
             decoded.complete = true;
@@ -3367,7 +3367,7 @@ impl RunStore {
                             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
                         ) {
                             decoded.outcome = Outcome::Failed;
-                            decoded.terminal_cause = Some(CauseKind::SettlementFailure);
+                            decoded.cause = Some(CauseKind::SettlementFailure);
                         }
                         let restored = self.unpublish_worktree(attempt, writer, record.project_id);
                         let restored = if restored.is_empty() {
@@ -3413,7 +3413,7 @@ impl RunStore {
                     };
                     seal_import_refusal(attempt, exit.scope, &writer.worktree, &reason)?;
                     decoded.outcome = Outcome::Failed;
-                    decoded.terminal_cause = Some(CauseKind::SettlementFailure);
+                    decoded.cause = Some(CauseKind::SettlementFailure);
                     decoded.reason = Some(reason);
                 }
                 _ if refused => {}
@@ -3563,7 +3563,7 @@ impl RunStore {
                 }
             }
             if completed_budget_handoff && decoded.outcome == Outcome::Failed {
-                decoded.terminal_cause = Some(CauseKind::SettlementFailure);
+                decoded.cause = Some(CauseKind::SettlementFailure);
             }
         } else if task.writer.is_none() {
             let archive =
@@ -3651,7 +3651,7 @@ impl RunStore {
             );
             decoded.complete = true;
             decoded.outcome = Outcome::ReviewRequired;
-            decoded.terminal_cause = Some(CauseKind::ContextHandoff);
+            decoded.cause = Some(CauseKind::ContextHandoff);
             decoded.reason = Some(CauseKind::ContextHandoff.detail().into());
             stopped_handoff = Some(stopped);
         }
@@ -3660,7 +3660,7 @@ impl RunStore {
         // successor's launch re-probes the account, so a login that really
         // lapsed refuses it there as `account_login_required`.
         if decoded.outcome == Outcome::AuthRequired
-            && decoded.terminal_cause == Some(CauseKind::LaneTokenLost)
+            && decoded.cause == Some(CauseKind::LaneTokenLost)
             && handoff_error.is_none()
             && task.writer.is_some()
             && !cancelled
@@ -3693,7 +3693,7 @@ impl RunStore {
             } else if !decoded.complete {
                 decoded.outcome = Outcome::Failed;
                 if completed_budget_handoff {
-                    decoded.terminal_cause = Some(CauseKind::SettlementFailure);
+                    decoded.cause = Some(CauseKind::SettlementFailure);
                 }
                 decoded.reason = Some("provider result is empty or incomplete".into());
             }
@@ -3763,7 +3763,7 @@ impl RunStore {
             lane,
             host: provenant_records::settlement::HostVerdict {
                 outcome: decoded.outcome,
-                cause: decoded.terminal_cause,
+                cause: decoded.cause,
                 complete: decoded.complete,
                 result_empty,
                 reason: decoded.reason.clone(),
@@ -3795,7 +3795,7 @@ impl RunStore {
                     .as_ref()
                     .filter(|_| {
                         !matches!(
-                            decoded.terminal_cause,
+                            decoded.cause,
                             Some(
                                 CauseKind::IdentityMismatch
                                     | CauseKind::ProviderCaptureDefect { .. }
@@ -5302,16 +5302,16 @@ mod settlement_5a_tests {
         )
         .with_answer(Some(crate::dispatch_tests::DONE_ANSWER.into()), Some(true));
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
-        let AttemptState::Terminal { terminal_cause, .. } = &finished.state else {
+        let AttemptState::Terminal { cause, .. } = &finished.state else {
             return Err("writer must settle".into());
         };
         assert_eq!(
-            *terminal_cause,
+            *cause,
             Some(CauseKind::Blocked),
             "pushed work must stay blocked: {:?}",
             finished.state
         );
-        assert_ne!(*terminal_cause, Some(CauseKind::StoppedNoWork));
+        assert_ne!(*cause, Some(CauseKind::StoppedNoWork));
         assert_eq!(
             finished.progress,
             Some(provenant_records::settlement::Progress::Moved)
@@ -5361,7 +5361,7 @@ mod settlement_5a_tests {
         let again = store.finish(id, &attempt, &observed, &fake, &request)?;
         let AttemptState::Terminal {
             outcome: first_outcome,
-            terminal_cause: first_cause,
+            cause: first_cause,
             reason: first_reason,
             ..
         } = &first.state
@@ -5370,7 +5370,7 @@ mod settlement_5a_tests {
         };
         let AttemptState::Terminal {
             outcome,
-            terminal_cause,
+            cause,
             reason,
             ..
         } = &again.state
@@ -5378,7 +5378,7 @@ mod settlement_5a_tests {
             return Err("re-drive must settle".into());
         };
         assert_eq!(outcome, first_outcome);
-        assert_eq!(terminal_cause, first_cause);
+        assert_eq!(cause, first_cause);
         assert_eq!(reason, first_reason);
         assert_eq!(again.settlement_reason, first.settlement_reason);
         assert_eq!(again.settlement_evidence, Some(digest));

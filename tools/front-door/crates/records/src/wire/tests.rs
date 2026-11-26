@@ -9,7 +9,7 @@ fn row() -> LaneRow {
         git_import_failure: None,
         stop_work: None,
         warnings: None,
-        terminal_cause: None,
+        cause: None,
         project_id: "9".repeat(32),
         graph: "g".into(),
         node: "n".into(),
@@ -189,7 +189,7 @@ fn lane_rows_validate_with_and_without_optional_members() {
         crate::run::CauseKind::EmptyWriterResult,
         crate::run::CauseKind::ProviderCaptureDefect { line: 52 },
     ] {
-        full.terminal_cause = Some(cause);
+        full.cause = Some(cause);
         accepted(&schema, &full);
     }
 }

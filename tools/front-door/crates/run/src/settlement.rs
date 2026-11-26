@@ -3665,7 +3665,7 @@ impl crate::RunStore {
                             .wall_now()
                             .map_err(|_| RunError::Admission(AdmissionError::Clock))?,
                         failure: None,
-                        terminal_cause: None,
+                        cause: None,
                         terminal_note: None,
                     },
                     call,

@@ -276,7 +276,7 @@ fn applied_write_grants(
 }
 /// Provider-decoded facts from a completed capture.
 pub struct Decoded {
-    pub terminal_cause: Option<CauseKind>,
+    pub cause: Option<CauseKind>,
     pub outcome: Outcome,
     pub result: String,
     pub complete: bool,
@@ -299,7 +299,7 @@ pub struct PrepareRefusal {
     /// A configurable resource threshold that refused this launch, if known.
     pub resource: Option<provenant_records::diagnostic::ResourceFact>,
     /// The specific cause. There is no generic refusal.
-    pub terminal_cause: CauseKind,
+    pub cause: CauseKind,
     /// Fixed-form text naming a configured value, never captured output.
     pub terminal_note: Option<String>,
     pub message: String,
@@ -325,7 +325,7 @@ impl PrepareRefusal {
             .map(|guard| guard.to_string())
             .collect();
         if facts.is_empty() {
-            self.terminal_cause.diagnostic(true)
+            self.cause.diagnostic(true)
         } else {
             facts.join("; ")
         }
@@ -336,7 +336,7 @@ impl PrepareRefusal {
             boundary_class: provenant_records::diagnostic::BoundaryClass::None,
             policy_code: None,
             resource: None,
-            terminal_cause: cause,
+            cause: cause,
             terminal_note: None,
             message: message.into(),
             host_message: None,
@@ -527,7 +527,7 @@ fn check_launch_policy(
     };
     // DiskFloor is emitted only by the shared critical-space decision.
     // Advisory pressure has already warned and continued at that core.
-    if refusal.terminal_cause == CauseKind::DiskFloor {
+    if refusal.cause == CauseKind::DiskFloor {
         return Err(refusal);
     }
     let owned = refusal.policy_code.clone();
@@ -549,7 +549,7 @@ fn check_launch_policy(
             }
             provenant_records::diagnostic::BoundaryClass::None
                 if matches!(
-                    refusal.terminal_cause,
+                    refusal.cause,
                     CauseKind::DiskObservationUnavailable
                 ) =>
             {
@@ -896,7 +896,7 @@ pub trait Providers {
     ) -> std::result::Result<Decoded, String> {
         if continuation.expectation.is_some() {
             return Ok(Decoded {
-                terminal_cause: None,
+                cause: None,
                 outcome: Outcome::Unsettled,
                 result: String::new(),
                 complete: false,
@@ -1154,7 +1154,7 @@ impl RunStore {
                             .wall_now()
                             .map_err(|_| RunError::Validation("wall clock"))?,
                         failure: None,
-                        terminal_cause: None,
+                        cause: None,
                         terminal_note: None,
                     },
                     call,
@@ -1830,7 +1830,7 @@ impl RunStore {
                 reason,
                 finished_at,
                 failure: None,
-                terminal_cause: Some(CauseKind::LaunchHandoffRefused),
+                cause: Some(CauseKind::LaunchHandoffRefused),
                 terminal_note: None,
             },
             call,
@@ -1868,7 +1868,7 @@ impl RunStore {
                 reason: "cancelled before launch",
                 finished_at,
                 failure: None,
-                terminal_cause: None,
+                cause: None,
                 terminal_note: None,
             },
             &cleanup_call,
@@ -1957,7 +1957,7 @@ impl RunStore {
                         reason: cause.detail(),
                         finished_at: now()?,
                         failure: None,
-                        terminal_cause: Some(cause),
+                        cause: Some(cause),
                         terminal_note: None,
                     },
                     call,
@@ -2145,7 +2145,7 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: None,
-                            terminal_cause: Some(CauseKind::StoredPromptUnreadable),
+                            cause: Some(CauseKind::StoredPromptUnreadable),
                             terminal_note: None,
                         },
                         call,
@@ -2305,7 +2305,7 @@ impl RunStore {
                     } else {
                         Outcome::Rejected
                     };
-                    let terminal_cause = Some(refusal.terminal_cause);
+                    let cause = Some(refusal.cause);
                     let continuation_reason = resume.as_ref().map(|_| refusal.safe_reason());
                     let terminal_note = match (kind.terminal_note(), refusal.terminal_note) {
                         (Some(guidance), Some(note)) if guidance != note => {
@@ -2363,7 +2363,7 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: refusal.fallback_outcome,
-                            terminal_cause,
+                            cause,
                             terminal_note,
                         },
                         call,
@@ -2455,7 +2455,7 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: None,
-                            terminal_cause: Some(CauseKind::WriteGrantsRefused),
+                            cause: Some(CauseKind::WriteGrantsRefused),
                             terminal_note: kind.terminal_note(),
                         },
                         call,
@@ -2583,7 +2583,7 @@ impl RunStore {
                         // local lease has been withdrawn. Preserve that typed
                         // pre-provider failure for graph fallback; a boundary or
                         // retained import does not establish safe preparation.
-                        let terminal_cause = match &error {
+                        let cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
                             HandOff::Boundary { cause, .. } => {
                                 cause.or(Some(CauseKind::LaunchHandoffRefused))
@@ -2646,7 +2646,7 @@ impl RunStore {
                                 reason: &reason,
                                 finished_at: now()?,
                                 failure: preparation_failure.filter(|_| !cancelled),
-                                terminal_cause,
+                                cause,
                                 terminal_note: preparation_note.or_else(|| kind.terminal_note()),
                             },
                             call,

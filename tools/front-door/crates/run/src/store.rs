@@ -150,7 +150,7 @@ pub struct TerminalPublication<'a> {
     pub session: Option<String>,
 }
 pub(crate) struct Withdrawal<'a> {
-    pub terminal_cause: Option<CauseKind>,
+    pub cause: Option<CauseKind>,
     pub terminal_note: Option<String>,
     pub expected: AttemptState,
     pub outcome: Outcome,
@@ -715,7 +715,7 @@ impl RunStore {
             if pending.schema_version == 2 {
                 let AttemptState::Terminal {
                     outcome,
-                    terminal_cause,
+                    cause,
                     ..
                 } = pending.state
                 else {
@@ -759,7 +759,7 @@ impl RunStore {
                             stored.cancel_delivered_before_exit,
                         ),
                         outcome,
-                        terminal_cause,
+                        cause,
                     )
                 {
                     return Err(RunError::Conflict);
@@ -1168,7 +1168,7 @@ impl RunStore {
                 reason,
                 finished_at,
                 failure: None,
-                terminal_cause: None,
+                cause: None,
                 terminal_note: None,
             },
             call,
@@ -1207,12 +1207,12 @@ impl RunStore {
             reason,
             finished_at,
             failure,
-            terminal_cause,
+            cause,
             terminal_note,
         } = withdrawal;
         // A refusal whose producer named no cause is recorded as unrecorded,
         // never as a cause the host did not observe.
-        let terminal_cause = terminal_cause
+        let cause = cause
             .or_else(|| (outcome == Outcome::Rejected).then_some(CauseKind::Unrecorded));
         if failure.is_some()
             && !matches!(
@@ -1258,7 +1258,7 @@ impl RunStore {
         let attempt_dir = self.attempt_dir(id, true)?;
         // An interrupted withdrawal resumes its own sealed facts, so a retry
         // never renders a second finished_at or reason.
-        let (outcome, finished_at, reason, preparation_failure, terminal_cause, terminal_note) =
+        let (outcome, finished_at, reason, preparation_failure, cause, terminal_note) =
             match read_sealed(
                 &attempt_dir,
                 AttemptFile::TerminalPending.name(),
@@ -1276,7 +1276,7 @@ impl RunStore {
                             exit_code: None,
                             finished_at,
                             reason,
-                            terminal_cause,
+                            cause,
                             terminal_note,
                             ..
                         } if saved.attempt_id == id
@@ -1291,7 +1291,7 @@ impl RunStore {
                                 finished_at,
                                 reason,
                                 saved.preparation_failure,
-                                terminal_cause,
+                                cause,
                                 terminal_note,
                             )
                         }
@@ -1303,14 +1303,14 @@ impl RunStore {
                     finished_at,
                     Some(reason.chars().take(256).collect()),
                     failure,
-                    terminal_cause,
+                    cause,
                     terminal_note,
                 ),
             };
         old.preparation_failure = preparation_failure;
         let safe_state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause,
+            cause,
             terminal_note: terminal_note.clone(),
             stop: None,
             outcome,
@@ -1331,7 +1331,7 @@ impl RunStore {
             lane: LaneRole::Reader,
             host: HostVerdict {
                 outcome,
-                cause: terminal_cause,
+                cause: cause,
                 complete: true,
                 result_empty: false,
                 reason,
@@ -1691,7 +1691,7 @@ impl RunStore {
             && import_cancelled(&self.attempt_dir(id, false)?, Self::scope(&old))?;
         next.state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: publication.fact.cause,
+            cause: publication.fact.cause,
             terminal_note: publication
                 .fact
                 .terminal_note
@@ -2045,7 +2045,7 @@ impl RunStore {
         next.settlement_reason = Some(SettlementReason::Lost);
         next.state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: Outcome::Lost,

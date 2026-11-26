@@ -1039,10 +1039,10 @@ mod graph_writer_admission_tests {
             provenant_records::run::CauseKind::RetainedWriterImport,
         ] {
             let mut refused = lanes[0].clone();
-            if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } =
+            if let provenant_records::run::AttemptState::Terminal { cause, .. } =
                 &mut refused.state
             {
-                *terminal_cause = Some(cause);
+                *cause = Some(cause);
             }
             assert!(durable_launch_refusal(&[refused.clone()]).is_some());
             assert!(durable_launch_refusal(&[refused, lanes[0].clone()]).is_none());
@@ -1078,10 +1078,10 @@ mod graph_writer_admission_tests {
         // child_reason is a Preparation refusal even though its cause names
         // access policy. Persist that exact producer shape and replay it.
         let mut child_preparation = lanes[0].clone();
-        if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } =
+        if let provenant_records::run::AttemptState::Terminal { cause, .. } =
             &mut child_preparation.state
         {
-            *terminal_cause = Some(provenant_records::run::CauseKind::AccessPolicyRefused);
+            *cause = Some(provenant_records::run::CauseKind::AccessPolicyRefused);
         }
         assert!(durable_launch_refusal(&[child_preparation.clone()]).is_none());
         let mut launched_failure = lanes[0].clone();
@@ -1097,8 +1097,8 @@ mod graph_writer_admission_tests {
         let attempt = lanes[0].attempt_id;
         let sealed = |cause: provenant_records::run::CauseKind| -> Result<provenant_run::AttemptRecord, Box<dyn std::error::Error>> {
             let mut lane = lanes[0].clone();
-            if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } = &mut lane.state {
-                *terminal_cause = Some(cause);
+            if let provenant_records::run::AttemptState::Terminal { cause, .. } = &mut lane.state {
+                *cause = Some(cause);
             }
             Ok(lane)
         };
