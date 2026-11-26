@@ -31,6 +31,42 @@ fn lane_reader_process() -> Result {
         provenant_cli::parse(arguments.into_iter().map(Into::into))
     });
     let actual = crate::dispatch(parsed, &crate::System, warnings);
+    if actual != expected {
+        use provenant_supervisor::census::{
+            ProcessObservation, ProcessObserver, SystemProcessObserver,
+        };
+        let observer = SystemProcessObserver;
+        let mut pid = i64::from(std::process::id());
+        eprintln!("relay ancestry diagnostic: client pid {pid}");
+        if let Ok(attempt) = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
+            && let Ok(attempt) = attempt.parse()
+        {
+            let path = provenant_providers::LaneRuntime::fabric_socket(attempt);
+            match provenant_os::sys::connect_unix_within(
+                &path,
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+                &CancelToken::new(),
+            ) {
+                Ok(stream) => eprintln!(
+                    "relay ancestry diagnostic: socket peer {:?}",
+                    provenant_os::pid::unix_peer_pid(&stream)
+                ),
+                Err(error) => eprintln!("relay ancestry diagnostic: socket connect {error}"),
+            }
+        }
+        for _ in 0..32 {
+            let observation = observer.observe(pid);
+            eprintln!("relay ancestry diagnostic: pid {pid}: {observation:?}");
+            match observation {
+                ProcessObservation::Present(fact)
+                    if fact.parent_pid > 0 && fact.parent_pid != pid =>
+                {
+                    pid = fact.parent_pid;
+                }
+                _ => break,
+            }
+        }
+    }
     assert_eq!(actual, expected);
     Ok(())
 }
@@ -709,7 +745,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         Err(error) => return Err(error.into()),
     };
     let child_state = rig.state.join("children").join(caller.to_string());
-    std::fs::create_dir_all(&child_state)?;
+    provenant_os::fixture::private_state_dir(&child_state)?;
     rig.env.extend([
         (
             provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
