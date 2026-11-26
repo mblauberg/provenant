@@ -13,7 +13,7 @@ use provenant_fabric_runtime::{
     hosts::{PeerAction, PeerResult, SmokeFixtureOp, SmokeFixtureReceipt},
 };
 use provenant_records::{
-    warning::{SMOKE_BINDING_RETAINED, SMOKE_FIXTURE_UNVERIFIED},
+    warning::{SMOKE_BINDING_RETAINED, SMOKE_PEER_FIXTURE_UNSUPPORTED},
     warning::{Warning, warn},
 };
 use serde_json::Value;
@@ -265,10 +265,10 @@ fn peer_too_old(error: &str) -> bool {
 }
 
 /// A unique graph name for this lifecycle invocation.
-fn verify_graph_name() -> String {
+fn smoke_graph_name() -> String {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     format!(
-        "smoke-verify-{}-{}",
+        "smoke-{}-{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     )
@@ -321,7 +321,7 @@ fn verify_status(status: &str, nonce: &str, write_enabled: bool) -> Result<(), S
         ));
     }
     let reviewer = if write_enabled {
-        "review"
+        "review-write"
     } else {
         "review-fixture"
     };
@@ -375,7 +375,7 @@ pub(crate) fn report_smoke_cleanup<T>(
 /// requires the nonce in both read and review results; an old peer can only
 /// produce an unverified result, never a pass.
 pub(crate) fn run_lifecycle(
-    runner: &crate::install::UpgradeRunner,
+    runner: &crate::install::ChildRunner,
     program: &Path,
     state: &Path,
     home: &Path,
@@ -410,7 +410,7 @@ pub(crate) fn run_lifecycle(
             }
         }
     }
-    let graph = verify_graph_name();
+    let graph = smoke_graph_name();
     let fixture = fixture_root(home).join(&nonce);
     let program = program.as_os_str().to_owned();
     let mut run = vec![
@@ -455,10 +455,7 @@ pub(crate) fn run_lifecycle(
             format!("fixture_base={}", commits.base).into(),
         ]);
     }
-    let write_enabled = !args
-        .set
-        .iter()
-        .any(|setting| setting == "smoke-write=false");
+    let write_enabled = !args.set.iter().any(|setting| setting == "write=false");
     let outcome = match runner.execute(&run, None, 1_048_576, 3600) {
         Ok(launched) => {
             let wait = runner.execute(
@@ -556,7 +553,7 @@ pub(crate) fn run_lifecycle(
     if unverified {
         warn(
             Warning::new(
-                SMOKE_FIXTURE_UNVERIFIED,
+                SMOKE_PEER_FIXTURE_UNSUPPORTED,
                 "the peer could not verify the smoke fixture",
             )
             .once_per_change(),
@@ -604,13 +601,16 @@ mod tests {
     fn status_verification_requires_the_nonce_in_read_and_review() {
         let nonce = "0123456789ab";
         let good = format!(
-            r#"{{"schema_version":1,"command":"status","data":{{"rows":[{{"kind":"node","node_id":"read","state":"succeeded","result_summary":"nonce: {nonce}"}},{{"kind":"node","node_id":"review","state":"succeeded","result_summary":"nonce: {nonce}"}},{{"kind":"node","node_id":"write","state":"succeeded"}}]}}}}"#
+            r#"{{"schema_version":1,"command":"status","data":{{"rows":[{{"kind":"node","node_id":"read","state":"succeeded","result_summary":"nonce: {nonce}"}},{{"kind":"node","node_id":"review-write","state":"succeeded","result_summary":"nonce: {nonce}"}},{{"kind":"node","node_id":"write","state":"succeeded"}}]}}}}"#
         );
         verify_status(&good, nonce, true).expect("the nonce is present in every required row");
         let bad = good.replace(&format!("nonce: {nonce}"), "no nonce here");
         let error = verify_status(&bad, nonce, true).expect_err("a false pass is refused");
         assert!(error.contains("read"), "{error}");
-        let no_review = good.replace("\"node_id\":\"review\"", "\"node_id\":\"review-fixture\"");
+        let no_review = good.replace(
+            "\"node_id\":\"review-write\"",
+            "\"node_id\":\"review-fixture\"",
+        );
         assert!(
             verify_status(&no_review, nonce, true)
                 .expect_err("the wrong reviewer is refused")

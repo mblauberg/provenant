@@ -335,7 +335,7 @@ fn verify_execs_the_installed_binary() -> Result<(), Box<dyn std::error::Error>>
         ),
     )?;
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
-    let runner = UpgradeRunner {
+    let runner = ChildRunner {
         executor: provenant_os::exec::SystemExecutor::new(1)?,
         environment: std::env::vars_os().collect(),
         cwd: home,
@@ -416,7 +416,7 @@ fn verify_smoke_runs_outside_a_checkout_without_requiring_one()
         ),
     )?;
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
-    let runner = UpgradeRunner {
+    let runner = ChildRunner {
         executor: provenant_os::exec::SystemExecutor::new(1)?,
         environment: std::env::vars_os().collect(),
         cwd: home,
@@ -509,7 +509,7 @@ case "$args" in
     printf '%s\n' '{{"schema_version":1,"command":"wait","data":{{"status":"complete"}}}}'
     ;;
   *' status '*)
-    printf '{{"schema_version":1,"command":"status","data":{{"rows":[{{"kind":"node","node_id":"read","state":"succeeded","result_summary":"%s"}},{{"kind":"node","node_id":"review","state":"succeeded","result_summary":"%s"}},{{"kind":"node","node_id":"write","state":"succeeded"}}]}}}}\n' "$summary" "$summary"
+    printf '{{"schema_version":1,"command":"status","data":{{"rows":[{{"kind":"node","node_id":"read","state":"succeeded","result_summary":"%s"}},{{"kind":"node","node_id":"review-write","state":"succeeded","result_summary":"%s"}},{{"kind":"node","node_id":"write","state":"succeeded"}}]}}}}\n' "$summary" "$summary"
     ;;
   *) exit 77;;
 esac
@@ -526,8 +526,8 @@ esac
 fn smoke_runner(
     root: &std::path::Path,
     cwd: &std::path::Path,
-) -> Result<UpgradeRunner, Box<dyn std::error::Error>> {
-    Ok(UpgradeRunner {
+) -> Result<ChildRunner, Box<dyn std::error::Error>> {
+    Ok(ChildRunner {
         executor: provenant_os::exec::SystemExecutor::new(1)?,
         environment: std::env::vars_os().collect(),
         cwd: cwd.to_path_buf(),
@@ -878,7 +878,7 @@ fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::E
     let program = temp.path().join("provenant");
     std::fs::write(
         &program,
-        "#!/bin/sh\ncase \" $* \" in *\" run smoke \"*) printf '%s\\n' '{\"node\":\"smoke/write\",\"state\":\"failed\"}' '{\"node\":\"smoke/retry-route\",\"state\":\"failed\"}' '{\"node\":\"smoke/steer-route\",\"state\":\"failed\"}'; exit 1;; esac\nexit 0\n",
+        "#!/bin/sh\ncase \" $* \" in *\" run smoke \"*) printf '%s\\n' '{\"node\":\"smoke/write\",\"state\":\"failed\"}' '{\"node\":\"smoke/retry-probe\",\"state\":\"failed\"}' '{\"node\":\"smoke/steer-probe\",\"state\":\"failed\"}'; exit 1;; esac\nexit 0\n",
     )?;
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
     let runner = smoke_runner(temp.path(), &home)?;
@@ -891,8 +891,8 @@ fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::E
     )
     .expect_err("a failed smoke node must fail verification");
     assert!(error.contains("\"node\":\"smoke/write\""), "{error}");
-    assert!(error.contains("\"node\":\"smoke/retry-route\""), "{error}");
-    assert!(error.contains("\"node\":\"smoke/steer-route\""), "{error}");
+    assert!(error.contains("\"node\":\"smoke/retry-probe\""), "{error}");
+    assert!(error.contains("\"node\":\"smoke/steer-probe\""), "{error}");
     Ok(())
 }
 
@@ -911,7 +911,7 @@ fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::e
     std::fs::write(
         &launcher,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"write\"}},{{\"id\":\"review\"}},{{\"id\":\"review-fixture\"}},{{\"id\":\"retry-route\"}},{{\"id\":\"steer-route\"}}]}}';; *) exit 77;; esac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"write\"}},{{\"id\":\"review-write\"}},{{\"id\":\"review-fixture\"}},{{\"id\":\"retry-probe\"}},{{\"id\":\"steer-probe\"}}]}}';; *) exit 77;; esac\n",
             calls.display()
         ),
     )?;
@@ -928,10 +928,10 @@ fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::e
     for node in [
         "read",
         "write",
-        "review",
+        "review-write",
         "review-fixture",
-        "retry-route",
-        "steer-route",
+        "retry-probe",
+        "steer-probe",
     ] {
         assert!(
             output.contains(&format!("\"id\":\"{node}\"")),

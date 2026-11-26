@@ -2578,7 +2578,7 @@ case "$args" in
     printf '%s\n' '{"schema_version":1,"command":"wait","data":{"status":"complete"}}'
     ;;
   *' status '*)
-    printf '{"schema_version":1,"command":"status","data":{"rows":[{"kind":"node","node_id":"read","state":"succeeded","result_summary":"%s"},{"kind":"node","node_id":"review","state":"succeeded","result_summary":"%s"},{"kind":"node","node_id":"write","state":"succeeded"}]}}\n' "$summary" "$summary"
+    printf '{"schema_version":1,"command":"status","data":{"rows":[{"kind":"node","node_id":"read","state":"succeeded","result_summary":"%s"},{"kind":"node","node_id":"review-write","state":"succeeded","result_summary":"%s"},{"kind":"node","node_id":"write","state":"succeeded"}]}}\n' "$summary" "$summary"
     ;;
   *) exit 77;;
 esac
@@ -2671,7 +2671,7 @@ esac
         let rows = status["data"]["rows"]
             .as_array()
             .ok_or_else(|| format!("{name}: status rows: {status}"))?;
-        for node in ["read", "review"] {
+        for node in ["read", "review-write"] {
             let row = rows
                 .iter()
                 .find(|row| row["node_id"].as_str() == Some(node))

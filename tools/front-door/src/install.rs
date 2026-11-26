@@ -2098,7 +2098,7 @@ pub(super) fn sync_after_registration(
     }
 }
 
-pub(crate) struct UpgradeRunner {
+pub(crate) struct ChildRunner {
     pub(crate) executor: provenant_os::exec::SystemExecutor,
     pub(crate) environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     pub(crate) cwd: PathBuf,
@@ -2139,8 +2139,8 @@ fn verify_release(
     Ok(())
 }
 
-fn runner_for_verify(targets: &provenant_config::Targets) -> Result<UpgradeRunner, String> {
-    Ok(UpgradeRunner {
+fn runner_for_verify(targets: &provenant_config::Targets) -> Result<ChildRunner, String> {
+    Ok(ChildRunner {
         executor: provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?,
         environment: std::env::vars_os().collect(),
         cwd: targets.home.clone(),
@@ -2174,7 +2174,7 @@ fn verify_smoke(
 /// wait, status and cleanup. The runner is injected so a test can name the
 /// program the verify invocation actually used.
 fn verify_installed_smoke(
-    runner: &UpgradeRunner,
+    runner: &ChildRunner,
     environment: &Resolved,
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
@@ -2268,7 +2268,7 @@ fn run_verify_only(
 /// launch. It never waits or reports a verdict, and it forgets the fixture
 /// binding when it is done.
 fn preview_smoke(
-    runner: &UpgradeRunner,
+    runner: &ChildRunner,
     program: &Path,
     state_dir: &Path,
     home: &Path,
@@ -2322,7 +2322,7 @@ fn preview_smoke(
     )
 }
 
-impl UpgradeRunner {
+impl ChildRunner {
     pub(crate) fn execute(
         &self,
         argv: &[std::ffi::OsString],
@@ -2579,7 +2579,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         let mut environment: Vec<_> = std::env::vars_os().collect();
         // The Rust report owns the app line; keep install.sh from printing it twice.
         environment.push(("PROVENANT_UPGRADE_QUIET_APP".into(), "true".into()));
-        let runner = UpgradeRunner {
+        let runner = ChildRunner {
             executor: provenant_os::exec::SystemExecutor::new(1)
                 .map_err(|error| error.to_string())?,
             environment,

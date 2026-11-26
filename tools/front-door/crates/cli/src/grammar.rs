@@ -706,8 +706,8 @@ pub struct GraphRunArgs {
     /// Access for a plain task; writer targets imply worktree-write
     #[arg(long, value_parser = ["read-only", "worktree-write"])]
     pub mode: Option<String>,
-    /// Tree a read-only task reads: the fetched upstream head, or the local checkout
-    #[arg(long, value_parser = ["upstream", "local"])]
+    /// Read source: auto, live, default_branch, or a Git ref
+    #[arg(long, value_parser = parse_read_source)]
     pub source: Option<String>,
     /// Existing writer worktree
     #[arg(long, conflicts_with = "branch")]
@@ -1532,4 +1532,9 @@ fn edit_graph_name(value: &str) -> Result<String, String> {
         );
     }
     Ok(target.name)
+}
+
+/// Validate launch read sources using the same vocabulary as configuration.
+fn parse_read_source(value: &str) -> Result<String, String> {
+    crate::run::ReadSource::parse(value).map(|_| value.to_owned())
 }

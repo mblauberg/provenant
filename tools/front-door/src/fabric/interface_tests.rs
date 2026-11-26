@@ -1835,7 +1835,7 @@ fn smoke_root_commit_skips_review_without_blocking_other_nodes() -> Result {
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let cancel = CancelToken::new();
     let preview = factory.graph_document(
-        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
+        json!({"op":"run", "template":"smoke", "set":{"write":false}, "explain":true}),
         budget,
         &cancel,
     )?;
@@ -1844,7 +1844,7 @@ fn smoke_root_commit_skips_review_without_blocking_other_nodes() -> Result {
         skipped.iter().any(|row| {
             row["node"]
                 .as_str()
-                .is_some_and(|id| id.contains("review--"))
+                .is_some_and(|id| id.contains("review-fixture--"))
                 && row["reason"]
                     .as_str()
                     .is_some_and(|reason| reason.contains("smoke-review"))
@@ -1855,8 +1855,8 @@ fn smoke_root_commit_skips_review_without_blocking_other_nodes() -> Result {
         !skipped.iter().any(|row| {
             row["node"].as_str().is_some_and(|id| {
                 id.ends_with("task--read")
-                    || id.ends_with("task--retry-route")
-                    || id.ends_with("task--steer-route")
+                    || id.ends_with("task--retry-probe")
+                    || id.ends_with("task--steer-probe")
             })
         }),
         "other read nodes must remain eligible: {preview}"
@@ -1877,7 +1877,7 @@ fn smoke_root_commit_skips_review_without_blocking_other_nodes() -> Result {
     crate::worktree_tests::git(&rig, &["add", "subject.txt"])?;
     crate::worktree_tests::git(&rig, &["commit", "-qm", "subject"])?;
     let with_parent = factory.graph_document(
-        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
+        json!({"op":"run", "template":"smoke", "set":{"write":false}, "explain":true}),
         budget,
         &cancel,
     )?;
@@ -1889,7 +1889,7 @@ fn smoke_root_commit_skips_review_without_blocking_other_nodes() -> Result {
             .any(|row| {
                 row["node"]
                     .as_str()
-                    .is_some_and(|id| id.contains("review--"))
+                    .is_some_and(|id| id.contains("review-fixture--"))
             }),
         "a parent must enable review: {with_parent}"
     );
@@ -1966,7 +1966,7 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
             .is_some_and(|id| id.ends_with("task--write"))
             && row["reason"]
                 .as_str()
-                .is_some_and(|reason| reason.contains("smoke-write"))
+                .is_some_and(|reason| reason.contains("write"))
     }));
     // A remote launch has no caller worktree, so the facade provisions the
     // writer from a sourced scratch branch and the peer exercises it.
@@ -2030,7 +2030,7 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
     let preview_remote_disabled = factory
         .graph_document(
             json!({"op":"run", "template":"smoke", "host":"peer-a",
-                "set":{"smoke-write":false}, "explain":true}),
+                "set":{"write":false}, "explain":true}),
             budget,
             &cancel,
         )
@@ -2042,7 +2042,7 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
             .is_some_and(|warnings| warnings.iter().any(|warning| {
                 warning
                     .as_str()
-                    .is_some_and(|text| text.contains("smoke-write is not enabled"))
+                    .is_some_and(|text| text.contains("write is not enabled"))
             })),
         "the skipped remote writer must name its reason: {preview_remote_disabled}"
     );
@@ -2837,7 +2837,7 @@ fn plain_read_only_task_pins_fetched_upstream_and_local_source_is_honoured() -> 
     );
 
     // An explicit local source keeps the stale checkout as the subject.
-    let local = submit(Some("local"))?;
+    let local = submit(Some("live"))?;
     let node = &local["document"]["nodes"][0];
     assert!(node["source"].is_null(), "{node}");
     let local_warnings = local["warnings"].as_array().ok_or("local warnings")?;
@@ -2992,13 +2992,13 @@ fn writer_roles_follow_the_lowered_graph_and_its_conditions() {
     };
     // A bundled writer template lowers to a worktree writer.
     assert!(lowered_writes_worktree(&lower(json!({"use":"implement"}))));
-    // The bundled smoke template carries a writer under `smoke-write`,
+    // The bundled smoke template carries a writer under `write`,
     // which defaults to false: the same launch stays read-only until the
     // condition holds.
     assert!(!lowered_writes_worktree(&lower(json!({"use":"smoke"}))));
     assert!(lowered_writes_worktree(&lower(json!({
         "use":"smoke",
-        "with":{"smoke-write":true, "worktree":"/tmp/writer"}
+        "with":{"write":true, "worktree":"/tmp/writer"}
     }))));
 }
 
@@ -3064,9 +3064,23 @@ fn read_source_choices_pin_the_commit_and_name_their_layer() -> Result {
         pinned["warnings"]
     );
 
-    let checkout = submit(Some("checkout"), None)?;
+    let checkout = submit(Some("live"), None)?;
     assert!(checkout["document"]["nodes"][0]["source"].is_null());
     assert!(checkout["read_source"]["commit"].is_null());
+
+    let repository_config = rig.project.join(".provenant");
+    std::fs::create_dir_all(&repository_config)?;
+    let repository_file = repository_config.join("config.toml");
+    std::fs::write(&repository_file, "[knobs]\nlanes.read_source='checkout'\n")?;
+    let (result, warnings) = provenant_records::warning::capture(|| submit(None, None));
+    let result = result?;
+    assert_eq!(result["read_source"]["value"], json!("auto"));
+    assert!(
+        warnings.iter().any(|warning| warning.code.as_ref()
+            == provenant_records::warning::READ_SOURCE_VALUE_RENAMED.0)
+    );
+    assert!(std::fs::read_to_string(&repository_file)?.contains("checkout"));
+    std::fs::remove_file(repository_file)?;
 
     let explicit = submit(Some("refs/remotes/origin/master"), None)?;
     assert_eq!(
@@ -3079,13 +3093,13 @@ fn read_source_choices_pin_the_commit_and_name_their_layer() -> Result {
         json!("refs/remotes/origin/master")
     );
 
-    let flag = submit(None, Some("upstream"))?;
+    let flag = submit(None, Some("default_branch"))?;
     assert_eq!(
         flag["document"]["nodes"][0]["source"]["commit"],
         json!(default)
     );
     assert_eq!(flag["read_source"]["source"], json!("launch"));
-    let flag = submit(None, Some("local"))?;
+    let flag = submit(None, Some("live"))?;
     assert!(flag["document"]["nodes"][0]["source"].is_null());
     Ok(())
 }
@@ -3141,7 +3155,7 @@ fn default_branch_pins_the_forge_default_not_the_feature_upstream() -> Result {
 
     for chosen in [
         submit(Some("default_branch"), None)?,
-        submit(None, Some("upstream"))?,
+        submit(None, Some("default_branch"))?,
     ] {
         let commit = chosen["document"]["nodes"][0]["source"]["commit"].clone();
         assert_eq!(

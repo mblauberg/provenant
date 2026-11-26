@@ -966,26 +966,26 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
         [
             "read",
             "write",
-            "review",
+            "review-write",
             "review-fixture",
-            "retry-route",
-            "steer-route"
+            "retry-probe",
+            "steer-probe"
         ]
     );
     assert_eq!(by_id("read").access, AccessMode::ReadOnly);
     assert_eq!(by_id("write").access, AccessMode::WorktreeWrite);
-    assert_eq!(by_id("review").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("review-write").access, AccessMode::ReadOnly);
     assert_eq!(by_id("review-fixture").access, AccessMode::ReadOnly);
-    assert_eq!(by_id("retry-route").access, AccessMode::ReadOnly);
-    assert_eq!(by_id("steer-route").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("retry-probe").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("steer-probe").access, AccessMode::ReadOnly);
 
     let node = Compiler::new(&library)
         .compile(&json!({
             "id":"smoke", "use":"smoke",
-            "with":{"worktree":"/fixture/writer", "smoke-write":true}
+            "with":{"worktree":"/fixture/writer", "write":true}
         }))
         .unwrap();
-    assert_eq!(node.composite.unwrap().exports[0].node, "review");
+    assert_eq!(node.composite.unwrap().exports[0].node, "review-write");
 }
 
 #[test]
@@ -1073,7 +1073,7 @@ fn smoke_review_covers_only_the_writer_commit() -> Result<(), String> {
             "with":{
                 "diff_base":diff_base,
                 "fixture_base":fixture_base,
-                "smoke-write":true
+                "write":true
             }
         }))
         .map_err(|error| error.to_string())?;
@@ -1081,7 +1081,7 @@ fn smoke_review_covers_only_the_writer_commit() -> Result<(), String> {
     let review = composite
         .nodes
         .iter()
-        .find(|node| node.id == "review")
+        .find(|node| node.id == "review-write")
         .unwrap();
     assert_eq!(
         review.source,
@@ -1147,7 +1147,7 @@ fn smoke_template_reads_no_staged_fixture() -> Result<(), String> {
                 "with":{
                     "diff_base":diff_base,
                     "fixture_base":fixture_base,
-                    "smoke-write":smoke_write
+                    "write":smoke_write
                 }
             }))
             .map_err(|error| error.to_string())?;
@@ -1157,20 +1157,23 @@ fn smoke_template_reads_no_staged_fixture() -> Result<(), String> {
         assert!(
             all.iter()
                 .all(|node| node.fixture.is_none() && node.fixture_bytes.is_none()),
-            "smoke staged a fixture with smoke-write={smoke_write}"
+            "smoke staged a fixture with write={smoke_write}"
         );
         let by_id = |id: &str| all.iter().find(|node| node.id == id).unwrap();
         let read = by_id("read");
         assert_eq!(read.access, AccessMode::ReadOnly);
         assert!(read.fixture.is_none(), "the read node stages a fixture");
 
-        for (id, expected) in [("review", diff_base), ("review-fixture", fixture_base)] {
+        for (id, expected) in [
+            ("review-write", diff_base),
+            ("review-fixture", fixture_base),
+        ] {
             let mut found = Vec::new();
             bases(by_id(id), &mut found);
             assert!(!found.is_empty(), "{id} carries no review_base");
             assert!(
                 found.iter().all(|base| base == expected),
-                "{id} carried a wrong review_base with smoke-write={smoke_write}: {found:?}"
+                "{id} carried a wrong review_base with write={smoke_write}: {found:?}"
             );
         }
     }

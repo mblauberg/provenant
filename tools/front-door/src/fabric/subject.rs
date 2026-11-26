@@ -5,7 +5,7 @@
 use super::interface::read_source_choice;
 use super::*;
 use crate::pr::observer::Observer;
-use provenant_cli::run::{ReadSourceChoice, read_only_source_ref};
+use provenant_cli::run::{ReadSourceChoice, resolve_read_source};
 use provenant_fabric_runtime::graph::{
     AccessMode, GraphDocument, GraphNode, NodeKind, SourceBinding,
 };
@@ -25,7 +25,7 @@ pub(crate) enum ReadPlan {
 }
 
 /// The one subject, base and read policy resolved for a graph at admission.
-pub(crate) struct GraphSubject {
+pub(crate) struct SubjectAdmission {
     pub subject: Option<PinnedSubject>,
     pub writer_base: Option<provenant_core::GitOid>,
     pub read: ReadPlan,
@@ -42,7 +42,7 @@ fn observed_pull(
     project: &std::path::Path,
     number: u64,
     request: &provenant_config::ports::Request,
-) -> Result<PullSubject, FacadeError> {
+) -> Result<PullSnapshot, FacadeError> {
     let repository = match crate::pr::observer::repository_for_project(state, project, request) {
         Ok(repository) => repository,
         Err(error) => return subject_read_result(state, project, number, error),
@@ -67,7 +67,7 @@ fn subject_read_result(
     project: &std::path::Path,
     number: u64,
     error: crate::pr::observer::ObserveError,
-) -> Result<PullSubject, FacadeError> {
+) -> Result<PullSnapshot, FacadeError> {
     match error {
         crate::pr::observer::ObserveError::RateLimited { reset } => {
             match graphql_pull_subject(state, project, number) {
@@ -86,7 +86,7 @@ fn graphql_pull_subject(
     state: &std::path::Path,
     project: &std::path::Path,
     number: u64,
-) -> Option<PullSubject> {
+) -> Option<PullSnapshot> {
     subject_from_batch(crate::pr::status::batch::single_with_cache_filter(
         state,
         project,
@@ -96,14 +96,14 @@ fn graphql_pull_subject(
 }
 
 /// Map a complete batched row to a subject, independently of check rollup completeness.
-fn subject_from_batch(batch: crate::pr::status::batch::Batch) -> Option<PullSubject> {
+fn subject_from_batch(batch: crate::pr::status::batch::Batch) -> Option<PullSnapshot> {
     let crate::pr::status::batch::Batch::Entries(entries) = batch else {
         return None;
     };
     subject_from_entry(entries.first()?)
 }
 
-fn subject_from_entry(entry: &crate::pr::status::batch::Entry) -> Option<PullSubject> {
+fn subject_from_entry(entry: &crate::pr::status::batch::Entry) -> Option<PullSnapshot> {
     if entry.state == "UNAVAILABLE"
         || entry.base_ref_oid.is_empty()
         || entry.base_ref_name.is_empty()
@@ -114,7 +114,7 @@ fn subject_from_entry(entry: &crate::pr::status::batch::Entry) -> Option<PullSub
     {
         return None;
     }
-    Some(PullSubject {
+    Some(PullSnapshot {
         base_ref_oid: provenant_core::GitOid::parse(&entry.base_ref_oid).ok()?,
         base_ref_name: entry.base_ref_name.clone(),
         head_ref_oid: provenant_core::GitOid::parse(&entry.head).ok()?,
@@ -135,7 +135,7 @@ fn forge_quota_error(reset: jiff::Timestamp) -> FacadeError {
 }
 
 /// The REST pull resource is the same shape the landing adapter observes.
-fn pull_subject(value: &Value) -> Result<PullSubject, FacadeError> {
+fn pull_subject(value: &Value) -> Result<PullSnapshot, FacadeError> {
     let field = |pointer: &str| -> Result<&str, FacadeError> {
         value
             .pointer(pointer)
@@ -146,7 +146,7 @@ fn pull_subject(value: &Value) -> Result<PullSubject, FacadeError> {
         provenant_core::GitOid::parse(field(pointer)?)
             .map_err(|_| graph_subject_error(format!("invalid {pointer}")))
     };
-    Ok(PullSubject {
+    Ok(PullSnapshot {
         base_ref_oid: oid("/base/sha")?,
         base_ref_name: field("/base/ref")?.to_owned(),
         head_ref_oid: oid("/head/sha")?,
@@ -157,7 +157,7 @@ fn pull_subject(value: &Value) -> Result<PullSubject, FacadeError> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct PullSubject {
+pub(super) struct PullSnapshot {
     base_ref_oid: provenant_core::GitOid,
     base_ref_name: String,
     head_ref_oid: provenant_core::GitOid,
@@ -168,21 +168,13 @@ pub(super) struct PullSubject {
     url: String,
 }
 
-pub(super) struct ReviewSubject {
-    pub base: String,
-    pub head: String,
-    pub warning: Option<String>,
-    /// The route that resolved the head, so one subject records its own origin.
-    pub origin: SubjectOrigin,
-}
-
 impl Factory {
     pub(super) fn review_subject(
         &self,
         input: &Value,
         review: bool,
         cancel: &CancelToken,
-    ) -> Result<Option<ReviewSubject>, FacadeError> {
+    ) -> Result<Option<(PinnedSubject, Option<String>)>, FacadeError> {
         self.review_subject_with(input, review, cancel, |number| {
             let request =
                 provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
@@ -200,8 +192,8 @@ impl Factory {
         input: &Value,
         review: bool,
         cancel: &CancelToken,
-        pull: impl Fn(u64) -> Result<PullSubject, FacadeError>,
-    ) -> Result<Option<ReviewSubject>, FacadeError> {
+        pull: impl Fn(u64) -> Result<PullSnapshot, FacadeError>,
+    ) -> Result<Option<(PinnedSubject, Option<String>)>, FacadeError> {
         let retry = crate::pr::observer::retry(&self.context.roots);
         self.review_subject_with_wait(
             input,
@@ -221,10 +213,10 @@ impl Factory {
         input: &Value,
         review: bool,
         cancel: &CancelToken,
-        pull: impl Fn(u64) -> Result<PullSubject, FacadeError>,
+        pull: impl Fn(u64) -> Result<PullSnapshot, FacadeError>,
         reread_attempts: usize,
         reread_delay: Duration,
-    ) -> Result<Option<ReviewSubject>, FacadeError> {
+    ) -> Result<Option<(PinnedSubject, Option<String>)>, FacadeError> {
         let pr = input.get("pr").filter(|value| !value.is_null());
         let mut expected_head = input
             .get("head")
@@ -359,7 +351,7 @@ impl Factory {
                 .flatten();
             let origin = if expected_head.is_some() {
                 // An explicit --head is the authoritative pin, even with --pr.
-                SubjectOrigin::Commit
+                SubjectOrigin::Explicit
             } else {
                 SubjectOrigin::ForgePr {
                     repository: repository.to_owned(),
@@ -418,35 +410,62 @@ impl Factory {
             (Some(ignored), Some(default)) => Some(format!("{ignored} {default}")),
             (one, other) => one.or(other),
         };
-        Ok(Some(ReviewSubject {
-            base,
-            head,
+        let base = provenant_core::GitOid::parse(&base)
+            .map_err(|_| graph_subject_error("invalid review base"))?;
+        let head = provenant_core::GitOid::parse(&head)
+            .map_err(|_| graph_subject_error("invalid review head"))?;
+        let pinned_at = self
+            .clock
+            .wall_now()
+            .map_err(|error| FacadeError::StateCorruptDetail {
+                detail: format!("subject admission clock: {error}"),
+            })?;
+        let base = if base == head && warning.is_some() {
+            None
+        } else {
+            Some(base)
+        };
+        Ok(Some((
+            PinnedSubject {
+                extra: Default::default(),
+                base,
+                head,
+                origin,
+                pinned_at,
+                policy: SubjectPolicy::Pinned,
+            },
             warning,
-            origin,
-        }))
+        )))
     }
 }
 
 impl Factory {
     /// Resolve the operation's one subject. Admission calls this once; nothing
     /// inside the admitted graph re-reads a ref or re-resolves a source.
-    pub(crate) fn resolve_graph_subject(
+    pub(crate) fn admit_subject(
         &self,
         input: &Value,
         document: &GraphDocument,
         remote: bool,
         cancel: &CancelToken,
-    ) -> Result<GraphSubject, FacadeError> {
-        let observed_at =
-            self.clock
-                .wall_now()
-                .map_err(|error| FacadeError::StateCorruptDetail {
-                    detail: format!("subject observation clock: {error}"),
-                })?;
+    ) -> Result<SubjectAdmission, FacadeError> {
+        let pinned_at = self
+            .clock
+            .wall_now()
+            .map_err(|error| FacadeError::StateCorruptDetail {
+                detail: format!("subject observation clock: {error}"),
+            })?;
         let read_config = provenant_cli::config_reads::read_for(&self.context.roots, "run").ok();
         let read_source = read_config
             .as_ref()
-            .map(|config| read_source_choice(input, config))
+            .map(|config| {
+                read_source_choice(
+                    input,
+                    config,
+                    self.context.roots.state.as_path(),
+                    &self.context.project_root,
+                )
+            })
             .unwrap_or_default();
         let git = provenant_os::git::git_executable();
         let mut warnings = Vec::new();
@@ -457,38 +476,14 @@ impl Factory {
             );
         }
         if document.review.is_some() {
-            let review = self
+            let (subject, review_warning) = self
                 .review_subject(input, true, cancel)?
                 .ok_or_else(|| graph_subject_error("no review subject"))?;
-            // An advisory empty range leaves no review base: that is the
-            // subject state the old review_subject_missing flag described.
-            let base = if review.base == review.head && review.warning.is_some() {
-                None
-            } else {
-                Some(
-                    review
-                        .base
-                        .parse::<provenant_core::GitOid>()
-                        .map_err(|_| graph_subject_error("invalid review base"))?,
-                )
-            };
-            let head = review
-                .head
-                .parse::<provenant_core::GitOid>()
-                .map_err(|_| graph_subject_error("invalid review head"))?;
-            let review_warning = review.warning.clone();
-            if let Some(warning) = review.warning {
-                warnings.push(warning);
+            if let Some(warning) = &review_warning {
+                warnings.push(warning.clone());
             }
-            return Ok(GraphSubject {
-                subject: Some(PinnedSubject {
-                    extra: Default::default(),
-                    base,
-                    head,
-                    origin: review.origin,
-                    observed_at,
-                    policy: SubjectPolicy::Pinned,
-                }),
+            return Ok(SubjectAdmission {
+                subject: Some(subject),
                 writer_base: None,
                 read: ReadPlan::Pinned,
                 warnings,
@@ -516,7 +511,7 @@ impl Factory {
         // is a commit; the checkout choice is HEAD with a follow-latest policy,
         // live locally and pinned to that same HEAD on a peer.
         let selected =
-            read_only_source_ref(self.context.roots.state.as_path(), &self.cwd, &read_source);
+            resolve_read_source(self.context.roots.state.as_path(), &self.cwd, &read_source);
         let (subject, read) = if let Some(selected) = selected {
             (
                 PinnedSubject {
@@ -524,7 +519,7 @@ impl Factory {
                     base: None,
                     head: selected.commit,
                     origin: ref_origin(&selected.reference),
-                    observed_at,
+                    pinned_at,
                     policy: SubjectPolicy::Pinned,
                 },
                 ReadPlan::Pinned,
@@ -554,7 +549,7 @@ impl Factory {
                     base: None,
                     head,
                     origin: SubjectOrigin::LocalRef { name },
-                    observed_at,
+                    pinned_at,
                     policy: SubjectPolicy::FollowLatest,
                 },
                 if remote {
@@ -564,7 +559,7 @@ impl Factory {
                 },
             )
         };
-        Ok(GraphSubject {
+        Ok(SubjectAdmission {
             subject: Some(subject),
             writer_base: writer_base_oid,
             read,
@@ -745,8 +740,8 @@ mod tests {
             })
         }
 
-        fn subject(fx: &Fixture, head: &str, name: Option<&str>) -> PullSubject {
-            PullSubject {
+        fn subject(fx: &Fixture, head: &str, name: Option<&str>) -> PullSnapshot {
+            PullSnapshot {
                 base_ref_oid: provenant_core::GitOid::parse(&fx.base).unwrap(),
                 base_ref_name: "main".into(),
                 head_ref_oid: provenant_core::GitOid::parse(head).unwrap(),
@@ -758,8 +753,8 @@ mod tests {
         fn run_with(
             factory: &Factory,
             input: &serde_json::Value,
-            pull: impl Fn(u64) -> std::result::Result<PullSubject, FacadeError>,
-        ) -> std::result::Result<Option<ReviewSubject>, FacadeError> {
+            pull: impl Fn(u64) -> std::result::Result<PullSnapshot, FacadeError>,
+        ) -> std::result::Result<Option<(PinnedSubject, Option<String>)>, FacadeError> {
             factory.review_subject_with_wait(
                 input,
                 true,
@@ -777,9 +772,9 @@ mod tests {
             let input = serde_json::json!({"pr":7,"head":fx.forge_new});
             let result = run_with(&factory, &input, |_| Ok(subject(&fx, &fx.forge_new, None)))?
                 .ok_or("no subject")?;
-            assert_eq!(result.head, fx.forge_new);
-            assert_eq!(result.base, fx.base);
-            assert!(result.warning.is_none());
+            assert_eq!(result.0.head.to_string(), fx.forge_new);
+            assert_eq!(result.0.base.unwrap().to_string(), fx.base);
+            assert!(result.1.is_none());
         }
 
         // Issue #3878: --pr with review_base keeps the PR binding and narrows
@@ -792,9 +787,17 @@ mod tests {
             });
             let result = run_with(&factory, &input, |_| Ok(subject(&fx, &fx.forge_new, None)))?
                 .ok_or("no subject")?;
-            assert_eq!(result.head, fx.forge_new, "PR head must stay bound");
-            assert_eq!(result.base, fx.forge_old, "range must start at review_base");
-            assert!(result.warning.is_none());
+            assert_eq!(
+                result.0.head.to_string(),
+                fx.forge_new,
+                "PR head must stay bound"
+            );
+            assert_eq!(
+                result.0.base.unwrap().to_string(),
+                fx.forge_old,
+                "range must start at review_base"
+            );
+            assert!(result.1.is_none());
         }
 
         // A forge that catches up is re-read and accepted within the bounded wait.
@@ -814,7 +817,7 @@ mod tests {
             })?
             .ok_or("no subject")?;
             assert_eq!(calls.get(), 3);
-            assert_eq!(result.head, fx.forge_new);
+            assert_eq!(result.0.head.to_string(), fx.forge_new);
         }
 
         // A persistent mismatch refuses and names both SHAs.
@@ -866,8 +869,8 @@ mod tests {
                 Ok(subject(&fx, &fx.forge_old, Some("feature")))
             })?
             .ok_or("no subject")?;
-            assert_eq!(result.head, fx.forge_old);
-            let warning = result.warning.as_deref().ok_or("expected warning")?;
+            assert_eq!(result.0.head.to_string(), fx.forge_old);
+            let warning = result.1.as_deref().ok_or("expected warning")?;
             assert!(warning.contains(&fx.forge_old), "{warning}");
             assert!(warning.contains(&fx.forge_new), "{warning}");
         }
@@ -889,11 +892,7 @@ mod tests {
                 Ok(subject(&fx, &fx.forge_old, Some(name)))
             })?
             .ok_or("no subject")?;
-            assert!(
-                result.warning.is_none(),
-                "unexpected warning: {:?}",
-                result.warning
-            );
+            assert!(result.1.is_none(), "unexpected warning: {:?}", result.1);
         }
 
         // --pr without a review template warns and proceeds with the host's
@@ -912,7 +911,7 @@ mod tests {
                     Duration::ZERO,
                 )?
                 .ok_or("no default review subject")?;
-            let warning = result.warning.as_deref().ok_or("expected warning")?;
+            let warning = result.1.as_deref().ok_or("expected warning")?;
             assert!(warning.contains("--pr was ignored"), "{warning}");
             assert!(warning.contains("review range"), "{warning}");
         }
@@ -1196,11 +1195,11 @@ fn resolve_ref(
     read_source: &ReadSourceChoice,
     origin: &str,
 ) -> Option<String> {
-    read_only_source_ref(
+    resolve_read_source(
         state,
         cwd,
         &ReadSourceChoice {
-            value: base.to_owned(),
+            source: provenant_cli::run::ReadSource::Ref(base.to_owned()),
             fetch_first: read_source.fetch_first,
             layer: Layer::Launch,
             origin: Some(origin.to_owned()),

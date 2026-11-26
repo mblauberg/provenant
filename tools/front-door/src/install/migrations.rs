@@ -29,6 +29,7 @@ const STEPS: &[&dyn Migration] = &[
     &PortSourceSpellings,
     &PortConfigSourceSpellings,
     &RetireWarningMarkers,
+    &ReadSourceLiveSpelling,
     &UsageLedgerV4,
 ];
 
@@ -490,6 +491,82 @@ impl Migration for PortConfigSourceSpellings {
     }
 }
 
+/// Migrate the persisted read-source spelling without touching repository files.
+struct ReadSourceLiveSpelling;
+
+impl Migration for ReadSourceLiveSpelling {
+    fn id(&self) -> &'static str {
+        "read-source-live"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        let mut paths = vec![state_root.join("config.toml")];
+        if let Ok(projects) = std::fs::read_dir(state_root.join("projects")) {
+            for project in projects {
+                paths.push(project?.path().join("config.toml"));
+            }
+        }
+        for path in paths.into_iter().filter(|path| path.exists()) {
+            let result = (|| -> Result<bool, MigrationError> {
+                let text = std::fs::read_to_string(&path)?;
+                let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|error| {
+                    MigrationError::new(format!("{}: invalid TOML: {error}", path.display()))
+                })?;
+                let Some(knobs) = doc
+                    .get_mut("knobs")
+                    .and_then(toml_edit::Item::as_table_like_mut)
+                else {
+                    return Ok(false);
+                };
+                let item = if knobs.contains_key("lanes.read_source") {
+                    knobs.get_mut("lanes.read_source")
+                } else {
+                    knobs
+                        .get_mut("lanes")
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                        .and_then(|lanes| lanes.get_mut("read_source"))
+                };
+                let Some(item) = item else { return Ok(false) };
+                if item.as_str() != Some("checkout") {
+                    return Ok(false);
+                }
+                *item = toml_edit::value("live");
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| MigrationError::new("config has no parent"))?;
+                let directory = Directory::open_anchor(parent)
+                    .map_err(|error| MigrationError::new(error.to_string()))?;
+                let name = path
+                    .file_name()
+                    .ok_or_else(|| MigrationError::new("config has no filename"))?;
+                directory
+                    .atomic_write(
+                        name,
+                        ".migration.",
+                        doc.to_string().as_bytes(),
+                        PublishMode::Replace,
+                    )
+                    .map_err(|error| MigrationError::new(error.to_string()))?;
+                Ok(true)
+            })();
+            match result {
+                Ok(true) => report.changed.push(path.display().to_string()),
+                Ok(false) => {}
+                Err(error) => report.warnings.push(
+                    Warning::new(
+                        MIGRATION_STEP_FAILED,
+                        format!("read source could not be migrated: {error}"),
+                    )
+                    .subject(path.display().to_string()),
+                ),
+            }
+        }
+        report.changed.sort();
+        Ok(report)
+    }
+}
+
 /// Warning dedup moved from per-finding marker files to `warnings.sqlite3`.
 /// Remove only the two retired marker prefixes; leave every other state file.
 struct RetireWarningMarkers;
@@ -699,6 +776,38 @@ mod tests {
     use serde_json::{Value, json};
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Host and host-project configurations migrate once; unrelated settings survive.
+    #[test]
+    fn read_source_live_migrates_host_and_projects_idempotently() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("projects/one");
+        std::fs::create_dir_all(&project).unwrap();
+        let host = root.path().join("config.toml");
+        let scoped = project.join("config.toml");
+        std::fs::write(&host, "schema_version=1\n[knobs]\nlanes.read_source='checkout'\nlanes.read_source_fetch_first=true\n").unwrap();
+        std::fs::write(
+            &scoped,
+            "schema_version=1\n[knobs]\n'lanes.read_source'='checkout'\nother='kept'\n",
+        )
+        .unwrap();
+        let step = super::ReadSourceLiveSpelling;
+        let report = step.apply(root.path()).unwrap();
+        assert_eq!(report.changed.len(), 2);
+        for path in [&host, &scoped] {
+            let text = std::fs::read_to_string(path).unwrap();
+            assert_eq!(
+                provenant_config::read_source_value(&text).as_deref(),
+                Some("live")
+            );
+            assert!(text.contains(if path == &host {
+                "read_source_fetch_first=true"
+            } else {
+                "other='kept'"
+            }));
+        }
+        assert!(step.apply(root.path()).unwrap().changed.is_empty());
+    }
 
     /// Spec: docs/specs/run-launch.md#lane-scratch-stays-outside-the-attempt-record
     #[test]

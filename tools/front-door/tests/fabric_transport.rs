@@ -1660,9 +1660,9 @@ printf '%s\n' '{"event":"result","result":{"conversation_id":"fixture","status":
         if writer {
             args.extend(["--branch", "smoke/peer-test", "--base", "HEAD"]);
         } else {
-            args.extend(["--set", "smoke-write=false"]);
+            args.extend(["--set", "write=false"]);
         }
-        args.extend(["--set", "smoke-retry=false", "--set", "smoke-steer=false"]);
+        args.extend(["--set", "retry_probe=false", "--set", "steer_probe=false"]);
         let (status, launched) = launch_named_and_wait(&rig, &args, name, "30s")?;
         assert_eq!(status, 0, "{launched}");
         let settled = tick_until(
@@ -1700,7 +1700,7 @@ printf '%s\n' '{"event":"result","result":{"conversation_id":"fixture","status":
         for review in nodes.iter().filter(|node| {
             node["id"]
                 .as_str()
-                .is_some_and(|id| id.contains("review--"))
+                .is_some_and(|id| id.contains("review-write--") || id.contains("review-fixture--"))
                 && node["attempts"]
                     .as_array()
                     .is_some_and(|attempts| !attempts.is_empty())

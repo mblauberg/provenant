@@ -1,6 +1,6 @@
 //! Document-based graph service shared by the CLI and the lane relay.
 use super::subject::{
-    DEFAULT_WRITER_BASE, GraphSubject, ReadPlan, bind_default_read_only_source,
+    DEFAULT_WRITER_BASE, ReadPlan, SubjectAdmission, bind_default_read_only_source,
     bind_writer_base_source,
 };
 use super::*;
@@ -756,39 +756,58 @@ const LAUNCH_CONTROLS: [&str; 5] = ["access", "worktree", "branch", "base", "wri
 pub(super) fn read_source_choice(
     input: &Value,
     config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
+    state: &Path,
+    project: &Path,
 ) -> provenant_cli::run::ReadSourceChoice {
-    use provenant_cli::run::ReadSourceChoice;
+    use provenant_cli::run::{ReadSource, ReadSourceChoice};
     use provenant_records::Layer;
 
     let mut choice = ReadSourceChoice::automatic();
     if let Some(knob) = config.knobs.get(ReadSourceChoice::KNOB) {
         let value = knob.value.as_str().unwrap_or_default();
-        // `auto` is the registry name for the compiled default, so an explicit
-        // setting of it still resolves the advisory pin. config schema reports
-        // the same value as this resolver uses.
-        choice.value = if knob.source.layer == Layer::Default || value == "auto" {
-            String::new()
-        } else {
-            value.to_owned()
-        };
+        choice.source = ReadSource::parse(value).unwrap_or(ReadSource::Auto);
         choice.layer = knob.source.layer;
         choice.origin = Some(format!("config.toml#{}", ReadSourceChoice::KNOB));
+    }
+    let mut layers = Vec::new();
+    if let Some(project_dir) = provenant_config::host_project_dir(state, project) {
+        layers.push((Layer::Host, project_dir.join("config.toml")));
+    }
+    layers.push((Layer::Project, project.join(".provenant/config.toml")));
+    for (layer, path) in layers {
+        let Some(value) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| provenant_config::read_source_value(&text))
+        else {
+            continue;
+        };
+        choice.layer = layer;
+        choice.origin = Some(path.display().to_string());
+        choice.source = match ReadSource::parse(&value) {
+            Ok(source) => source,
+            Err(_) => {
+                if value == "checkout" {
+                    provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                        provenant_records::warning::READ_SOURCE_VALUE_RENAMED,
+                        format!(
+                            "lanes.read_source=checkout is now live (source: {}); using auto",
+                            path.display()
+                        ),
+                    ));
+                }
+                ReadSource::Auto
+            }
+        };
     }
     if let Some(flag) = config.knobs.get("lanes.read_source_fetch_first") {
         choice.fetch_first = flag.value.as_bool().unwrap_or(false);
     }
-    match input.get("source").and_then(Value::as_str) {
-        Some("local") => {
-            choice.value = "checkout".into();
-            choice.layer = Layer::Launch;
-            choice.origin = Some("--source".into());
-        }
-        Some("upstream") => {
-            choice.value = "default_branch".into();
-            choice.layer = Layer::Launch;
-            choice.origin = Some("--source".into());
-        }
-        _ => {}
+    if let Some(source) = input.get("source").and_then(Value::as_str)
+        && let Ok(source) = ReadSource::parse(source)
+    {
+        choice.source = source;
+        choice.layer = Layer::Launch;
+        choice.origin = Some("--source".into());
     }
     choice
 }
@@ -797,11 +816,11 @@ pub(super) fn read_source_choice(
 /// (its status) and the launch result. The source names the layer that chose
 /// the ref; `commit` is null when the choice keeps the local checkout.
 fn read_source_report(
-    selected: Option<&provenant_cli::run::ReadOnlySourceRef>,
+    selected: Option<&provenant_cli::run::ReadSourcePin>,
     choice: &provenant_cli::run::ReadSourceChoice,
 ) -> Value {
     json!({
-        "value": choice.value,
+        "value": choice.source.to_string(),
         "fetch_first": choice.fetch_first,
         "source": choice.layer.as_str(),
         "origin": choice.origin,
@@ -1669,7 +1688,7 @@ impl Factory {
             .map_err(|_| invalid())?
             .accepts_review_range();
         let review_subject = self.review_subject(input, review, &CancelToken::new())?;
-        let idempotency_key = if let Some(subject) = &review_subject
+        let idempotency_key = if let Some((subject, _)) = &review_subject
             && name.is_some()
             && input
                 .get("idempotency_key")
@@ -1678,7 +1697,7 @@ impl Factory {
         {
             let mut pinned = input.clone();
             pinned["subject"] = json!({"base":subject.base,"head":subject.head});
-            submission_digest(&pinned, Some(&subject.head), None)?
+            submission_digest(&pinned, Some(&subject.head.to_string()), None)?
         } else {
             idempotency_key
         };
@@ -1729,9 +1748,14 @@ impl Factory {
             &self.context.port_table,
         )?;
         node["id"] = json!(key);
-        let range = review_subject
+        let range = review_subject.as_ref().and_then(|(subject, _)| {
+            subject
+                .base
+                .map(|base| (base.to_string(), subject.head.to_string()))
+        });
+        let range = range
             .as_ref()
-            .map(|subject| (subject.base.as_str(), subject.head.as_str()));
+            .map(|(base, head)| (base.as_str(), head.as_str()));
         let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref(), range)?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
@@ -1750,12 +1774,16 @@ impl Factory {
         }
         let mut typed = serde_json::from_value(compiled).map_err(|_| invalid())?;
         override_launch(&mut typed, input)?;
-        if let Some(subject) = &review_subject {
-            if subject.base != subject.head {
-                bind_submission_subject(&mut typed, Some(subject.base.as_str()), &subject.head);
-                bind_review_base(&mut typed, &subject.base);
+        if let Some((subject, warning)) = &review_subject {
+            if let Some(base) = subject.base {
+                bind_submission_subject(
+                    &mut typed,
+                    Some(&base.to_string()),
+                    &subject.head.to_string(),
+                );
+                bind_review_base(&mut typed, &base.to_string());
             }
-            if let Some(warning) = &subject.warning {
+            if let Some(warning) = warning {
                 warn_operator(warning);
                 bind_review_warning(&mut typed, warning);
             }
@@ -2178,13 +2206,13 @@ impl Factory {
             .get("host")
             .and_then(Value::as_str)
             .is_some_and(|host| !host.is_empty() && !matches!(host, "local" | "localhost"));
-        let GraphSubject {
+        let SubjectAdmission {
             subject,
             writer_base,
             read,
             warnings: subject_warnings,
             review_warning,
-        } = self.resolve_graph_subject(input, &subject_document, remote, cancel)?;
+        } = self.admit_subject(input, &subject_document, remote, cancel)?;
         input_warnings.extend(subject_warnings);
         let review_pin = subject
             .as_ref()
@@ -2214,7 +2242,14 @@ impl Factory {
         let read_config = provenant_cli::config_reads::read_for(&self.context.roots, "run").ok();
         let read_source = read_config
             .as_ref()
-            .map(|config| read_source_choice(input, config))
+            .map(|config| {
+                read_source_choice(
+                    input,
+                    config,
+                    self.context.roots.state.as_path(),
+                    &self.context.project_root,
+                )
+            })
             .unwrap_or_default();
         if read_config.is_none() {
             warn_operator(
@@ -2243,7 +2278,7 @@ impl Factory {
         // subject. Keep a reported read source only for the explain/result
         // shape; the subject is authoritative for every binding below.
         let default_source = if !review_launch && raw.is_none() && writer_base.is_none() {
-            provenant_cli::run::read_only_source_ref(
+            provenant_cli::run::resolve_read_source(
                 self.context.roots.state.as_path(),
                 &self.cwd,
                 &read_source,
@@ -2869,7 +2904,7 @@ impl Factory {
             if is_remote {
                 parameters["worktree"] = json!("");
             }
-            let requested = parameters.get("smoke-write").is_some();
+            let requested = parameters.get("write").is_some();
             // The lifecycle supplies the writer branch and both review bases;
             // a caller checkout never provisions or pins this graph.
             let peer_owned_writer = is_remote
@@ -2882,12 +2917,12 @@ impl Factory {
                     .get("worktree")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                parameters["smoke-write"] =
+                parameters["write"] =
                     json!(peer_owned_writer || (!is_remote && !worktree.is_empty()));
             }
-            if parameters["smoke-write"] != json!(true) {
+            if parameters["write"] != json!(true) {
                 let reason = if requested {
-                    "smoke-write is not enabled"
+                    "write is not enabled"
                 } else if is_remote {
                     "remote placement needs --branch B to provision a peer-owned worktree; caller paths are not accepted"
                 } else {

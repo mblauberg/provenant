@@ -375,15 +375,12 @@ proceeds, and records `effective=false` and the reason in the sandbox receipt.
 
 ## Inputs and resources
 
-The tree a read-only lane reads is the sourced `lanes.read_source` setting, resolved by one
-resolver, `read_only_source_ref`. `auto` (the registry default, also the empty value) pins only a
-checkout behind its fetched upstream, as last fetched; a level or ahead checkout keeps its local
-tree. `checkout` keeps the local checkout; `default_branch` pins the fetched default branch
-(remote HEAD, then the forge API), never this checkout's configured tracking upstream; any other
-value is an explicit Git ref; `lanes.read_source_fetch_first` fetches from the resolved remote
-before the ref is read. `--source local` maps onto `checkout` and `--source upstream` onto
-`default_branch` at the launch layer, so the flag wins over the host or project knob. The registry
-default and the resolver agree: `config schema` reports `auto` when no knob is set.
+The tree a read-only lane reads is selected by `lanes.read_source`, resolved by
+`resolve_read_source`. `auto` pins the fetched upstream when the checkout is behind,
+and otherwise pins checkout HEAD. `live` reads the live tree locally; on a peer it
+pins HEAD and warns `READ_SOURCE_PINNED_FOR_PEER`. `default_branch` pins the fetched
+default branch; any other value is a Git ref. `--source` accepts the same values
+and overrides configuration. `lanes.read_source_fetch_first` fetches before resolution.
 `bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit. A writer
 launch instead resolves one base by role before sealing its identity: explicit `--base`; else the
 `--branch` default; else the HEAD of a named `--worktree` or a composite bound with

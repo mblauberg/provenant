@@ -35,7 +35,7 @@ enum Source {
         subject: Option<PinnedSubject>,
         /// Whether the pull request has reported the pinned head at least once.
         /// Only after that does a different head count as a move.
-        seen: bool,
+        pinned_head_seen: bool,
         complete: bool,
     },
 }
@@ -278,7 +278,7 @@ impl ActionsGrace {
         };
         // A head that moved past the pinned subject is a terminal decision,
         // not a passing verdict that might still gain Actions runs.
-        if line.cause.as_deref() == Some("head_moved") {
+        if line.cause.as_deref() == Some(crate::pr::status::HEAD_MOVED) {
             return reading;
         }
         let first_read = match &self.head {
@@ -321,7 +321,7 @@ fn gate_line(line: &mut crate::pr::status::Line, watch_head: Option<&str>) {
 /// The head a PR reading is watching, always shown in its status line. The
 /// pinned subject is authoritative: a head the pull request moved to is never
 /// reported as the thing the wait is judging.
-fn watched_head(subject: &Option<PinnedSubject>, line: &crate::pr::status::Line) -> String {
+fn pinned_head(subject: &Option<PinnedSubject>, line: &crate::pr::status::Line) -> String {
     subject.as_ref().map_or_else(
         || line.awaiting.as_deref().unwrap_or(&line.head).to_owned(),
         |subject| subject.head.to_string(),
@@ -353,13 +353,13 @@ fn pr_subject(
         base: None,
         head,
         origin,
-        observed_at: now,
+        pinned_at: now,
         policy,
     };
     if let Some(head) = command_head {
         return GitOid::parse(head)
             .ok()
-            .map(|head| make(head, SubjectOrigin::Commit, SubjectPolicy::Pinned));
+            .map(|head| make(head, SubjectOrigin::Explicit, SubjectPolicy::Pinned));
     }
     let (sha, branch) = forge?;
     if let Some(local) = local_tip
@@ -381,13 +381,13 @@ fn pr_subject(
 }
 
 /// Apply one PR observation to the wait's pinned subject. Updates `subject`
-/// and `seen` in place; returns `true` only when a previously seen head moved
+/// and `pinned_head_seen` in place; returns `true` only when a previously pinned_head_seen head moved
 /// past a pinned subject. The invariant: a verdict is drawn only from the head
 /// pinned at admission (or the first sample when the forge was unreadable),
 /// never from a later head whose checks belong to different work.
 fn apply_subject_sample(
     subject: &mut Option<PinnedSubject>,
-    seen: &mut bool,
+    pinned_head_seen: &mut bool,
     line: &mut crate::pr::status::Line,
     number: u64,
     repository: &Result<String, String>,
@@ -406,11 +406,11 @@ fn apply_subject_sample(
                     repository: repository.as_ref().cloned().unwrap_or_default(),
                     number,
                 },
-                observed_at: now,
+                pinned_at: now,
                 policy,
             });
         }
-        *seen = true;
+        *pinned_head_seen = true;
         return false;
     }
     let (pinned, policy) = {
@@ -422,14 +422,14 @@ fn apply_subject_sample(
         &pinned,
         GitOid::parse(&line.head).map_err(|error| error.to_string()),
     ) {
-        HeadCheck::Unmoved => *seen = true,
+        HeadCheck::Unmoved => *pinned_head_seen = true,
         HeadCheck::Moved { current, .. } => {
-            if *seen {
+            if *pinned_head_seen {
                 match policy {
                     SubjectPolicy::Pinned => {
-                        line.cause = Some("head_moved".to_owned());
+                        line.cause = Some(crate::pr::status::HEAD_MOVED.to_owned());
                         line.next = Some(format!(
-                            "rerun provenant wait --pr {number} for the new head, or set domains.wait.pr_head=follow_latest"
+                            "rerun provenant wait --pr {number} for the new head, or set domains.wait.pr_head_policy=follow_latest"
                         ));
                         return true;
                     }
@@ -440,18 +440,17 @@ fn apply_subject_sample(
                                 "#{number} head moved from {pinned} to {current}; following the new head"
                             ),
                         );
-                        subject
-                            .as_mut()
-                            .expect("subject pinned before sampling")
-                            .head = current;
-                        *seen = false;
+                        let subject = subject.as_mut().expect("subject pinned before sampling");
+                        subject.head = current;
+                        subject.pinned_at = now;
+                        *pinned_head_seen = false;
                     }
                 }
             }
         }
         HeadCheck::Unavailable { .. } => {}
     }
-    if !*seen {
+    if !*pinned_head_seen {
         gate_line(line, Some(&pinned_text));
     }
     false
@@ -593,7 +592,7 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
 
 /// Render one PR observation as a reading. `head_moved` forces an
 /// unsuccessful settlement for a pinned subject whose head moved after it was
-/// seen. The subject is carried in the data so status and the wait envelope
+/// pinned_head_seen. The subject is carried in the data so status and the wait envelope
 /// show exactly what the wait pinned.
 fn pr_reading(
     label: &str,
@@ -602,7 +601,7 @@ fn pr_reading(
     complete: bool,
     head_moved: bool,
 ) -> Reading {
-    let head = watched_head(subject, &line);
+    let head = pinned_head(subject, &line);
     let settle = if head_moved {
         Settle::Unsuccessful
     } else {
@@ -626,7 +625,7 @@ fn pr_reading(
 }
 
 /// Read one PR source, applying the wait's subject policy to the observation.
-/// `source` is owned by the polling worker so `subject` and `seen` persist
+/// `source` is owned by the polling worker so `subject` and `pinned_head_seen` persist
 /// across samples: a verdict is only ever about the pinned head.
 fn read_pr(
     source: &mut Source,
@@ -664,9 +663,13 @@ fn read_pr(
         Err(error) => return Reading::unavailable(&label, &error.to_string()),
     };
     let head_moved = match &mut *source {
-        Source::Pr { subject, seen, .. } => apply_subject_sample(
+        Source::Pr {
             subject,
-            seen,
+            pinned_head_seen,
+            ..
+        } => apply_subject_sample(
+            subject,
+            pinned_head_seen,
             &mut line,
             number,
             &Ok(repository),
@@ -739,7 +742,7 @@ fn read(
 /// agree with direct readings in the wait's per-target rows.
 pub(crate) fn reading_pr_event(
     subject: &mut Option<PinnedSubject>,
-    seen: &mut bool,
+    pinned_head_seen: &mut bool,
     number: u64,
     repository: &Result<String, String>,
     policy: SubjectPolicy,
@@ -783,7 +786,7 @@ pub(crate) fn reading_pr_event(
         Ok(mut line) => {
             let head_moved = apply_subject_sample(
                 subject,
-                seen,
+                pinned_head_seen,
                 &mut line,
                 number,
                 repository,
@@ -1904,7 +1907,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     prs.dedup();
     let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
     let actions_grace = Duration::from_secs(settings.actions_grace_seconds);
-    let pr_head_policy = settings.pr_head;
+    let pr_head_policy = settings.pr_head_policy;
     if sources.len() + prs.len() > settings.max_targets as usize {
         return crate::fail(
             "wait",
@@ -1972,7 +1975,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 number,
                 repository: repository.clone(),
                 subject,
-                seen: false,
+                pinned_head_seen: false,
                 complete,
             }
         }));
@@ -2311,7 +2314,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             let stop = &stop;
             let interval = Duration::from_secs(60);
             scope.spawn(move || {
-                // Own the source so the subject and `seen` survive across
+                // Own the source so the subject and `pinned_head_seen` survive across
                 // samples: they are the wait's one pinned decision.
                 let mut source = (*source).clone();
                 let (number, repository, complete) = match &source {
@@ -2399,9 +2402,9 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 last_reconcile = Instant::now();
                                 if detail["status"].is_object() {
                                     let event = match &mut source {
-                                        Source::Pr { subject, seen, .. } => reading_pr_event(
+                                        Source::Pr { subject, pinned_head_seen, .. } => reading_pr_event(
                                             subject,
-                                            seen,
+                                            pinned_head_seen,
                                             number,
                                             &repository,
                                             pr_head_policy,
@@ -2726,10 +2729,10 @@ mod tests {
     /// direct reading has before the forge reports a head.
     fn event_reading(number: u64, complete: bool, detail: Value) -> Reading {
         let mut subject = None;
-        let mut seen = false;
+        let mut pinned_head_seen = false;
         reading_pr_event(
             &mut subject,
-            &mut seen,
+            &mut pinned_head_seen,
             number,
             &Ok("owner/repo".into()),
             SubjectPolicy::Pinned,
@@ -2994,7 +2997,7 @@ mod tests {
             number: 7,
             repository: Ok("owner/repo".into()),
             subject: None,
-            seen: false,
+            pinned_head_seen: false,
             complete: false,
         };
         for (with_pull, expected) in [(false, Outcome::Ok), (true, Outcome::Timeout)] {
@@ -3568,8 +3571,9 @@ mod tests {
 
         // Runs for the head end the hold.
         for active in [true, false] {
-            let seen = grace.apply(settled_pr_reading("a", true, Some(active)), "#7", false);
-            assert_eq!(seen.settle, Settle::Succeeded);
+            let pinned_head_seen =
+                grace.apply(settled_pr_reading("a", true, Some(active)), "#7", false);
+            assert_eq!(pinned_head_seen.settle, Settle::Succeeded);
         }
 
         // A default wait still settles on a failure at once; a complete one holds.
@@ -3636,7 +3640,7 @@ mod tests {
                 repository: "owner/repo".into(),
                 number: 7,
             },
-            observed_at: WallTime::from_micros(0).expect("fixture time"),
+            pinned_at: WallTime::from_micros(0).expect("fixture time"),
             policy,
         }
     }
@@ -3646,12 +3650,12 @@ mod tests {
         let pinned = oid(&"a".repeat(40));
         let other = oid(&"b".repeat(40));
         let mut subject = Some(pinned_subject(pinned, SubjectPolicy::Pinned));
-        let mut seen = false;
+        let mut pinned_head_seen = false;
         let mut line = pr_line(other, true);
         assert_eq!(line.verdict(), Some(true), "the other head passes");
         let moved = apply_subject_sample(
             &mut subject,
-            &mut seen,
+            &mut pinned_head_seen,
             &mut line,
             7,
             &Ok("owner/repo".into()),
@@ -3660,7 +3664,7 @@ mod tests {
         );
         assert!(!moved, "an unseen head is not a move");
         assert_eq!(line.verdict(), None, "its verdict is ignored");
-        assert_eq!(watched_head(&subject, &line), pinned.to_string());
+        assert_eq!(pinned_head(&subject, &line), pinned.to_string());
         assert_eq!(line.head, other.to_string());
     }
 
@@ -3669,24 +3673,24 @@ mod tests {
         let first = oid(&"a".repeat(40));
         let second = oid(&"b".repeat(40));
         let mut subject = Some(pinned_subject(first, SubjectPolicy::Pinned));
-        let mut seen = false;
+        let mut pinned_head_seen = false;
         let mut first_sample = pr_line(first, true);
         assert!(!apply_subject_sample(
             &mut subject,
-            &mut seen,
+            &mut pinned_head_seen,
             &mut first_sample,
             7,
             &Ok("owner/repo".into()),
             SubjectPolicy::Pinned,
             WallTime::from_micros(0).expect("fixture time"),
         ));
-        assert!(seen, "the pinned head was observed");
+        assert!(pinned_head_seen, "the pinned head was observed");
 
         let mut moved_line = pr_line(second, true);
         let (moved, warnings) = warning::capture(|| {
             apply_subject_sample(
                 &mut subject,
-                &mut seen,
+                &mut pinned_head_seen,
                 &mut moved_line,
                 7,
                 &Ok("owner/repo".into()),
@@ -3694,13 +3698,16 @@ mod tests {
                 WallTime::from_micros(0).expect("fixture time"),
             )
         });
-        assert!(moved, "a seen head that moves settles the wait");
-        assert_eq!(moved_line.cause.as_deref(), Some("head_moved"));
+        assert!(moved, "a pinned_head_seen head that moves settles the wait");
+        assert_eq!(
+            moved_line.cause.as_deref(),
+            Some(crate::pr::status::HEAD_MOVED)
+        );
         assert!(
             moved_line
                 .next
                 .as_deref()
-                .is_some_and(|next| next.contains("domains.wait.pr_head=follow_latest")),
+                .is_some_and(|next| next.contains("domains.wait.pr_head_policy=follow_latest")),
             "{:?}",
             moved_line.next
         );
@@ -3722,12 +3729,12 @@ mod tests {
         let first = oid(&"a".repeat(40));
         let second = oid(&"b".repeat(40));
         let mut subject = Some(pinned_subject(first, SubjectPolicy::FollowLatest));
-        let mut seen = true;
+        let mut pinned_head_seen = true;
         let mut line = pr_line(second, true);
         let (moved, warnings) = warning::capture(|| {
             apply_subject_sample(
                 &mut subject,
-                &mut seen,
+                &mut pinned_head_seen,
                 &mut line,
                 7,
                 &Ok("owner/repo".into()),
@@ -3738,7 +3745,10 @@ mod tests {
         assert!(!moved, "follow_latest never settles head_moved");
         let subject = subject.expect("subject stays pinned");
         assert_eq!(subject.head, second, "the new head is pinned");
-        assert!(!seen, "the new head must be observed before it can move");
+        assert!(
+            !pinned_head_seen,
+            "the new head must be observed before it can move"
+        );
         assert_eq!(line.cause, None);
         assert!(
             warnings.iter().any(|warning| {
@@ -3786,7 +3796,7 @@ mod tests {
         )
         .expect("--head pins a subject");
         assert_eq!(forced.head, oid(&explicit));
-        assert_eq!(forced.origin, SubjectOrigin::Commit);
+        assert_eq!(forced.origin, SubjectOrigin::Explicit);
         assert_eq!(forced.policy, SubjectPolicy::Pinned, "--head always pins");
 
         let local = "e".repeat(40);
@@ -3813,11 +3823,11 @@ mod tests {
     fn a_wait_without_a_forge_head_pins_its_first_sample() {
         let head = oid(&"f".repeat(40));
         let mut subject = None;
-        let mut seen = false;
+        let mut pinned_head_seen = false;
         let mut line = pr_line(head, true);
         let moved = apply_subject_sample(
             &mut subject,
-            &mut seen,
+            &mut pinned_head_seen,
             &mut line,
             7,
             &Ok("owner/repo".into()),
@@ -3835,7 +3845,7 @@ mod tests {
                 number: 7
             }
         );
-        assert!(seen);
+        assert!(pinned_head_seen);
         let reading = pr_reading("#7", &Some(subject.clone()), line, false, moved);
         assert_eq!(reading.data["subject"], json!(subject));
         assert_eq!(reading.settle, Settle::Succeeded);
@@ -3847,7 +3857,7 @@ mod tests {
             number: 7,
             repository: Ok("owner/repo".into()),
             subject: None,
-            seen: false,
+            pinned_head_seen: false,
             complete: false,
         }];
         let pending = Reading {
@@ -3904,7 +3914,7 @@ mod tests {
                 number: 7,
                 repository: Ok("owner/repo".into()),
                 subject: None,
-                seen: false,
+                pinned_head_seen: false,
                 complete,
             }]
         };

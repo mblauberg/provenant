@@ -74,7 +74,7 @@ fn graph_document_host_fields_round_trip_reject_wrong_types_and_keep_unknowns() 
             json!({
                 "head": "a".repeat(40),
                 "origin": {"kind":"local_ref","name":"HEAD"},
-                "observed_at": "2000-01-01T00:00:00.000000Z"
+                "pinned_at": "2000-01-01T00:00:00.000000Z"
             }),
             json!(false),
         ),
