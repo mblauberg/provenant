@@ -2329,6 +2329,12 @@ impl ChildRegistry for FileChildRegistry {
                 state_dir.join(S2_SUPPRESSED_REGISTRY_READ),
                 b"stale-census registry snapshot",
             )?;
+            // Consume the gate here, before the guardian can take another
+            // census. A persistent gate would let later retained-custody
+            // looks miss the late owner too, so the guardian would signal it
+            // and settle instead of leaving cleanup unresolved. The caller
+            // only needs the stale census to see a suppressed registry once.
+            std::fs::remove_file(state_dir.join(S2_IGNORE_CHILD_REGISTRY))?;
             return Ok(Vec::new());
         }
         let identity_path = self.home.join("s2-owner.json");
@@ -2478,8 +2484,9 @@ fn stale_complete_census_does_not_signal_a_late_shared_group_owner(root: &Path) 
         StopReceipt::Requested
     );
     std::fs::write(state_dir.join(S2_CENSUS_RELEASE), b"resume old snapshot")?;
+    // The registry consumes its own suppression gate once, so no later
+    // guardian census can race this test into hiding the late owner again.
     wait_for_file(&state_dir.join(S2_SUPPRESSED_REGISTRY_READ))?;
-    std::fs::remove_file(state_dir.join(S2_IGNORE_CHILD_REGISTRY))?;
 
     let exit = exited(&handle)?;
     assert!(exit.unresolved_cleanup);
