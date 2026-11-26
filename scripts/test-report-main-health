@@ -44,7 +44,8 @@ if sys.argv[1] == 'api':
     # Spec: docs/specs/ci.md#red-main-is-visible — a known flake opens no issue.
     junit = Path(tmp) / 'main-junit'
     junit.mkdir()
-    (junit / 'partition.xml').write_text(
+    (junit / 'rust-nextest-junit-1').mkdir()
+    (junit / 'rust-nextest-junit-1' / 'partition.xml').write_text(
         '<testsuites><testsuite><testcase classname="provenant" name="b::flaky">'
         '<failure message="timed out"/></testcase></testsuite></testsuites>'
     )
@@ -53,11 +54,39 @@ if sys.argv[1] == 'api':
     flaky_body = ('<!-- provenant-flaky:v1 -->\n- package: provenant\n'
                   '- name: b::flaky\n- owner: chair\n- expires: 2030-12-31')
     env['FLAKY_ISSUES'] = json.dumps([[{'number': 99, 'body': flaky_body}]])
+    env['JOBS'] = json.dumps([{'jobs': [
+        {'name': 'Rust front door (1/3)', 'conclusion': 'failure'},
+        {'name': 'ci-status', 'conclusion': 'failure'},
+    ]}])
     calls = run('failure', [])
     assert not [call for call in calls if call[:2] in (['issue', 'create'], ['issue', 'comment'])], calls
 
+    # A known failure cannot hide an unrelated failed test job with no JUnit evidence.
+    env['JOBS'] = json.dumps([{'jobs': [
+        {'name': 'Rust front door (1/3)', 'conclusion': 'failure'},
+        {'name': 'Rust macOS tests (custody)', 'conclusion': 'failure'},
+        {'name': 'ci-status', 'conclusion': 'failure'},
+    ]}])
+    calls = run('failure', [])
+    assert (calls[-1][:2] == ['issue', 'create'] and 'ci:red-main' in calls[-1]
+            and 'Rust macOS tests (custody)' in calls[-1][-1]), calls
+
+    # Missing JUnit leaves the failed CI job actionable and reporting still runs.
+    env['JUNIT_DIR'] = str(Path(tmp) / 'missing-junit')
+    env['JOBS'] = json.dumps([{'jobs': [
+        {'name': 'Rust front door (1/3)', 'conclusion': 'failure'},
+        {'name': 'ci-status', 'conclusion': 'failure'},
+    ]}])
+    calls = run('failure', [])
+    assert calls[-1][:2] == ['issue', 'create'] and 'ci:red-main' in calls[-1], calls
+    env['JUNIT_DIR'] = str(junit)
+
     # A failure that passes on re-run is quarantined with an issue per test.
     env['FLAKY_ISSUES'] = '[]'
+    env['JOBS'] = json.dumps([{'jobs': [
+        {'name': 'Rust front door (1/3)', 'conclusion': 'failure'},
+        {'name': 'ci-status', 'conclusion': 'failure'},
+    ]}])
     rerun = Path(tmp) / 'rerun-junit'
     rerun.mkdir()
     (rerun / 'again.xml').write_text(

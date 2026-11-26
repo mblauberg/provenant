@@ -96,8 +96,10 @@ naming the failed jobs and the commit range since the last green `main`; the
 next green `main` run closes it. A cancelled run reports nothing, because jobs
 that still run after a cancellation fail on missing evidence rather than on
 `main`. A failure whose every JUnit test failure is already quarantined, or is
-confirmed by a passing re-run of the same tests, opens no red-main issue: it is
-a known flake, not a new break.
+confirmed by a passing re-run of the same tests, opens no red-main issue only
+when every failed test job has matching JUnit evidence and no other CI job
+failed. Missing JUnit evidence and failures outside those test jobs remain
+visible as red-main issues.
 
 - Why: `main` is fixed forward, so its breakage must reach the owner at once;
   a known flake must not spend a chair cycle on a duplicate issue.

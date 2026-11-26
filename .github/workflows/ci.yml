@@ -1114,12 +1114,14 @@ jobs:
       - name: Download main JUnit results
         if: needs.ci-status.result == 'failure'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
         with:
           pattern: rust-nextest-junit-*
           path: ${{ runner.temp }}/main-junit
       - name: Download native test evidence
         if: needs.ci-status.result == 'failure'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
         with:
           pattern: native-test-evidence-*
           path: ${{ runner.temp }}/main-junit
