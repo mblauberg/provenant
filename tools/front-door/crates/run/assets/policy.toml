@@ -1417,6 +1417,14 @@ knob = "policy.LAUNCH_SANDBOX_UNAVAILABLE_NONE"
 justification = "An unavailable sandbox warns and proceeds for host access."
 
 [[rule]]
+code = "LAUNCH_PROCESS_ATTRIBUTION_NONE"
+site = "run/src/launch.rs#bind_sandbox_backend"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_PROCESS_ATTRIBUTION_NONE"
+justification = "An unsandboxed lane records its spawned group and session as a durable attempt tag so reconcile can report a detached process; without an OS mark the process cannot be proven and signalled. The setting source is named in each warning."
+
+[[rule]]
 code = "CONTINUATION_LINK_NONE"
 site = "cli/src/run/provider/continuation.rs#copy_tree"
 boundary = "none"

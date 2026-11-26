@@ -1117,6 +1117,18 @@ impl RunStore {
                 record.warnings.push(warning);
             }
         }
+        if let Ok(attempt) = self.attempt_dir(id, false)
+            && let Some(raw) = crate::artifacts::read_sealed_observed(
+                &attempt,
+                "orphan-warning.json",
+                RECORD_LIMIT,
+            )?
+        {
+            let warning: String = crate::db::decode(&raw)?;
+            if !record.warnings.contains(&warning) {
+                record.warnings.push(warning);
+            }
+        }
         let (checkpoint, checkpoint_readable) = match self.attempt_dir(id, false) {
             Ok(directory) => {
                 let read_checkpoint = match read {
