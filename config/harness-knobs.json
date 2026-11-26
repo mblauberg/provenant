@@ -48,7 +48,8 @@
       "providers.{provider}.stall_after_seconds",
       "providers.{provider}.stall_policy",
       "providers.codex.clean_config",
-      "gc.graph_checkpoint_days"
+      "gc.graph_checkpoint_days",
+      "session.digest.scope"
   ],
   "host_gc_settings": {
     "path": "gc",
@@ -496,6 +497,18 @@
         "effect": "Read-and-execute directory subtrees relative to the primary checkout. Entries escaping that checkout, missing, protected, credential or writable targets are ignored with a warning naming the configuration key."
       },
       "projects.{project}.user_skills": {"type": "enum", "default": "host user_skills", "effect": "Override host user skill discovery for this project."}
+    }
+  },
+  "native_hook_settings": {
+    "path": "domains.hooks",
+    "settings": {
+      "timeout_secs": {
+        "type": "int",
+        "min": 1,
+        "max": 300,
+        "default": 10,
+        "effect": "Timeout in seconds written into every installed chair hook (chair-start, chair-stop, chair-prompt) and the chair switch settings, with its source shown in `provenant doctor`. The hook runtime uses one local budget of 60% of this value, warns and records an overrun before the host kills the hook, and returns before the budget expires. Inspect value, default and origin with config show or config schema."
+      }
     }
   },
   "host_lane_build_settings": {
@@ -1184,6 +1197,15 @@
       "reader": "tools/front-door/crates/confinement/src/push.rs, tools/front-door/src/hooks.rs",
       "effect": "Whether the owner permits a non-fast-forward rewrite of the default branch by a push. refuse (default) is the owner gate: the push is refused with this setting and its source named. allow proceeds with a warning after the owner sets it in the host configuration; a launch override cannot grant it. Deleting the default branch and pushing it from a linked worktree stay refused under every value.",
       "trade_off": "refuse protects shared history; allow is the owner's explicit, host-only authority to replace it."
+    },
+    "session.digest.scope": {
+      "type": "enum",
+      "values": ["project", "all"],
+      "default": "project",
+      "status": "wired",
+      "reader": "tools/front-door/src/hooks.rs, tools/front-door/src/hook_state.rs",
+      "effect": "Which projects' custody appears in the session-start digest. project (the default) names only custody this chair holds in the hook's project; unattended items open to adoption and other projects' rows collapse to one counted line naming `provenant status --adoptable`. all lists this chair's custody across projects as before. The effective scope and its layer appear in that line. Set with `provenant config set session.digest.scope all` or under `[knobs]` in config.toml.",
+      "trade_off": "project keeps another project's stale work out of the chair's context; all restores the cross-project view when the chair works across projects."
     },
     "lanes.prepare_deps": {
       "type": "bool", "default": true, "status": "wired",

@@ -1687,6 +1687,9 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "console sessions",
         "console tree",
         "disk report",
+        // #4028 adds a real top-level doctor beside `hosts doctor`; the unit
+        // string is part of the persisted verb set, so declare the new spelling.
+        "doctor",
         "edit",
         "events",
         "fabric claim acquire",
@@ -1889,7 +1892,10 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/fabric/run_owner.rs", 3000),
         ("src/fabric/unified.rs", 4500),
         ("src/session_handoff.rs", 1750),
-        ("src/hooks.rs", 2750),
+        // The #4028 hook budget, overrun warning and diagnostic reader grew this
+        // owner deliberately: 2770 lines on the CI merge base. Next 250-band
+        // above size + 100, with headroom for routine growth.
+        ("src/hooks.rs", 3000),
         ("src/install.rs", 3250),
         ("src/lane_cleanup.rs", 3250),
         ("src/pr/landing/adapters.rs", 3250),

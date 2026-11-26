@@ -27,6 +27,7 @@ mod console;
 mod custody;
 mod declaration;
 mod disk;
+mod doctor;
 mod edit;
 mod events;
 mod fabric;
@@ -83,6 +84,7 @@ pub static DOMAINS: &[&Domain] = &[
     &custody::DOMAIN,
     &declaration::DOMAIN,
     &disk::DOMAIN,
+    &doctor::DOMAIN,
     &edit::DOMAIN,
     &events::DOMAIN,
     &fabric::DOMAIN,

@@ -27,6 +27,19 @@ suite's selection and adds no selection logic of its own.
   scattered workflow conditionals.
 - Owner: `config/ci-suites.toml`; `scripts/select-ci-suites`; `scripts/check-ci-suites`
 
+## Cheap gates run first
+
+A job declared as a `gate` in the manifest must finish before any job of a
+gated suite starts, directly or through an intermediate job. A failed gate
+leaves gated jobs skipped, so no scarce runner is claimed for a change that
+does not compile; a skipped gate (its own suite covered by evidence) still lets
+an independently selected gated suite run. `scripts/check-ci-suites` refuses a
+workflow that drops the edge.
+
+- Why: the cheap Linux compile check fails before macOS archive, lint and
+  release jobs spend the scarce pool on the same error.
+- Owner: `config/ci-suites.toml` (`gate`); `scripts/check-ci-suites`
+
 ## Main runs everything
 
 Every push to `main` and every landing candidate runs every suite in full, with
