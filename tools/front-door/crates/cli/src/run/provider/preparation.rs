@@ -5728,7 +5728,7 @@ pub(super) fn prepare_candidates_inner(
             // An owner-set `refuse` image gap stops the launch; otherwise a
             // degraded image input leaves the attachments as readable paths.
             if let Some(decision) = check.refusal() {
-                return Err(PrepareError::Unsupported(decision.clone()).into());
+                return Err(PrepareError::Unsupported(decision.clone()));
             }
             if let Some(decision) = check.degraded(provenant_records::LaunchField::ImageInput)
                 && decision.warn
