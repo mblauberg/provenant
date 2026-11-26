@@ -744,36 +744,8 @@ pub enum OutputTail {
 pub fn output_tail_text(text: &str, tail: OutputTail) -> String {
     let bytes = text.as_bytes();
     let start = match tail {
-        OutputTail::Bytes(max_bytes) => {
-            let mut start = bytes.len().saturating_sub(max_bytes as usize);
-            while start < bytes.len() && std::str::from_utf8(&bytes[start..]).is_err() {
-                start += 1;
-            }
-            start
-        }
-        OutputTail::Lines(lines) => {
-            if lines == 0 {
-                bytes.len()
-            } else {
-                let mut end = bytes.len();
-                if bytes.last() == Some(&b'\n') {
-                    end -= 1;
-                }
-                let mut seen = 0u64;
-                let mut start = 0;
-                while end > 0 {
-                    end -= 1;
-                    if bytes[end] == b'\n' {
-                        seen += 1;
-                        if seen >= lines {
-                            start = end + 1;
-                            break;
-                        }
-                    }
-                }
-                start
-            }
-        }
+        OutputTail::Bytes(max_bytes) => crate::run::tail_start_bytes(bytes, max_bytes),
+        OutputTail::Lines(lines) => crate::run::tail_start_lines(bytes, lines),
     };
     text[start..].to_owned()
 }
