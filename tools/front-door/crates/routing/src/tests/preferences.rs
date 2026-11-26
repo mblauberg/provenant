@@ -345,7 +345,12 @@ fn an_adapter_entry_can_refuse_an_exact_pin_effort_gap() -> Result<(), Box<dyn s
         _ => panic!("an owner refuse gap must reject the exact pin"),
     };
     assert!(error.contains("no effort control"));
-    assert!(error.contains("action set by an adapter_capabilities entry"));
+    assert!(
+        error.contains(
+            "action set by .provenant/config.toml#adapter_capabilities[adapter=codex].on_gap.effort (project)"
+        ),
+        "{error}"
+    );
     Ok(())
 }
 
