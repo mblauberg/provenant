@@ -113,15 +113,90 @@ pub fn resolve_control(
     }
 }
 
+/// Compose the typed notice that states what a `--now` steer will do before it
+/// interrupts the live attempt. It names the delivery source and the fallback,
+/// so the action is announced rather than discovered afterwards. It is a
+/// warning value, never prose written to a stream: the sink prints it in human
+/// mode and carries it in the envelope under `--json`.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn compose_steer_restart_notice(
+    fallback: provenant_fabric_runtime::config::SteerFallback,
+    delivery_source: &str,
+    fallback_source: &str,
+) -> provenant_records::warning::Warning {
+    use provenant_fabric_runtime::config::SteerFallback as F;
+    let (name, behaviour) = match fallback {
+        F::FreshWithHandoff => (
+            "fresh_with_handoff",
+            "if the provider session is unavailable, a fresh attempt continues with the accepted brief, prior handoff and steering instructions",
+        ),
+        F::Refuse => (
+            "refuse",
+            "if the provider session is unavailable, the steering text is retained without a successor",
+        ),
+    };
+    provenant_records::warning::Warning::new(
+        provenant_records::warning::STEER_INTERRUPTS_ATTEMPT,
+        format!("steer will interrupt this attempt and resume its session; delivery=now (source: {delivery_source}); fallback={name} (source: {fallback_source}); {behaviour}"),
+    )
+    .subject("steer restart")
+}
+
+/// Read the effective delivery sources for the pre-interrupt notice. A config
+/// read failure never blocks the interrupt; the action goes unannounced rather
+/// than refusing a steer the owner can still deliver.
+pub fn steer_restart_notice(
+    roots: &provenant_core::Roots,
+) -> Option<provenant_records::warning::Warning> {
+    let config = crate::config_reads::read_for(roots, "steer").ok()?;
+    let delivery_source =
+        crate::config_reads::setting_source(&config.origins, "domains.fabric.steer.delivery");
+    let fallback_source =
+        crate::config_reads::setting_source(&config.origins, "domains.fabric.steer.fallback");
+    Some(compose_steer_restart_notice(
+        config.domains.fabric.steer.fallback,
+        &delivery_source,
+        &fallback_source,
+    ))
+}
+
+/// Route the notice through the typed warning seam. It must reach the user
+/// before the live attempt is cancelled: the sink prints it as it arrives in
+/// human mode, and holds it for the envelope under `--json`.
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn emit_notice(warning: &provenant_records::warning::Warning) {
+    provenant_records::warning::warn(warning.clone());
+}
+
+/// Emit a notice, then take the action it describes. Isolated so ordering is
+/// testable: the notice must reach the user before the live attempt is cancelled.
+pub(crate) fn announce_before<E, S, R>(
+    notice: Option<&provenant_records::warning::Warning>,
+    emit: E,
+    act: S,
+) -> R
+where
+    E: FnOnce(&provenant_records::warning::Warning),
+    S: FnOnce() -> R,
+{
+    if let Some(notice) = notice {
+        emit(notice);
+    }
+    act()
+}
+
 /// Persist a steer with Run's owner. The text is durable for the next turn of
-/// a running lane; a steer never interrupts or cancels the live attempt. The
-/// message identifier is stable across replays.
+/// a running lane. Queued delivery (`now = false`) never interrupts the live
+/// attempt; `now = true` announces the restart, then interrupts through custody
+/// once the session identity is durable. The message identifier is stable
+/// across replays.
 pub fn deliver_steer(
     edge: &crate::run::Edge<'_>,
     identity: &provenant_fabric_runtime::identity::Identity,
     attempt: provenant_core::AttemptId,
     operation_id: &OperationId,
     text: &str,
+    now: bool,
     call: &provenant_fabric_store::Request<'_>,
 ) -> Result<provenant_core::MessageId, InboxError> {
     let context = provenant_run::ExecutionContext {
@@ -144,9 +219,27 @@ pub fn deliver_steer(
     }) {
         return Err(InboxError::SteerNoTurn);
     }
-    // The inbox owner has checked route capability and fallback. Session
-    // availability is decided at settlement, without interrupting this run.
-    let outcome = store.steer(attempt, operation_id.clone(), text, &run_call);
+    if now
+        && matches!(&record.state, provenant_run::AttemptState::Running { .. })
+        && !store
+            .steer_session_available(attempt, &run_call)
+            .map_err(|error| InboxError::Steer(error.to_string()))?
+    {
+        // `--now` promises a same-session restart. Without a validated
+        // session the interrupt would cancel the attempt and strand the text,
+        // so refuse before writing an intent or a stop. Queued delivery has no
+        // such gate: it always accepts a running lane. A replay of an already
+        // accepted intent is still handled by `steer`.
+        return Err(InboxError::SteerSessionUnavailable);
+    }
+    let notice = now.then(|| steer_restart_notice(edge.roots)).flatten();
+    let outcome = announce_before(notice.as_ref(), emit_notice, || {
+        if now {
+            store.steer_now(attempt, operation_id.clone(), text, &run_call)
+        } else {
+            store.steer(attempt, operation_id.clone(), text, &run_call)
+        }
+    });
     match outcome {
         Ok(provenant_run::SteerReceipt::Queued { message_id })
         | Ok(provenant_run::SteerReceipt::AlreadyQueued { message_id }) => Ok(message_id),
@@ -248,12 +341,25 @@ pub struct Steer {
         long,
         value_name = "TEXT",
         catalog_required_unless = "brief_file",
+        catalog_required_unless = "explain",
         conflicts_with = "brief_file"
     )]
     pub brief: Option<String>,
     /// Read the message from a file, or from standard input given `-`
-    #[arg(long, catalog_required_unless = "brief", conflicts_with = "brief")]
+    #[arg(
+        long,
+        catalog_required_unless = "brief",
+        catalog_required_unless = "explain",
+        conflicts_with = "brief"
+    )]
     pub brief_file: Option<PathBuf>,
+    /// Interrupt through custody once the session identity is durable, then
+    /// resume the same session with this text. The default queues the turn.
+    #[arg(long)]
+    pub now: bool,
+    /// Show the effective delivery mode and its source without steering
+    #[arg(long)]
+    pub explain: bool,
     #[arg(long)]
     pub operation_id: Option<OperationId>,
 }
@@ -1476,5 +1582,84 @@ mod unsupported_receipt_tests {
         assert_eq!(error.message, receipt.refusal_message());
         assert!(error.message.contains("retry"));
         assert_eq!(error.repair.as_deref(), Some(CONTROL_UNSUPPORTED_REPAIR));
+    }
+}
+
+#[cfg(test)]
+mod steer_notice_tests {
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_notice_is_one_line_naming_the_delivery_source_and_fallback() {
+        use provenant_fabric_runtime::config::SteerFallback as F;
+        let delivery_source = "config.toml (domains.fabric.steer.delivery)";
+        let fallback_source = "config.toml (domains.fabric.steer.fallback)";
+        for (fallback, name) in [
+            (F::FreshWithHandoff, "fresh_with_handoff"),
+            (F::Refuse, "refuse"),
+        ] {
+            let notice =
+                super::compose_steer_restart_notice(fallback, delivery_source, fallback_source);
+            // Spec: docs/specs/cli.md#warnings-are-typed-values
+            assert_eq!(
+                notice.code.as_ref(),
+                provenant_records::warning::STEER_INTERRUPTS_ATTEMPT.as_str()
+            );
+            assert!(
+                !notice.message.contains('\n'),
+                "notice must be a single line"
+            );
+            assert!(notice.message.starts_with("steer will interrupt"));
+            assert!(
+                notice.message.contains(&format!("fallback={name}")),
+                "{notice:?}"
+            );
+            assert!(notice.message.contains(delivery_source), "{notice:?}");
+            assert!(notice.message.contains(fallback_source), "{notice:?}");
+        }
+    }
+
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    #[test]
+    fn steer_notice_travels_through_the_typed_warning_seam() {
+        use provenant_fabric_runtime::config::SteerFallback as F;
+        let warning = super::compose_steer_restart_notice(
+            F::Refuse,
+            "compiled defaults (domains.fabric.steer.delivery)",
+            "compiled defaults (domains.fabric.steer.fallback)",
+        );
+        let ((), captured) = provenant_records::warning::capture(|| super::emit_notice(&warning));
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].code.as_ref(),
+            provenant_records::warning::STEER_INTERRUPTS_ATTEMPT.as_str()
+        );
+        assert_eq!(captured[0].message, warning.message);
+    }
+
+    #[test]
+    fn fallback_line_is_emitted_before_the_cancel() {
+        use std::cell::RefCell;
+        let events = RefCell::new(Vec::new());
+        let notice = provenant_records::warning::Warning::new(
+            provenant_records::warning::STEER_INTERRUPTS_ATTEMPT,
+            "steer will interrupt this attempt",
+        );
+        let result = super::announce_before(
+            Some(&notice),
+            |warning| {
+                events
+                    .borrow_mut()
+                    .push(format!("notice:{}", warning.message))
+            },
+            || {
+                events.borrow_mut().push("cancel:steered".into());
+                "receipt"
+            },
+        );
+        assert_eq!(result, "receipt");
+        let events = events.into_inner();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].starts_with("notice:"), "{events:?}");
+        assert_eq!(events[1], "cancel:steered", "{events:?}");
     }
 }

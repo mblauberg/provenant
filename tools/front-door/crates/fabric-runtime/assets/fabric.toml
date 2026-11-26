@@ -51,6 +51,7 @@ write_crates = 2 # a write scope spanning more crates than this turns it on
 batch_issues = 2 # this many distinct issues in one brief turns it on
 
 [steer]
+delivery = "queued" # queued (default, no interrupt) or now (session-preserving restart)
 fallback = "fresh_with_handoff" # fresh_with_handoff or refuse when a stopped session is unavailable
 restart_spacing_ms = 2000 # minimum spacing between steer restarts; 0 disables the stagger
 

@@ -1471,12 +1471,16 @@ fn chair_message(session: &str, text: &str, id: &str) -> InboxInput {
     }
 }
 fn steer(text: &str, id: &str) -> InboxInput {
+    steer_with(text, id, false)
+}
+fn steer_with(text: &str, id: &str, now: bool) -> InboxInput {
     InboxInput::Steer {
         extra: Default::default(),
         graph_context: None,
         attempt: provenant_core::AttemptId::from_bytes([7; 16]),
         text: text.into(),
         operation_id: op(id),
+        now,
     }
 }
 fn control_route(provider: Option<Harness>, launch: LaunchKind) -> ControlRoute {
@@ -1555,10 +1559,11 @@ fn steer_receipt_names_continuation_and_replay_does_not_redeliver() {
     let route = control_route(Some(Harness::Codex), LaunchKind::Lane);
     let lookup = move |_: &InboxInput, _: &Request<'_>| Ok(route.clone());
     let deliveries = std::cell::Cell::new(0);
-    let delivery = |attempt, operation: &OperationId, text: &str, _: &Request<'_>| {
+    let delivery = |attempt, operation: &OperationId, text: &str, now: bool, _: &Request<'_>| {
         assert_eq!(attempt, provenant_core::AttemptId::from_bytes([7; 16]));
         assert_eq!(operation.as_str(), "steer-receipt");
         assert_eq!(text, "Inspect the failing path.");
+        assert!(!now);
         deliveries.set(deliveries.get() + 1);
         Ok(MessageId::from_bytes([8; 16]))
     };
@@ -1590,6 +1595,26 @@ fn steer_receipt_names_continuation_and_replay_does_not_redeliver() {
         Err(InboxError::Mutation { ref source, .. }) if source.code() == "operation_conflict"
     ));
     assert_eq!(deliveries.get(), 1);
+}
+
+#[test]
+fn steer_now_flag_reaches_the_delivery_callback() {
+    let f = Fixture::new();
+    let route = control_route(Some(Harness::Command), LaunchKind::Lane);
+    let lookup = move |_: &InboxInput, _: &Request<'_>| Ok(route.clone());
+    let seen = std::cell::Cell::new(None);
+    let delivery = |_, _: &OperationId, _: &str, now: bool, _: &Request<'_>| {
+        seen.set(Some(now));
+        Ok(MessageId::from_bytes([8; 16]))
+    };
+    let result = f
+        .service()
+        .with_control_lookup(&lookup)
+        .with_steer_delivery(&delivery)
+        .execute(steer_with("Inspect now", "steer-now", true), &f.cancel)
+        .unwrap();
+    assert!(matches!(result, InboxResult::Control { .. }));
+    assert_eq!(seen.get(), Some(true));
 }
 
 #[test]
@@ -1686,7 +1711,7 @@ fn unsupported_route_obeys_owner_fallback_before_delivery() {
     let route = control_route(Some(Harness::Command), LaunchKind::Lane);
     let lookup = move |_: &InboxInput, _: &Request<'_>| Ok(route.clone());
     let deliveries = std::cell::Cell::new(0);
-    let delivery = |_, _: &OperationId, _: &str, _: &Request<'_>| {
+    let delivery = |_, _: &OperationId, _: &str, _: bool, _: &Request<'_>| {
         deliveries.set(deliveries.get() + 1);
         Ok(MessageId::from_bytes([8; 16]))
     };

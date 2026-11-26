@@ -1768,6 +1768,10 @@ pub struct PendingGraphSteer {
     pub requester_agent: String,
     pub requester_actor: provenant_core::ActorId,
     pub text: String,
+    /// Deferred delivery keeps the `--now` request; older queued steers default
+    /// to the queued mode.
+    #[serde(default)]
+    pub now: bool,
     /// Accepted text remains available for inspection after a safe refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<PendingSteerRefusal>,

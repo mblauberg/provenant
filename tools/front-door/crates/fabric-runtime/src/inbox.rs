@@ -260,6 +260,10 @@ pub enum InboxInput {
         attempt: AttemptId,
         text: String,
         operation_id: Option<OperationId>,
+        /// Request the session-preserving restart (the `--now` delivery mode).
+        /// Queued delivery leaves the attempt running; old peers default to it.
+        #[serde(default)]
+        now: bool,
     },
     /// Message an exact registered chair session through Fabric mail.
     ChairMessage {
@@ -516,6 +520,10 @@ pub enum InboxError {
     Steer(String),
     #[error("steering has no graph continuation turn for this attempt")]
     SteerNoTurn,
+    #[error(
+        "this running attempt has no retained provider session for its route; the attempt was left running; start a new round on the same worktree with `provenant run implement --worktree WORKTREE --brief-file FILE`"
+    )]
+    SteerSessionUnavailable,
     #[error("work repository or head mismatch")]
     WorkMismatch,
     #[error(
@@ -656,6 +664,7 @@ impl InboxError {
             Self::WorkLookup(_) => "work_lookup_failed",
             Self::Steer(_) => "steer_failed",
             Self::SteerNoTurn => "steer_no_turn",
+            Self::SteerSessionUnavailable => "steer_session_unavailable",
             Self::WorkMismatch => "work_mismatch",
             Self::Store(provenant_fabric_store::Error::NotFound) => "not_found",
             Self::Store(provenant_fabric_store::Error::Busy) => "busy",
@@ -954,7 +963,7 @@ pub struct ControlRoute {
 pub type ControlLookup<'a> =
     dyn Fn(&InboxInput, &Request<'_>) -> Result<ControlRoute, InboxError> + 'a;
 pub type SteerDelivery<'a> =
-    dyn Fn(AttemptId, &OperationId, &str, &Request<'_>) -> Result<MessageId, InboxError> + 'a;
+    dyn Fn(AttemptId, &OperationId, &str, bool, &Request<'_>) -> Result<MessageId, InboxError> + 'a;
 
 pub struct InboxService<'a> {
     store: Store,
@@ -1181,14 +1190,17 @@ impl<'a> InboxService<'a> {
         support: ControlSupport,
         request: &Request<'_>,
     ) -> Result<InboxResult, InboxError> {
-        let InboxInput::Steer { attempt, text, .. } = input else {
+        let InboxInput::Steer {
+            attempt, text, now, ..
+        } = input
+        else {
             return Err(InboxError::Invalid("control target"));
         };
         if route.launch != LaunchKind::Lane {
             return Err(InboxError::Invalid("steer continuation route"));
         }
         let message_id = self.steer_delivery.ok_or(InboxError::OwnerUnavailable)?(
-            *attempt, operation, text, request,
+            *attempt, operation, text, *now, request,
         )?;
         Ok(self.control_receipt(input, operation, route, support, Some(message_id)))
     }

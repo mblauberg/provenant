@@ -57,6 +57,37 @@ impl Default for BatchConfig {
     }
 }
 
+/// How an accepted steer reaches a running attempt. Queued delivery keeps the
+/// attempt running and applies the text at its next turn boundary; `now`
+/// interrupts through custody once the session identity is durable, then
+/// resumes that same session with the text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteerDelivery {
+    /// Keep the attempt running; deliver at the next turn boundary.
+    #[default]
+    Queued,
+    /// Interrupt through custody and resume the same session with the text.
+    Now,
+}
+
+impl SteerDelivery {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "queued" => Some(Self::Queued),
+            "now" => Some(Self::Now),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Now => "now",
+        }
+    }
+}
+
 /// Fallback after an accepted steer cannot resume its provider session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +102,8 @@ pub enum SteerFallback {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SteerConfig {
+    /// Default delivery mode. `provenant steer --now` overrides it for one call.
+    pub delivery: SteerDelivery,
     pub fallback: SteerFallback,
     /// Minimum spacing between steer restart launches, in milliseconds. Steered
     /// lanes that settle close together queue behind this gate instead of
@@ -81,6 +114,7 @@ pub struct SteerConfig {
 impl Default for SteerConfig {
     fn default() -> Self {
         Self {
+            delivery: SteerDelivery::Queued,
             fallback: SteerFallback::FreshWithHandoff,
             restart_spacing_ms: 2_000,
         }
@@ -966,6 +1000,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
     FieldMetadata::int("batch.max_parallel", 1, 64),
+    FieldMetadata::enumeration("steer.delivery", &["queued", "now"]),
     FieldMetadata::enumeration("steer.fallback", &["fresh_with_handoff", "refuse"]),
     FieldMetadata::int("steer.restart_spacing_ms", 0, 600_000),
     FieldMetadata::enumeration(
@@ -1287,6 +1322,22 @@ mod tests {
                 store_busy_timeout_ms: 30_000,
             },
         }
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_delivery_defaults_to_queued_and_can_be_overridden() {
+        let config = config();
+        assert_eq!(config.steer.delivery, SteerDelivery::Queued);
+        let mut encoded = serde_json::to_value(config).unwrap();
+        encoded["steer"]["delivery"] = "now".into();
+        let decoded: FabricConfig = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.steer.delivery, SteerDelivery::Now);
+        assert_eq!(SteerDelivery::parse("queued"), Some(SteerDelivery::Queued));
+        assert_eq!(SteerDelivery::parse("now"), Some(SteerDelivery::Now));
+        assert_eq!(SteerDelivery::parse("unknown"), None);
+        assert_eq!(SteerDelivery::Queued.name(), "queued");
+        assert_eq!(SteerDelivery::Now.name(), "now");
     }
 
     // Spec: docs/specs/fabric.md#session-ready-steering

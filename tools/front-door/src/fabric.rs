@@ -435,6 +435,7 @@ impl F3Facade for BoundFacade<'_> {
         let steer = |attempt: provenant_core::AttemptId,
                      operation: &provenant_core::OperationId,
                      text: &str,
+                     now: bool,
                      call: &provenant_fabric_store::Request<'_>| {
             provenant_cli::inbox::deliver_steer(
                 &edge,
@@ -442,6 +443,7 @@ impl F3Facade for BoundFacade<'_> {
                 attempt,
                 operation,
                 text,
+                now,
                 call,
             )
         };

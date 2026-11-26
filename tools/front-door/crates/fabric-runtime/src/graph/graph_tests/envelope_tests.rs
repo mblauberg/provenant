@@ -292,6 +292,7 @@ fn worst_case_pending_steers() -> PendingSteerQueue {
                     requester_agent: requester.agent.clone(),
                     requester_actor: requester.actor,
                     text: "\u{1}".repeat(MAX_PENDING_GRAPH_STEER_BYTES / MAX_PENDING_GRAPH_STEERS),
+                    now: false,
                     refusal: Some(PendingSteerRefusal::OwnerRefused),
                 },
             )
@@ -1282,6 +1283,7 @@ fn pending_steer_replay_keeps_work_and_requester_identity_until_receipt_commit()
         requester_agent: requester.agent,
         requester_actor: requester.actor,
         text: "resume with the handoff".into(),
+        now: false,
         refusal: None,
     };
     let mut queue = PendingSteerQueue::default();
@@ -1370,6 +1372,7 @@ fn graph_status_never_serialises_pending_steer_text() {
                 requester_agent: requester.agent,
                 requester_actor: requester.actor,
                 text: "private queued instruction".into(),
+                now: false,
                 refusal: None,
             },
         )
