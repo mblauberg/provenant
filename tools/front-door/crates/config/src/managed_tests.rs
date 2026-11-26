@@ -256,7 +256,7 @@ fn first_install_replaces_foreign_release_links_and_current_agents() {
     let skill = codex.skills_dir.join("example");
     fs::create_dir_all(skill.parent().unwrap()).unwrap();
     symlink(old_root.join("skills/example"), &skill).unwrap();
-    let instruction = codex.instruction.as_ref().unwrap();
+    let instruction = codex.instruction_file.as_ref().unwrap();
     fs::create_dir_all(instruction.parent().unwrap()).unwrap();
     symlink(old_root.join("instructions/AGENTS.md"), instruction).unwrap();
     fs::create_dir_all(f.targets.shared_instruction.parent().unwrap()).unwrap();
@@ -3266,13 +3266,13 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     let claude_instruction = custom.join("claude/CLAUDE.md");
     f.targets.bin_dir = custom.join("bin");
     f.targets.harnesses[0].skills_dir = codex_skills.clone();
-    f.targets.harnesses[0].instruction = Some(codex_instruction.clone());
+    f.targets.harnesses[0].instruction_file = Some(codex_instruction.clone());
     f.targets.harnesses.push(HarnessTarget {
         harness: Harness::Claude,
         config_file: f.home.join(".claude.json"),
         hook_file: Some(f.home.join(".claude/settings.json")),
         skills_dir: claude_skills.clone(),
-        instruction: Some(claude_instruction.clone()),
+        instruction_file: Some(claude_instruction.clone()),
     });
     fs::create_dir_all(f.source.join("instructions")).unwrap();
     let asset = f.source.join("instructions/AGENTS.md");
@@ -3315,7 +3315,7 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
         target.skills_dir = custom
             .join("changed")
             .join(format!("{:?}/skills", target.harness));
-        target.instruction = None;
+        target.instruction_file = None;
     }
     assert!(no_drift(
         &inspect_install(
@@ -3334,7 +3334,7 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
         config_file: f.home.join(".claude.json"),
         hook_file: Some(f.home.join(".claude/settings.json")),
         skills_dir: custom.join("changed/claude/skills"),
-        instruction: None,
+        instruction_file: None,
     }];
     uninstall(
         &changed,
@@ -3389,7 +3389,7 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
     );
     assert_eq!(
         receipt.harness_targets[0]
-            .instruction
+            .instruction_file
             .as_ref()
             .unwrap()
             .to_path_buf()
@@ -3399,7 +3399,7 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
     let mut changed_targets = f.targets.clone();
     changed_targets.bin_dir = f.home.join("elsewhere/bin");
     changed_targets.harnesses[0].skills_dir = f.home.join("elsewhere/skills");
-    changed_targets.harnesses[0].instruction = Some(f.home.join("elsewhere/AGENTS.md"));
+    changed_targets.harnesses[0].instruction_file = Some(f.home.join("elsewhere/AGENTS.md"));
     assert!(no_drift(
         &inspect_install(
             &changed_targets,
@@ -3733,7 +3733,7 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
             target.config_file.is_file(),
             target.harness == Harness::Opencode
         );
-        if let Some(instruction) = &target.instruction {
+        if let Some(instruction) = &target.instruction_file {
             assert!(
                 fs::read_link(instruction)
                     .unwrap()

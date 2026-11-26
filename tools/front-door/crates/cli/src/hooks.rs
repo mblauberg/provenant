@@ -26,13 +26,13 @@ pub fn delivery_capabilities() -> Vec<provenant_records::inbox::DeliveryCapabili
             .provider
             .spec()
             .install
-            .is_some_and(|install| install.answer_delivery.is_supported());
+            .is_some_and(|install| install.native.answer_delivery.value);
     }
     for spec in ADAPTER_SPECS {
         let Some(install) = spec.install else {
             continue;
         };
-        if install.answer_delivery.is_supported() {
+        if install.native.answer_delivery.value {
             capabilities.push(DeliveryCapability {
                 provider: spec.id,
                 transport: AnswerTransport::ProviderHook,
@@ -85,13 +85,15 @@ fn handler(action: HookAction) -> Handler {
 }
 
 fn resolve_provider(name: &str, command: &str) -> Option<ResolvedHook> {
-    let spec = ADAPTER_SPECS.iter().find(|spec| spec.name == name)?;
+    let spec = ADAPTER_SPECS
+        .iter()
+        .find(|spec| spec.identity.name == name)?;
     let install = spec.install?;
     let requested = HookAction::ALL
         .iter()
         .copied()
         .find(|action| action.command() == command)?;
-    if requested.is_answer_delivery() && !install.answer_delivery.is_supported() {
+    if requested.is_answer_delivery() && !install.native.answer_delivery.value {
         return None;
     }
     let HookEvent::Supported { event, .. } = install.hook_events.iter().find(
@@ -143,14 +145,14 @@ mod tests {
         for spec in ADAPTER_SPECS {
             let supported = spec
                 .install
-                .is_some_and(|install| install.answer_delivery.is_supported());
+                .is_some_and(|install| install.native.answer_delivery.value);
             let mail: Vec<_> = capabilities
                 .iter()
                 .filter(|cap| {
                     cap.provider == spec.id && cap.transport == AnswerTransport::FabricMail
                 })
                 .collect();
-            assert_eq!(mail.len(), 1, "{} mail capability", spec.name);
+            assert_eq!(mail.len(), 1, "{} mail capability", spec.identity.name);
             assert_eq!(mail[0].local_offer_reader, supported);
             assert!(!mail[0].live_injection);
 
@@ -164,7 +166,7 @@ mod tests {
                 hooks.len(),
                 usize::from(supported),
                 "{} hook capability",
-                spec.name
+                spec.identity.name
             );
             for hook in hooks {
                 assert!(hook.local_offer_reader && hook.live_injection);
@@ -183,7 +185,7 @@ mod tests {
                     continue;
                 };
                 let hook = Hook::Provider(vec![
-                    OsString::from(spec.name),
+                    OsString::from(spec.identity.name),
                     OsString::from(action.command()),
                 ])
                 .spec()
@@ -205,7 +207,7 @@ mod tests {
         {
             for spec in ADAPTER_SPECS {
                 if let Some(hook) = Hook::Provider(vec![
-                    OsString::from(spec.name),
+                    OsString::from(spec.identity.name),
                     OsString::from(action.command()),
                 ])
                 .spec()
@@ -213,7 +215,7 @@ mod tests {
                     assert!(
                         matches!(hook.handler, Handler::AnswerDelivery),
                         "{} {:?}",
-                        spec.name,
+                        spec.identity.name,
                         action
                     );
                     assert!(hook.client.is_some_and(|client| client == spec.id));
@@ -222,7 +224,7 @@ mod tests {
         }
         assert!(
             Hook::Provider(vec![
-                OsString::from(provenant_records::Harness::Claude.spec().name),
+                OsString::from(provenant_records::Harness::Claude.spec().identity.name),
                 OsString::from(POST_TOOL_USE),
             ])
             .spec()

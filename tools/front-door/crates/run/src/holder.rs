@@ -637,8 +637,8 @@ fn account_directories(
     specs
         .iter()
         .filter_map(|spec| {
-            let (environment, _) = spec.default_account_directory?;
-            lookup(environment).map(|path| (spec.name.to_owned(), PathBuf::from(path)))
+            let (environment, _) = spec.accounts.default_directory?;
+            lookup(environment).map(|path| (spec.identity.name.to_owned(), PathBuf::from(path)))
         })
         .collect()
 }
@@ -1022,6 +1022,7 @@ fn warn_stray_check(error: &dyn std::fmt::Display) {
     warn(Warning::new(
         STRAY_WORK_CHECK_FAILED,
         format!("could not check the primary checkout for stray lane work: {error}"),
+        provenant_records::warning::detected_source(STRAY_WORK_CHECK_FAILED),
     ));
 }
 
@@ -1033,6 +1034,7 @@ fn warn_retained_private_git(what: &str, error: &dyn std::fmt::Display) {
     warn(Warning::new(
         PRIVATE_GIT_RETAINED,
         format!("{what}; retaining the private Git: {error}"),
+        provenant_records::warning::detected_source(PRIVATE_GIT_RETAINED),
     ));
 }
 
@@ -1137,6 +1139,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             .map_err(custody_error)?;
         // The live capture is newer than the periodically published checkpoint.
         record.last_output_at = last_output;
+        record.first_output_at = record.first_output_at.or(last_output);
         let attempt = store
             .attempt_dir(context.attempt_id, false)
             .map_err(custody_error)?;
@@ -1319,9 +1322,9 @@ fn record_budget_warning(
     use provenant_records::control::*;
     let support = provenant_records::ADAPTER_SPECS
         .iter()
-        .find(|spec| Some(spec.name) == provider)
+        .find(|spec| Some(spec.identity.name) == provider)
         .map_or(ControlSupport::Unsupported, |spec| {
-            spec.launch.control.for_launch(LaunchKind::Lane)
+            spec.capabilities.control.for_launch(LaunchKind::Lane)
         });
     let receipt = ControlReceipt {
         extra: Default::default(),
@@ -1614,6 +1617,7 @@ impl RunStore {
                         warn(Warning::new(
                             PRIVATE_GIT_RETAINED,
                             format!("private Git staged paths unreadable; retaining it: {error}"),
+                            provenant_records::warning::detected_source(PRIVATE_GIT_RETAINED),
                         ));
                         unreadable = true;
                         Vec::new()
@@ -2130,10 +2134,19 @@ impl RunStore {
             format!("{}{steering}", crate::controls::STEER_PROMPT_PREFIX)
         };
         if let Some(warning) = repin_warning.take() {
-            provenant_records::warning::warn(provenant_records::warning::Warning::new(
-                provenant_records::warning::BRANCH_BEHIND_BASE,
-                warning.clone(),
-            ));
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::BRANCH_BEHIND_BASE,
+                    warning.clone(),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::BRANCH_BEHIND_BASE,
+                    ),
+                )
+                .source(provenant_records::Source {
+                    layer: provenant_records::Layer::Detected,
+                    origin: Some("writer branch repin".to_owned()),
+                }),
+            );
             prompt.push_str("\n\n");
             prompt.push_str(&warning);
         }
@@ -2184,7 +2197,7 @@ impl RunStore {
                     .provider
                     .as_deref()
                     .and_then(provenant_records::AdapterSpec::get)
-                    .is_some_and(|spec| !spec.launch.control.lane.continues())
+                    .is_some_and(|spec| !spec.capabilities.control.lane.continues())
         });
         if (session.is_none() || unsupported) && !fresh_with_handoff {
             return Err(RunError::SteerSessionUnavailable);
@@ -2924,7 +2937,11 @@ impl RunStore {
             .applied_route
             .as_ref()
             .and_then(|r| r.provider.as_deref())
-            == Some("codex")
+            .and_then(provenant_records::AdapterSpec::get)
+            .is_some_and(|s| {
+                s.capabilities.usage_attribution.value
+                    == provenant_records::UsageAttribution::Session
+            })
         {
             let prior_id = self.request(record.attempt_id, call).map(|request| {
                 if request.fresh_continuation.is_none() {
@@ -3543,6 +3560,9 @@ impl RunStore {
                                         warn(Warning::new(
                                             PRIMARY_MOVED_UNATTRIBUTED,
                                             note.clone(),
+                                            provenant_records::warning::detected_source(
+                                                PRIMARY_MOVED_UNATTRIBUTED,
+                                            ),
                                         ));
                                         primary =
                                             provenant_records::settlement::PrimaryCheckout::Warn {
@@ -3550,7 +3570,13 @@ impl RunStore {
                                             };
                                     }
                                     crate::writer::StrayDisposition::Review { note } => {
-                                        warn(Warning::new(STRAY_LANE_WORK, note.clone()));
+                                        warn(Warning::new(
+                                            STRAY_LANE_WORK,
+                                            note.clone(),
+                                            provenant_records::warning::detected_source(
+                                                STRAY_LANE_WORK,
+                                            ),
+                                        ));
                                         primary = provenant_records::settlement::PrimaryCheckout::Review {
                                             note,
                                         };
@@ -4871,8 +4897,8 @@ mod host_clock_tests {
     #[test]
     fn account_directory_overrides_follow_registry_entries() {
         let mut fixture = provenant_records::ADAPTER_SPECS[0];
-        fixture.name = "fixture";
-        fixture.default_account_directory = Some(("FIXTURE_HOME", ".fixture"));
+        fixture.identity.name = "fixture";
+        fixture.accounts.default_directory = Some(("FIXTURE_HOME", ".fixture"));
         let actual = account_directories(&[fixture], |key| {
             (key == "FIXTURE_HOME").then(|| "/fixture/home".into())
         });

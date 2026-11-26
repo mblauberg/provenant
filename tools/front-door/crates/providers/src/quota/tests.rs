@@ -319,19 +319,19 @@ fn no_reported_windows_remain_unknown() {
 fn quota_effects_follow_specs_and_require_successful_commands() {
     for spec in provenant_records::ADAPTER_SPECS {
         use provenant_records::QuotaProbeKind;
-        let expected = match spec.quota_probe {
+        let expected = match spec.quota.probe {
             QuotaProbeKind::HttpGet => QuotaEffectKind::HttpGet,
             QuotaProbeKind::Command => QuotaEffectKind::Command,
             QuotaProbeKind::LocalLedger => QuotaEffectKind::LocalLedger,
             QuotaProbeKind::None => {
                 assert!(matches!(
-                    super::plan(spec.name, &scope(spec.name), &input()),
+                    super::plan(spec.identity.name, &scope(spec.identity.name), &input()),
                     Err(QuotaError::Disabled)
                 ));
                 continue;
             }
         };
-        let plan = super::plan(spec.name, &scope(spec.name), &input()).unwrap();
+        let plan = super::plan(spec.identity.name, &scope(spec.identity.name), &input()).unwrap();
         assert_eq!(plan.kind, expected);
         let capture = provenant_quota::ProbeCapture {
             stdout: br#"{"payload": {}}"#.to_vec(),
@@ -339,14 +339,14 @@ fn quota_effects_follow_specs_and_require_successful_commands() {
             exit_code: None,
             overflowed: false,
         };
-        let result = source(spec.name).decode(&plan, &capture);
+        let result = source(spec.identity.name).decode(&plan, &capture);
         if expected == QuotaEffectKind::Command {
             assert!(matches!(
                 result,
                 Err(QuotaError::Invalid("provider quota effect"))
             ));
         } else {
-            assert!(result.is_ok(), "{}: {result:?}", spec.name);
+            assert!(result.is_ok(), "{}: {result:?}", spec.identity.name);
         }
     }
     assert!(matches!(

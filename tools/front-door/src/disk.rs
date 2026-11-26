@@ -179,7 +179,7 @@ fn capped_warning(omitted: usize) -> Warning {
     Warning::new(
         RESULT_TOO_LARGE,
         format!("[RESULT_TOO_LARGE] disk report exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted"),
-    )
+     provenant_records::warning::detected_source(RESULT_TOO_LARGE))
     .repair("preview reclaim candidates with `provenant gc --dry-run`")
 }
 

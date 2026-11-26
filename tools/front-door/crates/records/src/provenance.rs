@@ -75,8 +75,9 @@ impl Layer {
 
 /// A layer plus the exact place, for example
 /// `~/.config/provenant/config.toml#lanes.writer_dirty`,
-/// `.provenant/ports.json#verify.remote` or `--max-turns`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `.provenant/ports.json#verify.remote` or `--max-turns`. The default is the
+/// compiled default with no named place.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Source {
     /// The layer that set the value.
     pub layer: Layer,
@@ -139,6 +140,7 @@ pub fn warn_ignored<T>(ignored: &[Sourced<T>], setting: &str) {
                     "{setting} value from {} ignored: this family does not declare that layer",
                     candidate.source.layer.description()
                 ),
+                crate::warning::detected_source(SETTING_LAYER_IGNORED),
             )
             .source(candidate.source.clone())
             .repair(format!("set {setting} from a layer this family declares")),
@@ -294,10 +296,7 @@ mod tests {
             crate::warning::capture(|| crate::warn_ignored(&merge.ignored, "example"));
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
-        assert_eq!(
-            warnings[0].source.as_ref().map(|source| source.layer),
-            Some(Layer::Profile)
-        );
+        assert_eq!(warnings[0].source.layer, Layer::Profile);
         assert!(warnings[0].repair.is_some());
     }
 

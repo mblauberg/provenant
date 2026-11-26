@@ -213,6 +213,140 @@ pub(super) fn panel_patch(parent: &str, commit: &str, revision: u64) -> patch::P
     }
 }
 
+/// One adjudication node resolves a split verdict on one head. The patch adds
+/// only that node after the panel: no loop, no round, no second panel. An
+/// upheld changes-request still needs repair, which the adjudicator declares.
+/// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+pub(super) fn split_verdict_patch(parent: &str, head: Option<&str>, revision: u64) -> patch::Patch {
+    let mut adjudicate = serde_json::json!({
+        "id": "adjudicate",
+        "kind": "adjudicate",
+        "access": "read_only",
+        "route": {"alias": "senior"},
+        "after": [parent],
+        "inputs": [{"node": parent, "outputs": ["verdict", "findings"]}],
+        "require_findings": true,
+        "prompt": "Read only. The panel above reported conflicting verdicts on one head. Resolve the split once: weigh each finding against the code and the named invariant in its top-level `class`. Return every input finding in the findings block with its id and invariant preserved, then exactly one verdict. Do not re-run a full panel or start another review round. If a blocking finding is upheld, name the invariant it breaks and say that repair is required; an upheld changes-request legitimately needs a repair round, but the split itself does not. Give VERDICT: PASS only when no blocking finding survives adjudication, otherwise VERDICT: FAIL or VERDICT: INCONCLUSIVE."
+    });
+    if let Some(head) = head {
+        adjudicate["source"] = serde_json::json!({"type": "commit", "commit": head});
+    }
+    patch::Patch {
+        schema_version: patch::PATCH_SCHEMA_VERSION,
+        expected_revision: Some(revision),
+        idempotency_key: Some(format!(
+            "split-adjudicate:{}",
+            CanonicalV1::file_digest(format!("{parent}\0{}", head.unwrap_or("")).as_bytes())
+        )),
+        reason: Some("split verdict on one head".into()),
+        nodes: vec![adjudicate],
+        ..Default::default()
+    }
+}
+
+/// The subject is recorded on the panel's launched members, not its composite boundary.
+pub(super) fn split_panel_head<'a>(
+    parent: &'a str,
+    checkpoint: &'a GraphCheckpoint,
+) -> Result<Option<&'a str>, &'static str> {
+    let mut pending = vec![parent];
+    let mut head = None;
+    while let Some(id) = pending.pop() {
+        if let Some(progress) = checkpoint.nodes.iter().find(|node| node.id == id) {
+            pending.extend(progress.children.iter().map(String::as_str));
+            if let Some(commit) = progress.source_commit.as_deref() {
+                if head.is_some_and(|previous| previous != commit) {
+                    return Err("split panel members reviewed different heads");
+                }
+                head = Some(commit);
+            }
+        }
+    }
+    Ok(head)
+}
+
+/// Locate an adjudicator through its persisted patch parent and pinned source.
+pub(super) fn panel_adjudicator<'a>(
+    parent: &str,
+    head: Option<&str>,
+    checkpoint: &'a GraphCheckpoint,
+) -> Option<&'a GraphNode> {
+    checkpoint
+        .expansions
+        .iter()
+        .flat_map(|expansion| &expansion.nodes)
+        .find(|node| {
+            node.kind == Some(NodeKind::Adjudicate)
+                && node.parent_node.as_deref() == Some(parent)
+                && match (&node.source, head) {
+                    (Some(SourceBinding::Commit { commit }), Some(head)) => commit == head,
+                    (None, None) => true,
+                    _ => false,
+                }
+        })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct SplitAdjudication {
+    pub(super) parent: String,
+    pub(super) head: Option<String>,
+    pub(super) revision: u64,
+}
+
+/// A panel can synthesise its verdict after a nested lens group split.
+fn panel_has_split(parent: &NodeProgress, checkpoint: &GraphCheckpoint) -> bool {
+    let mut pending = vec![parent];
+    while let Some(node) = pending.pop() {
+        if node.state == NodeState::Succeeded
+            && node.outputs.as_ref().is_some_and(|outputs| {
+                outputs
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with("review_split_verdict:"))
+            })
+        {
+            return true;
+        }
+        pending.extend(
+            node.children
+                .iter()
+                .filter_map(|id| checkpoint.nodes.iter().find(|child| child.id == *id)),
+        );
+    }
+    false
+}
+
+/// A gate only adjudicates split panels whose verdicts it consumes.
+pub(super) fn split_adjudication(
+    gate: &PlannedNode,
+    checkpoint: &GraphCheckpoint,
+) -> Result<Option<SplitAdjudication>, &'static str> {
+    let candidates = gate.inputs.iter().flat_map(|input| {
+        std::iter::once(input.node.as_str()).chain(
+            panel_expansion(checkpoint, &input.node)
+                .and_then(panel_root)
+                .map(|root| root.id.as_str()),
+        )
+    });
+    for id in candidates {
+        let Some(parent) = checkpoint.nodes.iter().find(|node| node.id == id) else {
+            continue;
+        };
+        if parent.state != NodeState::Succeeded || !panel_has_split(parent, checkpoint) {
+            continue;
+        }
+        let head = split_panel_head(&parent.id, checkpoint)?;
+        if panel_adjudicator(&parent.id, head, checkpoint).is_none() {
+            return Ok(Some(SplitAdjudication {
+                parent: parent.id.clone(),
+                head: head.map(str::to_owned),
+                revision: patch::revision(checkpoint),
+            }));
+        }
+    }
+    Ok(None)
+}
+
 pub(super) fn replan_source<'a>(
     node: &PlannedNode,
     checkpoint: &'a GraphCheckpoint,
@@ -342,18 +476,28 @@ pub(super) fn panel_outputs<'a>(
     if panel_pending(checkpoint, expansion) {
         return None;
     }
-    let root = expansion.nodes.iter().find(|candidate| {
+    let root = panel_root(expansion)?;
+    let head = split_panel_head(&root.id, checkpoint).ok()?;
+    let progress = if let Some(adjudicator) = panel_adjudicator(&root.id, head, checkpoint) {
+        checkpoint.nodes.iter().find(|progress| {
+            progress.id == adjudicator.id && progress.state == NodeState::Succeeded
+        })?
+    } else {
+        checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == root.id)?
+    };
+    progress.outputs.as_ref()
+}
+
+fn panel_root(expansion: &Expansion) -> Option<&GraphNode> {
+    expansion.nodes.iter().find(|candidate| {
         candidate.composite.is_some()
             && expansion.nodes.iter().all(|member| {
                 member.id == candidate.id || member.id.starts_with(&format!("{}--", candidate.id))
             })
-    })?;
-    checkpoint
-        .nodes
-        .iter()
-        .find(|progress| progress.id == root.id)?
-        .outputs
-        .as_ref()
+    })
 }
 
 /// A failed expanded panel is recovered by its enclosing bounded repair loop.
@@ -384,12 +528,7 @@ pub(super) fn handled_panel(checkpoint: &GraphCheckpoint, node: &NodeProgress) -
 }
 
 pub(super) fn panel_failure(checkpoint: &GraphCheckpoint, expansion: &Expansion) -> Option<String> {
-    let Some(root) = expansion.nodes.iter().find(|candidate| {
-        candidate.composite.is_some()
-            && expansion.nodes.iter().all(|member| {
-                member.id == candidate.id || member.id.starts_with(&format!("{}--", candidate.id))
-            })
-    }) else {
+    let Some(root) = panel_root(expansion) else {
         return Some("replanned panel boundary is missing".into());
     };
     let Some(progress) = checkpoint
@@ -399,7 +538,7 @@ pub(super) fn panel_failure(checkpoint: &GraphCheckpoint, expansion: &Expansion)
     else {
         return Some("replanned panel boundary is missing".into());
     };
-    let Some(outputs) = progress.outputs.as_ref() else {
+    let Some(outputs) = panel_outputs(checkpoint, &expansion.source) else {
         return Some("replanned panel has no complete output".into());
     };
     if progress.state != NodeState::Succeeded
@@ -500,13 +639,34 @@ fn same_finding(left: &Finding, right: &Finding) -> bool {
         && left.lens == right.lens
 }
 
+/// Two distinct findings that name the same invariant are one shared flaw,
+/// whether or not a reviewer remembered to set the boolean. The named class is
+/// the cause the design path keys on, so a repeated invariant routes to design
+/// even when the boolean was omitted.
+/// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn shared_flaw(findings: &[&Finding]) -> bool {
-    findings.iter().any(|finding| {
+    if findings.iter().any(|finding| {
         finding
             .triage
             .as_ref()
             .is_some_and(|triage| triage.shared_flaw)
-    })
+    }) {
+        return true;
+    }
+    let mut owners: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for finding in findings {
+        let Some(invariant) = finding.named_invariant() else {
+            continue;
+        };
+        if owners
+            .get(invariant)
+            .is_some_and(|owner| *owner != finding.id.as_str())
+        {
+            return true;
+        }
+        owners.entry(invariant).or_insert(finding.id.as_str());
+    }
+    false
 }
 
 fn design_cannot_hold(outputs: &NodeOutputs) -> bool {
@@ -986,5 +1146,127 @@ mod tests {
         let patch = panel_patch("review", &"a".repeat(40), 2);
         assert_eq!(patch.nodes[0]["use"], "review-panel");
         assert_eq!(patch.nodes[0]["distinct_strength"], "prefer");
+    }
+    #[test]
+    // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+    fn split_verdict_patch_creates_one_adjudicator_and_no_round() {
+        let patch = split_verdict_patch("panel", None, 2);
+        assert_eq!(patch.nodes.len(), 1);
+        assert_eq!(patch.nodes[0]["kind"], "adjudicate");
+        assert_eq!(patch.nodes[0]["after"][0], "panel");
+        assert!(patch.nodes[0].get("loop").is_none());
+        assert!(patch.nodes[0].get("repeat").is_none());
+        assert!(patch.idempotency_key.is_some());
+    }
+    #[test]
+    fn split_adjudication_detects_a_flagged_panel_once() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"split","nodes":[
+                {"id":"panel","access":"read_only","prompt":"review","route":{"alias":"fixture"}},
+                {"id":"gate","kind":"gate","access":"read_only","depends_on":["panel"],
+                 "inputs":[{"node":"panel","outputs":["verdict"]}],
+                 "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+            ]
+        }))
+        .unwrap();
+        let (plan, _) =
+            validate_flat_plan(&document, &crate::config::GraphLimits::default()).unwrap();
+        let mut checkpoint = transitions::initial_checkpoint(
+            &document,
+            &plan,
+            CanonicalV1::file_digest(b"split").to_string(),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            split_adjudication(&plan.nodes[1], &checkpoint)
+                .unwrap()
+                .is_none()
+        );
+        checkpoint.nodes[0].state = NodeState::Succeeded;
+        checkpoint.nodes[0].outputs = Some(NodeOutputs {
+            warnings: vec!["review_split_verdict: conflicting verdicts on one head".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            split_adjudication(&plan.nodes[1], &checkpoint).unwrap(),
+            Some(SplitAdjudication {
+                parent: "panel".into(),
+                head: None,
+                revision: patch::revision(&checkpoint),
+            })
+        );
+        checkpoint.expansions.push(
+            serde_json::from_value(serde_json::json!({
+                "source":"panel", "nodes":[{"id":"panel--adjudicate", "kind":"adjudicate",
+                    "parent_node":"panel", "access":"read_only", "prompt":"resolve"}]
+            }))
+            .unwrap(),
+        );
+        assert!(
+            split_adjudication(&plan.nodes[1], &checkpoint)
+                .unwrap()
+                .is_none()
+        );
+    }
+    // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+    #[test]
+    fn replanned_split_requires_its_own_successful_adjudicator_output() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "panel-output", "nodes": [
+                {"id":"check", "access":"read_only", "prompt":"review", "route":{"alias":"fixture"}}
+            ]
+        }))
+        .unwrap();
+        let (plan, _) =
+            validate_flat_plan(&document, &crate::config::GraphLimits::default()).unwrap();
+        let mut checkpoint = transitions::initial_checkpoint(
+            &document,
+            &plan,
+            CanonicalV1::file_digest(b"panel-output").to_string(),
+            None,
+            None,
+            None,
+        );
+        let mut panel = checkpoint.nodes[0].clone();
+        panel.id = "check--panel".into();
+        panel.state = NodeState::Succeeded;
+        panel.outputs = Some(NodeOutputs {
+            verdict: Some("VERDICT: PASS".into()),
+            ..Default::default()
+        });
+        let mut adjudicator = panel.clone();
+        adjudicator.id = "check--panel--adjudicate".into();
+        adjudicator.state = NodeState::Failed;
+        adjudicator.outputs = None;
+        checkpoint.nodes.extend([panel, adjudicator]);
+        checkpoint.expansions.push(
+            serde_json::from_value(serde_json::json!({
+                "source":"check", "patch":{"revision":1,"digest":"fixture","parent":"check",
+                    "reason":"repair expanded risk or scope"},
+                "nodes":[{"id":"check--panel", "kind":"composite", "access":"read_only",
+                    "composite":{"nodes":[],"exports":[]}}]
+            }))
+            .unwrap(),
+        );
+        checkpoint.expansions.push(serde_json::from_value(serde_json::json!({
+            "source":"check--panel", "nodes":[{"id":"check--panel--adjudicate",
+                "kind":"adjudicate", "parent_node":"check--panel", "access":"read_only", "prompt":"resolve"}]
+        })).unwrap());
+        assert!(
+            panel_outputs(&checkpoint, "check").is_none(),
+            "a failed adjudicator cannot be bypassed by the panel verdict"
+        );
+        let adjudicator = checkpoint.nodes.last_mut().unwrap();
+        adjudicator.state = NodeState::Succeeded;
+        adjudicator.outputs = Some(NodeOutputs {
+            verdict: Some("VERDICT: FAIL".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            panel_outputs(&checkpoint, "check").and_then(|outputs| outputs.verdict.as_deref()),
+            Some("VERDICT: FAIL")
+        );
     }
 }

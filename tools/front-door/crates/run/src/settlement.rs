@@ -1359,7 +1359,7 @@ mod tests {
             .collect();
         assert_eq!(missing.len(), 1, "{warnings:?}");
         assert!(missing[0].message.contains(&id.to_string()));
-        let source = missing[0].source.as_ref().ok_or("missing fence source")?;
+        let source = &missing[0].source;
         assert_eq!(source.layer, provenant_records::Layer::Detected);
         assert!(
             source
@@ -3989,6 +3989,7 @@ fn report_registry_error(attempt: provenant_core::AttemptId, error: &RunError) {
         Warning::new(
             WRITER_FENCE_LIST_FAILED,
             format!("writer fence listing failed for {attempt}: {error}"),
+            provenant_records::warning::detected_source(WRITER_FENCE_LIST_FAILED),
         )
         .subject(format!("attempt {attempt}")),
     );
@@ -4011,7 +4012,7 @@ fn warn_retained_fence_missing(attempt: provenant_core::AttemptId, slot: Option<
         format!(
             "attempt {attempt} named a retained writer fence that is missing at {detail}; abandonment settles and keeps its worktree and uncommitted files"
         ),
-    )
+     provenant_records::warning::detected_source(ABANDON_RETAINED_FENCE_MISSING))
     .subject(format!("attempt {attempt}"));
     if let Some(origin) = origin {
         warning = warning.source(Source {
@@ -4044,7 +4045,7 @@ fn warn_abandon_stale_registration(
                 "abandoned lane {attempt} left a Git registration for its removed worktree {}: {detail}; {repair}",
                 worktree.display()
             ),
-        )
+         provenant_records::warning::detected_source(ABANDON_STALE_WORKTREE_REGISTRATION))
         .subject(format!("attempt {attempt}"))
         .repair(repair),
     );

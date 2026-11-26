@@ -58,7 +58,7 @@ fn relevant(pool: &str) -> bool {
 }
 fn fresh(snapshot: &QuotaSnapshot, now: i64, freshness: &FreshnessPolicy) -> bool {
     provenant_records::AdapterSpec::get(&snapshot.account.adapter)
-        .is_some_and(|spec| spec.chair_switch)
+        .is_some_and(|spec| spec.launch.chair_switch)
         && matches!(
             snapshot.status,
             QuotaStatus::Available | QuotaStatus::Exhausted

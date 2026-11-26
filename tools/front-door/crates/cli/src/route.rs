@@ -463,6 +463,7 @@ pub(crate) fn task_exclusion_rules(
                         Warning::new(
                             CONFIG_KEY_IGNORED,
                             "dropping unrecognised carried graph exclusion",
+                            provenant_records::warning::detected_source(CONFIG_KEY_IGNORED),
                         )
                         .subject(format!("{selector:?}")),
                     );

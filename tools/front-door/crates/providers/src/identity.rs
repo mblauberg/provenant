@@ -61,7 +61,8 @@ pub fn agy_fingerprint(bytes: &[u8]) -> Option<String> {
     let email = tail.split_whitespace().next().filter(|s| s.contains('@'))?;
     let namespace = provenant_records::Harness::Agy
         .spec()
-        .account_identity_namespace?;
+        .accounts
+        .identity_namespace?;
     Some(format!("{namespace}{}", fingerprint(email)?.get(..12)?))
 }
 
@@ -118,7 +119,7 @@ impl RegisteredAccount {
         // config tree that overlaps another account's, so any directory below
         // the root qualifies, including a shallow home such as `/Users/me`.
         let shallowest = if provenant_records::AdapterSpec::get(adapter)
-            .is_some_and(|spec| spec.isolated_login_keychain)
+            .is_some_and(|spec| spec.accounts.isolated_login_keychain)
         {
             2
         } else {
@@ -177,7 +178,8 @@ pub fn account_state_paths(adapter: &str, directory: &std::path::Path) -> Vec<st
             let mut paths = vec![directory.join(install.home)];
             if let Some(spec) = spec {
                 paths.extend(
-                    spec.credential_files
+                    spec.login
+                        .credential_files
                         .iter()
                         .map(|file| directory.join(file)),
                 );

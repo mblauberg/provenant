@@ -390,8 +390,12 @@ fn private_metadata(
             use provenant_records::warning::{RUN_STORE_MODE_TIGHTENED, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             warn(
-                Warning::new(RUN_STORE_MODE_TIGHTENED, rendered.clone())
-                    .subject(dir.anchored_path().join(name).display().to_string()),
+                Warning::new(
+                    RUN_STORE_MODE_TIGHTENED,
+                    rendered.clone(),
+                    provenant_records::warning::detected_source(RUN_STORE_MODE_TIGHTENED),
+                )
+                .subject(dir.anchored_path().join(name).display().to_string()),
             );
         }
         return Ok(after);

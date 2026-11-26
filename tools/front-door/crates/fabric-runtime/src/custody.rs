@@ -18,7 +18,11 @@ pub fn acquire(
 pub fn warning(message: impl std::fmt::Display) {
     use provenant_records::warning::{CUSTODY_HELD, Warning, warn};
     // Spec: docs/specs/cli.md#warnings-are-typed-values
-    warn(Warning::new(CUSTODY_HELD, message.to_string()));
+    warn(Warning::new(
+        CUSTODY_HELD,
+        message.to_string(),
+        provenant_records::warning::detected_source(CUSTODY_HELD),
+    ));
 }
 /// A warning is an observation, never a custody lock.
 pub fn warn(changes: &[CustodyChange]) {
@@ -34,6 +38,7 @@ pub fn warn(changes: &[CustodyChange]) {
                         change.record.subject,
                         holder_label(holder),
                     ),
+                    provenant_records::warning::detected_source(CUSTODY_CHANGED),
                 )
                 .subject(change.record.subject.to_string()),
             );

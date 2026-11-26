@@ -148,6 +148,15 @@ impl Finding {
         self.triage.clone()
     }
 
+    /// The named invariant this finding breaks. `class` is the single field
+    /// the review contract uses for the invariant name; it is what shared-flaw
+    /// routing and settlement checks key on.
+    pub fn named_invariant(&self) -> Option<&str> {
+        self.class
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    }
+
     pub fn boundary_or_data_loss(&self) -> bool {
         self.triage.as_ref().is_some_and(|triage| {
             matches!(triage.blocking_class.as_str(), "boundary" | "data_loss")

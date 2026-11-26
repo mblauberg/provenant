@@ -565,11 +565,11 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&rig.state, std::fs::Permissions::from_mode(0o700))?;
     }
-    // Under --json a warning rides in the envelope, never bare stderr. A
-    // per-change key is remembered, so the typo names once across both reads.
-    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    // Under --json a warning rides in the envelope, never bare stderr. JSON
+    // keeps every warning, repeats included, and never marks a key as shown, so
+    // both reads still carry the typo instead of hiding it behind an earlier
+    // memory. Spec: docs/specs/cli.md#warnings-are-typed-values
     let mut stderr = String::new();
-    let mut shown = 0;
     for args in [&["config", "show", "--json"][..], &["status", "--json"][..]] {
         let output = rig.command(args)?;
         assert_eq!(
@@ -579,7 +579,7 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
             String::from_utf8_lossy(&output.stdout.bytes)
         );
         let envelope: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-        shown += envelope["warnings"]
+        let shown = envelope["warnings"]
             .as_array()
             .ok_or("warnings")?
             .iter()
@@ -590,9 +590,9 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
                         .is_some_and(|message| message.contains("lanes.max_concurency"))
             })
             .count();
+        assert!(shown >= 1, "{args:?} {envelope}");
         stderr.push_str(&String::from_utf8_lossy(&output.stderr.bytes));
     }
-    assert_eq!(shown, 1, "{stderr}");
     assert!(!stderr.contains("warning:"), "{stderr}");
     assert!(!stderr.contains("PathWire"), "{stderr}");
     rig.assert_v1_root_untouched()
@@ -645,9 +645,9 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
     for adapter in provenant_records::ADAPTER_SPECS {
         let documented = documented_providers
             .iter()
-            .any(|provider| provider.as_str() == Some(adapter.name));
+            .any(|provider| provider.as_str() == Some(adapter.identity.name));
         for setting in ["update", "runtime_deadline_seconds"] {
-            let path = format!("providers.{}.{setting}", adapter.name);
+            let path = format!("providers.{}.{setting}", adapter.identity.name);
             assert_eq!(
                 compact.iter().any(|field| field["path"] == path),
                 documented,

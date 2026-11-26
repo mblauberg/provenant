@@ -841,6 +841,7 @@ impl RunStore {
                             "admission: settings unavailable: {}; proceeding with shipped policy",
                             probe_error(error)
                         ),
+                        provenant_records::warning::detected_source(RUN_SETTINGS_UNAVAILABLE),
                     )
                     .subject("LaneBuildSettings"),
                 )
@@ -857,6 +858,7 @@ impl RunStore {
                             "admission: memory pressure probe failed: {}",
                             probe_error(error)
                         ),
+                        provenant_records::warning::detected_source(RESOURCE_PROBE_FAILED),
                     )
                     .subject("memory pressure"),
                 )
@@ -875,6 +877,7 @@ impl RunStore {
                             "admission: process budget probe failed: {}",
                             probe_error(error)
                         ),
+                        provenant_records::warning::detected_source(RESOURCE_PROBE_FAILED),
                     )
                     .subject("process budget"),
                 )
@@ -889,6 +892,7 @@ impl RunStore {
                     Warning::new(
                         RESOURCE_PROBE_FAILED,
                         format!("admission: disk probe failed: {}", probe_error(error)),
+                        provenant_records::warning::detected_source(RESOURCE_PROBE_FAILED),
                     )
                     .subject("disk probe"),
                 )
@@ -902,6 +906,7 @@ impl RunStore {
                     Warning::new(
                         RESOURCE_PROBE_FAILED,
                         format!("admission: disk floor unavailable: {error}; proceeding"),
+                        provenant_records::warning::detected_source(RESOURCE_PROBE_FAILED),
                     )
                     .subject("disk floor"),
                 )
@@ -923,6 +928,7 @@ impl RunStore {
                             .unwrap_or("available memory is low"),
                         warning.next.as_deref().unwrap_or("inspect host memory")
                     ),
+                    provenant_records::warning::detected_source(MEMORY_FLOOR_LOW),
                 )
                 .subject(warning.code.clone()),
             );

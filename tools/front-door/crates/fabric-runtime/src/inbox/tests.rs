@@ -384,7 +384,7 @@ fn delivery_capabilities_publish_only_tested_fabric_fallback_for_each_provider()
         assert!(!capability.live_injection);
         assert!(!capability.local_offer_reader);
         let mut f = Fixture::new();
-        f.identity.client = capability.provider.spec().name.into();
+        f.identity.client = capability.provider.spec().identity.name.into();
         register(&f, "session-a");
         let created = receipt(f.call(ask(RequestKind::Decision, "ask")).unwrap());
         let saved = receipt(f.call(answer(created.request_id, "answer")).unwrap());

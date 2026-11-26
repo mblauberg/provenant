@@ -82,6 +82,9 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
             provenant_records::warning::Warning::new(
                 provenant_records::warning::PORT_DURATION_INVALID,
                 warning.clone(),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::PORT_DURATION_INVALID,
+                ),
             )
             .once_per_change(),
         );
@@ -317,6 +320,9 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
             provenant_records::warning::warn(provenant_records::warning::Warning::new(
                 provenant_records::warning::VERIFY_UNAVAILABLE,
                 format!("[VERIFY_UNAVAILABLE] {reason}; skipping verification"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::VERIFY_UNAVAILABLE,
+                ),
             ));
             return render(
                 Report {
@@ -414,7 +420,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                         provenant_records::warning::Warning::new(
                             provenant_records::warning::AFFECTED_SELECTION_UNAVAILABLE,
                             format!("affected selection unavailable: {error}"),
-                        )
+                         provenant_records::warning::detected_source(provenant_records::warning::AFFECTED_SELECTION_UNAVAILABLE))
                         .once_per_change(),
                     );
                 },
@@ -427,6 +433,9 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
         provenant_records::warning::warn(provenant_records::warning::Warning::new(
             provenant_records::warning::BUILD_PRIORITY_ADVISORY,
             warning.clone(),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::BUILD_PRIORITY_ADVISORY,
+            ),
         ));
     }
     let priority = match priority.value {
@@ -734,6 +743,9 @@ impl Drop for DetachedCheckout {
                     format!(
                         "failed to remove temporary checkout {}",
                         self.path.display()
+                    ),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::TEMP_CHECKOUT_RETAINED,
                     ),
                 )
                 .subject(self.path.display().to_string()),

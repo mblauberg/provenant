@@ -144,6 +144,7 @@ pub(crate) fn start_fabric_relay(
                         format!(
                             "handoff journal settings unavailable ({error}); using compiled defaults"
                         ),
+                        provenant_records::warning::detected_source(provenant_records::warning::CONFIG_UNAVAILABLE),
                     )
                     .subject("domains.run.declaration_journal_bytes")
                     .once_per_change(),

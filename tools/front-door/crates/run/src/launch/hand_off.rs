@@ -465,6 +465,7 @@ impl RunStore {
                     warn(Warning::new(
                         STOP_PUBLICATION_UNAVAILABLE,
                         format!("stop publication is unavailable: {error}"),
+                        provenant_records::warning::detected_source(STOP_PUBLICATION_UNAVAILABLE),
                     ));
                 }
             }
@@ -609,14 +610,19 @@ impl RunStore {
             permission_plan_digest: task.authority_digest,
             key,
             requester,
-            // OpenCode stores answering-model evidence in its shared XDG data
-            // directory. The guardian otherwise starts with an empty environment
-            // and no Registry home; retain the absolute path selected at launch.
-            config_environment: if provider == "opencode" {
-                vec!["XDG_DATA_HOME".into()]
-            } else {
-                vec![]
-            },
+            // An adapter declares the environment variables its guardian needs;
+            // the guardian otherwise starts with an empty environment and no
+            // Registry home. Retain the absolute path selected at launch.
+            config_environment: provenant_records::AdapterSpec::get(provider).map_or_else(
+                Vec::new,
+                |s| {
+                    s.launch
+                        .config_environment
+                        .iter()
+                        .map(|v| (*v).into())
+                        .collect()
+                },
+            ),
             argv: plan.argv,
             environment: plan.environment,
             cwd: plan.cwd,

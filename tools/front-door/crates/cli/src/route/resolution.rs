@@ -495,6 +495,11 @@ pub(super) fn with_context<T>(
             .policy
             .resolve_with_knobs(&project, &resolved_config.knobs, &Default::default())
     });
+    // Owner capability entries are config data, not routing I/O: read the same
+    // host and project layers the other overlays use here, once, and carry the
+    // effective entries on the routing document. Invalid rows warn without
+    // refusing the dispatch.
+    config.capability_overlay = crate::config_reads::capability_overlay(roots);
     config.allow_unknown_partial_headroom = allow_unknown;
     config.partial_headroom_source = Some(partial_headroom_source);
     resolve_pacing_accounts(&mut config, &domains.accounts)?;
@@ -535,7 +540,7 @@ pub(super) fn with_context<T>(
             .filter_map(|record| {
                 let at = record.observed_unix_seconds;
                 let spec = provenant_records::AdapterSpec::get(adapter)?;
-                let observed = match spec.login_observation {
+                let observed = match spec.login.observation {
                     provenant_records::LoginObservation::AccountAvailability => true,
                     provenant_records::LoginObservation::Reprobe => {
                         record.fixture_ref == format!("installed/{adapter}/login-status")
@@ -544,7 +549,7 @@ pub(super) fn with_context<T>(
                     provenant_records::LoginObservation::ExecutableOnly => false,
                     provenant_records::LoginObservation::None => false,
                 };
-                observed.then_some(if spec.login_check_names_account {
+                observed.then_some(if spec.login.check_names_account {
                     crate::quota::LoginEvidence::Verified(at)
                 } else {
                     crate::quota::LoginEvidence::Unverified(at)
@@ -1227,9 +1232,9 @@ pub fn resolve_review_family(
                             context.readiness.map_or_else(provenant_quota::ReadinessRead::absent, |lookup| lookup(scope, now))
                         });
                         let local = provenant_records::AdapterSpec::get(&selected.adapter)
-                            .filter(|spec| spec.local_login);
+                            .filter(|spec| spec.login.local);
                         if let Some(spec) = local {
-                            let key = spec.local_account.1;
+                            let key = spec.accounts.local_entry.1;
                             let mut scope = provenant_quota::ReadinessScope {
                                 extra: Default::default(),
                                 host: provenant_quota::LOCAL_HOST.into(),
@@ -1254,7 +1259,7 @@ pub fn resolve_review_family(
                             {
                                 recorded.push(RecordedReadiness {
                                     host: scope.host,
-                                    account: spec.local_account.0.into(),
+                                    account: spec.accounts.local_entry.0.into(),
                                     account_key: key.into(),
                                     model: model.as_str().into(),
                                     observation,
@@ -1309,7 +1314,7 @@ pub fn resolve_review_family(
                         }
                         if accounts.is_empty() {
                             return provenant_records::AdapterSpec::get(&selected.adapter)
-                                .map(|adapter| adapter.family.to_owned())
+                                .map(|adapter| adapter.identity.family.to_owned())
                                 .ok_or_else(|| {
                                     RoutingError::unknown_adapter(&selected.adapter).into()
                                 });

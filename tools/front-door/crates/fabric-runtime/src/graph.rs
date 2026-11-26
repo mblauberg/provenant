@@ -3651,10 +3651,27 @@ fn gate_failure(
         } => {
             use provenant_records::workflow::ReviewVerdict;
             for input in &node.inputs {
-                if let Some(error) = checkpoint.nodes[positions[&input.node]]
-                    .outputs
-                    .as_ref()
-                    .and_then(|outputs| outputs.verdict_error.as_ref())
+                let head = repair::split_panel_head(&input.node, checkpoint)
+                    .ok()
+                    .flatten();
+                let adjudicator = repair::panel_adjudicator(&input.node, head, checkpoint);
+                let adjudication = adjudicator
+                    .and_then(|adjudicator| positions.get(&adjudicator.id))
+                    .and_then(|&index| checkpoint.nodes.get(index))
+                    .filter(|progress| progress.state == NodeState::Succeeded)
+                    .and_then(|progress| progress.outputs.as_ref())
+                    .and_then(|outputs| outputs.verdict.as_deref());
+                if adjudicator.is_some() && adjudication.is_none() {
+                    return Some(format!(
+                        "input {}: adjudication has no successful verdict",
+                        input.node
+                    ));
+                }
+                if adjudication.is_none()
+                    && let Some(error) = checkpoint.nodes[positions[&input.node]]
+                        .outputs
+                        .as_ref()
+                        .and_then(|outputs| outputs.verdict_error.as_ref())
                 {
                     return Some(format!("input {}: {error}", input.node));
                 }
@@ -3677,8 +3694,17 @@ fn gate_failure(
                                     ))
                         });
                     }
-                    outputs
-                        .and_then(|outputs| outputs.verdict.as_ref())
+                    let head = repair::split_panel_head(&input.node, checkpoint)
+                        .ok()
+                        .flatten();
+                    let adjudication = repair::panel_adjudicator(&input.node, head, checkpoint)
+                        .and_then(|adjudicator| positions.get(&adjudicator.id))
+                        .and_then(|&index| checkpoint.nodes.get(index))
+                        .filter(|progress| progress.state == NodeState::Succeeded)
+                        .and_then(|progress| progress.outputs.as_ref())
+                        .and_then(|outputs| outputs.verdict.as_deref());
+                    adjudication
+                        .or_else(|| outputs.and_then(|outputs| outputs.verdict.as_deref()))
                         .is_some_and(|actual| {
                             match (
                                 ReviewVerdict::from_token(actual),

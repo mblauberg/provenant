@@ -1386,7 +1386,7 @@ pub fn render_or_publish<T: Serialize>(
                                 "[RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); paged to the owner-published artefact; proceeding",
                                 result.command
                             ),
-                        )
+                         provenant_records::warning::detected_source(RESULT_TOO_LARGE))
                         .repair(
                             "Read the published artifact named in data.artifact for the full result; request a smaller page.",
                         );

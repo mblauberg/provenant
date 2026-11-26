@@ -919,11 +919,12 @@ fn registered_opencode_plans_select_independently_of_account_keys()
         .insert("opencode".into(), PacingPolicy::Pace);
     let spec = provenant_records::AdapterSpec::get("opencode").ok_or("adapter")?;
     let records: Vec<_> = spec
-        .account_model_plans
+        .accounts
+        .model_plans
         .iter()
         .enumerate()
         .map(|(index, plan)| AvailabilityRecord {
-            adapter: spec.name.into(),
+            adapter: spec.identity.name.into(),
             plan: Some(plan.plan.into()),
             account_key: Some(format!("registered-{index}")),
             observed_models: vec![],
@@ -937,7 +938,7 @@ fn registered_opencode_plans_select_independently_of_account_keys()
     for entry in catalogue
         .models()
         .iter()
-        .filter(|entry| entry.model.adapter() == spec.name)
+        .filter(|entry| entry.model.adapter() == spec.identity.name)
     {
         let serving = records
             .iter()

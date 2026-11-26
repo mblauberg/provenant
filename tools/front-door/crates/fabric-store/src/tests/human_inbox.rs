@@ -6,33 +6,7 @@ use provenant_records::inbox::*;
 #[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
 fn invalid_hook_candidates_do_not_block_valid_answers() {
     use std::time::{Duration, Instant};
-    const CHILD: &str = "PROVENANT_INVALID_ANSWER_DIAGNOSTIC_TEST";
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::human_inbox::invalid_hook_candidates_do_not_block_valid_answers",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        for n in [1, 2] {
-            let diagnostic = format!(
-                "answer delivery: skipping invalid answer {}",
-                HumanAnswerId::from_bytes([n; 16])
-            );
-            // Both the observation and transaction boundaries diagnose the row.
-            assert_eq!(stderr.matches(&diagnostic).count(), 2, "{stderr}");
-        }
-        return;
-    }
+    let _ = provenant_records::warning::take_unhandled();
     let f = Fixture::new();
     let store = f.open();
     let target = AnswerTarget {
@@ -162,35 +136,29 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
             .items
             .is_empty()
     );
+    let warnings = provenant_records::warning::take_unhandled();
+    for n in [1, 2] {
+        let subject = format!("answer {}", HumanAnswerId::from_bytes([n; 16]));
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| {
+                    warning.code == provenant_records::warning::ANSWER_DELIVERY_SKIPPED.as_str()
+                        && warning.subject.as_deref() == Some(subject.as_str())
+                })
+                .count(),
+            2,
+            "both observation and transaction boundaries report the invalid answer: {warnings:?}"
+        );
+    }
 }
 
 #[test]
 #[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
 fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
     use std::time::{Duration, Instant};
-    const CHILD: &str = "PROVENANT_OVERSIZED_PAGE_TEST";
     let oversized_id = HumanAnswerId::from_bytes([3; 16]);
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::human_inbox::hook_page_reports_individually_oversized_answer_and_revisits_overflow", "--nocapture"])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(
-            stderr.matches(&format!(
-                "answer delivery: answer {oversized_id} exceeds internal page limit; retained for Fabric mail"
-            )).count(),
-            1,
-            "{stderr}"
-        );
-        return;
-    }
+    let _ = provenant_records::warning::take_unhandled();
     let f = Fixture::new();
     let store = f.open();
     let target = AnswerTarget {
@@ -296,6 +264,19 @@ fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
         [&existing_id], |row| row.get(0),
     ).unwrap();
     assert_eq!(error, "prior failure");
+    let warnings = provenant_records::warning::take_unhandled();
+    let subject = format!("answer {oversized_id}");
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| {
+                warning.code == provenant_records::warning::ANSWER_DELIVERY_RETAINED.as_str()
+                    && warning.subject.as_deref() == Some(subject.as_str())
+            })
+            .count(),
+        1,
+        "the oversized answer is reported once: {warnings:?}"
+    );
 }
 
 #[test]

@@ -433,6 +433,9 @@ impl Drop for Lease {
                 Warning::new(
                     provenant_records::warning::GC_SWEEP_LEASE_UNRELEASED,
                     "could not lock GC sweep metadata to release its lease",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::GC_SWEEP_LEASE_UNRELEASED,
+                    ),
                 )
                 .once_per_change(),
             );
@@ -450,6 +453,9 @@ impl Drop for Lease {
                 Warning::new(
                     provenant_records::warning::GC_SWEEP_CURSOR_UNWRITTEN,
                     format!("could not persist the released GC sweep cursor: {error}"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::GC_SWEEP_CURSOR_UNWRITTEN,
+                    ),
                 )
                 .once_per_change(),
             );
@@ -533,6 +539,7 @@ pub(crate) fn acquire(
             Warning::new(
                 SETTING_LAYER_IGNORED,
                 "gc.sweep_budget=0 checkpoints immediately without collecting",
+                provenant_records::warning::detected_source(SETTING_LAYER_IGNORED),
             )
             .once_per_change(),
         );
@@ -688,6 +695,7 @@ fn read_progress(directory: &Directory) -> Result<Option<Progress>, Box<dyn std:
                 Warning::new(
                     CONFIG_MALFORMED,
                     format!("corrupt {PROGRESS_FILE}: {error}; resetting cursor"),
+                    provenant_records::warning::detected_source(CONFIG_MALFORMED),
                 )
                 .subject(PROGRESS_FILE)
                 .once_per_change(),
@@ -719,6 +727,7 @@ fn next_epoch(
                     Warning::new(
                         CONFIG_MALFORMED,
                         format!("corrupt {EPOCH_FILE}; resetting epoch counter"),
+                        provenant_records::warning::detected_source(CONFIG_MALFORMED),
                     )
                     .subject(EPOCH_FILE)
                     .once_per_change(),

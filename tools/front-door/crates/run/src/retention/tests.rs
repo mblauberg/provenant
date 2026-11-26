@@ -2356,6 +2356,27 @@ fn gc_expires_credentials_at_one_day_and_archives_history_at_configured_age() ->
 }
 
 #[test]
+fn gc_keeps_an_undeclared_transcript_candidate_whole_as_history() -> TestResult {
+    let (_temp, context, store, input, attempt) = seeded()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    withdraw(&store, &input, &call)?;
+    let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    // Agy declares no transcript layout: the whole candidate is kept as
+    // history rather than split into a transcript archive.
+    let history = attempt.join("provider-history/candidate-1");
+    assert_eq!(fs::read_to_string(history.join("provider.txt"))?, "agy");
+    assert_eq!(
+        fs::read_to_string(history.join("unknown-session"))?,
+        "unknown transcript"
+    );
+    assert!(!history.join("auth.json").exists());
+    assert!(!attempt.join("provider-state/candidate-1").exists());
+    Ok(())
+}
+
+#[test]
 fn gc_archives_provider_history_before_disposing_private_state() -> TestResult {
     let cases: &[(&str, &str, &[&str])] = &[
         (
