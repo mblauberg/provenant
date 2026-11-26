@@ -65,7 +65,8 @@ and one maximum page. Custody and lane inventories flush a page header before
 presence observations and flush each inspected row with its cursor. A deadline
 preserves complete rows and offers a continuation from the last inspected row,
 including when that row was filtered out; an interrupted first row resumes the
-page from its start. Lane pages use ordered index scans and defer the host census
+page from its start. Custody continuation preserves the selected chair session
+on every page. Lane pages use ordered index scans and defer the host census
 until a non-terminal row needs it. A source that cannot produce its header is
 reported unavailable, never empty, and the hook still returns inside its budget.
 Hook state carries custody-ledger, lane and worktree rows. Inside a lane,

@@ -13,6 +13,19 @@ use std::{
 };
 type Error = Box<dyn std::error::Error>;
 
+/// Preserve the chair selection when continuing a custody inventory.
+pub(crate) fn custody_page_command(session: Option<&str>, cursor: Option<u64>) -> String {
+    let mut command = String::from("status --mine");
+    if let Some(session) = session {
+        command.push_str(" --session ");
+        command.push_str(&provenant_os::shell::quote_portable(session));
+    }
+    if let Some(cursor) = cursor {
+        command.push_str(&format!(" --cursor {cursor}"));
+    }
+    command
+}
+
 /// Host-backed adapter for confinement's retirement port. It opens the one
 /// custody store per operation so every receipt and state transition uses the
 /// current host database revision.
@@ -699,7 +712,10 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
             });
         }
         if let Some(cursor) = next {
-            lines.push(format!("more: provenant status --mine --cursor {cursor}"));
+            lines.push(format!(
+                "more: provenant {}",
+                custody_page_command(args.custody_session.as_deref(), Some(cursor))
+            ));
         }
         if lines.is_empty() {
             lines.push(if args.adoptable {

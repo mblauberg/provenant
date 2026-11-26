@@ -6,4 +6,4 @@
 
 ### Session and hooks
 
-- Session-start custody and lane inventories stream completed rows before their deadline and offer a continuation for any unread rows. Lane pages use ordered index scans and defer process observation until needed, so a large history no longer needs a project-wide sort before it can report progress. (#4072)
+- Session-start custody and lane inventories stream completed rows before their deadline and offer a continuation for any unread rows. Custody continuations retain the selected chair session. Lane pages use ordered index scans and defer process observation until needed, so a large history no longer needs a project-wide sort before it can report progress. (#4072)

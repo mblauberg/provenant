@@ -333,12 +333,12 @@ fn collect_with_cli(
             Ok(Ok((items, next))) => {
                 state.custody = items;
                 state.custody_more = next.map(|cursor| {
-                    let suffix = if cursor.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" --cursor {cursor}")
-                    };
-                    state.commands.command(&format!("status --mine{suffix}"))
+                    state
+                        .commands
+                        .command(&crate::custody::custody_page_command(
+                            want.session.as_deref(),
+                            cursor.parse().ok(),
+                        ))
                 });
             }
             Ok(Err(reason)) => state.unavailable.push(Unavailable {
@@ -637,7 +637,8 @@ mod tests {
                 self.0.lock().unwrap().push(options.timeout);
                 let args: Vec<&str> = options.argv.iter().filter_map(|arg| arg.to_str()).collect();
                 let stdout = if args.contains(&"--custody-stream") {
-                    "{\"total\":0,\"next\":null}\n"
+                    assert!(args.windows(2).any(|pair| pair == ["--session", "chair-a"]));
+                    "{\"total\":2,\"next\":null}\n{\"cursor\":4,\"item\":null}\n"
                 } else if args.contains(&"worktree") {
                     WORKTREES
                 } else if args.contains(&"--all") {
@@ -684,7 +685,7 @@ mod tests {
             &Want {
                 worktrees: true,
                 settled_after_unix: 0,
-                session: None,
+                session: Some("chair-a".into()),
                 project: None,
                 scope: DigestScope::Project,
                 scope_source: None,
@@ -692,6 +693,10 @@ mod tests {
             deadline,
         );
         let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert_eq!(
+            state.custody_more.as_deref(),
+            Some("provenant status --mine --session 'chair-a' --cursor 4")
+        );
         assert!(digest.contains("g/a#1"), "{digest}");
         assert!(digest.contains("/lane"), "{digest}");
         assert!(
@@ -889,6 +894,14 @@ mod tests {
         assert_eq!(next.as_deref(), Some("4"));
         let (_, next) = parse_custody_stream(b"{\"total\":1,\"next\":null}\n").unwrap();
         assert_eq!(next.as_deref(), Some(""));
+        assert_eq!(
+            crate::custody::custody_page_command(Some("chair-a"), Some(4)),
+            "status --mine --session 'chair-a' --cursor 4"
+        );
+        assert_eq!(
+            crate::custody::custody_page_command(Some("chair-a"), None),
+            "status --mine --session 'chair-a'"
+        );
     }
 
     #[test]
