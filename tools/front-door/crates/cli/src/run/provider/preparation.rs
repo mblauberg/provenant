@@ -241,7 +241,8 @@ fn resolve_pacing_source(
 
 pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
     (!attachments.is_empty()
-        && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
+        && !AdapterSpec::get(adapter)
+            .is_some_and(|spec| spec.capabilities.launch.image_input.value))
     .then(|| {
         format!(
             "warning: adapter {adapter} does not support image_input; attachments remain readable"
@@ -990,7 +991,7 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     Prompt(#[from] LaunchPromptError),
     #[error(transparent)]
-    Unsupported(#[from] provenant_records::UnsupportedLaunch),
+    Unsupported(#[from] provenant_records::LaunchDecision),
     #[error(transparent)]
     Permission(#[from] provenant_confinement::permissions::PermissionError),
     #[error(transparent)]
@@ -1594,9 +1595,12 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         PrepareError::SourceCwd(SourceCwdError::Operational("cwd unavailable".into()))
             .into_refusal();
     assert_eq!(unavailable.boundary_class, BoundaryClass::None);
-    let unsupported = PrepareError::Unsupported(provenant_records::UnsupportedLaunch {
+    let unsupported = PrepareError::Unsupported(provenant_records::LaunchDecision {
         adapter: "fixture",
         field: provenant_records::LaunchField::Write,
+        action: provenant_records::LaunchAction::Refuse,
+        reason: "fixture limitation",
+        source: provenant_records::ROW_SOURCE,
     })
     .into_refusal();
     assert_eq!(unsupported.boundary_class, BoundaryClass::None);
@@ -2155,7 +2159,8 @@ fn prepare_inner(
                 network: task.access.network,
                 skill_location: task.profile.require_skill_location,
                 ..Default::default()
-            })?;
+            })
+            .first_as_error()?;
         let roots = registry.roots.ok_or("routing context is unavailable")?;
         let config =
             crate::config_reads::read_for(roots, "run").map_err(|error| error.to_string())?;
@@ -4045,10 +4050,10 @@ pub(super) fn prepare_candidates_inner(
             continue;
         }
         if let Some(spec) = AdapterSpec::get(&route.adapter)
-            && let Err(error) =
-                request
-                    .intent
-                    .check_launch(spec, &route.model, route.effort.as_deref())
+            && let Err(error) = request
+                .intent
+                .check_launch(spec, &route.model, route.effort.as_deref())
+                .first_as_error()
         {
             reason_boundaries.insert(
                 reasons.len(),
@@ -4643,7 +4648,8 @@ pub(super) fn prepare_candidates_inner(
             continue;
         }
         let opencode_host = adapter_spec.is_some_and(|spec| {
-            spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+            spec.capabilities.answering_model.value
+                == provenant_records::ModelObservation::SessionDatabase
         }) && !lane_access.access.is_isolated();
         let opencode_homes = provenant_providers::opencode::host_xdg_homes(&home, &|key| {
             host_provider_var(registry, key)
@@ -4744,7 +4750,8 @@ pub(super) fn prepare_candidates_inner(
             None => text,
         };
         let text = if !task.access.attachments.is_empty()
-            && !AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.launch.image_input)
+            && !AdapterSpec::get(adapter.id())
+                .is_some_and(|spec| spec.capabilities.launch.image_input.value)
         {
             let paths = task
                 .access
@@ -5787,7 +5794,8 @@ pub(super) fn prepare_candidates_inner(
                 .collect(),
         ))?);
         if adapter_spec.is_some_and(|spec| {
-            spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+            spec.capabilities.answering_model.value
+                == provenant_records::ModelObservation::SessionDatabase
         }) {
             let message = opencode_access_message(&lane_access);
             warn(Warning::new(

@@ -185,14 +185,59 @@ pub struct AccountModelPlan {
     pub quota: AccountQuota,
 }
 
-/// Provider integration support, including the evidence for a native limitation.
+pub const ROW_SOURCE: &str = "crates/records/src/adapters.rs";
+pub const ROW_REASON: &str = "declared by the adapter row";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CapabilitySupport {
-    Supported,
-    Unsupported {
-        reason: &'static str,
-        source: &'static str,
-    },
+pub struct Declaration<T> {
+    pub value: T,
+    pub reason: &'static str,
+    pub source: &'static str,
+}
+impl<T> Declaration<T> {
+    pub const fn row(value: T) -> Self {
+        Self {
+            value,
+            reason: ROW_REASON,
+            source: ROW_SOURCE,
+        }
+    }
+    pub const fn because(value: T, reason: &'static str, source: &'static str) -> Self {
+        Self {
+            value,
+            reason,
+            source,
+        }
+    }
+}
+impl Declaration<bool> {
+    pub const fn supported() -> Self {
+        Self::row(true)
+    }
+    pub const fn unsupported(reason: &'static str, source: &'static str) -> Self {
+        Self::because(false, reason, source)
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalEvent {
+    Weak,
+    None,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageAttribution {
+    Turn,
+    Session,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetainedArtifact {
+    pub parent: &'static str,
+    pub name: &'static str,
+    pub scrub: &'static [&'static str],
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    pub transcripts: Declaration<bool>,
+    pub artifacts: &'static [RetainedArtifact],
 }
 
 /// Wire format used by a native harness hook registry.
@@ -259,12 +304,6 @@ pub enum HookEvent {
         source: &'static str,
     },
 }
-impl CapabilitySupport {
-    pub const fn is_supported(self) -> bool {
-        matches!(self, Self::Supported)
-    }
-}
-
 /// Managed harness paths and native integration capabilities. Wire formats stay
 /// in config; this is the single declaration of which integrations exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,13 +319,13 @@ pub struct HarnessInstall {
     pub hook_file: Option<&'static str>,
     /// Provider CLI option that loads a generated hook settings document.
     pub hook_settings_arg: Option<&'static str>,
-    pub hooks: CapabilitySupport,
+    pub hooks: Declaration<bool>,
     pub hook_protocol: Option<HookProtocol>,
     pub hook_events: &'static [HookEvent],
-    pub answer_delivery: CapabilitySupport,
+    pub answer_delivery: Declaration<bool>,
     /// Whether a pre-compaction response reaches the model's context.
-    pub precompact_context: CapabilitySupport,
-    pub instructions: CapabilitySupport,
+    pub precompact_context: Declaration<bool>,
+    pub instructions: Declaration<bool>,
     /// The adapter declares its instruction documents as an array in its config.
     pub instruction_array: bool,
     pub source: &'static str,
@@ -594,7 +633,7 @@ pub enum StreamContract {
 
 #[derive(Debug, Clone, Copy)]
 pub struct AdapterSpec {
-    pub stdout: StreamContract,
+    pub stream: StreamContract,
     pub id: Harness,
     pub name: &'static str,
     /// Format of a supported CLI model listing.
@@ -716,9 +755,6 @@ pub struct AdapterSpec {
     pub usage: UsageSemantics,
     /// Provider-specific explanation when writer token budgets cannot stop it.
     pub token_budget_notice: Option<&'static str>,
-    /// Usage totals are session-wide unless an attempt marks them per-attempt,
-    /// so they cannot be attributed to one attempt by default.
-    pub session_wide_usage: bool,
     /// Config-deprecation notices can arrive on stderr as well as the event
     /// stream; the host folds both into one warning per attempt.
     pub stderr_config_notices: bool,
@@ -730,11 +766,8 @@ pub struct AdapterSpec {
     pub stdout_error_diagnostic: bool,
     /// The adapter's plan uses the Codex clean/inherited config policy.
     pub codex_policy: bool,
-    /// Source of model identity after a run.
-    pub model_observation: ModelObservation,
     /// Preparation mechanism for a model-less named entry.
     pub named_entry: NamedEntry,
-    pub user_sessions: bool,
     /// Sessions formerly stored in host configuration now require private attempt state.
     pub relocated_session_state: bool,
     /// Copy only session files when retaining private state.
@@ -759,7 +792,9 @@ pub struct AdapterSpec {
     pub pacing_keys: Option<(&'static str, &'static str)>,
     /// What a launch may ask of this adapter. The one source for dispatch,
     /// `run`, resume and graph validation.
-    pub launch: LaunchCapabilities,
+    pub capabilities: Capabilities,
+    pub guardian_environment: &'static [&'static str],
+    pub retention: Retention,
 }
 
 const ALL_NETWORK: &[NetworkAccess] = &[
@@ -768,82 +803,110 @@ const ALL_NETWORK: &[NetworkAccess] = &[
     NetworkAccess::Open,
 ];
 
-/// Declared launch capabilities. Unsupported enforced controls are refused
-/// before admission; missing image input is advisory.
+/// Declared launch capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchCapabilities {
-    /// Accepts a model selector; false for configured command entries.
-    pub model: bool,
-    pub default_network: NetworkAccess,
-    /// Takes a reasoning-effort control on the command line.
-    pub effort: bool,
-    /// Continues a recorded provider session.
-    pub resume: bool,
-    /// What a control message can do for this adapter, per launch kind.
-    pub control: ControlCapabilities,
-    /// Network modes the adapter's sandbox profile can enforce.
+    pub model: Declaration<bool>,
+    pub effort: Declaration<bool>,
+    pub image_input: Declaration<bool>,
+    pub resume: Declaration<bool>,
+    pub write: Declaration<bool>,
     pub network: &'static [NetworkAccess],
-    /// Accepts image input in a prompt.
-    pub image_input: bool,
-    /// Runs with worktree-write access.
-    pub write: bool,
+    pub default_network: NetworkAccess,
 }
-
-/// The fields of a launch request an adapter can refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    pub launch: LaunchCapabilities,
+    pub control: ControlCapabilities,
+    pub terminal_event: Declaration<TerminalEvent>,
+    pub answering_model: Declaration<ModelObservation>,
+    pub usage_attribution: Declaration<UsageAttribution>,
+    pub live_input: Declaration<bool>,
+}
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LaunchRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    pub image_input: bool,
     pub resume: bool,
     pub network: Option<NetworkAccess>,
     pub write: bool,
     pub skill_location: bool,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchField {
     Model,
     Effort,
+    ImageInput,
     Resume,
     Network,
     Write,
     SkillLocation,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchAction {
+    Degrade,
+    Refuse,
 }
 impl LaunchField {
     pub fn name(self) -> &'static str {
         match self {
             Self::Model => "model",
             Self::Effort => "effort",
+            Self::ImageInput => "image input",
             Self::Resume => "resume",
             Self::Network => "network",
             Self::Write => "write",
             Self::SkillLocation => "skill location",
         }
     }
-    /// A fixed refusal for callers that cannot carry the adapter name.
-    pub fn refusal(self) -> &'static str {
+    pub fn decision(self) -> LaunchAction {
         match self {
-            Self::Model => "model is not supported by the route's adapter",
-            Self::Effort => "effort is not supported by the route's adapter",
-            Self::Resume => "resume is not supported by the route's adapter",
-            Self::Network => "network mode is not supported by the route's adapter",
-            Self::Write => "worktree-write is not supported by the route's adapter",
-            Self::SkillLocation => "skill location is not supported by the route's adapter",
+            Self::Model | Self::Effort | Self::ImageInput => LaunchAction::Degrade,
+            _ => LaunchAction::Refuse,
         }
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnsupportedLaunch {
+pub struct LaunchDecision {
     pub adapter: &'static str,
     pub field: LaunchField,
+    pub action: LaunchAction,
+    pub reason: &'static str,
+    pub source: &'static str,
 }
-impl std::fmt::Display for UnsupportedLaunch {
+impl std::fmt::Display for LaunchDecision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} does not support {}", self.adapter, self.field.name())
+        write!(
+            f,
+            "{} does not support {}: {}; source={}",
+            self.adapter,
+            self.field.name(),
+            self.reason,
+            self.source
+        )
     }
 }
-impl std::error::Error for UnsupportedLaunch {}
+impl std::error::Error for LaunchDecision {}
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchCheck {
+    pub decisions: Vec<LaunchDecision>,
+}
+impl LaunchCheck {
+    pub fn refusal(&self) -> Option<&LaunchDecision> {
+        self.decisions
+            .iter()
+            .find(|d| d.action == LaunchAction::Refuse)
+    }
+    pub fn degraded(&self, field: LaunchField) -> Option<&LaunchDecision> {
+        self.decisions
+            .iter()
+            .find(|d| d.field == field && d.action == LaunchAction::Degrade)
+    }
+    pub fn first_as_error(self) -> Result<(), LaunchDecision> {
+        self.decisions.into_iter().next().map_or(Ok(()), Err)
+    }
+}
 
 impl AdapterSpec {
     /// Whether account entries describe metadata for one shared local login
@@ -860,32 +923,53 @@ impl AdapterSpec {
         self.registered_account && self.local_login && key == "local"
     }
     /// Check a request against the declared table before any side effect.
-    pub fn check_launch(&self, request: &LaunchRequest<'_>) -> Result<(), UnsupportedLaunch> {
-        let caps = &self.launch;
-        let field = if request.model.is_some() && !caps.model {
-            Some(LaunchField::Model)
-        } else if request.effort.is_some() && !caps.effort {
-            Some(LaunchField::Effort)
-        } else if request.resume && !caps.resume {
-            Some(LaunchField::Resume)
-        } else if request
+    pub fn check_launch(&self, request: &LaunchRequest<'_>) -> LaunchCheck {
+        let caps = &self.capabilities.launch;
+        let mut decisions = Vec::new();
+        let mut add = |field: LaunchField, reason, source| {
+            decisions.push(LaunchDecision {
+                adapter: self.name,
+                field,
+                action: field.decision(),
+                reason,
+                source,
+            })
+        };
+        for (requested, field, declaration) in [
+            (request.model.is_some(), LaunchField::Model, caps.model),
+            (request.effort.is_some(), LaunchField::Effort, caps.effort),
+            (
+                request.image_input,
+                LaunchField::ImageInput,
+                caps.image_input,
+            ),
+            (request.resume, LaunchField::Resume, caps.resume),
+        ] {
+            if requested && !declaration.value {
+                add(field, declaration.reason, declaration.source);
+            }
+        }
+        if request
             .network
             .is_some_and(|mode| !caps.network.contains(&mode))
         {
-            Some(LaunchField::Network)
-        } else if request.write && !caps.write {
-            Some(LaunchField::Write)
-        } else if request.skill_location && self.skills.is_none() {
-            Some(LaunchField::SkillLocation)
-        } else {
-            None
-        };
-        field.map_or(Ok(()), |field| {
-            Err(UnsupportedLaunch {
-                adapter: self.name,
-                field,
-            })
-        })
+            add(
+                LaunchField::Network,
+                "network mode is outside the adapter's sandbox profiles",
+                ROW_SOURCE,
+            );
+        }
+        if request.write && !caps.write.value {
+            add(LaunchField::Write, caps.write.reason, caps.write.source);
+        }
+        if request.skill_location && self.skills.is_none() {
+            add(
+                LaunchField::SkillLocation,
+                "the adapter declares no skill location",
+                ROW_SOURCE,
+            );
+        }
+        LaunchCheck { decisions }
     }
     pub fn account_plan(&self, plan: Option<&str>) -> Option<&AccountModelPlan> {
         self.account_model_plans
@@ -961,7 +1045,7 @@ adapter_specs! { $;
     Claude [] (claude: 1) {
         name: "claude",
         usage: UsageSemantics::new(UsageScope::Cumulative, false, true),
-        stdout: StreamContract::ProviderJsonl,
+        stream: StreamContract::ProviderJsonl,
         model_listing: None,
         default_models: None,
         model_id_prefix: None,
@@ -976,12 +1060,12 @@ adapter_specs! { $;
             instruction: Some("CLAUDE.md"),
             hook_file: Some("settings.json"),
             hook_settings_arg: Some("--settings"),
-            hooks: CapabilitySupport::Supported,
+            hooks: Declaration::supported(),
             hook_protocol: Some(HookProtocol::CommandGroups { timeout_unit: HookTimeoutUnit::Seconds }),
             hook_events: CLAUDE_HOOK_EVENTS,
-            answer_delivery: CapabilitySupport::Supported,
-            precompact_context: CapabilitySupport::Supported,
-            instructions: CapabilitySupport::Supported,
+            answer_delivery: Declaration::supported(),
+            precompact_context: Declaration::supported(),
+            instructions: Declaration::supported(),
             instruction_array: false,
             source: "https://docs.anthropic.com/en/docs/claude-code/settings; https://docs.anthropic.com/en/docs/claude-code/hooks",
         }),
@@ -1043,15 +1127,12 @@ adapter_specs! { $;
         answer_from_text: true,
         result_event_usage: true,
         token_budget_notice: None,
-        session_wide_usage: false,
         stderr_config_notices: false,
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
         codex_policy: false,
-        model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
-        user_sessions: false,
         relocated_session_state: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
@@ -1067,24 +1148,32 @@ adapter_specs! { $;
         refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: true,
-            resume: true,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: Declaration::supported(),
+                default_network: NetworkAccess::Open,
+                effort: Declaration::supported(),
+                resume: Declaration::supported(),
+                network: ALL_NETWORK,
+                image_input: Declaration::supported(),
+                write: Declaration::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
                 chair: ControlSupport::MailOnly,
             },
-            network: ALL_NETWORK,
-            image_input: true,
-            write: true,
+            terminal_event: Declaration::row(TerminalEvent::Weak),
+            answering_model: Declaration::row(ModelObservation::Stream),
+            usage_attribution: Declaration::row(UsageAttribution::Turn),
+            live_input: Declaration::unsupported("no live mid-run input is implemented for this adapter", ROW_SOURCE),
         },
+        guardian_environment: &[],
+        retention: Retention { transcripts: Declaration::supported(), artifacts: &[] },
     },
     Codex [] (codex: 0) {
         name: "codex",
         usage: UsageSemantics::new(UsageScope::Step, true, true),
-        stdout: StreamContract::ProviderJsonl,
+        stream: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::CodexJson),
         default_models: None,
         model_id_prefix: None,
@@ -1099,15 +1188,12 @@ adapter_specs! { $;
             instruction: Some("AGENTS.md"),
             hook_file: Some("hooks.json"),
             hook_settings_arg: None,
-            hooks: CapabilitySupport::Supported,
+            hooks: Declaration::supported(),
             hook_protocol: Some(HookProtocol::CommandGroups { timeout_unit: HookTimeoutUnit::Seconds }),
             hook_events: CODEX_HOOK_EVENTS,
-            answer_delivery: CapabilitySupport::Supported,
-            precompact_context: CapabilitySupport::Unsupported {
-                reason: "Codex PreCompact accepts only a systemMessage UI notice, not model context",
-                source: "https://developers.openai.com/codex/hooks",
-            },
-            instructions: CapabilitySupport::Supported,
+            answer_delivery: Declaration::supported(),
+            precompact_context: Declaration::unsupported("Codex PreCompact accepts only a systemMessage UI notice, not model context", "https://developers.openai.com/codex/hooks"),
+            instructions: Declaration::supported(),
             instruction_array: false,
             source: "https://learn.chatgpt.com/docs/hooks; https://developers.openai.com/codex/guides/agents-md",
         }),
@@ -1177,15 +1263,12 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: Some("Codex writer token budgets are checked at completed-turn boundaries; a turn cannot be interrupted mid-flight"),
-        session_wide_usage: true,
         stderr_config_notices: true,
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
         codex_policy: true,
-        model_observation: ModelObservation::Rollout,
         named_entry: NamedEntry::None,
-        user_sessions: false,
         relocated_session_state: false,
         copy_sessions_only: true,
         quota_probe: QuotaProbeKind::Command,
@@ -1201,24 +1284,32 @@ adapter_specs! { $;
         refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: true,
-            resume: true,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: Declaration::supported(),
+                default_network: NetworkAccess::Open,
+                effort: Declaration::supported(),
+                resume: Declaration::supported(),
+                network: ALL_NETWORK,
+                image_input: Declaration::supported(),
+                write: Declaration::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
                 chair: ControlSupport::MailOnly,
             },
-            network: ALL_NETWORK,
-            image_input: true,
-            write: true,
+            terminal_event: Declaration::row(TerminalEvent::Weak),
+            answering_model: Declaration::row(ModelObservation::Rollout),
+            usage_attribution: Declaration::because(UsageAttribution::Session, "codex usage totals are session-wide unless marked per attempt", "crates/run/src/holder.rs"),
+            live_input: Declaration::unsupported("no live mid-run input is implemented for this adapter", ROW_SOURCE),
         },
+        guardian_environment: &[],
+        retention: Retention { transcripts: Declaration::supported(), artifacts: &[] },
     },
     Cursor [] (cursor: 2) {
         name: "cursor",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::ProviderJsonl,
+        stream: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::CursorText),
         default_models: Some(&["auto", "composer-*", "grok-*"]),
         model_id_prefix: None,
@@ -1233,21 +1324,12 @@ adapter_specs! { $;
             instruction: None,
             hook_file: Some("hooks.json"),
             hook_settings_arg: None,
-            hooks: CapabilitySupport::Supported,
+            hooks: Declaration::supported(),
             hook_protocol: Some(HookProtocol::CursorCommands { timeout_unit: HookTimeoutUnit::Seconds }),
             hook_events: CURSOR_HOOK_EVENTS,
-            answer_delivery: CapabilitySupport::Unsupported {
-                reason: "Cursor preToolUse does not accept the additionalContext response used by Provenant answer delivery",
-                source: "https://cursor.com/docs/hooks#pretooluse",
-            },
-            precompact_context: CapabilitySupport::Unsupported {
-                reason: "Cursor preCompact accepts only user_message output shown to the user, not model context",
-                source: "https://cursor.com/docs/hooks#precompact",
-            },
-            instructions: CapabilitySupport::Unsupported {
-                reason: "Cursor global instructions are settings-managed; AGENTS.md is project-root scoped",
-                source: "https://docs.cursor.com/context/rules-for-ai",
-            },
+            answer_delivery: Declaration::unsupported("Cursor preToolUse does not accept the additionalContext response used by Provenant answer delivery", "https://cursor.com/docs/hooks#pretooluse"),
+            precompact_context: Declaration::unsupported("Cursor preCompact accepts only user_message output shown to the user, not model context", "https://cursor.com/docs/hooks#precompact"),
+            instructions: Declaration::unsupported("Cursor global instructions are settings-managed; AGENTS.md is project-root scoped", "https://docs.cursor.com/context/rules-for-ai"),
             instruction_array: false,
             source: "https://docs.cursor.com/hooks; https://docs.cursor.com/context/rules-for-ai",
         }),
@@ -1309,15 +1391,12 @@ adapter_specs! { $;
         answer_from_text: true,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
         stderr_config_notices: false,
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
         codex_policy: false,
-        model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
-        user_sessions: false,
         relocated_session_state: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
@@ -1333,24 +1412,32 @@ adapter_specs! { $;
         refusal_reset_source: "provider reset",
         drop_unsupported_effort: true,
         pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: true,
-            resume: true,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: Declaration::supported(),
+                default_network: NetworkAccess::Open,
+                effort: Declaration::supported(),
+                resume: Declaration::supported(),
+                network: ALL_NETWORK,
+                image_input: Declaration::unsupported("cursor does not provide image input control", ROW_SOURCE),
+                write: Declaration::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
                 chair: ControlSupport::MailOnly,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: true,
+            terminal_event: Declaration::row(TerminalEvent::Weak),
+            answering_model: Declaration::row(ModelObservation::Stream),
+            usage_attribution: Declaration::row(UsageAttribution::Turn),
+            live_input: Declaration::unsupported("no live mid-run input is implemented for this adapter", ROW_SOURCE),
         },
+        guardian_environment: &[],
+        retention: Retention { transcripts: Declaration::supported(), artifacts: &[RetainedArtifact { parent: ".cursor", name: "chats", scrub: &[] }] },
     },
     Agy [] (agy: 3) {
         name: "agy",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::ProviderJsonl,
+        stream: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::AgyText),
         default_models: None,
         model_id_prefix: Some("agy/"),
@@ -1365,18 +1452,12 @@ adapter_specs! { $;
             instruction: Some("AGENTS.md"),
             hook_file: Some("config/hooks.json"),
             hook_settings_arg: None,
-            hooks: CapabilitySupport::Supported,
+            hooks: Declaration::supported(),
             hook_protocol: Some(HookProtocol::NamedGroups { timeout_unit: HookTimeoutUnit::Seconds }),
             hook_events: AGY_HOOK_EVENTS,
-            answer_delivery: CapabilitySupport::Unsupported {
-                reason: "Antigravity PreToolUse returns a tool decision and argument overwrite, not injected context",
-                source: "https://antigravity.google/docs/hooks#input-and-output-contract",
-            },
-            precompact_context: CapabilitySupport::Unsupported {
-                reason: "Antigravity exposes no PreCompact event",
-                source: "https://antigravity.google/docs/hooks#supported-events",
-            },
-            instructions: CapabilitySupport::Supported,
+            answer_delivery: Declaration::unsupported("Antigravity PreToolUse returns a tool decision and argument overwrite, not injected context", "https://antigravity.google/docs/hooks#input-and-output-contract"),
+            precompact_context: Declaration::unsupported("Antigravity exposes no PreCompact event", "https://antigravity.google/docs/hooks#supported-events"),
+            instructions: Declaration::supported(),
             instruction_array: false,
             source: "https://antigravity.google/docs/hooks; https://antigravity.google/docs/customization-discovery",
         }),
@@ -1442,15 +1523,12 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
         stderr_config_notices: false,
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
         codex_policy: false,
-        model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
-        user_sessions: false,
         relocated_session_state: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::Command,
@@ -1466,24 +1544,32 @@ adapter_specs! { $;
         refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: true,
-            resume: true,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: Declaration::supported(),
+                default_network: NetworkAccess::Open,
+                effort: Declaration::supported(),
+                resume: Declaration::supported(),
+                network: ALL_NETWORK,
+                image_input: Declaration::unsupported("agy does not provide image input control", ROW_SOURCE),
+                write: Declaration::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
                 chair: ControlSupport::MailOnly,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: true,
+            terminal_event: Declaration::row(TerminalEvent::Weak),
+            answering_model: Declaration::row(ModelObservation::Stream),
+            usage_attribution: Declaration::row(UsageAttribution::Turn),
+            live_input: Declaration::unsupported("no live mid-run input is implemented for this adapter", ROW_SOURCE),
         },
+        guardian_environment: &[],
+        retention: Retention { transcripts: Declaration::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] },
     },
     Opencode [] (opencode: 4) {
         name: "opencode",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::ProviderJsonl,
+        stream: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::OpencodeText),
         default_models: None,
         model_id_prefix: Some("opencode/"),
@@ -1498,15 +1584,12 @@ adapter_specs! { $;
             instruction: Some("AGENTS.md"),
             hook_file: Some("plugins/provenant/index.ts"),
             hook_settings_arg: None,
-            hooks: CapabilitySupport::Supported,
+            hooks: Declaration::supported(),
             hook_protocol: Some(HookProtocol::OpenCodePlugin),
             hook_events: OPENCODE_HOOK_EVENTS,
-            answer_delivery: CapabilitySupport::Unsupported {
-                reason: "OpenCode tool.execute.before hooks cannot inject additional context into the active session",
-                source: "https://opencode.ai/docs/build/plugins/server#tool-execution",
-            },
-            precompact_context: CapabilitySupport::Supported,
-            instructions: CapabilitySupport::Supported,
+            answer_delivery: Declaration::unsupported("OpenCode tool.execute.before hooks cannot inject additional context into the active session", "https://opencode.ai/docs/build/plugins/server#tool-execution"),
+            precompact_context: Declaration::supported(),
+            instructions: Declaration::supported(),
             instruction_array: true,
             source: "https://opencode.ai/docs/build/plugins/; https://opencode.ai/docs/instructions",
         }),
@@ -1570,15 +1653,12 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
         stderr_config_notices: false,
         exit_route: false,
         stderr_quota: true,
         stdout_error_diagnostic: true,
         codex_policy: false,
-        model_observation: ModelObservation::SessionDatabase,
         named_entry: NamedEntry::None,
-        user_sessions: false,
         relocated_session_state: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::LocalLedger,
@@ -1597,24 +1677,32 @@ adapter_specs! { $;
         refusal_reset_source: "provider retry-after",
         drop_unsupported_effort: true,
         pacing_keys: Some(("opencode_free", "opencode_paid")),
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: true,
-            resume: true,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: Declaration::supported(),
+                default_network: NetworkAccess::Open,
+                effort: Declaration::supported(),
+                resume: Declaration::supported(),
+                network: ALL_NETWORK,
+                image_input: Declaration::unsupported("opencode does not provide image input control", ROW_SOURCE),
+                write: Declaration::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
                 chair: ControlSupport::MailOnly,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: true,
+            terminal_event: Declaration::row(TerminalEvent::Weak),
+            answering_model: Declaration::row(ModelObservation::SessionDatabase),
+            usage_attribution: Declaration::row(UsageAttribution::Turn),
+            live_input: Declaration::unsupported("no live mid-run input is implemented for this adapter", ROW_SOURCE),
         },
+        guardian_environment: &["XDG_DATA_HOME"],
+        retention: Retention { transcripts: Declaration::supported(), artifacts: &[RetainedArtifact { parent: "data", name: "opencode", scrub: &["auth.json"] }] },
     },
     Command [] (command: 5) {
         name: "command",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::Raw,
+        stream: StreamContract::Raw,
         model_listing: None,
         default_models: None,
         model_id_prefix: None,
@@ -1673,15 +1761,12 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
         stderr_config_notices: false,
         exit_route: true,
         stderr_quota: false,
         stdout_error_diagnostic: false,
         codex_policy: false,
-        model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::Command,
-        user_sessions: false,
         relocated_session_state: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
@@ -1697,26 +1782,34 @@ adapter_specs! { $;
         refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: false,
-            default_network: NetworkAccess::Open,
-            effort: false,
-            resume: false,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: Declaration::unsupported("command does not provide model control", ROW_SOURCE),
+                default_network: NetworkAccess::Open,
+                effort: Declaration::unsupported("command does not provide effort control", ROW_SOURCE),
+                resume: Declaration::unsupported("command does not provide resume control", ROW_SOURCE),
+                network: ALL_NETWORK,
+                image_input: Declaration::unsupported("command does not provide image input control", ROW_SOURCE),
+                write: Declaration::unsupported("command does not provide write control", ROW_SOURCE),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::Unsupported,
                 chair: ControlSupport::Unsupported,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: false,
+            terminal_event: Declaration::because(TerminalEvent::None, "process exit is the contract for raw output", ROW_SOURCE),
+            answering_model: Declaration::because(ModelObservation::Stream, "configured commands report no model; stream is the neutral default", ROW_SOURCE),
+            usage_attribution: Declaration::row(UsageAttribution::Turn),
+            live_input: Declaration::unsupported("no live mid-run input is implemented for this adapter", ROW_SOURCE),
         },
+        guardian_environment: &[],
+        retention: Retention { transcripts: Declaration::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] },
     },
     // A named, optional host feature. Preparation delegates to its provider;
     // decoding, accounts and confinement remain owned by that provider.
     HostNative [serde(rename = "host-native")] () {
         name: "host-native",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::ProviderJsonl,
+        stream: StreamContract::ProviderJsonl,
         model_listing: None,
         default_models: None,
         model_id_prefix: None,
@@ -1775,15 +1868,12 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
         stderr_config_notices: false,
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
         codex_policy: false,
-        model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::DelegatedAgent,
-        user_sessions: false,
         relocated_session_state: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
@@ -1799,25 +1889,33 @@ adapter_specs! { $;
         refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: false,
-            default_network: NetworkAccess::Open,
-            effort: false,
-            resume: false,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: Declaration::unsupported("host-native does not provide model control", ROW_SOURCE),
+                default_network: NetworkAccess::Open,
+                effort: Declaration::unsupported("host-native does not provide effort control", ROW_SOURCE),
+                resume: Declaration::unsupported("host-native does not provide resume control", ROW_SOURCE),
+                network: ALL_NETWORK,
+                image_input: Declaration::unsupported("host-native does not provide image input control", ROW_SOURCE),
+                write: Declaration::supported(),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::Unsupported,
                 chair: ControlSupport::Unsupported,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: true,
+            terminal_event: Declaration::row(TerminalEvent::Weak),
+            answering_model: Declaration::row(ModelObservation::Stream),
+            usage_attribution: Declaration::row(UsageAttribution::Turn),
+            live_input: Declaration::unsupported("no live mid-run input is implemented for this adapter", ROW_SOURCE),
         },
+        guardian_environment: &[],
+        retention: Retention { transcripts: Declaration::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] },
     },
     #[cfg(feature = "registry-fixture")]
     FixtureProvider [serde(rename = "fixture-provider")] () {
         name: "fixture-provider",
         usage: UsageSemantics::new(UsageScope::Step, false, false),
-        stdout: StreamContract::ProviderJsonl,
+        stream: StreamContract::ProviderJsonl,
         model_listing: None,
         default_models: None,
         model_id_prefix: None,
@@ -1876,15 +1974,12 @@ adapter_specs! { $;
         answer_from_text: false,
         result_event_usage: false,
         token_budget_notice: None,
-        session_wide_usage: false,
         stderr_config_notices: false,
         exit_route: true,
         stderr_quota: false,
         stdout_error_diagnostic: false,
         codex_policy: false,
-        model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
-        user_sessions: false,
         relocated_session_state: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
@@ -1900,19 +1995,27 @@ adapter_specs! { $;
         refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
-        launch: LaunchCapabilities {
-            model: true,
-            default_network: NetworkAccess::Open,
-            effort: false,
-            resume: false,
+        capabilities: Capabilities {
+            launch: LaunchCapabilities {
+                model: Declaration::supported(),
+                default_network: NetworkAccess::Open,
+                effort: Declaration::unsupported("fixture-provider does not provide effort control", ROW_SOURCE),
+                resume: Declaration::unsupported("fixture-provider does not provide resume control", ROW_SOURCE),
+                network: ALL_NETWORK,
+                image_input: Declaration::unsupported("fixture-provider does not provide image input control", ROW_SOURCE),
+                write: Declaration::unsupported("fixture-provider does not provide write control", ROW_SOURCE),
+            },
             control: ControlCapabilities {
                 lane: ControlSupport::Unsupported,
                 chair: ControlSupport::Unsupported,
             },
-            network: ALL_NETWORK,
-            image_input: false,
-            write: false,
+            terminal_event: Declaration::row(TerminalEvent::Weak),
+            answering_model: Declaration::row(ModelObservation::Stream),
+            usage_attribution: Declaration::row(UsageAttribution::Turn),
+            live_input: Declaration::unsupported("no live mid-run input is implemented for this adapter", ROW_SOURCE),
         },
+        guardian_environment: &[],
+        retention: Retention { transcripts: Declaration::unsupported("transcript layout not established; the payload is kept as history", "crates/run/src/retention.rs"), artifacts: &[] },
     },
 }
 
@@ -1951,14 +2054,18 @@ mod tests {
     fn host_native_declares_a_fresh_named_writer_contract() {
         let spec = AdapterSpec::get("host-native").unwrap();
         assert!(spec.binary.is_empty() && !spec.registered_account);
-        assert_eq!(spec.launch.default_network, NetworkAccess::Open);
+        assert_eq!(
+            spec.capabilities.launch.default_network,
+            NetworkAccess::Open
+        );
         assert!(
             spec.check_launch(&LaunchRequest {
                 write: true,
                 network: Some(NetworkAccess::Open),
                 ..Default::default()
             })
-            .is_ok()
+            .decisions
+            .is_empty()
         );
         for (request, field) in [
             (
@@ -1983,7 +2090,7 @@ mod tests {
                 LaunchField::Resume,
             ),
         ] {
-            assert_eq!(spec.check_launch(&request).unwrap_err().field, field);
+            assert_eq!(spec.check_launch(&request).decisions[0].field, field);
         }
     }
 
@@ -1997,13 +2104,13 @@ mod tests {
             assert!(!install.config.is_empty(), "{}", spec.name);
             assert!(!install.source.is_empty(), "{}", spec.name);
             assert_eq!(
-                install.hooks.is_supported(),
+                install.hooks.value,
                 install.hook_file.is_some(),
                 "{}",
                 spec.name
             );
             assert_eq!(
-                install.instructions.is_supported(),
+                install.instructions.value,
                 install.instruction.is_some(),
                 "{}",
                 spec.name
@@ -2014,22 +2121,27 @@ mod tests {
                 install.answer_delivery,
                 install.precompact_context,
             ] {
-                if let CapabilitySupport::Unsupported { reason, source } = support {
+                if !support.value {
+                    let Declaration { reason, source, .. } = support;
                     assert!(!reason.trim().is_empty(), "{}", spec.name);
                     assert!(!source.trim().is_empty(), "{}", spec.name);
                 }
             }
             assert_eq!(
-                spec.launch.default_network,
+                spec.capabilities.launch.default_network,
                 NetworkAccess::Open,
                 "{}",
                 spec.name
             );
             for network in ALL_NETWORK {
-                assert!(spec.launch.network.contains(network), "{}", spec.name);
+                assert!(
+                    spec.capabilities.launch.network.contains(network),
+                    "{}",
+                    spec.name
+                );
             }
             assert!(
-                spec.launch.write,
+                spec.capabilities.launch.write.value,
                 "managed providers share worktree-write capability"
             );
         }
@@ -2125,8 +2237,16 @@ mod launch_tests {
         let command = AdapterSpec::get("command").unwrap();
         assert!(!command.registered_account);
         assert_eq!(command.quota_probe, QuotaProbeKind::None);
-        assert_eq!(command.launch.default_network, NetworkAccess::Open);
-        assert!(command.check_launch(&LaunchRequest::default()).is_ok());
+        assert_eq!(
+            command.capabilities.launch.default_network,
+            NetworkAccess::Open
+        );
+        assert!(
+            command
+                .check_launch(&LaunchRequest::default())
+                .decisions
+                .is_empty()
+        );
         for (request, field) in [
             (
                 LaunchRequest {
@@ -2157,8 +2277,59 @@ mod launch_tests {
                 LaunchField::Write,
             ),
         ] {
-            assert_eq!(command.check_launch(&request).unwrap_err().field, field);
+            assert_eq!(command.check_launch(&request).decisions[0].field, field);
         }
+    }
+
+    #[test]
+    fn launch_check_reports_all_gaps_in_field_order() {
+        let spec = AdapterSpec {
+            skills: None,
+            capabilities: Capabilities {
+                launch: LaunchCapabilities {
+                    model: Declaration::unsupported("no model", ROW_SOURCE),
+                    effort: Declaration::unsupported("no effort", ROW_SOURCE),
+                    image_input: Declaration::unsupported("no images", ROW_SOURCE),
+                    resume: Declaration::unsupported("no resume", ROW_SOURCE),
+                    network: &[],
+                    write: Declaration::unsupported("no write", ROW_SOURCE),
+                    ..ADAPTER_SPECS[0].capabilities.launch
+                },
+                ..ADAPTER_SPECS[0].capabilities
+            },
+            ..ADAPTER_SPECS[0]
+        };
+        let check = spec.check_launch(&LaunchRequest {
+            model: Some("model"),
+            effort: Some("high"),
+            image_input: true,
+            resume: true,
+            network: Some(NetworkAccess::Open),
+            write: true,
+            skill_location: true,
+        });
+        let expected = [
+            LaunchField::Model,
+            LaunchField::Effort,
+            LaunchField::ImageInput,
+            LaunchField::Resume,
+            LaunchField::Network,
+            LaunchField::Write,
+            LaunchField::SkillLocation,
+        ];
+        assert_eq!(
+            check.decisions.iter().map(|d| d.field).collect::<Vec<_>>(),
+            expected
+        );
+        for decision in &check.decisions {
+            assert_eq!(decision.action, decision.field.decision());
+            assert!(!decision.reason.is_empty() && !decision.source.is_empty());
+        }
+        assert_eq!(check.refusal().map(|d| d.field), Some(LaunchField::Resume));
+        assert_eq!(
+            check.degraded(LaunchField::ImageInput).map(|d| d.field),
+            Some(LaunchField::ImageInput)
+        );
     }
 
     #[test]
@@ -2184,7 +2355,10 @@ mod launch_tests {
                 ..Default::default()
             };
             assert_eq!(
-                spec.check_launch(&request).err().map(|e| e.field),
+                spec.check_launch(&request)
+                    .decisions
+                    .first()
+                    .map(|e| e.field),
                 refused,
                 "{name}"
             );
@@ -2199,7 +2373,8 @@ mod launch_tests {
                 effort: Some("low"),
                 ..Default::default()
             })
-            .unwrap_err();
+            .decisions
+            .remove(0);
         assert_eq!(error.adapter, "command");
         assert_eq!(error.field, LaunchField::Effort);
     }
@@ -2207,14 +2382,14 @@ mod launch_tests {
     #[test]
     fn declared_unsupported_modes_are_refused_by_field() {
         for spec in ADAPTER_SPECS {
-            let capabilities = spec.launch;
+            let capabilities = spec.capabilities.launch;
             let cases = [
                 (
                     LaunchRequest {
                         model: Some("fixture/model"),
                         ..Default::default()
                     },
-                    capabilities.model,
+                    capabilities.model.value,
                     LaunchField::Model,
                 ),
                 (
@@ -2222,7 +2397,7 @@ mod launch_tests {
                         effort: Some("high"),
                         ..Default::default()
                     },
-                    capabilities.effort,
+                    capabilities.effort.value,
                     LaunchField::Effort,
                 ),
                 (
@@ -2230,7 +2405,7 @@ mod launch_tests {
                         resume: true,
                         ..Default::default()
                     },
-                    capabilities.resume,
+                    capabilities.resume.value,
                     LaunchField::Resume,
                 ),
                 (
@@ -2238,7 +2413,7 @@ mod launch_tests {
                         write: true,
                         ..Default::default()
                     },
-                    capabilities.write,
+                    capabilities.write.value,
                     LaunchField::Write,
                 ),
                 (
@@ -2252,7 +2427,7 @@ mod launch_tests {
             ];
             for (request, supported, field) in cases {
                 if !supported {
-                    assert_eq!(spec.check_launch(&request).unwrap_err().field, field);
+                    assert_eq!(spec.check_launch(&request).decisions[0].field, field);
                 }
             }
             for network in ALL_NETWORK {
@@ -2262,8 +2437,8 @@ mod launch_tests {
                             network: Some(*network),
                             ..Default::default()
                         })
-                        .unwrap_err()
-                        .field,
+                        .decisions[0]
+                            .field,
                         LaunchField::Network
                     );
                 }

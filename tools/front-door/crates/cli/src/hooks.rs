@@ -26,13 +26,13 @@ pub fn delivery_capabilities() -> Vec<provenant_records::inbox::DeliveryCapabili
             .provider
             .spec()
             .install
-            .is_some_and(|install| install.answer_delivery.is_supported());
+            .is_some_and(|install| install.answer_delivery.value);
     }
     for spec in ADAPTER_SPECS {
         let Some(install) = spec.install else {
             continue;
         };
-        if install.answer_delivery.is_supported() {
+        if install.answer_delivery.value {
             capabilities.push(DeliveryCapability {
                 provider: spec.id,
                 transport: AnswerTransport::ProviderHook,
@@ -91,7 +91,7 @@ fn resolve_provider(name: &str, command: &str) -> Option<ResolvedHook> {
         .iter()
         .copied()
         .find(|action| action.command() == command)?;
-    if requested.is_answer_delivery() && !install.answer_delivery.is_supported() {
+    if requested.is_answer_delivery() && !install.answer_delivery.value {
         return None;
     }
     let HookEvent::Supported { event, .. } = install.hook_events.iter().find(
@@ -143,7 +143,7 @@ mod tests {
         for spec in ADAPTER_SPECS {
             let supported = spec
                 .install
-                .is_some_and(|install| install.answer_delivery.is_supported());
+                .is_some_and(|install| install.answer_delivery.value);
             let mail: Vec<_> = capabilities
                 .iter()
                 .filter(|cap| {

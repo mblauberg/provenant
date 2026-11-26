@@ -373,7 +373,7 @@ fn prepared_git_binding_is_not_ambient_for_every_adapter() -> Result<(), Provide
     let token = fixture_token();
     for entry in REGISTRY.iter().filter(|entry| {
         provenant_records::AdapterSpec::get(entry.adapter.id())
-            .is_some_and(|spec| spec.launch.model)
+            .is_some_and(|spec| spec.capabilities.launch.model.value)
     }) {
         let id = entry.adapter.id();
         let mut route = route(id, "fixture-model");
@@ -652,7 +652,7 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
     );
     for entry in REGISTRY.iter().filter(|entry| {
         provenant_records::AdapterSpec::get(entry.adapter.id())
-            .is_some_and(|spec| spec.launch.write)
+            .is_some_and(|spec| spec.capabilities.launch.write.value)
     }) {
         let id = entry.adapter.id();
         // Share immutable repository/submodule setup; each adapter owns all

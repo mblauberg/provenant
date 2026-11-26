@@ -577,9 +577,10 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
         assert_eq!(result.is_ok(), accepted, "{provider} {effort:?}");
         assert!(recorded, "{provider} {effort:?} left no operation");
         if let Err(error) = result {
-            assert_eq!(
-                error.to_string(),
-                format!("{provider} does not support effort")
+            assert!(
+                error
+                    .to_string()
+                    .starts_with(&format!("{provider} does not support effort: "))
             );
         }
     }
@@ -808,7 +809,11 @@ fn explicit_skill_location_is_rechecked_before_dispatch() -> TestResult {
         );
         assert!(store.operation(&operation, &call)?.is_some());
         if let Err(error) = result {
-            assert_eq!(error.to_string(), "command does not support skill location");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("command does not support skill location: ")
+            );
         }
     }
     Ok(())
@@ -835,7 +840,11 @@ fn the_task_is_checked_before_a_writer_is_prepared() -> TestResult {
     let error = Service::new(&store)
         .dispatch(input, temp.path(), &call)
         .unwrap_err();
-    assert_eq!(error.to_string(), "command does not support model");
+    assert!(
+        error
+            .to_string()
+            .starts_with("command does not support model: ")
+    );
     assert_eq!(
         store
             .operation(&operation, &call)?

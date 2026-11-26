@@ -79,10 +79,16 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
     );
     let narrow = AdapterSpec {
         skills: None,
-        launch: LaunchCapabilities {
-            write: false,
-            network: &[NetworkAccess::Provider],
-            ..ADAPTER_SPECS[2].launch
+        capabilities: provenant_records::Capabilities {
+            launch: LaunchCapabilities {
+                write: provenant_records::Declaration::unsupported(
+                    "fixture has no write",
+                    provenant_records::ROW_SOURCE,
+                ),
+                network: &[NetworkAccess::Provider],
+                ..ADAPTER_SPECS[2].capabilities.launch
+            },
+            ..ADAPTER_SPECS[2].capabilities
         },
         ..ADAPTER_SPECS[2]
     };
@@ -130,6 +136,7 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
             query
                 .intent
                 .check_launch(&narrow, "gpt-5.3-codex-low", None)
+                .first_as_error()
                 .is_ok(),
             expected == "cursor"
         );
@@ -195,7 +202,7 @@ fn image_input_preference_keeps_pool_weights_and_falls_back()
         );
         let lookup = |adapter: &str| {
             let mut spec = *AdapterSpec::get(adapter)?;
-            spec.launch.image_input = match adapter {
+            spec.capabilities.launch.image_input.value = match adapter {
                 "cursor" => cursor_image,
                 "codex" => codex_image,
                 _ => false,

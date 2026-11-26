@@ -1640,7 +1640,7 @@ pub(crate) fn route_identity(
             && r.provider
                 .as_deref()
                 .and_then(provenant_records::AdapterSpec::get)
-                .is_some_and(|spec| !spec.launch.model));
+                .is_some_and(|spec| !spec.capabilities.launch.model.value));
     if !r.provider.as_ref().is_some_and(|v| !v.is_empty())
         || !valid_model
         || r.provider != a.provider

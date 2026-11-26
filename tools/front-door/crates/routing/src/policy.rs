@@ -28,10 +28,11 @@ impl RouteIntent {
         spec: &provenant_records::AdapterSpec,
         model: &str,
         effort: Option<&str>,
-    ) -> Result<(), provenant_records::UnsupportedLaunch> {
+    ) -> provenant_records::LaunchCheck {
         spec.check_launch(&provenant_records::LaunchRequest {
             model: Some(model),
             effort,
+            image_input: false,
             resume: false,
             network: self.network,
             write: self.writes,
@@ -956,10 +957,16 @@ mod tests {
         use provenant_records::run::NetworkAccess;
         use provenant_records::{ADAPTER_SPECS, AdapterSpec, LaunchCapabilities, LaunchField};
         let narrow = AdapterSpec {
-            launch: LaunchCapabilities {
-                network: &[NetworkAccess::Provider],
-                write: false,
-                ..ADAPTER_SPECS[0].launch
+            capabilities: provenant_records::Capabilities {
+                launch: LaunchCapabilities {
+                    network: &[NetworkAccess::Provider],
+                    write: provenant_records::Declaration::unsupported(
+                        "fixture has no write",
+                        provenant_records::ROW_SOURCE,
+                    ),
+                    ..ADAPTER_SPECS[0].capabilities.launch
+                },
+                ..ADAPTER_SPECS[0].capabilities
             },
             ..ADAPTER_SPECS[0]
         };
@@ -990,6 +997,7 @@ mod tests {
             assert_eq!(
                 intent
                     .check_launch(&narrow, "model", None)
+                    .first_as_error()
                     .err()
                     .map(|e| e.field),
                 expected

@@ -676,7 +676,7 @@ fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
     ];
     for entry in REGISTRY.iter().filter(|entry| {
         provenant_records::AdapterSpec::get(entry.adapter.id())
-            .is_some_and(|spec| spec.launch.model)
+            .is_some_and(|spec| spec.capabilities.launch.model.value)
     }) {
         let id = entry.adapter.id();
         let declared = provenant_records::AdapterSpec::get(id).expect("registered adapter spec");
@@ -883,7 +883,7 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
     let host_home = std::path::Path::new("/fixture/home");
     for declared in provenant_records::ADAPTER_SPECS
         .iter()
-        .filter(|spec| spec.install.is_some() && spec.launch.model)
+        .filter(|spec| spec.install.is_some() && spec.capabilities.launch.model.value)
     {
         let id = declared.name;
         let adapter = REGISTRY

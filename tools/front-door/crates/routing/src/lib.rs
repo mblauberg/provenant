@@ -1,6 +1,8 @@
 //! Pure explicit routing over immutable snapshots. No process or state effects.
 #![forbid(unsafe_code)]
+
 mod catalog;
+pub mod compatibility;
 mod discovery;
 mod monthly;
 pub use monthly::*;

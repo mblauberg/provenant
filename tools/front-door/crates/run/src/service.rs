@@ -1105,11 +1105,13 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
         spec.check_launch(&provenant_records::LaunchRequest {
             model,
             effort,
+            image_input: false,
             resume: false,
             network: task.access.network,
             write,
             skill_location: task.profile.require_skill_location,
         })
+        .first_as_error()
         .map_err(|error| input_error(ErrorKind::Unsupported, error.to_string()))
     };
     match route {

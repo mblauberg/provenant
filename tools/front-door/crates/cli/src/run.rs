@@ -591,7 +591,7 @@ impl Registry<'_> {
     pub fn continues_sessions(&self) -> bool {
         REGISTRY.iter().any(|entry| {
             provenant_records::AdapterSpec::get(entry.adapter.id())
-                .is_some_and(|spec| spec.launch.resume)
+                .is_some_and(|spec| spec.capabilities.launch.resume.value)
         })
     }
 }
@@ -1042,7 +1042,7 @@ impl Registry<'_> {
             return Ok(failed("route names no registered adapter"));
         };
         let model_observation = provenant_records::AdapterSpec::get(adapter.id())
-            .map(|spec| spec.model_observation)
+            .map(|spec| spec.capabilities.answering_model.value)
             .unwrap_or(provenant_records::ModelObservation::Stream);
         let model = stream_model(route);
         // A caller without a sealed task policy receives the compiled table;

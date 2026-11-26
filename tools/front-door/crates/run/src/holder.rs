@@ -1319,7 +1319,7 @@ fn record_budget_warning(
         .iter()
         .find(|spec| Some(spec.name) == provider)
         .map_or(ControlSupport::Unsupported, |spec| {
-            spec.launch.control.for_launch(LaunchKind::Lane)
+            spec.capabilities.control.for_launch(LaunchKind::Lane)
         });
     let receipt = ControlReceipt {
         extra: Default::default(),
@@ -2182,7 +2182,7 @@ impl RunStore {
                     .provider
                     .as_deref()
                     .and_then(provenant_records::AdapterSpec::get)
-                    .is_some_and(|spec| !spec.launch.control.lane.continues())
+                    .is_some_and(|spec| !spec.capabilities.control.lane.continues())
         });
         if (session.is_none() || unsupported) && !fresh_with_handoff {
             return Err(RunError::SteerSessionUnavailable);

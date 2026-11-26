@@ -682,18 +682,26 @@ pub(super) fn validate_flat_plan(
                 .adapter
                 .as_deref()
                 .and_then(provenant_records::AdapterSpec::get)
-                && let Err(error) = spec.check_launch(&provenant_records::LaunchRequest {
-                    model: route.model.as_deref(),
-                    effort: route.effort.as_deref(),
-                    write: node.access == AccessMode::WorktreeWrite
-                        || node
-                            .attempt
-                            .as_ref()
-                            .is_some_and(|spec| !spec.write_roots.is_empty()),
-                    ..Default::default()
-                })
+                && let Err(error) = spec
+                    .check_launch(&provenant_records::LaunchRequest {
+                        model: route.model.as_deref(),
+                        effort: route.effort.as_deref(),
+                        write: node.access == AccessMode::WorktreeWrite
+                            || node
+                                .attempt
+                                .as_ref()
+                                .is_some_and(|spec| !spec.write_roots.is_empty()),
+                        ..Default::default()
+                    })
+                    .first_as_error()
             {
-                return Err(node_plan_error(node, error.field.refusal()));
+                return Err(node_plan_error(
+                    node,
+                    format!(
+                        "{} is not supported by the route's adapter",
+                        error.field.name()
+                    ),
+                ));
             }
         }
 

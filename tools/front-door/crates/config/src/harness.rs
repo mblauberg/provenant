@@ -2,7 +2,7 @@
 use crate::managed::{self, InstallError, SelectorChange, Snapshot, Targets, Value};
 use crate::{Harness, Release};
 use provenant_records::{
-    AbsolutePath, CapabilitySupport, InstallReceipt, Limits, OwnedEntry, OwnedValue,
+    AbsolutePath, Declaration, InstallReceipt, Limits, OwnedEntry, OwnedValue,
     ResolvedHarnessTarget,
 };
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,9 @@ pub(crate) fn default_config(h: Harness, home: &Path, base: &Path) -> PathBuf {
 }
 pub(crate) fn default_hooks(h: Harness, base: &Path) -> Option<PathBuf> {
     let install = h.spec().install?;
-    (install.hooks.is_supported())
+    install
+        .hooks
+        .value
         .then_some(install.hook_file)
         .flatten()
         .map(|path| base.join(path))
@@ -537,7 +539,7 @@ pub(crate) fn permitted_selector(
         return Ok(target.hook_file.as_ref() == Some(&entry.path)
             && crate::hooks::belongs_to(&entry.selector, target.harness)?
             && target.harness.spec().install.is_some_and(|install| {
-                install.hooks.is_supported()
+                install.hooks.value
                     && !matches!(
                         install.hook_protocol,
                         Some(provenant_records::HookProtocol::OpenCodePlugin)
@@ -846,11 +848,8 @@ fn add_finding(
 pub(crate) fn capability_findings(
     targets: &Targets,
 ) -> Result<Vec<managed::InstallFinding>, InstallError> {
-    fn unsupported(capability: CapabilitySupport) -> Option<(&'static str, &'static str)> {
-        match capability {
-            CapabilitySupport::Supported => None,
-            CapabilitySupport::Unsupported { reason, source } => Some((reason, source)),
-        }
+    fn unsupported(capability: Declaration<bool>) -> Option<(&'static str, &'static str)> {
+        (!capability.value).then_some((capability.reason, capability.source))
     }
 
     let mut findings = Vec::new();
@@ -891,7 +890,7 @@ pub(crate) fn capability_findings(
                 )),
             });
         }
-        if !install.hooks.is_supported() {
+        if !install.hooks.value {
             if let Some((reason, source)) = unsupported(install.hooks) {
                 findings.push(managed::InstallFinding {
                     rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),

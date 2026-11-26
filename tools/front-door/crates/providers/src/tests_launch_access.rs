@@ -298,7 +298,7 @@ fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<()
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         for entry in REGISTRY.iter().filter(|entry| {
             provenant_records::AdapterSpec::get(entry.adapter.id())
-                .is_some_and(|spec| spec.launch.model)
+                .is_some_and(|spec| spec.capabilities.launch.model.value)
         }) {
             let id = entry.adapter.id();
             let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
@@ -453,7 +453,7 @@ fn model_adapters_follow_declared_prompt_transport_without_exposing_tokens()
     let repo = Path::new("/fixture/repo");
     for entry in REGISTRY.iter().filter(|entry| {
         provenant_records::AdapterSpec::get(entry.adapter.id())
-            .is_some_and(|spec| spec.launch.model)
+            .is_some_and(|spec| spec.capabilities.launch.model.value)
     }) {
         let id = entry.adapter.id();
         let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
@@ -529,7 +529,7 @@ fn read_only_launch_requires_cwd_inside_a_declared_read_root() -> Result<(), Pro
     let token = fixture_token();
     for entry in REGISTRY.iter().filter(|entry| {
         provenant_records::AdapterSpec::get(entry.adapter.id())
-            .is_some_and(|declaration| declaration.launch.model)
+            .is_some_and(|declaration| declaration.capabilities.launch.model.value)
     }) {
         let id = entry.adapter.id();
         let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");

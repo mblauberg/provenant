@@ -1,6 +1,8 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
+
 pub mod accounts;
+pub mod adapter_capabilities;
 pub mod brief;
 pub mod check;
 pub mod ci;

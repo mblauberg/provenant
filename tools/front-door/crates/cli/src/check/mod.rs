@@ -656,10 +656,11 @@ mod tests {
                 install.answer_delivery,
                 install.precompact_context,
             ] {
-                let provenant_records::CapabilitySupport::Unsupported { reason, source } = support
-                else {
+                if support.value {
                     continue;
-                };
+                }
+                let reason = support.reason;
+                let source = support.source;
                 let detail = format!("{}: {reason} (source: {source})", spec.name);
                 let inspection = provenant_config::InstallInspection {
                     error: None,

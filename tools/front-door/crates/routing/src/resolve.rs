@@ -2220,7 +2220,7 @@ fn admissible<'c>(
     // Backstop for uncatalogued models; catalogued ones record their own efforts.
     if let Some(effort) = effort
         && let Some(spec) = provenant_records::AdapterSpec::get(model.adapter())
-        && !spec.launch.effort
+        && !spec.capabilities.launch.effort.value
     {
         return Err(RoutingError::UnsupportedEffort {
             model: model.as_str().to_owned(),
@@ -2551,6 +2551,7 @@ fn candidate(
     if let Some(spec) = spec {
         intent
             .check_launch(&spec, model.model(), effort)
+            .first_as_error()
             .map_err(|error| RoutingError::UnsupportedLaunch(error.to_string()))?;
     }
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
@@ -3458,7 +3459,7 @@ fn image_input_supported(model: &ModelId, _context: &ValidatedContext<'_>) -> bo
         .or_else(|| provenant_records::AdapterSpec::get(model.adapter()).copied());
     #[cfg(not(test))]
     let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
-    spec.is_some_and(|spec| spec.launch.image_input)
+    spec.is_some_and(|spec| spec.capabilities.launch.image_input.value)
 }
 
 fn classify_pool(

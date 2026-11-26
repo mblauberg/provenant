@@ -180,9 +180,9 @@ pub(crate) fn observe_codex_rollout(
         .provider
         .as_deref()
         .ok_or(ProviderError::UnknownIdentity)?;
-    if !AdapterSpec::get(provider)
-        .is_some_and(|spec| spec.model_observation == provenant_records::ModelObservation::Rollout)
-    {
+    if !AdapterSpec::get(provider).is_some_and(|spec| {
+        spec.capabilities.answering_model.value == provenant_records::ModelObservation::Rollout
+    }) {
         return Err(ProviderError::UnknownIdentity);
     }
     let model = route

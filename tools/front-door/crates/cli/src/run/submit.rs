@@ -24,7 +24,7 @@ pub fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
 pub(super) fn adapter_entry(route: &str) -> Option<(&str, &str)> {
     let (provider, name) = route.split_once('/')?;
     let spec = provenant_records::AdapterSpec::get(provider)?;
-    (!spec.launch.model && !name.is_empty()).then_some((provider, name))
+    (!spec.capabilities.launch.model.value && !name.is_empty()).then_some((provider, name))
 }
 
 /// Exactly one of `ADAPTER/ID`, `ADAPTER/NAME` for a model-less adapter, or a

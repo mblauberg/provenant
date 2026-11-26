@@ -712,7 +712,7 @@ fn budget_warning_records_the_steer_refusal_for_lane_providers()
             .iter()
             .find(|spec| spec.name == provider)
             .map_or(ControlSupport::Unsupported, |spec| {
-                spec.launch.control.for_launch(LaunchKind::Lane)
+                spec.capabilities.control.for_launch(LaunchKind::Lane)
             });
         assert_eq!(receipt.support, support);
         assert!(!receipt.support.delivers());

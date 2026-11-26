@@ -1353,7 +1353,7 @@ fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<
     else {
         return Ok(());
     };
-    if !install.instructions.is_supported() {
+    if !install.instructions.value {
         return Ok(());
     }
     let instruction = install.instruction.ok_or(ProviderError::InvalidPath)?;
@@ -1404,7 +1404,7 @@ fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, P
     let Some(install) = adapter.install else {
         return Ok(false);
     };
-    if !install.hooks.is_supported() {
+    if !install.hooks.value {
         return Ok(false);
     }
     let warn_skip = |detail| {

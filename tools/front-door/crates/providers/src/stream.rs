@@ -284,7 +284,7 @@ impl StreamState {
     }
     fn raw_stream(&self) -> bool {
         provenant_records::AdapterSpec::get(self.adapter)
-            .is_some_and(|spec| spec.stdout == provenant_records::StreamContract::Raw)
+            .is_some_and(|spec| spec.stream == provenant_records::StreamContract::Raw)
     }
     pub(crate) fn observe(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
         if self.raw_stream() {

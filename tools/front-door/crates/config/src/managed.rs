@@ -7,8 +7,8 @@ use provenant_os::fs::{
     Directory, FileKind, FsError, LockMode, Metadata, Publication, PublishMode,
 };
 use provenant_records::{
-    AbsolutePath, CanonicalV1, CapabilitySupport, FileDigest, Harness, HookAction, HookProtocol,
-    InstallReceipt, Limits, OwnedEntry, OwnedValue, PathWire, ResolvedHarnessTarget, VersionInfo,
+    AbsolutePath, CanonicalV1, FileDigest, Harness, HookAction, HookProtocol, InstallReceipt,
+    Limits, OwnedEntry, OwnedValue, PathWire, ResolvedHarnessTarget, VersionInfo,
 };
 use serde::Serialize;
 use std::{
@@ -231,7 +231,9 @@ impl HarnessTarget {
     /// `home` is the user's home, which decides where Claude keeps its config file.
     pub fn at(harness: Harness, home: &Path, base: &Path) -> Self {
         let instruction = harness.spec().install.and_then(|install| {
-            (install.instructions == CapabilitySupport::Supported)
+            install
+                .instructions
+                .value
                 .then_some(install.instruction)
                 .flatten()
         });

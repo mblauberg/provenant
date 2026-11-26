@@ -1107,7 +1107,7 @@ impl<'a> InboxService<'a> {
     /// so its delivery is the provider-neutral Fabric mail path.
     fn support(&self, route: &ControlRoute) -> ControlSupport {
         match (route.provider, route.launch) {
-            (Some(provider), launch) => provider.spec().launch.control.for_launch(launch),
+            (Some(provider), launch) => provider.spec().capabilities.control.for_launch(launch),
             // An attempt with no recorded adapter cannot be steered.
             (None, LaunchKind::Lane) => ControlSupport::Unsupported,
             (None, LaunchKind::Chair) => ControlSupport::MailOnly,

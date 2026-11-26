@@ -179,7 +179,8 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
             (Access::WorktreeWrite, "worktree-write"),
         ] {
             if access == Access::WorktreeWrite
-                && !provenant_records::AdapterSpec::get(id).is_some_and(|spec| spec.launch.write)
+                && !provenant_records::AdapterSpec::get(id)
+                    .is_some_and(|spec| spec.capabilities.launch.write.value)
             {
                 continue;
             }

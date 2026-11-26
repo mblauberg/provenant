@@ -1072,7 +1072,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
         } else {
             let error = result.unwrap_err();
             if AdapterSpec::get(adapter).is_some_and(|spec| {
-                spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+                spec.capabilities.answering_model.value == provenant_records::ModelObservation::SessionDatabase
             }) {
                 assert!(matches!(
                     &error,
