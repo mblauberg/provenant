@@ -2190,8 +2190,11 @@ fn queue_ci_conflict_after_clear_rebases_republishes_and_rechecks_after_replay()
                 && node(checkpoint, "rebase--r1--verified_clean").state == NodeState::Pending
         })
         .expect("CI conflict reset must be durable before retrying conflict observation");
-    let replay_checkpoint: GraphCheckpoint =
+    let mut replay_checkpoint: GraphCheckpoint =
         serde_json::from_slice(&serde_json::to_vec(reset).unwrap()).unwrap();
+    // GraphJournal hydrates this runtime projection from GraphExecution.bases.
+    replay_checkpoint.bases = reset.bases;
+    assert_eq!(replay_checkpoint.bases, reset.bases);
 
     let mut replay_owner = owner();
     replay_owner.repair_fixture = true;

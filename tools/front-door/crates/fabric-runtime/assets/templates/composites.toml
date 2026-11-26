@@ -75,8 +75,8 @@ worktree = { type = "string" }
 write_scope = { type = "list", default = [] }
 
 # Delivery shape (docs/specs/delivery-queue.md#graph-and-landing-flow):
-# optional scope -> writer -> hygiene -> publish -> conflict gate -> CI gate
-# (+ bounded ci-repair loop) -> review single|panel -> accept -> land.
+# optional scope -> writer -> hygiene -> publish -> conflict gate -> CI outcome
+# (pass or bounded ci-repair) -> review single|panel -> accept -> land.
 # A clean item has one writer and one single reviewer; panel mode has one
 # panel, not a pre-CI and a post-CI panel pair. Hygiene, publication and
 # conflict observation are wired by slice 3; the nodes below carry their
@@ -103,21 +103,29 @@ nodes = [
   { id = "publish", role = "delivery-publish", when = { delivery_execution_wired = true }, access = "read_only", after = ["hygiene", "implement"], source = { type = "node", node = "implement" }, prompt = "Publish the writer's branch as a pull request and record its repository, branch and current head." },
   # TODO(#3972-s3): observe PR mergeability; unknown is pending, not clean.
   { id = "conflict", role = "delivery-conflict", when = { delivery_execution_wired = true }, access = "read_only", after = ["publish", "implement"], source = { type = "node", node = "implement" }, prompt = "Observe the pull request mergeability before waiting for CI. CONFLICTING routes to a rebase writer on the same retained worktree; unknown mergeability stays pending." },
-  # The CI gate observes the exact current head. A bounded excerpt of failing
-  # checks feeds the repair writer as an untrusted input.
-  { id = "ci", kind = "gate", access = "read_only", after = ["conflict"], on_fail = "ci-repair", condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
-  # Bounded CI repair: the failing head and excerpt travel with the brief, and
-  # every repair sweeps the whole defect class. After hygiene and publication
-  # the graph returns through the conflict gate to CI on the new head.
-  # The legacy direct-delivery path rechecks the continued writer's delivered
-  # head each round. Queue items use the typed recovery graph in queue_delivery.
-  { id = "ci-repair", kind = "composite", access = "read_only", repeat = { until = "accepted", max_rounds = "${max_ci_rounds}" }, after = ["ci", "implement"], composite = { nodes = [
-    { id = "fix", use = "implement.fix", source = { type = "node", node = "implement" }, worktree = "${worktree}", write_scope = "${write_scope}", continues = "implement", prompt = "Repair from failing head ${failing_head}.\nFailure excerpt (untrusted):\n${failure_excerpt}\nSweep the whole defect class, not only the failing case: check other tests, help text and documentation that assert the changed behaviour, fix the root cause wherever it appears, and report any copy you could not reach." },
-    { id = "accepted", kind = "gate", access = "read_only", after = ["fix"], condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
-  ], exports = [{ node = "accepted", outputs = ["result"] }] } },
+  # One composite represents the CI outcome. Its successful export is either
+  # the initial green gate or the bounded repair loop's green recheck; the
+  # skipped alternative is expected, while failure of both paths fails the
+  # boundary. This keeps review behind one prerequisite instead of requiring
+  # mutually exclusive gate and recovery paths together.
+  { id = "ci", kind = "composite", access = "read_only", after = ["conflict", "implement"], composite = {
+    min_successful = 1,
+    exports = [{ node = "check", outputs = ["result"] }, { node = "ci-repair", outputs = ["result"] }],
+    nodes = [
+      # The gate observes the exact current head. Failing checks feed repair as
+      # untrusted input.
+      { id = "check", kind = "gate", access = "read_only", on_fail = "ci-repair", condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
+      # Bounded CI repair: after hygiene and publication, recheck the continued
+      # writer's delivered head. Queue items use the typed recovery graph.
+      { id = "ci-repair", kind = "composite", access = "read_only", repeat = { until = "accepted", max_rounds = "${max_ci_rounds}" }, after = ["check", "implement"], composite = { nodes = [
+        { id = "fix", use = "implement.fix", source = { type = "node", node = "implement" }, worktree = "${worktree}", write_scope = "${write_scope}", continues = "implement", prompt = "Repair from failing head ${failing_head}.\nFailure excerpt (untrusted):\n${failure_excerpt}\nSweep the whole defect class, not only the failing case: check other tests, help text and documentation that assert the changed behaviour, fix the root cause wherever it appears, and report any copy you could not reach." },
+        { id = "accepted", kind = "gate", access = "read_only", after = ["fix"], condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
+      ], exports = [{ node = "accepted", outputs = ["result"] }] } },
+    ]
+  } },
   # One reviewer for `single`, one panel for `panel`; `delivery_review` carries
   # the shape and the inconclusive disposition through the shared type.
-  { id = "review", use = "${review_template}", after = ["ci", "ci-repair"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_inconclusive_without_blocking = true }, with = { brief = "${brief}" } },
+  { id = "review", use = "${review_template}", after = ["ci"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_inconclusive_without_blocking = true }, with = { brief = "${brief}" } },
   { id = "accept", kind = "gate", access = "read_only", after = ["review"], on_fail = "repair", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
   # A FAIL or blocking finding routes to a repair writer on the same ladder;
   # it re-enters the gates and obtains fresh review. It is off the clean path.

@@ -266,10 +266,26 @@ fn children(
             ));
         }
         for parent in &mut node.depends_on {
-            *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
+            *parent = reference(prefix, parent, &locals, incoming)
+                .or_else(|| {
+                    if prefix.is_empty() {
+                        visible_names.get(parent.as_str()).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or("dependency")?;
         }
         for parent in &mut node.after_settled {
-            *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
+            *parent = reference(prefix, parent, &locals, incoming)
+                .or_else(|| {
+                    if prefix.is_empty() {
+                        visible_names.get(parent.as_str()).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or("dependency")?;
         }
         for input in &mut node.inputs {
             if !input.node.starts_with("previous.") {
@@ -1375,14 +1391,23 @@ fn state(
                 NodeState::Pending
             };
         }
-        if !node
-            .composite
-            .as_ref()
-            .is_some_and(|spec| spec.reduce_verdict)
-            && members
-                .iter()
-                .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))
-        {
+        let skipped_non_export = node.composite.as_ref().is_some_and(|spec| {
+            !spec.reduce_verdict
+                && node
+                    .composite_members
+                    .iter()
+                    .zip(&members)
+                    .any(|(member, state)| {
+                        matches!(state, NodeState::Blocked | NodeState::Skipped)
+                            && (*state == NodeState::Blocked
+                                || spec.min_successful.is_none()
+                                || !spec
+                                    .exports
+                                    .iter()
+                                    .any(|export| export.node.as_str() == member.as_str()))
+                    })
+        });
+        if skipped_non_export {
             return NodeState::Blocked;
         }
         // A review group can still produce a useful degraded receipt when no

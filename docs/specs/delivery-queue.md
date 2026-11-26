@@ -71,8 +71,10 @@ while mergeability is read, the observation is pending on the new head and
 identifies both heads; stale conflict evidence cannot direct a rebase. A failed CI gate
 passes the failing head, job identities and bounded log excerpts as untrusted
 inputs to `ci-repair`; after hygiene and publication, return through the
-conflict gate to CI on the new head. Review failure similarly passes structured
-findings to a repair writer, then re-enters the gates and obtains fresh review.
+conflict gate to CI on the new head. The delivery CI outcome joins the initial
+green check and the successful repair recheck; review waits for that outcome,
+including when the alternative path is skipped. Review failure similarly passes
+structured findings to a repair writer, then re-enters the gates and obtains fresh review.
 Both paths use the per-node ladder and bounded loops; no new commit is not proof
 of a fix. A CI rerun, if offered, is an explicit sourced policy and records the
 run and head; it cannot produce a green verdict from stale or absent checks.

@@ -372,7 +372,7 @@ fn clean_entry_selects_seed_only_after_recovery_is_inactive() {
 }
 
 #[test]
-fn loop_body_preserves_an_outer_node_source_and_entry_dependency() {
+fn loop_body_preserves_outer_node_sources_and_entry_dependencies() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 2,
         "graph_id": "outer-node-source",
@@ -385,8 +385,10 @@ fn loop_body_preserves_an_outer_node_source_and_entry_dependency() {
              "depends_on":["ready"], "loop":{"max_rounds":1,"until":"done","body":[
                 {"id":"reader", "access":"read_only", "prompt":"read writer output",
                  "route":{"alias":"fixture"}, "depends_on":["writer"], "source":{"type":"node","node":"writer"}},
+                {"id":"settled-reader", "access":"read_only", "prompt":"read after writer settles",
+                 "route":{"alias":"fixture"}, "depends_on":["reader"], "after_settled":["writer"]},
                 {"id":"done", "kind":"gate", "access":"read_only",
-                 "depends_on":["reader"], "condition":{"type":"budget"}}
+                 "depends_on":["settled-reader"], "condition":{"type":"budget"}}
              ]}}
         ]
     }))
@@ -405,6 +407,15 @@ fn loop_body_preserves_an_outer_node_source_and_entry_dependency() {
     assert!(reader.depends_on.contains(&"writer".to_owned()));
     assert!(reader.depends_on.contains(&"ready".to_owned()));
     assert!(!reader.depends_on.contains(&"cycle--r1--writer".to_owned()));
+    let settled_reader = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "cycle--r1--settled-reader")
+        .unwrap();
+    assert!(settled_reader.after_settled.contains(&"writer".to_owned()));
+    assert!(!settled_reader
+        .after_settled
+        .contains(&"cycle--r1--writer".to_owned()));
     assert!(validate_flat_plan(&expanded, &Default::default()).is_ok());
 }
 

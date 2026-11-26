@@ -723,7 +723,6 @@ fn delivery_composites_compile_both_review_shapes() {
             "publish",
             "conflict",
             "ci",
-            "ci-repair",
             "review",
             "accept",
             "land",
@@ -774,6 +773,38 @@ fn delivery_composites_compile_both_review_shapes() {
                 .any(|node| node.id.contains("initial-review"))
         );
     }
+}
+
+#[test]
+fn delivery_review_waits_on_the_single_ci_outcome_boundary() {
+    let doc = compiled_delivery(json!({"plan": false}), false);
+    let expanded = expanded_delivery(&doc, &limits());
+    let ci = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--ci")
+        .unwrap();
+    let spec = ci.composite.as_ref().unwrap();
+    assert_eq!(spec.min_successful, Some(1));
+    assert!(!spec.reduce_verdict);
+    assert_eq!(spec.exports.len(), 2);
+    for expected in ["delivery--ci--check", "delivery--ci--ci-repair"] {
+        assert!(spec.exports.iter().any(|input| input.node == expected));
+    }
+
+    let check = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--ci--check")
+        .unwrap();
+    assert_eq!(check.on_fail.as_deref(), Some("delivery--ci--ci-repair"));
+    let review = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "delivery--review")
+        .unwrap();
+    assert_eq!(review.depends_on.len(), 1);
+    assert_eq!(review.depends_on[0], "delivery--ci");
 }
 
 /// Sourced queue knobs resolve over the declared layers and seal the winning
@@ -2389,7 +2420,7 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
     let ci = expanded
         .nodes
         .iter()
-        .find(|node| node.id == "delivery--ci")
+        .find(|node| node.id == "delivery--ci--check")
         .unwrap();
     assert!(matches!(
         &ci.condition,
@@ -2432,7 +2463,7 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
             && input.outputs.contains(&OutputKind::Commit)
     }));
     assert!(repair.inputs.iter().any(|input| {
-        input.node == "delivery--ci"
+        input.node == "delivery--ci--check"
             && input.outputs.len() == 2
             && input.outputs.contains(&OutputKind::Findings)
             && input.outputs.contains(&OutputKind::Commit)
