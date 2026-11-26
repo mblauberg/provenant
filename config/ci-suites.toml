@@ -171,6 +171,7 @@ pr_paths = [
   "tools/front-door/crates/providers/src/tests_launch_access.rs",
   "tools/front-door/crates/providers/src/tests_skills_and_discovery.rs",
   "tools/front-door/crates/providers/src/tests_stream_outcomes.rs",
+  "tools/front-door/crates/run/src/build/rust.rs",
   "tools/front-door/crates/run/src/short_temporary.rs",
   "tools/front-door/crates/run/src/telemetry_context.rs",
   "tools/front-door/crates/run/src/writer.rs",
