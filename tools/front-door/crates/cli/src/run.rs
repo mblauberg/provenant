@@ -591,7 +591,7 @@ impl Registry<'_> {
     pub fn continues_sessions(&self) -> bool {
         REGISTRY.iter().any(|entry| {
             provenant_records::AdapterSpec::get(entry.adapter.id())
-                .is_some_and(|spec| spec.launch.resume)
+                .is_some_and(|spec| spec.capabilities.launch.resume.value)
         })
     }
 }
@@ -989,7 +989,7 @@ impl Registry<'_> {
             .provider
             .as_deref()
             .and_then(provenant_records::AdapterSpec::get)
-            .is_some_and(|spec| spec.result_event_usage);
+            .is_some_and(|spec| spec.launch.result_event_usage);
         let failed = |reason: &str| run::Decoded {
             cause: None,
             outcome: run::Outcome::Failed,
@@ -1038,8 +1038,8 @@ impl Registry<'_> {
             return Ok(failed("route names no registered adapter"));
         };
         let model_observation = provenant_records::AdapterSpec::get(adapter.id())
-            .map(|spec| spec.model_observation)
-            .unwrap_or(provenant_records::ModelObservation::Stream);
+            .map(|spec| spec.capabilities.answering_model.value)
+            .unwrap_or(provenant_records::AnsweringModelSource::Unreported);
         let model = stream_model(route);
         // A caller without a sealed task policy receives the compiled table;
         // there is no host or project layer to overlay in that case.
@@ -1099,7 +1099,7 @@ impl Registry<'_> {
                 .as_deref()
                 .filter(|key| {
                     provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| {
-                        spec.registered_account && !spec.is_unregistered_local(key)
+                        spec.accounts.registered && !spec.is_unregistered_local(key)
                     })
                 })
                 .map(str::to_owned),
@@ -1185,7 +1185,8 @@ impl Registry<'_> {
 
         // Exit-time stderr quota text is evidence only for a run the adapter
         // did not accept. Live structured refusals trigger cleanup separately.
-        if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.stderr_quota)
+        if provenant_records::AdapterSpec::get(adapter.id())
+            .is_some_and(|spec| spec.launch.stderr_quota)
             && !matches!(outcome.status(), OutcomeStatus::Success)
             && let Some(event) = provenant_providers::opencode::stderr_quota(stderr)
         {
@@ -1196,7 +1197,7 @@ impl Registry<'_> {
             .as_ref()
             .is_none_or(|sandbox| !sandbox.effective);
         let rollout =
-            (model_observation == provenant_records::ModelObservation::Rollout).then(|| {
+            (model_observation == provenant_records::AnsweringModelSource::Rollout).then(|| {
                 outcome
                     .session()
                     .ok_or(provenant_providers::ProviderError::UnknownIdentity)
@@ -1220,7 +1221,7 @@ impl Registry<'_> {
             });
         // OpenCode's stream names no model; its session record does.
         let opencode_model = (model_observation
-            == provenant_records::ModelObservation::SessionDatabase)
+            == provenant_records::AnsweringModelSource::SessionDatabase)
             .then(|| {
                 let session = outcome
                     .session()
@@ -1241,10 +1242,12 @@ impl Registry<'_> {
             None => None,
         };
         let rollout = rollout.and_then(Result::ok);
-        let observed_model = if model_observation == provenant_records::ModelObservation::Rollout {
+        let observed_model = if model_observation
+            == provenant_records::AnsweringModelSource::Rollout
+        {
             // Missing or invalid rollout evidence cannot fall back to another source.
             rollout.as_ref().map(|turn| turn.model.as_str())
-        } else if model_observation == provenant_records::ModelObservation::SessionDatabase {
+        } else if model_observation == provenant_records::AnsweringModelSource::SessionDatabase {
             opencode_model.as_deref()
         } else {
             outcome.model()
@@ -1293,7 +1296,7 @@ impl Registry<'_> {
         // The adapter declares what one report means; the accumulator is the
         // only merge. A name we do not have a spec for reports nothing live.
         let usage_semantics = provenant_records::AdapterSpec::get(adapter.id())
-            .map(|spec| spec.usage)
+            .map(|spec| spec.launch.usage)
             .unwrap_or_else(|| {
                 provenant_records::UsageSemantics::new(
                     provenant_records::UsageScope::Step,
@@ -1334,10 +1337,10 @@ impl Registry<'_> {
         // also arrive on stderr; collapsing both channels here keeps one
         // warning even when Codex prints the key twice.
         let scan_stderr = provenant_records::AdapterSpec::get(adapter.id())
-            .is_some_and(|spec| spec.stderr_config_notices);
+            .is_some_and(|spec| spec.launch.stderr_config_notices);
         report_config_notices(&events, stderr, scan_stderr);
         if provenant_records::AdapterSpec::get(adapter.id())
-            .is_some_and(|spec| spec.deduplicate_result)
+            .is_some_and(|spec| spec.launch.deduplicate_result)
         {
             // The provider can repeat the whole answer across its streamed response and
             // result, or within the result itself. Leave distinct text intact.
@@ -1353,7 +1356,9 @@ impl Registry<'_> {
                 decoded.result = first.to_owned();
             }
         }
-        if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.exit_route) {
+        if provenant_records::AdapterSpec::get(adapter.id())
+            .is_some_and(|spec| spec.launch.exit_route)
+        {
             decoded.observed_route = Some(run::RouteRecord {
                 source: Some("command_exit".into()),
                 account_key: account_key.clone(),
@@ -1390,7 +1395,7 @@ impl Registry<'_> {
         // was renewed away or expired, not that the account needs a login.
         let lane_token = auth
             && provenant_records::AdapterSpec::get(adapter.id())
-                .is_some_and(|spec| spec.launch_token_refresh);
+                .is_some_and(|spec| spec.launch.launch_token_refresh);
         let provider_failed = outcome.status() == OutcomeStatus::Failed
             && failure_cause == provenant_providers::FailureCause::Provider;
         (decoded.outcome, decoded.reason) = match outcome.status() {
@@ -1590,7 +1595,7 @@ impl Registry<'_> {
             decoded.outcome = run::Outcome::Unclassified;
             // A diagnostic replaces the provider's untrusted text.
             let diagnosed = provenant_records::AdapterSpec::get(adapter.id())
-                .is_some_and(|spec| spec.stdout_error_diagnostic)
+                .is_some_and(|spec| spec.launch.stdout_error_diagnostic)
                 && provenant_providers::opencode::stdout_error_diagnostic(
                     stdout,
                     route.model.as_deref(),
@@ -1607,7 +1612,7 @@ impl Registry<'_> {
             });
         }
         if provenant_records::AdapterSpec::get(adapter.id())
-            .is_some_and(|spec| spec.stdout_error_diagnostic)
+            .is_some_and(|spec| spec.launch.stdout_error_diagnostic)
             && let Some(note) = provenant_providers::opencode::stdout_error_diagnostic(
                 stdout,
                 route.model.as_deref(),
@@ -1671,7 +1676,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         intent: provenant_routing::RouteIntent {
             writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
             network: Some(task.access.network(task.writer.is_some())),
-            image_input: false,
+            image_input: !task.access.attachments.is_empty(),
             skill_location: task.profile.require_skill_location,
             workload: task
                 .route

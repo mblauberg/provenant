@@ -120,7 +120,7 @@ fn prepared(
 
 /// The credential mechanism each adapter's fixture plan selects.
 fn login(id: &str) -> Option<&'static str> {
-    provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication)
+    provenant_records::AdapterSpec::get(id).and_then(|spec| spec.login.authentication)
 }
 
 struct Case {
@@ -179,7 +179,8 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
             (Access::WorktreeWrite, "worktree-write"),
         ] {
             if access == Access::WorktreeWrite
-                && !provenant_records::AdapterSpec::get(id).is_some_and(|spec| spec.launch.write)
+                && !provenant_records::AdapterSpec::get(id)
+                    .is_some_and(|spec| spec.capabilities.launch.write.value)
             {
                 continue;
             }

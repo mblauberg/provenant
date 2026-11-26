@@ -16,4 +16,7 @@ output = run([lint, lint, other])
 assert '`clippy::example` | 2 | `src/a.rs:7`' in output
 assert 'Other warnings/errors: 1' in output
 assert 'No Clippy lints fired.' in run([])
+rendered = dict(other, message=dict(other['message'], rendered='error[E0609]: no field\n'))
+logged = subprocess.run([script], input=json.dumps(rendered), text=True, capture_output=True, check=True).stderr
+assert 'error[E0609]: no field' in logged, 'each diagnostic stays in the job log'
 print('Clippy summary fixtures passed.')

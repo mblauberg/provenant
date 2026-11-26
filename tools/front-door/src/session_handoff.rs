@@ -490,7 +490,7 @@ fn checkpoint_repair(
     client: Option<provenant_records::Harness>,
 ) -> String {
     let client = client
-        .map(|harness| format!(" --client {}", harness.spec().name))
+        .map(|harness| format!(" --client {}", harness.spec().identity.name))
         .unwrap_or_else(|| " --client HARNESS".into());
     let rest = format!(
         "workflow session save {}{client} --rebind",
@@ -601,7 +601,8 @@ fn execute(
             "coordination mutations are not allowed inside a lane",
         ));
     }
-    if !provenant_records::AdapterSpec::get(&args.provider).is_some_and(|spec| spec.session_handoff)
+    if !provenant_records::AdapterSpec::get(&args.provider)
+        .is_some_and(|spec| spec.launch.session_handoff)
     {
         return Err(Refusal::new(
             Outcome::Unavailable,

@@ -103,7 +103,8 @@ pub fn monthly_allowance_assessment(
     };
     // A declared monthly allowance cannot become neutral just because its report is absent.
     let required =
-        provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.monthly_allowance)
+        provenant_records::AdapterSpec::get(model.adapter())
+            .is_some_and(|s| s.quota.monthly_allowance)
             || profile.is_some_and(|p| {
                 p.monthly.is_some()
                     || p.windows

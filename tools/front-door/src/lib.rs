@@ -384,7 +384,7 @@ fn report_account_sync(
                         .iter()
                         .find(|status| {
                             status.label == entry.label
-                                && status.harness.spec().name == entry.adapter
+                                && status.harness.spec().identity.name == entry.adapter
                         })
                         .map_or(provenant_config::AccountState::NotInstalled, |s| s.state);
                     let state = serde_json::to_value(state)

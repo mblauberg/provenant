@@ -144,7 +144,7 @@ pub struct Handoff {
     #[arg(long)]
     pub no_checkpoint: bool,
     /// Provider for the new session; only `claude` is supported
-    #[arg(long, default_value = provenant_records::Harness::Claude.spec().name)]
+    #[arg(long, default_value = provenant_records::Harness::Claude.spec().identity.name)]
     pub provider: String,
     /// Model for the new session
     #[arg(long)]

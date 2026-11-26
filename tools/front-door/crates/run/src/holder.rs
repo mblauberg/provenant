@@ -637,8 +637,8 @@ fn account_directories(
     specs
         .iter()
         .filter_map(|spec| {
-            let (environment, _) = spec.default_account_directory?;
-            lookup(environment).map(|path| (spec.name.to_owned(), PathBuf::from(path)))
+            let (environment, _) = spec.accounts.default_directory?;
+            lookup(environment).map(|path| (spec.identity.name.to_owned(), PathBuf::from(path)))
         })
         .collect()
 }
@@ -1139,6 +1139,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             .map_err(custody_error)?;
         // The live capture is newer than the periodically published checkpoint.
         record.last_output_at = last_output;
+        record.first_output_at = record.first_output_at.or(last_output);
         let attempt = store
             .attempt_dir(context.attempt_id, false)
             .map_err(custody_error)?;
@@ -1321,9 +1322,9 @@ fn record_budget_warning(
     use provenant_records::control::*;
     let support = provenant_records::ADAPTER_SPECS
         .iter()
-        .find(|spec| Some(spec.name) == provider)
+        .find(|spec| Some(spec.identity.name) == provider)
         .map_or(ControlSupport::Unsupported, |spec| {
-            spec.launch.control.for_launch(LaunchKind::Lane)
+            spec.capabilities.control.for_launch(LaunchKind::Lane)
         });
     let receipt = ControlReceipt {
         extra: Default::default(),
@@ -2196,7 +2197,7 @@ impl RunStore {
                     .provider
                     .as_deref()
                     .and_then(provenant_records::AdapterSpec::get)
-                    .is_some_and(|spec| !spec.launch.control.lane.continues())
+                    .is_some_and(|spec| !spec.capabilities.control.lane.continues())
         });
         if (session.is_none() || unsupported) && !fresh_with_handoff {
             return Err(RunError::SteerSessionUnavailable);
@@ -2936,7 +2937,11 @@ impl RunStore {
             .applied_route
             .as_ref()
             .and_then(|r| r.provider.as_deref())
-            == Some("codex")
+            .and_then(provenant_records::AdapterSpec::get)
+            .is_some_and(|s| {
+                s.capabilities.usage_attribution.value
+                    == provenant_records::UsageAttribution::Session
+            })
         {
             let prior_id = self.request(record.attempt_id, call).map(|request| {
                 if request.fresh_continuation.is_none() {
@@ -4892,8 +4897,8 @@ mod host_clock_tests {
     #[test]
     fn account_directory_overrides_follow_registry_entries() {
         let mut fixture = provenant_records::ADAPTER_SPECS[0];
-        fixture.name = "fixture";
-        fixture.default_account_directory = Some(("FIXTURE_HOME", ".fixture"));
+        fixture.identity.name = "fixture";
+        fixture.accounts.default_directory = Some(("FIXTURE_HOME", ".fixture"));
         let actual = account_directories(&[fixture], |key| {
             (key == "FIXTURE_HOME").then(|| "/fixture/home".into())
         });

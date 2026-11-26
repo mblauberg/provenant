@@ -922,12 +922,21 @@ fn validate_flat_plan_inner(
         if routes.iter().any(|route| !route_is_bounded(route)) {
             return Err(node_plan_error(node, "route field size"));
         }
-        // Configured aliases resolve model providers, whose registry excludes host-native.
+        // A delegated-agent entry runs on the host's own provider login; every
+        // other adapter runs in its own lane. Read that from the registry row.
+        let delegated = |name: &str| {
+            provenant_records::AdapterSpec::get(name).is_some_and(|spec| {
+                spec.identity.named_entry == provenant_records::NamedEntry::DelegatedAgent
+            })
+        };
         for (index, route) in routes.iter().enumerate() {
-            if route.adapter.as_deref() == Some("host-native")
-                && !routes[index + 1..]
-                    .iter()
-                    .any(|fallback| fallback.adapter.as_deref() != Some("host-native"))
+            if route.adapter.as_deref().is_some_and(delegated)
+                && !routes[index + 1..].iter().any(|fallback| {
+                    fallback
+                        .adapter
+                        .as_deref()
+                        .is_none_or(|name| !delegated(name))
+                })
             {
                 return Err(node_plan_error(
                     node,
@@ -940,18 +949,20 @@ fn validate_flat_plan_inner(
                 .adapter
                 .as_deref()
                 .and_then(provenant_records::AdapterSpec::get)
-                && let Err(error) = spec.check_launch(&provenant_records::LaunchRequest {
-                    model: route.model.as_deref(),
-                    effort: route.effort.as_deref(),
-                    write: node.access == AccessMode::WorktreeWrite
-                        || node
-                            .attempt
-                            .as_ref()
-                            .is_some_and(|spec| !spec.write_roots.is_empty()),
-                    ..Default::default()
-                })
+                && let Some(refusal) = spec
+                    .check_launch(&provenant_records::LaunchRequest {
+                        model: route.model.as_deref(),
+                        effort: route.effort.as_deref(),
+                        write: node.access == AccessMode::WorktreeWrite
+                            || node
+                                .attempt
+                                .as_ref()
+                                .is_some_and(|spec| !spec.write_roots.is_empty()),
+                        ..Default::default()
+                    })
+                    .refusal()
             {
-                return Err(node_plan_error(node, error.field.refusal()));
+                return Err(node_plan_error(node, refusal.to_string()));
             }
         }
 

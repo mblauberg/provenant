@@ -932,7 +932,7 @@ pub(super) fn execute_in(
                                 == Some(r.account.account_key.as_str())
                                 || (route.account_key.is_none()
                                     && provenant_records::AdapterSpec::get(&route.adapter)
-                                        .is_some_and(|spec| spec.allowance_prefix.is_some())
+                                        .is_some_and(|spec| spec.quota.allowance_prefix.is_some())
                                     && snapshot_governs(
                                         &route.adapter,
                                         r.snapshot

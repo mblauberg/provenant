@@ -2794,6 +2794,12 @@ impl Factory {
                     }));
                 }
             }
+            let capability_gaps = provenant_cli::adapter_capabilities::explain_capability_gaps(
+                &self.context.roots,
+                &self.context.identity.project.to_string(),
+                &config,
+                &expanded.nodes,
+            );
             let node_routes = self.explain_node_routes(&expanded.nodes);
             let source_admission = self.explain_source_admission(&expanded.nodes)?;
             let refused = source_admission
@@ -2811,6 +2817,7 @@ impl Factory {
                 .collect::<Vec<_>>();
             return Ok(json!({
                 "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
+                "capability_gaps": capability_gaps,
                 "writer_base": writer_base.as_ref().map(|base| json!({
                     "commit": base.commit,
                     "source": base.source.label(),

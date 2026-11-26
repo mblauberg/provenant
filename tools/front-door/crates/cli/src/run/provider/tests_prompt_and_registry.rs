@@ -367,8 +367,8 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
 -> Result<(), Box<dyn std::error::Error>> {
     let spec = provenant_records::AdapterSpec::get("fixture-provider")
         .ok_or("fixture AdapterSpec is missing")?;
-    assert!(spec.local_login);
-    assert_eq!(spec.local_account, ("fixture", "work"));
+    assert!(spec.login.local);
+    assert_eq!(spec.accounts.local_entry, ("fixture", "work"));
     registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work", false, false)
 }
 

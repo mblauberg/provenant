@@ -15,6 +15,10 @@ def main():
         if record.get('reason') != 'compiler-message':
             continue
         message = record.get('message', {})
+        if message.get('level') in ('warning', 'error'):
+            # The summary only counts; the job log must still name each
+            # diagnostic, or a failing lint job hides its own cause.
+            sys.stderr.write(message.get('rendered') or '')
         code = (message.get('code') or {}).get('code') or ''
         if code.startswith('clippy::'):
             spans = message.get('spans') or []

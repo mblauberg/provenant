@@ -57,6 +57,18 @@ pub enum Source {
     Project,
     Dispatch,
 }
+impl Source {
+    /// The shared provenance layer for this policy layer. A dispatch override
+    /// arrives with the resolved route's policy.
+    pub const fn layer(self) -> crate::Layer {
+        match self {
+            Self::CompiledDefault => crate::Layer::Default,
+            Self::Host => crate::Layer::Host,
+            Self::Project => crate::Layer::Project,
+            Self::Dispatch => crate::Layer::Route,
+        }
+    }
+}
 
 impl Source {
     /// The provenance a warning from this effective rule carries, so a

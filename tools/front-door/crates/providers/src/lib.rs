@@ -2,6 +2,8 @@
 //! that runs probes and reads credentials. No mutable registry.
 #![forbid(unsafe_code)]
 
+pub mod version;
+
 pub mod accounts;
 pub mod agy;
 pub mod claude;

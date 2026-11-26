@@ -589,7 +589,7 @@ impl MandatoryRoots {
         if sandboxed && !mandatory.is_host_access() {
             let endpoints: std::collections::BTreeSet<_> = provenant_records::ADAPTER_SPECS
                 .iter()
-                .flat_map(|spec| spec.credential_files.iter().copied())
+                .flat_map(|spec| spec.login.credential_files.iter().copied())
                 .chain(HOST_CREDENTIAL_ENDPOINTS.iter().copied())
                 .collect();
             let resolved_scratch = resolve_boundary_path(scratch)?;
@@ -1778,7 +1778,7 @@ mod tests {
         ];
         let declared: std::collections::BTreeSet<_> = provenant_records::ADAPTER_SPECS
             .iter()
-            .flat_map(|spec| spec.credential_files.iter().copied())
+            .flat_map(|spec| spec.login.credential_files.iter().copied())
             .collect();
         endpoints.extend(
             declared

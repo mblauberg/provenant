@@ -489,14 +489,13 @@ fn answer_delivery_reply(
         diagnostic("answer delivery unavailable: provider has no native install declaration");
         return Ok(None);
     };
-    match install.answer_delivery {
-        provenant_records::CapabilitySupport::Supported => {}
-        provenant_records::CapabilitySupport::Unsupported { reason, source } => {
-            diagnostic(&format!(
-                "answer delivery unavailable: {reason} (source: {source})"
-            ));
-            return Ok(None);
-        }
+    if !install.native.answer_delivery.value {
+        let reason = install.native.answer_delivery.reason;
+        let source = install.native.answer_delivery.source;
+        diagnostic(&format!(
+            "answer delivery unavailable: {reason} (source: {source})"
+        ));
+        return Ok(None);
     }
     let Some(session) = event
         .session_id
@@ -846,24 +845,27 @@ fn provider_advisory_output(
             client
                 .spec()
                 .install
-                .map(|install| install.precompact_context)
+                .map(|install| install.native.precompact_context)
         });
         return match support {
-            Some(provenant_records::CapabilitySupport::Supported)
-                if matches!(
-                    protocol,
-                    Some(HookProtocol::CommandGroups { .. } | HookProtocol::OpenCodePlugin)
-                ) =>
+            Some(declaration)
+                if declaration.value
+                    && matches!(
+                        protocol,
+                        Some(HookProtocol::CommandGroups { .. } | HookProtocol::OpenCodePlugin)
+                    ) =>
             {
                 Some(output.to_vec())
             }
-            Some(provenant_records::CapabilitySupport::Supported) => {
+            Some(declaration) if declaration.value => {
                 diagnostic(
                     "checkpoint guidance unavailable: preCompact response format is undeclared",
                 );
                 Some(Vec::new())
             }
-            Some(provenant_records::CapabilitySupport::Unsupported { reason, source }) => {
+            Some(declaration) => {
+                let reason = declaration.reason;
+                let source = declaration.source;
                 let message = format!(
                     "Provenant cannot inject pre-compaction guidance into the model context: {reason} (source: {source})"
                 );
@@ -2228,14 +2230,16 @@ mod answer_delivery_tests {
         .ok_or("Codex preCompact response did not normalize")?;
         let codex: serde_json::Value = serde_json::from_slice(&codex)?;
         let codex_message = codex["systemMessage"].as_str().ok_or("Codex notice")?;
-        let Some(provenant_records::CapabilitySupport::Unsupported { reason, source }) =
-            Harness::Codex
-                .spec()
-                .install
-                .map(|install| install.precompact_context)
+        let Some(declaration) = Harness::Codex
+            .spec()
+            .install
+            .map(|install| install.native.precompact_context)
         else {
             return Err("Codex precompact context capability must be declared unsupported".into());
         };
+        assert!(!declaration.value);
+        let reason = declaration.reason;
+        let source = declaration.source;
         assert!(codex_message.contains(reason));
         assert!(codex_message.contains(source));
         assert!(codex.get("additionalContext").is_none());
@@ -2252,14 +2256,16 @@ mod answer_delivery_tests {
         .ok_or("Cursor preCompact response did not normalize")?;
         let cursor: serde_json::Value = serde_json::from_slice(&cursor)?;
         let cursor_message = cursor["user_message"].as_str().ok_or("Cursor notice")?;
-        let Some(provenant_records::CapabilitySupport::Unsupported { reason, source }) =
-            Harness::Cursor
-                .spec()
-                .install
-                .map(|install| install.precompact_context)
+        let Some(declaration) = Harness::Cursor
+            .spec()
+            .install
+            .map(|install| install.native.precompact_context)
         else {
             return Err("Cursor precompact context capability must be declared unsupported".into());
         };
+        assert!(!declaration.value);
+        let reason = declaration.reason;
+        let source = declaration.source;
         assert!(cursor_message.contains(reason));
         assert!(cursor_message.contains(source));
         assert!(cursor.get("additional_context").is_none());

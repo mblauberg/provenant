@@ -92,7 +92,10 @@ pub struct ResolvedHarnessTarget {
     pub skills_dir: AbsolutePath,
     pub config_file: AbsolutePath,
     pub hook_file: Option<AbsolutePath>,
-    pub instruction: Option<AbsolutePath>,
+    /// The managed instruction file. The receipt keeps its recorded key, so an
+    /// installed receipt reads unchanged and no migration is needed.
+    #[serde(rename = "instruction")]
+    pub instruction_file: Option<AbsolutePath>,
     /// The account removed every managed hook on purpose, so a later install
     /// does not add them again from its sibling accounts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

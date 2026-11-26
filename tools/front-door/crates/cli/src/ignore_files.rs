@@ -59,23 +59,23 @@ pub fn findings<'a>(
 ) -> Vec<IgnoreFinding> {
     let mut findings = Vec::new();
     for spec in adapters {
-        for &file in spec.ignore_files {
+        for &file in spec.launch.ignore_files {
             match read(&checkout.join(file)) {
                 Ok(None) => {}
                 Ok(Some(contents)) => {
                     if let Some((line, pattern)) = hiding_rule(&contents, path) {
                         findings.push(IgnoreFinding::Hidden {
-                            adapter: spec.name,
+                            adapter: spec.identity.name,
                             file,
                             line,
                             pattern,
                             path: path.to_path_buf(),
-                            indexing: spec.indexing_ignore_files,
+                            indexing: spec.launch.indexing_ignore_files,
                         });
                     }
                 }
                 Err(error) => findings.push(IgnoreFinding::Unreadable {
-                    adapter: spec.name,
+                    adapter: spec.identity.name,
                     file,
                     error,
                 }),
@@ -93,7 +93,7 @@ pub fn launch_warnings(
     adapter: &AdapterSpec,
     host_state: &Path,
 ) -> Vec<String> {
-    if adapter.ignore_files.is_empty() {
+    if adapter.launch.ignore_files.is_empty() {
         return Vec::new();
     }
     let Ok(relative) = worktree.strip_prefix(checkout) else {
@@ -315,7 +315,7 @@ mod tests {
     fn declared_files() -> Vec<&'static str> {
         let mut files: Vec<_> = ADAPTER_SPECS
             .iter()
-            .flat_map(|spec| spec.ignore_files.iter().copied())
+            .flat_map(|spec| spec.launch.ignore_files.iter().copied())
             .collect();
         files.sort_unstable();
         files.dedup();
@@ -335,7 +335,7 @@ mod tests {
     fn hidden(directory: &tempfile::TempDir, spec: &AdapterSpec, path: &str) -> bool {
         findings(directory.path(), Path::new(path), [spec])
             .iter()
-            .any(|finding| matches!(finding, IgnoreFinding::Hidden { adapter, .. } if *adapter == spec.name))
+            .any(|finding| matches!(finding, IgnoreFinding::Hidden { adapter, .. } if *adapter == spec.identity.name))
     }
 
     // The invariant comes from the declaration: an adapter warns exactly when
@@ -352,41 +352,59 @@ mod tests {
         assert!(
             ADAPTER_SPECS
                 .iter()
-                .any(|spec| !spec.ignore_files.is_empty())
+                .any(|spec| !spec.launch.ignore_files.is_empty())
         );
         for spec in ADAPTER_SPECS {
-            for file in spec.ignore_files {
+            for file in spec.launch.ignore_files {
                 let path = Path::new(file);
                 assert!(
                     path.components().count() == 1
                         && matches!(path.components().next(), Some(Component::Normal(_))),
                     "{}: {file} must be a checkout-root file",
-                    spec.name
+                    spec.identity.name
                 );
             }
-            let declares = !spec.ignore_files.is_empty();
-            assert_eq!(hidden(&listing, spec, &worktree), declares, "{}", spec.name);
-            assert_eq!(hidden(&listing, spec, root), declares, "{}", spec.name);
-            assert!(!hidden(&unrelated, spec, &worktree), "{}", spec.name);
-            assert!(!hidden(&absent, spec, &worktree), "{}", spec.name);
+            let declares = !spec.launch.ignore_files.is_empty();
+            assert_eq!(
+                hidden(&listing, spec, &worktree),
+                declares,
+                "{}",
+                spec.identity.name
+            );
+            assert_eq!(
+                hidden(&listing, spec, root),
+                declares,
+                "{}",
+                spec.identity.name
+            );
+            assert!(
+                !hidden(&unrelated, spec, &worktree),
+                "{}",
+                spec.identity.name
+            );
+            assert!(!hidden(&absent, spec, &worktree), "{}", spec.identity.name);
             assert!(findings(absent.path(), Path::new(&worktree), [spec]).is_empty());
             // Doctor reads the same declaration through the layout port.
             assert_eq!(
                 !layout_warnings(listing.path(), state.path(), [spec]).is_empty(),
                 declares,
                 "{}",
-                spec.name
+                spec.identity.name
             );
             assert!(layout_warnings(unrelated.path(), state.path(), [spec]).is_empty());
             // The warning names each declared indexing-only file as the place
             // that keeps worktrees out of indexing without hiding them.
             for warning in layout_warnings(listing.path(), state.path(), [spec]) {
-                for file in spec.indexing_ignore_files {
-                    assert!(warning.contains(file), "{}: {warning}", spec.name);
+                for file in spec.launch.indexing_ignore_files {
+                    assert!(warning.contains(file), "{}: {warning}", spec.identity.name);
                 }
             }
-            for file in spec.indexing_ignore_files {
-                assert!(!spec.ignore_files.contains(file), "{}: {file}", spec.name);
+            for file in spec.launch.indexing_ignore_files {
+                assert!(
+                    !spec.launch.ignore_files.contains(file),
+                    "{}: {file}",
+                    spec.identity.name
+                );
             }
         }
     }

@@ -220,7 +220,7 @@ pub(crate) fn shared_settings(
         .filter(|entry| {
             !entry.settings.is_empty()
                 && provenant_records::AdapterSpec::get(&entry.adapter)
-                    .is_some_and(|spec| spec.shared_account_settings)
+                    .is_some_and(|spec| spec.accounts.shared_settings)
         })
         .map(|entry| {
             (
@@ -985,7 +985,7 @@ fn orphaned_targets(
         .harness_targets
         .iter()
         .filter(|record| {
-            if !record.harness.spec().account_config_dir {
+            if !record.harness.spec().accounts.config_dir {
                 return false;
             }
             let mut defaults = Targets::new(
@@ -1122,8 +1122,8 @@ fn detected_batches(
                             .hook_file
                             .map(|path| path.to_path_buf())
                             .transpose()?,
-                        instruction: record
-                            .instruction
+                        instruction_file: record
+                            .instruction_file
                             .map(|path| path.to_path_buf())
                             .transpose()?,
                     })
@@ -1140,7 +1140,7 @@ fn detected_batches(
         .filter(|spec| spec.install.is_some())
     {
         if std::env::split_paths(&path)
-            .any(|dir| provenant_os::sys::is_executable(&dir.join(spec.binary)))
+            .any(|dir| provenant_os::sys::is_executable(&dir.join(spec.identity.binary)))
         {
             batches.push(selected_targets_in(environment, &[spec.id])?);
         }
@@ -1154,10 +1154,11 @@ fn detected_batches(
         let name = entry.file_name();
         for spec in provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|spec| spec.account_config_dir && spec.install.is_some())
+            .filter(|spec| spec.accounts.config_dir && spec.install.is_some())
         {
             if spec
-                .account_directory_prefix
+                .accounts
+                .directory_prefix
                 .is_some_and(|prefix| name.as_encoded_bytes().starts_with(prefix.as_bytes()))
             {
                 directories.push((entry.path(), spec.id));
@@ -1925,7 +1926,7 @@ fn adopt_settings(globals: &cli::Globals, account: &str) -> Result<Vec<String>, 
     let id = cli::accounts::resolve(accounts, account)?;
     let entry = accounts.entries.get(&id).ok_or("unknown account")?;
     if !provenant_records::AdapterSpec::get(&entry.adapter)
-        .is_some_and(|spec| spec.shared_account_settings)
+        .is_some_and(|spec| spec.accounts.shared_settings)
     {
         return Err("only Claude accounts have shared settings".into());
     }

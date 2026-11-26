@@ -1579,11 +1579,12 @@ fn adapter_policy_excludes_fixture_items_but_scans_production_neighbours() {
 fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
     let names = provenant_records::ADAPTER_SPECS
         .iter()
-        .map(|spec| regex::escape(spec.name))
+        .map(|spec| regex::escape(spec.identity.name))
         .collect::<Vec<_>>()
         .join("|");
     let literal = format!(r#""(?:{names})""#);
-    let harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*\s*\.\s*spec\s*\(\s*\)\s*\.\s*name";
+    let harness =
+        r"Harness::[A-Za-z_][A-Za-z_0-9]*\s*\.\s*spec\s*\(\s*\)\s*\.\s*identity\s*\.\s*name";
     let typed_harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*";
     regex::Regex::new(&format!(
         r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness}|{typed_harness})|(?:{literal}|{harness}|{typed_harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*(?:\||=>|if\b)|matches!\s*\([^,]+,[^;{{}}\n]*(?:{literal}|{harness})|\.\s*(?:eq|ne|eq_ignore_ascii_case)\s*\(\s*(?:{literal}|{harness}|{typed_harness})|{typed_harness}[^,;{{}}]*=>|\blet\s+[^=;{{}}]*{typed_harness}[^=;{{}}]*=|matches!\s*\([^;{{}}]*{typed_harness})"
@@ -1594,10 +1595,10 @@ fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
 fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(), Box<dyn Error>> {
     let comparison = adapter_identity_comparison()?;
     for spec in provenant_records::ADAPTER_SPECS {
-        assert!(comparison.is_match(&format!("adapter == \"{}\"", spec.name)));
-        assert!(comparison.is_match(&format!("\"{}\" => action()", spec.name)));
+        assert!(comparison.is_match(&format!("adapter == \"{}\"", spec.identity.name)));
+        assert!(comparison.is_match(&format!("\"{}\" => action()", spec.identity.name)));
     }
-    assert!(comparison.is_match("adapter == Harness::Codex.spec().name"));
+    assert!(comparison.is_match("adapter == Harness::Codex.spec().identity.name"));
     assert!(comparison.is_match("matches!(adapter, \"codex\")"));
     assert!(comparison.is_match("matches!(adapter, Some(\"codex\"))"));
     assert!(comparison.is_match("matches!(adapter, None | Some(\"codex\"))"));
@@ -1605,7 +1606,7 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     assert!(comparison.is_match("adapter.eq(\"codex\")"));
     assert!(comparison.is_match("adapter.eq_ignore_ascii_case(\"codex\")"));
     assert!(comparison.is_match("\"codex\" if ready => action()"));
-    assert!(comparison.is_match("Harness::Agy.spec().name != adapter"));
+    assert!(comparison.is_match("Harness::Agy.spec().identity.name != adapter"));
     assert!(comparison.is_match("provider == Harness::Claude"));
     for pattern in [
         "Harness::Claude => action()",
@@ -1617,7 +1618,7 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     ] {
         assert!(comparison.is_match(pattern), "{pattern}");
     }
-    assert!(!comparison.is_match("default_value = Harness::Claude.spec().name"));
+    assert!(!comparison.is_match("default_value = Harness::Claude.spec().identity.name"));
     assert!(!comparison.is_match("true => Some(Harness::Codex),\nfalse => None"));
     Ok(())
 }
@@ -1639,7 +1640,7 @@ fn adapter_policy_detects_provider_and_config_identity_branches() -> Result<(), 
     for source in [
         "crate::adapter!(Agy, \"agy\", prepare);",
         "adapter: \"agy\",",
-        "provenant_records::Harness::Agy.spec().name",
+        "provenant_records::Harness::Agy.spec().identity.name",
     ] {
         assert!(!comparison.is_match(source), "false positive: {source}");
     }
@@ -1653,18 +1654,21 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let names = provenant_records::ADAPTER_SPECS
         .iter()
-        .map(|spec| regex::escape(spec.name))
+        .map(|spec| regex::escape(spec.identity.name))
         .collect::<Vec<_>>()
         .join("|");
     let literal = regex::Regex::new(&format!(r#""(?:{names})""#))?;
     let comparison = adapter_identity_comparison()?;
     let mut sources = Vec::new();
-    // Every production crate that can dispatch on adapter identity is in scope.
-    // Providers and config declare their own adapter bindings and name adapters
-    // in declarative data and diagnostics, so only identity comparisons are
-    // policy there; the routing/cli/quota side has no such declarations.
-    for name in ["cli", "routing", "quota", "providers", "config"] {
-        rust_sources(&root.join("crates").join(name).join("src"), &mut sources)?;
+    // Every crate can dispatch on adapter identity, so every crate is in scope.
+    // Provider, config and registry sources declare their own adapter bindings
+    // and name adapters in declarative data and diagnostics, so only identity
+    // comparisons are policy there; elsewhere a bare adapter literal is policy.
+    for entry in fs::read_dir(root.join("crates"))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_symlink() {
+            rust_sources(&entry.path().join("src"), &mut sources)?;
+        }
     }
     rust_sources(&root.join("src"), &mut sources)?;
     let mut violations = Vec::new();
@@ -1678,7 +1682,8 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
         let declarative = path.starts_with(root.join("src"))
             || path == root.join("crates/cli/src/hooks.rs")
             || path.starts_with(root.join("crates/providers/src"))
-            || path.starts_with(root.join("crates/config/src"));
+            || path.starts_with(root.join("crates/config/src"))
+            || path == root.join("crates/records/src/adapters.rs");
         let checks: Vec<_> = if declarative {
             vec![&comparison]
         } else {
@@ -1700,7 +1705,28 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
                 || (path.ends_with("run/status.rs")
                     && source[found.end()..].starts_with(": cursor"))
                 || (path.ends_with("run/provider/preparation.rs")
-                    && source[found.end()..].starts_with(':'));
+                    && source[found.end()..].starts_with(':'))
+                // Chair telemetry reads the Claude transcript format only.
+                || (path.ends_with("telemetry/src/ingest.rs")
+                    && line_text.contains("PROVIDER"))
+                // Host credential declarations are declarative adapter data.
+                || path.ends_with("confinement/src/permissions/policy/host.rs")
+                // Built-in credential inventory is declarative adapter data.
+                || path.ends_with("core/src/credential_declarations.rs")
+                // A name-kind example in documentation, not an adapter identity.
+                || (path.ends_with("core/src/names.rs") && line_text.contains("///"))
+                // Fixture document data, not an adapter policy branch.
+                || path.ends_with("fabric-runtime/src/graph/cutover_followup_invariants.rs")
+                // A declared host-native constant, not an adapter policy branch.
+                || (path.ends_with("fabric-runtime/src/graph/next_step.rs")
+                    && line_text.contains("HOST_NATIVE"))
+                // Result-envelope schema field names, not adapter identities.
+                || path.ends_with("records/src/wire/mod.rs")
+                // CLI event JSON field names, not adapter identities.
+                || path.ends_with("telemetry/src/signals.rs")
+                // A declared cache inventory, not an adapter policy branch.
+                || (path.ends_with("run/src/retention.rs")
+                    && source[..found.start()].contains("PROVIDER_CACHES"));
             if non_adapter_literal {
                 continue;
             }
@@ -1914,6 +1940,7 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "accounts set",
         "accounts show",
         "accounts sync",
+        "adapter capabilities",
         "admit",
         "adopt",
         "answer",

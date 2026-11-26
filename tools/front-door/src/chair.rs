@@ -1021,7 +1021,7 @@ fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIde
         .map_err(|_| provenant_providers::ProviderError::UnknownIdentity)?;
         // The chair state carries the Claude configuration directory, so the
         // identity comes from that harness's adapter, named by registry data.
-        let claude = provenant_records::Harness::Claude.spec().name;
+        let claude = provenant_records::Harness::Claude.spec().identity.name;
         let adapter = provenant_providers::REGISTRY
             .iter()
             .find(|registration| registration.adapter.id() == claude)

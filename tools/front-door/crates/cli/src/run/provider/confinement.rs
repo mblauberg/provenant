@@ -377,7 +377,7 @@ pub(super) fn confinement_request(
             protected_roots: cache_reads,
             secret_roots: Vec::new(),
             selected_authentication: AdapterSpec::get(adapter)
-                .and_then(|spec| spec.authentication)
+                .and_then(|spec| spec.login.authentication)
                 .map(Into::into),
             include_continuation: false,
             write_roots: writes,
@@ -783,9 +783,10 @@ fn credential_declarations(
                 });
                 if let Some(spec) = AdapterSpec::get(&entry.adapter) {
                     for relative in spec
+                        .login
                         .credential_files
                         .iter()
-                        .chain(spec.credential_auxiliary_files)
+                        .chain(spec.login.credential_auxiliary_files)
                     {
                         declarations.push(CredentialDeclaration {
                             root: CredentialRoot {
@@ -817,11 +818,11 @@ fn credential_declarations(
         .map(|host| host.default_account_directories.clone())
         .unwrap_or_else(run::HostLaunchContext::default_account_directories);
     for spec in ADAPTER_SPECS {
-        let Some((environment, fallback)) = spec.default_account_directory else {
+        let Some((environment, fallback)) = spec.accounts.default_directory else {
             continue;
         };
         let host_override = default_directories
-            .get(spec.name)
+            .get(spec.identity.name)
             .cloned()
             .or_else(|| host_provider_var(registry, environment).map(PathBuf::from));
         let (path, source, kind) = if let Some(path) = host_override {
@@ -835,12 +836,12 @@ fn credential_declarations(
                 home.join(fallback),
                 format!(
                     "provider declaration: {} default account directory",
-                    spec.name
+                    spec.identity.name
                 ),
-                (*spec.default_account_root_kind).clone(),
+                (*spec.accounts.default_root_kind).clone(),
             )
         };
-        if spec.credential_profile_sibling {
+        if spec.login.credential_profile_sibling {
             declarations.push(CredentialDeclaration {
                 root: CredentialRoot {
                     path: path.with_extension("json"),
@@ -848,7 +849,7 @@ fn credential_declarations(
                     kind: CredentialKind::Store,
                     scope: CredentialScope::Exact,
                 },
-                inventory: CredentialInventory::Adapter(spec.name.to_owned()),
+                inventory: CredentialInventory::Adapter(spec.identity.name.to_owned()),
             });
         }
         declarations.push(CredentialDeclaration {
@@ -858,7 +859,7 @@ fn credential_declarations(
                 kind,
                 scope: CredentialScope::Subtree,
             },
-            inventory: CredentialInventory::Adapter(spec.name.to_owned()),
+            inventory: CredentialInventory::Adapter(spec.identity.name.to_owned()),
         });
     }
 
@@ -878,7 +879,8 @@ fn credential_declarations(
                 return None;
             };
             let spec = provenant_records::AdapterSpec::get(adapter)?;
-            spec.credential_profile_sibling
+            spec.login
+                .credential_profile_sibling
                 .then(|| CredentialDeclaration {
                     root: CredentialRoot {
                         path: declaration.root.path.with_extension("json"),
@@ -1030,7 +1032,7 @@ pub(super) fn credential_roots(
         let inventory = match &decl.inventory {
             CredentialInventory::Adapter(adapter) => {
                 if provenant_records::AdapterSpec::get(adapter)
-                    .is_some_and(|spec| !spec.credential_files.is_empty())
+                    .is_some_and(|spec| !spec.login.credential_files.is_empty())
                 {
                     crate::accounts::exact_directory_credential_paths(
                         &root.path,
@@ -2350,7 +2352,7 @@ pub(super) fn find_executable_on_path(
     name: &str,
     search_path: &[PathBuf],
 ) -> Result<PathBuf, String> {
-    let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
+    let name = AdapterSpec::get(name).map_or(name, |spec| spec.identity.binary);
     find_command_on_path(name, search_path)
 }
 

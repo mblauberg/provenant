@@ -626,7 +626,7 @@ pub(crate) fn admit(
     if let Some(account) = input.account {
         account.validate_route(input.route)?;
     } else if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-        spec.registered_account
+        spec.accounts.registered
             && input
                 .route
                 .account_key
@@ -1362,10 +1362,10 @@ fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<
     else {
         return Ok(());
     };
-    if !install.instructions.is_supported() {
+    if !install.native.instructions.value {
         return Ok(());
     }
-    let instruction = install.instruction.ok_or(ProviderError::InvalidPath)?;
+    let instruction = install.instruction_file.ok_or(ProviderError::InvalidPath)?;
     let relative = Path::new(instruction);
     if relative.is_absolute()
         || relative
@@ -1413,7 +1413,7 @@ fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, P
     let Some(install) = adapter.install else {
         return Ok(false);
     };
-    if !install.hooks.is_supported() {
+    if !install.native.hooks.value {
         return Ok(false);
     }
     let warn_skip = |detail| {
@@ -1422,7 +1422,7 @@ fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, P
             "LANE_LANERUNTIME_HOOK_PROJECTION",
             format!(
                 "{} {detail}; continuing without its lane hooks",
-                adapter.name
+                adapter.identity.name
             ),
         )
     };
@@ -2358,7 +2358,9 @@ fn locate_user_skills(
     home: &Path,
     host_var: &dyn Fn(&str) -> Option<OsString>,
 ) -> Option<PathBuf> {
-    let location = provenant_records::AdapterSpec::get(adapter)?.skills?;
+    let location = provenant_records::AdapterSpec::get(adapter)?
+        .launch
+        .skill_location?;
     let path = location
         .environment
         .and_then(host_var)

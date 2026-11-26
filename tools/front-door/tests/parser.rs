@@ -645,9 +645,9 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
     for adapter in provenant_records::ADAPTER_SPECS {
         let documented = documented_providers
             .iter()
-            .any(|provider| provider.as_str() == Some(adapter.name));
+            .any(|provider| provider.as_str() == Some(adapter.identity.name));
         for setting in ["update", "runtime_deadline_seconds"] {
-            let path = format!("providers.{}.{setting}", adapter.name);
+            let path = format!("providers.{}.{setting}", adapter.identity.name);
             assert_eq!(
                 compact.iter().any(|field| field["path"] == path),
                 documented,

@@ -173,7 +173,7 @@ pub fn record_chair(
         roots,
         Event {
             kind: "chair.session".into(),
-            unit: "claude".into(),
+            unit: crate::ingest::PROVIDER.into(),
             exit_code: None,
             outcome: None,
             duration_ms: 0,
@@ -214,7 +214,7 @@ pub fn chair_sessions(
     Ok(events(roots)?
         .into_iter()
         .filter_map(|event| {
-            if event.kind != "chair.session" || event.unit != "claude" {
+            if event.kind != "chair.session" || event.unit != crate::ingest::PROVIDER {
                 return None;
             }
             let time = event

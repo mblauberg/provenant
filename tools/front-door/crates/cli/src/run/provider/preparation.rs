@@ -6,7 +6,7 @@ pub(super) fn preparation_executable(
     path: &run::FilteredLanePath,
     name: &str,
 ) -> Result<PathBuf, String> {
-    let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
+    let name = AdapterSpec::get(name).map_or(name, |spec| spec.identity.binary);
     path.resolve(name)
 }
 
@@ -17,28 +17,31 @@ fn include_local_login(
     selected_adapter: Option<&str>,
     retained_identity: Option<RetainedIdentity<'_>>,
 ) -> bool {
-    if !spec.local_login
-        || selected_adapter.is_some_and(|adapter| adapter != spec.name)
+    if !spec.login.local
+        || selected_adapter.is_some_and(|adapter| adapter != spec.identity.name)
         || retained_identity
-            .is_some_and(|identity| identity.account_key != Some(spec.local_account.1))
+            .is_some_and(|identity| identity.account_key != Some(spec.accounts.local_entry.1))
     {
         return false;
     }
-    let has_entry = entries.iter().any(|entry| entry.adapter == spec.name);
+    let has_entry = entries
+        .iter()
+        .any(|entry| entry.adapter == spec.identity.name);
     if !has_entry {
         return true;
     }
 
     // A registered-account adapter's local identity participates in the same
     // per-account observation and quota scheduling as its other accounts.
-    if !spec.is_unregistered_local(spec.local_account.1) {
+    if !spec.is_unregistered_local(spec.accounts.local_entry.1) {
         return false;
     }
     selected.is_none_or(|selector| {
-        selector == spec.local_account.1
-            || (selector == spec.local_account.0
+        selector == spec.accounts.local_entry.1
+            || (selector == spec.accounts.local_entry.0
                 && !entries.iter().any(|entry| {
-                    entry.adapter == spec.name && (entry.label == selector || entry.key == selector)
+                    entry.adapter == spec.identity.name
+                        && (entry.label == selector || entry.key == selector)
                 }))
     })
 }
@@ -239,21 +242,20 @@ fn resolve_pacing_source(
     fact
 }
 
-pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
-    (!attachments.is_empty()
-        && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
-    .then(|| {
-        format!(
-            "warning: adapter {adapter} does not support image_input; attachments remain readable"
-        )
-    })
-}
-
 fn opencode_access_message(access: &provenant_records::LaneAccessReceipt) -> String {
     format!(
         "OpenCode profile={} (lanes.access; source: {})",
         access.access.as_str(),
         access.source.as_str()
+    )
+}
+
+/// Effective `[[adapter_capabilities]]` entries for one launch; without
+/// routing roots there are no owner entries.
+fn launch_capability_overlay(registry: &Registry<'_>) -> provenant_records::CapabilityOverlay {
+    registry.roots.map_or_else(
+        provenant_records::CapabilityOverlay::default,
+        crate::config_reads::capability_overlay,
     )
 }
 
@@ -1008,7 +1010,7 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     Prompt(#[from] LaunchPromptError),
     #[error(transparent)]
-    Unsupported(#[from] provenant_records::UnsupportedLaunch),
+    Unsupported(#[from] provenant_records::LaunchGap),
     #[error(transparent)]
     Permission(#[from] provenant_confinement::permissions::PermissionError),
     #[error(transparent)]
@@ -1607,9 +1609,14 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         PrepareError::SourceCwd(SourceCwdError::Operational("cwd unavailable".into()))
             .into_refusal();
     assert_eq!(unavailable.boundary_class, BoundaryClass::None);
-    let unsupported = PrepareError::Unsupported(provenant_records::UnsupportedLaunch {
+    let unsupported = PrepareError::Unsupported(provenant_records::LaunchGap {
         adapter: "fixture",
         field: provenant_records::LaunchField::Write,
+        action: provenant_records::LaunchAction::Refuse,
+        reason: "fixture limitation",
+        source: provenant_records::ADAPTER_ROW_SOURCE,
+        warn: true,
+        action_source: provenant_records::Source::default(),
     })
     .into_refusal();
     assert_eq!(unsupported.boundary_class, BoundaryClass::None);
@@ -2152,19 +2159,26 @@ fn prepare_inner(
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    let capability_overlay = launch_capability_overlay(registry);
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
-        && AdapterSpec::get(provider)
-            .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::DelegatedAgent)
+        && AdapterSpec::get(provider).is_some_and(|spec| {
+            spec.identity.named_entry == provenant_records::NamedEntry::DelegatedAgent
+        })
     {
-        AdapterSpec::get(provider)
+        let check = AdapterSpec::get(provider)
             .ok_or("unknown adapter")?
+            .with_overlay(&capability_overlay)
             .check_launch(&provenant_records::LaunchRequest {
                 resume: resume.is_some(),
                 write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
                 network: task.access.network,
                 skill_location: task.profile.require_skill_location,
+                gap_policy: provenant_records::GapPolicy::default(),
                 ..Default::default()
-            })?;
+            });
+        if let Some(decision) = check.refusal() {
+            return Err(PrepareError::Unsupported(decision.clone()));
+        }
         let roots = registry.roots.ok_or("routing context is unavailable")?;
         let config =
             crate::config_reads::read_for(roots, "run").map_err(|error| error.to_string())?;
@@ -2241,7 +2255,7 @@ fn prepare_inner(
 /// A mismatch is about which account is signed in, so only a check that names
 /// the account may clear it; a plain "logged in" answer must not.
 pub(super) fn login_check_can_clear(adapter: &str, mismatch: bool) -> bool {
-    !mismatch || AdapterSpec::get(adapter).is_some_and(|spec| spec.login_check_names_account)
+    !mismatch || AdapterSpec::get(adapter).is_some_and(|spec| spec.login.check_names_account)
 }
 
 /// Spec: docs/specs/routing.md#launch-login-recovery
@@ -2268,7 +2282,7 @@ fn login_recovery_can_clear(
         return false;
     }
     AdapterSpec::get(adapter).is_none_or(|spec| {
-        spec.account_identity_probe != provenant_records::AccountIdentityProbe::CliAuthStatus
+        spec.login.identity_probe != provenant_records::AccountIdentityProbe::CliAuthStatus
     })
 }
 
@@ -2310,7 +2324,7 @@ fn unoffered_model(
     catalogue: &provenant_routing::Catalogue,
 ) -> Option<(Vec<String>, u64)> {
     let key = route.account_key.as_deref()?;
-    if !AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.offered_models) {
+    if !AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.identity.offered_models) {
         return None;
     }
     let model =
@@ -3224,6 +3238,7 @@ pub(super) fn prepare_candidates_inner(
     host_native: Option<&str>,
     #[cfg(test)] alter_availability: Option<&AlterAvailability<'_>>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    let capability_overlay = launch_capability_overlay(registry);
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(
             registry,
@@ -3519,16 +3534,24 @@ pub(super) fn prepare_candidates_inner(
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.clone().into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
-    for spec in ADAPTER_SPECS.iter().filter(|spec| eligible(spec.name)) {
-        let Some((environment, fallback)) = spec.default_account_directory else {
+    for spec in ADAPTER_SPECS
+        .iter()
+        .filter(|spec| eligible(spec.identity.name))
+    {
+        let Some((environment, fallback)) = spec.accounts.default_directory else {
             continue;
         };
-        if entries.iter().any(|entry| entry.adapter == spec.name) {
+        if entries
+            .iter()
+            .any(|entry| entry.adapter == spec.identity.name)
+        {
             continue;
         }
-        let host_directory = registry
-            .host
-            .and_then(|host| host.default_account_directories.get(spec.name).cloned());
+        let host_directory = registry.host.and_then(|host| {
+            host.default_account_directories
+                .get(spec.identity.name)
+                .cloned()
+        });
         let environment_directory = host_provider_var(registry, environment);
         let configured_by = match (host_directory.as_ref(), environment_directory.as_ref()) {
             (Some(directory), Some(value)) if directory.as_os_str() == value => Some(environment),
@@ -3540,7 +3563,7 @@ pub(super) fn prepare_candidates_inner(
             .or_else(|| environment_directory.map(PathBuf::from))
             .unwrap_or_else(|| home.join(fallback));
         let mut entry = provenant_providers::accounts::Registration {
-            adapter: spec.name.into(),
+            adapter: spec.identity.name.into(),
             label: "default".into(),
             key: String::new(),
             org_fingerprint: None,
@@ -3559,13 +3582,13 @@ pub(super) fn prepare_candidates_inner(
         };
         let discovered = (|| -> Result<(), AccountObservationError> {
             let executable =
-                locate(spec.name).map_err(AccountObservationError::VersionUnavailable)?;
+                locate(spec.identity.name).map_err(AccountObservationError::VersionUnavailable)?;
             entry.directory = canonical(&directory).map_err(|detail| {
                 default_directory_error(spec, &directory, detail, configured_by)
             })?;
             entry.key = provenant_providers::accounts::detect(
                 &executor,
-                spec.name,
+                spec.identity.name,
                 &executable,
                 &home,
                 &user,
@@ -3581,7 +3604,7 @@ pub(super) fn prepare_candidates_inner(
                 let configured_directory =
                     matches!(&error, AccountObservationError::ConfiguredDirectory(_));
                 default_failures.insert(
-                    spec.name.to_owned(),
+                    spec.identity.name.to_owned(),
                     (error.skip_kind(), error.to_string(), configured_directory),
                 );
             }
@@ -3590,9 +3613,9 @@ pub(super) fn prepare_candidates_inner(
     // These adapters use the CLI's existing local login and configuration.
     for spec in ADAPTER_SPECS
         .iter()
-        .filter(|spec| spec.local_login && eligible(spec.name))
+        .filter(|spec| spec.login.local && eligible(spec.identity.name))
     {
-        let adapter = spec.name;
+        let adapter = spec.identity.name;
         if include_local_login(
             spec,
             &entries,
@@ -3602,13 +3625,13 @@ pub(super) fn prepare_candidates_inner(
         ) && locate(adapter).is_ok()
             && !entries.iter().any(|entry| {
                 entry.adapter == adapter
-                    && (entry.key == spec.local_account.1 || entry.directory == home)
+                    && (entry.key == spec.accounts.local_entry.1 || entry.directory == home)
             })
         {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
-                label: spec.local_account.0.into(),
-                key: spec.local_account.1.into(),
+                label: spec.accounts.local_entry.0.into(),
+                key: spec.accounts.local_entry.1.into(),
                 org_fingerprint: None,
                 directory: home.clone(),
                 plan: None,
@@ -3681,7 +3704,7 @@ pub(super) fn prepare_candidates_inner(
             Ok(mut record) => {
                 let strategy = AdapterSpec::get(&entry.adapter)
                     .map_or(provenant_records::LoginReprobe::None, |spec| {
-                        spec.login_reprobe
+                        spec.login.reprobe
                     });
                 if strategy != provenant_records::LoginReprobe::None {
                     let scope = provenant_quota::ReadinessScope {
@@ -4088,18 +4111,21 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(skipped);
             continue;
         }
-        if let Some(spec) = AdapterSpec::get(&route.adapter)
-            && let Err(error) =
-                request
-                    .intent
-                    .check_launch(spec, &route.model, route.effort.as_deref())
-        {
-            reason_boundaries.insert(
-                reasons.len(),
-                provenant_records::diagnostic::BoundaryClass::Authority,
-            );
-            reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
-            continue;
+        if let Some(spec) = AdapterSpec::get(&route.adapter) {
+            let spec = spec.with_overlay(&capability_overlay);
+            let gap_policy = capability_overlay.gap_policy(spec.identity.name, &launch_policy);
+            if let Some(error) = request
+                .intent
+                .check_launch(&spec, &route.model, route.effort.as_deref(), gap_policy)
+                .refusal()
+            {
+                reason_boundaries.insert(
+                    reasons.len(),
+                    provenant_records::diagnostic::BoundaryClass::Authority,
+                );
+                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                continue;
+            }
         }
         let effective = config.domains.routing.model_policy.effective(
             &catalogue,
@@ -4635,7 +4661,7 @@ pub(super) fn prepare_candidates_inner(
         let account = match entry
             .filter(|entry| {
                 AdapterSpec::get(&entry.adapter).is_none_or(|spec| {
-                    spec.registered_account && !spec.is_unregistered_local(&entry.key)
+                    spec.accounts.registered && !spec.is_unregistered_local(&entry.key)
                 })
             })
             .map(|entry| entry.registered())
@@ -4649,7 +4675,7 @@ pub(super) fn prepare_candidates_inner(
         };
         // An unregistered local login runs without a pinned account.
         if AdapterSpec::get(adapter.id()).is_some_and(|spec| {
-            spec.registered_account
+            spec.accounts.registered
                 && !route
                     .account_key
                     .as_deref()
@@ -4705,7 +4731,8 @@ pub(super) fn prepare_candidates_inner(
             continue;
         }
         let opencode_host = adapter_spec.is_some_and(|spec| {
-            spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+            spec.capabilities.answering_model.value
+                == provenant_records::AnsweringModelSource::SessionDatabase
         }) && !lane_access.access.is_isolated();
         let opencode_homes = provenant_providers::opencode::host_xdg_homes(&home, &|key| {
             host_provider_var(registry, key)
@@ -4806,8 +4833,13 @@ pub(super) fn prepare_candidates_inner(
             None => text,
         };
         let text = if !task.access.attachments.is_empty()
-            && !AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.launch.image_input)
-        {
+            && !AdapterSpec::get(adapter.id()).is_some_and(|spec| {
+                spec.with_overlay(&capability_overlay)
+                    .capabilities
+                    .launch
+                    .image_input
+                    .value
+            }) {
             let paths = task
                 .access
                 .attachments
@@ -4896,7 +4928,7 @@ pub(super) fn prepare_candidates_inner(
                 continue;
             }
         };
-        if adapter_spec.is_some_and(|spec| spec.codex_policy) {
+        if adapter_spec.is_some_and(|spec| spec.launch.codex_policy) {
             request.codex = if writer.is_none()
                 || config
                     .providers
@@ -5113,8 +5145,8 @@ pub(super) fn prepare_candidates_inner(
             // host profile reads the provider's own login. Take that set and
             // its expected mechanism from the registry rather than restating
             // adapter names here.
-            let warning = adapter_spec.map(|spec| spec.native_auth_warning);
-            let expected = adapter_spec.and_then(|spec| spec.authentication);
+            let warning = adapter_spec.map(|spec| spec.login.native_auth_warning);
+            let expected = adapter_spec.and_then(|spec| spec.login.authentication);
             if warning.is_some_and(|warning| {
                 warning == provenant_records::NativeAuthWarning::Always
                     || (warning == provenant_records::NativeAuthWarning::WhenMismatch
@@ -5134,8 +5166,51 @@ pub(super) fn prepare_candidates_inner(
                 }
             }
         }
+        // Harness version compatibility is declared data: the bundled table is
+        // overlaid by host and project config, and the policy decides whether a
+        // status warns or blocks. No network fetch; probes are cached by file.
+        let (compatible, overlay_warnings) =
+            provenant_routing::compatibility::CompatibilityTable::effective(
+                roots.state.as_path(),
+                Some(&source),
+            );
+        for warning in overlay_warnings {
+            push_launch_warning(&mut route, warning.to_string());
+        }
+        // The probe is a per-adapter host setting: when it is off we assess an
+        // unreadable version and name the key in the reason, without running
+        // the harness binary. The bound comes from the same settings row.
+        let (version, disabled) =
+            match provenant_providers::version::configured(adapter.id(), provider_settings) {
+                Ok(timeout) => (
+                    provenant_providers::version::shared().read(
+                        &git_executor,
+                        &executable,
+                        &cwd,
+                        timeout,
+                    ),
+                    None,
+                ),
+                Err(reason) => (None, Some(reason)),
+            };
+        let mut assessment = compatible.assess(adapter.id(), version.as_deref());
+        if disabled.is_some() {
+            assessment.reason = disabled;
+        }
+        if let Some(code) = provenant_routing::compatibility::policy_code(assessment.status) {
+            let detail = assessment.detail();
+            match launch_policy.check(code, provenant_records::policy::Facts::violation(detail)) {
+                provenant_records::policy::Effect::Warn(warning) => {
+                    push_launch_warning(&mut route, warning.message);
+                }
+                effect if effect.blocks() => {
+                    return Err(effect.message().unwrap_or(code).into());
+                }
+                _ => {}
+            }
+        }
         let credential_roots = plan.permissions().credential_roots.clone();
-        let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh)
+        let refresh_token = adapter_spec.is_some_and(|spec| spec.launch.launch_token_refresh)
             && lane_access.access.is_isolated()
             && sandbox.env_value() != "off";
         let refreshed = if refresh_token && fixture_token.is_none() {
@@ -5643,7 +5718,7 @@ pub(super) fn prepare_candidates_inner(
             }
         }
         if git_context.is_some()
-            && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)
+            && let Some(argument) = adapter_spec.and_then(|spec| spec.launch.context_directory_arg)
         {
             // Scratch is already granted by the outer profile. Claude's file
             // tools also need it in their working directories to read context.
@@ -5671,7 +5746,7 @@ pub(super) fn prepare_candidates_inner(
         }
         let transcript_account = account
             .as_ref()
-            .filter(|_| adapter_spec.is_some_and(|spec| spec.transcript_account_root))
+            .filter(|_| adapter_spec.is_some_and(|spec| spec.retention.transcript_account_root))
             .map(|account| account.directory());
         let mut setup_roots = vec![scratch, private_state, roots.state.as_path()];
         // Only directory creation uses these additional provider state roots;
@@ -5681,7 +5756,9 @@ pub(super) fn prepare_candidates_inner(
             .iter()
             .find(|(key, _)| key == "XDG_DATA_HOME")
             .map(|(_, value)| Path::new(value));
-        match adapter_spec.map_or(provenant_records::SetupRoot::None, |spec| spec.setup_root) {
+        match adapter_spec.map_or(provenant_records::SetupRoot::None, |spec| {
+            spec.accounts.setup_root
+        }) {
             provenant_records::SetupRoot::XdgDataHome => {
                 if let Some(data) = xdg_data_home {
                     let existing = data
@@ -5706,7 +5783,7 @@ pub(super) fn prepare_candidates_inner(
             continue;
         }
         if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
-            spec.login_observation == provenant_records::LoginObservation::ExecutableOnly
+            spec.login.observation == provenant_records::LoginObservation::ExecutableOnly
         }) {
             let warning = format!(
                 "{} login status is unverified; the selected launch will check authentication",
@@ -5714,8 +5791,28 @@ pub(super) fn prepare_candidates_inner(
             );
             push_launch_warning(&mut route, warning);
         }
-        if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
-            push_launch_warning(&mut route, warning);
+        let image_input = !task.access.attachments.is_empty();
+        if let Some(spec) = AdapterSpec::get(&route.adapter) {
+            let spec = spec.with_overlay(&capability_overlay);
+            let gap_policy = capability_overlay.gap_policy(spec.identity.name, &launch_policy);
+            let check = spec.check_launch(&provenant_records::LaunchRequest {
+                image_input,
+                gap_policy,
+                ..Default::default()
+            });
+            // An owner-set `refuse` image gap stops the launch; otherwise a
+            // degraded image input leaves the attachments as readable paths.
+            if let Some(decision) = check.refusal() {
+                return Err(PrepareError::Unsupported(decision.clone()));
+            }
+            if let Some(decision) = check.degraded(provenant_records::LaunchField::ImageInput)
+                && decision.warn
+            {
+                push_launch_warning(
+                    &mut route,
+                    format!("warning: {decision}; attachments remain readable"),
+                );
+            }
         }
         // A read-only lane builds in its scratch by design. No writer launch
         // exports a target; warn if an adapter still points one into the lane's
@@ -5862,7 +5959,8 @@ pub(super) fn prepare_candidates_inner(
                 .collect(),
         ))?);
         if adapter_spec.is_some_and(|spec| {
-            spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+            spec.capabilities.answering_model.value
+                == provenant_records::AnsweringModelSource::SessionDatabase
         }) {
             let message = opencode_access_message(&lane_access);
             warn(Warning::new(
@@ -5886,8 +5984,8 @@ pub(super) fn prepare_candidates_inner(
             }
             provider.launch_warnings.push(message);
         }
-        if let Some(spec) = adapter_spec.filter(|spec| spec.codex_policy) {
-            let setting = format!("providers.{}.clean_config", spec.name);
+        if let Some(spec) = adapter_spec.filter(|spec| spec.launch.codex_policy) {
+            let setting = format!("providers.{}.clean_config", spec.identity.name);
             let source = if writer.is_none() {
                 "read-only extension authority"
             } else {
@@ -5898,7 +5996,7 @@ pub(super) fn prepare_candidates_inner(
             };
             provider.launch_warnings.push(format!(
                 "{} clean_config={} ({setting}; source: {source})",
-                spec.name,
+                spec.identity.name,
                 plan.codex_policy() == provenant_confinement::CodexPolicy::Clean,
             ));
         }
@@ -5929,7 +6027,7 @@ pub(super) fn prepare_candidates_inner(
         let reader_gh = publishing
             && sandbox.effective
             && github_auth_permitted(&plan, &spec.profile.spec)
-            && adapter_spec.is_some_and(|spec| spec.github_auth.is_some());
+            && adapter_spec.is_some_and(|spec| spec.launch.github_auth.is_some());
         if let Some(gh) = policy_gh.as_ref()
             && reader_gh
             && !gh_attempted
@@ -6004,7 +6102,7 @@ pub(super) fn prepare_candidates_inner(
         }
         gh_selection.finalise_environment(&mut spec.env);
         if adapter_spec.is_some_and(|spec| {
-            spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
+            spec.launch.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
         }) && (!sandbox.effective || spec.env.iter().any(|(key, _)| key == "GH_TOKEN"))
         {
             super::gh_auth::codex_shell_environment(&spec.env, &mut spec.argv);
@@ -6762,11 +6860,11 @@ mod user_skills_tests {
         let prompt = Prompt::new("fixture".into());
         for adapter in provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|entry| entry.skills.is_some())
+            .filter(|entry| entry.launch.skill_location.is_some())
         {
-            let root = base.join(adapter.name);
+            let root = base.join(adapter.identity.name);
             let home = root.join("home");
-            let skills = match adapter.name {
+            let skills = match adapter.identity.name {
                 "claude" => home.join(".claude/skills"),
                 "codex" => home.join(".agents/skills"),
                 "cursor" => home.join(".cursor/skills"),
@@ -6782,7 +6880,7 @@ mod user_skills_tests {
                 path,
                 scope: PathScope::Subtree,
             };
-            let auth = match adapter.name {
+            let auth = match adapter.identity.name {
                 "codex" | "cursor" | "opencode" => Some("login".into()),
                 "agy" => Some("keychain".into()),
                 _ => None,
@@ -6815,7 +6913,7 @@ mod user_skills_tests {
                 user_skills: true,
                 access: provenant_records::LaneAccess::Isolated,
                 extra: Default::default(),
-                adapter: adapter.name.into(),
+                adapter: adapter.identity.name.into(),
                 model: "fixture".into(),
                 effort: None,
                 catalogue_revision: "fixture".into(),
@@ -6838,7 +6936,7 @@ mod user_skills_tests {
             };
             let provider = provenant_providers::REGISTRY
                 .iter()
-                .find(|entry| entry.adapter.id() == adapter.name)
+                .find(|entry| entry.adapter.id() == adapter.identity.name)
                 .ok_or("adapter")?
                 .adapter;
             for writer in [false, true] {
@@ -6912,7 +7010,7 @@ mod user_skills_tests {
                         receipt["exposed"],
                         state == "discover",
                         "{} {state}",
-                        adapter.name
+                        adapter.identity.name
                     );
                     if let Some(stage) = &spec.user_skills.root {
                         assert!(
@@ -6930,7 +7028,7 @@ mod user_skills_tests {
                                     && (read.scope != PathScope::Subtree
                                         || !skills.starts_with(&read.path))),
                             "{}: {:?}",
-                            adapter.name,
+                            adapter.identity.name,
                             spec.profile.spec.runtime_reads
                         );
                         assert!(spec.setup.iter().any(
@@ -7080,12 +7178,94 @@ mod user_skills_tests {
 mod attachment_tests {
     use super::*;
     #[test]
-    fn unsupported_image_input_warns_without_refusing() {
-        let images = vec![PathBuf::from("/outside/image.png")];
-        let warning = image_input_warning("cursor", &images).unwrap();
-        assert!(warning.contains("cursor") && warning.contains("image_input"));
-        assert!(image_input_warning("claude", &images).is_none());
-        assert!(image_input_warning("cursor", &[]).is_none());
+    fn unsupported_image_input_degrades_without_refusing() {
+        let request = provenant_records::LaunchRequest {
+            image_input: true,
+            ..Default::default()
+        };
+        let cursor = AdapterSpec::get("cursor").unwrap();
+        let checked = cursor.check_launch(&request);
+        let decision = checked
+            .degraded(provenant_records::LaunchField::ImageInput)
+            .expect("cursor declares no image input");
+        assert_eq!(decision.action, provenant_records::LaunchAction::Degrade);
+        let warning = format!("warning: {decision}; attachments remain readable");
+        assert!(warning.contains("cursor") && warning.contains("image input"));
+        assert!(warning.contains("source="));
+        let claude = AdapterSpec::get("claude").unwrap();
+        assert!(
+            claude
+                .check_launch(&request)
+                .degraded(provenant_records::LaunchField::ImageInput)
+                .is_none()
+        );
+        assert!(
+            cursor
+                .check_launch(&provenant_records::LaunchRequest::default())
+                .degraded(provenant_records::LaunchField::ImageInput)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_disabled_image_input_names_the_overlay_and_off_silences_it() {
+        use provenant_records::{
+            AdapterOverride, CapabilityOverlay, Layer, OVERLAY_SOURCE, OverridableCapability,
+            Source,
+        };
+        let overlay = CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "cursor".into(),
+                disable: vec![OverridableCapability::ImageInput],
+                reason: Some("no attachments in this lane".into()),
+                on_gap: vec![],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: None,
+                },
+            }],
+        };
+        let effective = AdapterSpec::get("cursor").unwrap().with_overlay(&overlay);
+        let checked = effective.check_launch(&provenant_records::LaunchRequest {
+            image_input: true,
+            gap_policy: provenant_records::GapPolicy::default(),
+            ..Default::default()
+        });
+        let gap = checked
+            .degraded(provenant_records::LaunchField::ImageInput)
+            .expect("a disabled image input degrades");
+        assert_eq!(gap.source, OVERLAY_SOURCE);
+        assert!(gap.warn);
+        let warning = format!("warning: {gap}; attachments remain readable");
+        assert!(warning.contains("cursor") && warning.contains("image input"));
+        assert!(warning.contains(OVERLAY_SOURCE));
+
+        let off = CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "cursor".into(),
+                disable: vec![OverridableCapability::ImageInput],
+                reason: None,
+                on_gap: vec![(
+                    provenant_records::LaunchField::ImageInput,
+                    provenant_records::GapAction::Off,
+                )],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: None,
+                },
+            }],
+        };
+        let policy = off.gap_policy("cursor", &provenant_records::policy::Policy::default());
+        let effective = AdapterSpec::get("cursor").unwrap().with_overlay(&off);
+        let checked = effective.check_launch(&provenant_records::LaunchRequest {
+            image_input: true,
+            gap_policy: policy,
+            ..Default::default()
+        });
+        let silent = checked
+            .degraded(provenant_records::LaunchField::ImageInput)
+            .expect("off still degrades rather than refusing");
+        assert!(!silent.warn);
     }
 }
 
@@ -7232,649 +7412,8 @@ fn oversized_argv_prompt_spills_to_private_attempt_state() -> Result<(), Box<dyn
 }
 
 #[cfg(test)]
-mod candidate_walk_regressions {
-    use super::*;
-    use provenant_records::{
-        ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
-    };
-
-    fn route(model: &str, account: &str) -> ResolvedRoute {
-        ResolvedRoute {
-            selection_context: Default::default(),
-            diagnostics: Default::default(),
-            user_skills: true,
-            access: Default::default(),
-            extra: Default::default(),
-            adapter: "cursor".into(),
-            model: model.into(),
-            effort: None,
-            catalogue_revision: "fixture".into(),
-            account_key: Some(account.into()),
-            host: "fixture".into(),
-            alternatives: Default::default(),
-            exclusions: vec![],
-            eligibility: RouteEligibility::Eligible,
-            readiness: RouteReadiness::stale(),
-            confidentiality: RouteConfidentiality {
-                extra: Default::default(),
-                evidence_ref: "fixture".into(),
-            },
-            pool_selection: None,
-        }
-    }
-
-    #[test]
-    fn pin_incompatible_candidate_does_not_hide_later_compatible_candidate()
-    -> Result<(), PrepareError> {
-        let mut queue = [route("wrong", "other"), route("right", "pinned")].into();
-        let mut rejected = vec![];
-        let mut reasons = vec![];
-        let selected = next_permitted_candidate(
-            &mut queue,
-            &mut rejected,
-            &mut reasons,
-            (Some("pinned"), Some("cursor")),
-            true,
-            provenant_routing::FallbackOutcome::Other,
-        )?
-        .expect("compatible route");
-        assert_eq!(selected.model, "right");
-        assert_eq!(reasons[0].route, "cursor/wrong");
-        assert_eq!(
-            reasons[0].cause,
-            Some(provenant_records::RouteExclusionReason::AccountPinned)
-        );
-        assert!(queue.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn refused_accounts_leave_only_untried_accounts() {
-        let record = |key: &str| provenant_providers::AvailabilityRecord {
-            schema_version: 1,
-            adapter: "claude".into(),
-            executable: "/fixture/claude".into(),
-            version: "fixture".into(),
-            last_update: None,
-            fixture_ref: "fixture".into(),
-            catalogue_revision: "fixture".into(),
-            account_key: Some(key.into()),
-            plan: None,
-            observed_models: vec![],
-            observed_unix_seconds: 0,
-            expires_unix_seconds: 1,
-        };
-        let all = [record("spent"), record("ready")];
-        let mut refused = std::collections::BTreeSet::new();
-        refused.insert(("claude".to_owned(), "spent".to_owned()));
-        let left = without_refused_accounts(&all, &refused);
-        assert_eq!(left.len(), 1);
-        assert_eq!(left[0].account_key.as_deref(), Some("ready"));
-        refused.insert(("claude".to_owned(), "ready".to_owned()));
-        assert!(without_refused_accounts(&all, &refused).is_empty());
-    }
-
-    #[test]
-    fn admission_exclusions_become_typed_preparation_skips()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let spent = provenant_routing::ModelId::parse("cursor/spent")?;
-        let admitted = crate::route::admission::AdmittedRoutes {
-            exclusions: vec![crate::route::admission::AdmissionExclusion {
-                model: spent.clone(),
-                reason: provenant_records::RouteExclusionReason::Exhausted,
-                detail: "quota admission refused: allowance exhausted".into(),
-            }],
-            ..Default::default()
-        };
-        let mut reasons = vec![];
-        let mut rejected = vec![];
-        record_admission_exclusions(&admitted, &mut reasons, &mut rejected);
-        assert_eq!(reasons[0].route, "cursor/spent");
-        assert_eq!(
-            reasons[0].cause,
-            Some(provenant_records::RouteExclusionReason::Exhausted)
-        );
-        // A typed cause persists only its bounded safe projection, never the
-        // admission error's own text.
-        assert!(reasons[0].detail.contains("allowance is exhausted"));
-        assert!(!reasons[0].detail.contains("quota admission refused"));
-        assert!(rejected.contains(&spent));
-        Ok(())
-    }
-
-    #[test]
-    fn advisory_carve_out_keys_on_the_exact_pinned_candidate() {
-        let primary = route("legacy", "spent");
-        let alternative = route("other", "spent");
-        let choice = provenant_routing::RouteChoice::Model(
-            provenant_routing::ModelId::parse(&format!("{}/{}", primary.adapter, primary.model))
-                .expect("model"),
-        );
-        assert!(pinned_candidate(&choice, &primary));
-        assert!(!pinned_candidate(&choice, &alternative));
-        // An exact account pin is attempted; a model-only pin redraws while
-        // another account can serve the model, and is attempted when none can.
-        assert!(pinned_advisory_candidate(
-            &choice,
-            &primary,
-            Some("spent"),
-            true
-        ));
-        assert!(pinned_advisory_candidate(
-            &choice,
-            &primary,
-            Some("spent"),
-            false
-        ));
-        assert!(!pinned_advisory_candidate(&choice, &primary, None, true));
-        assert!(pinned_advisory_candidate(&choice, &primary, None, false));
-        assert!(!pinned_advisory_candidate(
-            &choice,
-            &alternative,
-            Some("spent"),
-            true
-        ));
-    }
-
-    // Spec: docs/specs/routing.md#unknown-never-means-ready
-    #[test]
-    fn advisory_redraw_defers_the_pinned_route_for_one_final_attempt() {
-        use provenant_records::RouteExclusionReason;
-        let pinned = route("legacy", "spent");
-        let choice = provenant_routing::RouteChoice::Model(
-            provenant_routing::ModelId::parse("cursor/legacy").expect("model"),
-        );
-        let deferred = deferred_pinned_attempt(
-            &choice,
-            &pinned,
-            None,
-            true,
-            &RouteExclusionReason::Exhausted,
-            Some("recorded exhaustion".into()),
-        )
-        .expect("a model-only pin with another account defers");
-        assert_eq!(deferred.route.account_key.as_deref(), Some("spent"));
-        // A non-advisory cause is never deferred: a missing login or a policy
-        // refusal is not evidence that an attempt would succeed.
-        assert!(
-            deferred_pinned_attempt(
-                &choice,
-                &pinned,
-                None,
-                true,
-                &RouteExclusionReason::AuthRequired,
-                Some("warning".into())
-            )
-            .is_none()
-        );
-        assert!(
-            deferred_pinned_attempt(
-                &choice,
-                &pinned,
-                None,
-                true,
-                &RouteExclusionReason::ConfinementUnavailable,
-                Some("warning".into())
-            )
-            .is_none()
-        );
-        // An exact account pin, a pin with no other account, and a pin with no
-        // recorded source are attempted directly or cannot warn truthfully.
-        assert!(
-            deferred_pinned_attempt(
-                &choice,
-                &pinned,
-                Some("spent"),
-                true,
-                &RouteExclusionReason::Exhausted,
-                Some("warning".into())
-            )
-            .is_none()
-        );
-        assert!(
-            deferred_pinned_attempt(
-                &choice,
-                &pinned,
-                None,
-                false,
-                &RouteExclusionReason::Exhausted,
-                Some("warning".into())
-            )
-            .is_none()
-        );
-        assert!(
-            deferred_pinned_attempt(
-                &choice,
-                &pinned,
-                None,
-                true,
-                &RouteExclusionReason::Exhausted,
-                None
-            )
-            .is_none()
-        );
-
-        // A drained redraw re-queues exactly the refused pinned route with its
-        // warning and makes its model tryable again.
-        let mut queue = std::collections::VecDeque::new();
-        let mut rejected =
-            vec![provenant_routing::ModelId::parse("cursor/legacy").expect("recorded rejection")];
-        assert_eq!(
-            resume_deferred_pinned(&mut queue, deferred, &mut rejected),
-            "recorded exhaustion"
-        );
-        assert_eq!(queue.len(), 1);
-        assert!(rejected.is_empty());
-        assert_eq!(queue[0].account_key.as_deref(), Some("spent"));
-    }
-
-    // Spec: docs/specs/routing.md#unknown-never-means-ready
-    #[test]
-    fn redraw_records_the_admission_block_cause() {
-        use provenant_records::RouteExclusionReason;
-        let blocked =
-            |block| crate::route::EdgeError::Quota(provenant_quota::QuotaError::Blocked(block));
-        assert_eq!(
-            redraw_exclusion_reason(&blocked(provenant_quota::AccountBlock::ScopedRefusal), None),
-            RouteExclusionReason::ProviderRefused
-        );
-        assert_eq!(
-            redraw_exclusion_reason(
-                &blocked(provenant_quota::AccountBlock::FreeTierRefusal),
-                None
-            ),
-            RouteExclusionReason::FreeTierRefused
-        );
-        assert_eq!(
-            redraw_exclusion_reason(&blocked(provenant_quota::AccountBlock::Mismatch), None),
-            RouteExclusionReason::AccountMismatch
-        );
-        assert_eq!(
-            redraw_exclusion_reason(
-                &crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted),
-                Some(&RouteExclusionReason::ProviderRefused),
-            ),
-            RouteExclusionReason::Exhausted
-        );
-        assert_eq!(
-            redraw_exclusion_reason(
-                &crate::route::EdgeError::Admission("unclassified".into()),
-                Some(&RouteExclusionReason::ProviderRefused),
-            ),
-            RouteExclusionReason::ProviderRefused
-        );
-    }
-
-    // Spec: docs/specs/routing.md#unknown-never-means-ready
-    #[test]
-    fn advisory_expiry_must_be_in_the_future() {
-        let mut pinned = route("legacy", "spent");
-        pinned.diagnostics.allowance_warning =
-            Some(provenant_records::route_selection::AllowanceWarning {
-                extra: Default::default(),
-                warning: "allowance spent".into(),
-                source: "quota:fixture".into(),
-            });
-        let availability = [provenant_providers::AvailabilityRecord {
-            schema_version: 1,
-            adapter: pinned.adapter.clone(),
-            executable: "/fixture/cursor".into(),
-            version: "fixture".into(),
-            last_update: None,
-            fixture_ref: "fixture".into(),
-            catalogue_revision: "fixture".into(),
-            account_key: pinned.account_key.clone(),
-            plan: None,
-            observed_models: vec![],
-            observed_unix_seconds: 0,
-            expires_unix_seconds: 3700,
-        }];
-        let reason = provenant_records::RouteExclusionReason::Exhausted;
-        assert!(
-            pinned_refusal_warning(
-                &pinned,
-                &availability,
-                &[],
-                &reason,
-                3700,
-                &provenant_quota::DEFAULT_FRESHNESS,
-            )
-            .is_none(),
-            "an availability expiry at the current second is not in the future"
-        );
-        assert!(
-            pinned_refusal_warning(
-                &pinned,
-                &availability,
-                &[],
-                &reason,
-                4000,
-                &provenant_quota::DEFAULT_FRESHNESS,
-            )
-            .is_none(),
-            "an expired availability record is not evidence for an advisory launch"
-        );
-        assert!(
-            pinned_refusal_warning(
-                &pinned,
-                &availability,
-                &[],
-                &reason,
-                3699,
-                &provenant_quota::DEFAULT_FRESHNESS,
-            )
-            .is_some()
-        );
-    }
-
-    #[test]
-    fn alternative_account_must_serve_the_pinned_model() {
-        let mut pinned = route("gemini-4-hydrogen", "spent");
-        pinned.adapter = "agy".into();
-        pinned.catalogue_revision = "revision".into();
-        let policy = offer_policy(0);
-        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
-        let record = |key: &str, models: &[&str]| provenant_providers::AvailabilityRecord {
-            schema_version: 1,
-            adapter: pinned.adapter.clone(),
-            executable: "/fixture/agy".into(),
-            version: "fixture".into(),
-            last_update: None,
-            fixture_ref: "fixture".into(),
-            catalogue_revision: pinned.catalogue_revision.clone(),
-            account_key: Some(key.into()),
-            plan: None,
-            observed_models: models.iter().map(|model| (*model).to_owned()).collect(),
-            observed_unix_seconds: 0,
-            expires_unix_seconds: 1,
-        };
-        let refused = std::collections::BTreeSet::new();
-        assert!(!has_alternative_account(
-            &pinned,
-            &[],
-            &refused,
-            &policy,
-            &catalogue
-        ));
-        assert!(!has_alternative_account(
-            &pinned,
-            &[record("spent", &["gemini-4-hydrogen"])],
-            &refused,
-            &policy,
-            &catalogue,
-        ));
-        assert!(has_alternative_account(
-            &pinned,
-            &[record("other", &["gemini-4-hydrogen"])],
-            &refused,
-            &policy,
-            &catalogue,
-        ));
-        assert!(!has_alternative_account(
-            &pinned,
-            &[record("other", &["gemini-4-argon"])],
-            &refused,
-            &policy,
-            &catalogue,
-        ));
-        let mut refused = std::collections::BTreeSet::new();
-        refused.insert(("agy".to_owned(), "other".to_owned()));
-        assert!(!has_alternative_account(
-            &pinned,
-            &[record("other", &["gemini-4-hydrogen"])],
-            &refused,
-            &policy,
-            &catalogue,
-        ));
-    }
-
-    #[test]
-    fn alternative_account_uses_fresh_snapshot_offer_evidence() {
-        let mut pinned = route("gemini-4-hydrogen", "spent");
-        pinned.adapter = "agy".into();
-        pinned.catalogue_revision = "revision".into();
-        let availability = [provenant_providers::AvailabilityRecord {
-            schema_version: 1,
-            adapter: pinned.adapter.clone(),
-            executable: "/fixture/agy".into(),
-            version: "fixture".into(),
-            last_update: None,
-            fixture_ref: "fixture".into(),
-            catalogue_revision: "revision".into(),
-            account_key: Some("other".into()),
-            plan: None,
-            observed_models: Vec::new(),
-            observed_unix_seconds: 90,
-            expires_unix_seconds: 200,
-        }];
-        let scope = provenant_quota::AccountScope {
-            extra: Default::default(),
-            adapter: pinned.adapter.clone(),
-            account_key: "other".into(),
-            label: "other".into(),
-        };
-        let mut account = provenant_quota::AccountRecord::empty(scope.clone());
-        account.revision = 1;
-        account.snapshot = Some(provenant_quota::QuotaSnapshot {
-            extra: Default::default(),
-            schema_version: 1,
-            account: scope,
-            revision: 1,
-            status: provenant_quota::QuotaStatus::Available,
-            observed_unix_seconds: 80,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            details: Some(provenant_quota::QuotaDetails {
-                extra: Default::default(),
-                models: vec!["gemini-4-hydrogen".into()],
-                ..Default::default()
-            }),
-            windows: Vec::new(),
-        });
-        let accounts = [account];
-        let policy = provenant_routing::OfferEvidencePolicy {
-            accounts: &accounts,
-            freshness: &provenant_quota::DEFAULT_FRESHNESS,
-            quota_policies: &[],
-            catalogue_revision: &pinned.catalogue_revision,
-            now_seconds: 100,
-        };
-        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
-        assert!(has_alternative_account(
-            &pinned,
-            &availability,
-            &std::collections::BTreeSet::new(),
-            &policy,
-            &catalogue,
-        ));
-    }
-
-    #[test]
-    fn pinned_refusal_warning_names_the_record_source_and_expiry() {
-        let mut pinned = route("cursor/legacy", "spent");
-        pinned.diagnostics.allowance_warning =
-            Some(provenant_records::route_selection::AllowanceWarning {
-                extra: Default::default(),
-                warning: "allowance spent".into(),
-                source: "quota:fixture".into(),
-            });
-        // Without a quota record the expiry comes from the matching
-        // availability record, never from a fabricated default.
-        let availability = [provenant_providers::AvailabilityRecord {
-            schema_version: 1,
-            adapter: pinned.adapter.clone(),
-            executable: "/fixture/cursor".into(),
-            version: "fixture".into(),
-            last_update: None,
-            fixture_ref: "fixture".into(),
-            catalogue_revision: "fixture".into(),
-            account_key: pinned.account_key.clone(),
-            plan: None,
-            observed_models: vec![],
-            observed_unix_seconds: 0,
-            expires_unix_seconds: 3700,
-        }];
-        let (warning, expiry) = pinned_refusal_warning(
-            &pinned,
-            &availability,
-            &[],
-            &provenant_records::RouteExclusionReason::Exhausted,
-            0,
-            &provenant_quota::DEFAULT_FRESHNESS,
-        )
-        .expect("availability evidence");
-        assert!(warning.contains("cursor/legacy"), "{warning}");
-        assert!(warning.contains("quota:fixture"), "{warning}");
-        assert!(warning.contains("expiry unix seconds: 3700"), "{warning}");
-        assert_eq!(expiry, 3700);
-        assert!(
-            pinned_refusal_warning(
-                &pinned,
-                &[],
-                &[],
-                &provenant_records::RouteExclusionReason::Exhausted,
-                0,
-                &provenant_quota::DEFAULT_FRESHNESS,
-            )
-            .is_none(),
-            "no record means no source or expiry to claim"
-        );
-    }
-
-    #[test]
-    fn pinned_refusal_warning_reads_the_exhaustion_record() {
-        let pinned = route("legacy", "spent");
-        let scope = provenant_quota::AccountScope {
-            extra: Default::default(),
-            adapter: pinned.adapter.clone(),
-            account_key: "spent".into(),
-            label: "pro".into(),
-        };
-        let expected_source = format!("quota.provider.{}", pinned.adapter);
-        let mut record = provenant_quota::AccountRecord::empty(scope.clone());
-        record.revision = 1;
-        record.snapshot = Some(provenant_quota::QuotaSnapshot {
-            extra: Default::default(),
-            schema_version: 1,
-            account: scope,
-            revision: 1,
-            status: provenant_quota::QuotaStatus::Exhausted,
-            observed_unix_seconds: 1000,
-            source_ref: expected_source.clone(),
-            authority_ref: None,
-            windows: vec![provenant_quota::QuotaWindow {
-                extra: Default::default(),
-                pool: "five_hour".into(),
-                window_seconds: Some(18_000),
-                used_basis_points: 10_000,
-                resets_unix_seconds: Some(10_000),
-            }],
-            details: None,
-        });
-        let (warning, expiry) = pinned_refusal_warning(
-            &pinned,
-            &[],
-            std::slice::from_ref(&record),
-            &provenant_records::RouteExclusionReason::Exhausted,
-            0,
-            &provenant_quota::DEFAULT_FRESHNESS,
-        )
-        .expect("record evidence");
-        assert!(warning.contains(&expected_source), "{warning}");
-        assert!(!warning.contains("quota allowance on"), "{warning}");
-        assert!(warning.contains("expiry unix seconds: 10000"), "{warning}");
-        assert_eq!(expiry, 10_000);
-    }
-
-    #[test]
-    fn pinned_refusal_warning_reads_the_provider_refusal_record() {
-        let pinned = route("legacy", "spent");
-        let scope = provenant_quota::AccountScope {
-            extra: Default::default(),
-            adapter: pinned.adapter.clone(),
-            account_key: "spent".into(),
-            label: "pro".into(),
-        };
-        let mut record = provenant_quota::AccountRecord::empty(scope.clone());
-        record.revision = 1;
-        record.refusals.push(provenant_quota::Refusal {
-            extra: Default::default(),
-            account: scope,
-            model: pinned.model.clone(),
-            pool: None,
-            observed_unix_seconds: 2_000,
-            resets_unix_seconds: Some(9_000),
-        });
-        let reason = provenant_records::RouteExclusionReason::ProviderRefused;
-        let (warning, expiry) = pinned_refusal_warning(
-            &pinned,
-            &[],
-            std::slice::from_ref(&record),
-            &reason,
-            3_000,
-            &provenant_quota::DEFAULT_FRESHNESS,
-        )
-        .expect("refusal evidence");
-        assert!(warning.contains("cursor/legacy"), "{warning}");
-        assert!(
-            warning.contains("source: provider refusal observed unix seconds 2000"),
-            "{warning}"
-        );
-        assert!(warning.contains("expiry unix seconds: 9000"), "{warning}");
-        assert_eq!(expiry, 9_000);
-        assert!(
-            pinned_refusal_warning(
-                &pinned,
-                &[],
-                std::slice::from_ref(&record),
-                &reason,
-                9_000,
-                &provenant_quota::DEFAULT_FRESHNESS
-            )
-            .is_none(),
-            "an expired refusal is not evidence for an advisory launch"
-        );
-    }
-
-    #[test]
-    fn persisted_provider_refusal_feeds_the_advisory_warning()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir()?;
-        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
-        crate::quota::persist_provider_refusal(
-            temp.path(),
-            &provenant_records::run::RouteRecord {
-                provider: Some("cursor".into()),
-                model: Some("cursor/legacy".into()),
-                account_key: Some("spent".into()),
-                account_label: Some("pro".into()),
-                ..Default::default()
-            },
-            None,
-            5_000,
-            Some(9_000),
-        )?;
-        let records = crate::quota::read_cache_at(temp.path())?;
-        let pinned = route("legacy", "spent");
-        let (warning, expiry) = pinned_refusal_warning(
-            &pinned,
-            &[],
-            &records,
-            &provenant_records::RouteExclusionReason::ProviderRefused,
-            5_001,
-            &provenant_quota::DEFAULT_FRESHNESS,
-        )
-        .expect("persisted refusal evidence");
-        assert!(
-            warning.contains("source: provider refusal observed unix seconds 5000"),
-            "{warning}"
-        );
-        assert!(warning.contains("expiry unix seconds: 9000"), "{warning}");
-        assert_eq!(expiry, 9_000);
-        Ok(())
-    }
-}
+#[path = "tests_candidate_walk.rs"]
+mod candidate_walk_regressions;
 
 #[cfg(test)]
 mod route_launch_boundary_regressions {
@@ -7923,21 +7462,21 @@ mod route_launch_boundary_regressions {
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.local_account.1),
+            Some(spec.accounts.local_entry.1),
             Some("agy"),
             None
         ));
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.local_account.0),
+            Some(spec.accounts.local_entry.0),
             Some("agy"),
             None
         ));
         assert!(!include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.local_account.1),
+            Some(spec.accounts.local_entry.1),
             Some("cursor"),
             None
         ));
@@ -7945,20 +7484,23 @@ mod route_launch_boundary_regressions {
         assert!(include_local_login(
             cursor,
             &[],
-            Some(cursor.local_account.1),
+            Some(cursor.accounts.local_entry.1),
             Some("cursor"),
             None
         ));
         assert!(!include_local_login(
             cursor,
             &[],
-            Some(cursor.local_account.1),
+            Some(cursor.accounts.local_entry.1),
             Some("agy"),
             None
         ));
-        let resumed_local =
-            effective_account_selector(Some("agy-registered"), Some(spec.local_account.1), true);
-        assert_eq!(resumed_local, Some(spec.local_account.1));
+        let resumed_local = effective_account_selector(
+            Some("agy-registered"),
+            Some(spec.accounts.local_entry.1),
+            true,
+        );
+        assert_eq!(resumed_local, Some(spec.accounts.local_entry.1));
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
@@ -7966,7 +7508,7 @@ mod route_launch_boundary_regressions {
             Some("agy"),
             Some(RetainedIdentity {
                 provider: "agy",
-                account_key: Some(spec.local_account.1),
+                account_key: Some(spec.accounts.local_entry.1),
             })
         ));
         assert!(!include_local_login(
@@ -7980,7 +7522,11 @@ mod route_launch_boundary_regressions {
             })
         ));
         assert_eq!(
-            effective_account_selector(Some("agy-registered"), Some(spec.local_account.1), false),
+            effective_account_selector(
+                Some("agy-registered"),
+                Some(spec.accounts.local_entry.1),
+                false
+            ),
             Some("agy-registered")
         );
         assert_eq!(
@@ -8051,18 +7597,22 @@ mod route_launch_boundary_regressions {
         );
 
         let mut candidates = vec![registered.clone()];
-        candidates.push(agy_entry(spec.local_account.0, spec.local_account.1, &home));
+        candidates.push(agy_entry(
+            spec.accounts.local_entry.0,
+            spec.accounts.local_entry.1,
+            &home,
+        ));
         assert_eq!(
-            select_account(&candidates, spec.local_account.1, Some("agy"))
+            select_account(&candidates, spec.accounts.local_entry.1, Some("agy"))
                 .map_err(|error| error.to_string())?
                 .key,
-            spec.local_account.1
+            spec.accounts.local_entry.1
         );
         assert_eq!(
-            select_account(&candidates, spec.local_account.0, Some("agy"))
+            select_account(&candidates, spec.accounts.local_entry.0, Some("agy"))
                 .map_err(|error| error.to_string())?
                 .key,
-            spec.local_account.1
+            spec.accounts.local_entry.1
         );
         assert_eq!(
             select_account(&candidates, "agy-registered", Some("agy"))
@@ -8073,11 +7623,19 @@ mod route_launch_boundary_regressions {
 
         let labelled_collision = agy_entry("local", "agy-other", &home.join(".agy-other"));
         let mut colliding_candidates = vec![labelled_collision];
-        colliding_candidates.push(agy_entry(spec.local_account.0, spec.local_account.1, &home));
+        colliding_candidates.push(agy_entry(
+            spec.accounts.local_entry.0,
+            spec.accounts.local_entry.1,
+            &home,
+        ));
         // Spec: docs/specs/routing.md#account-references
         // A key and a label collision is ambiguous, never silently key-first.
         assert!(matches!(
-            select_account(&colliding_candidates, spec.local_account.1, Some("agy")),
+            select_account(
+                &colliding_candidates,
+                spec.accounts.local_entry.1,
+                Some("agy")
+            ),
             Err(PrepareError::Other(_))
         ));
         Ok(())
