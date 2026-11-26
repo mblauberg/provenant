@@ -451,7 +451,7 @@ mod forge_remote_tests {
         std::fs::write(project.join("fixture.txt"), "fixture\n")?;
         git(&project, &["add", "."])?;
         let nonce = "session-nonce";
-        let trailer = super::trailer(nonce);
+        let trailer = super::cloud::trailer(nonce);
         git(
             &project,
             &[

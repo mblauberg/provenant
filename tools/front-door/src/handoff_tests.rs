@@ -678,7 +678,8 @@ fn inspect_and_recreate_follow_the_configured_upstream_remote()
         &Free,
         &worktrees::RepoFacts::default(),
         declared_remote.as_ref(),
-    )?;
+    )
+    .map_err(|refusal| refusal.message)?;
     let lane = inspected
         .iter()
         .find(|tree| tree.branch.as_deref() == Some("lane"))
@@ -703,6 +704,11 @@ fn inspect_and_recreate_follow_the_configured_upstream_remote()
         "recreation from upstream must succeed"
     );
     assert!(made[0].created);
-    assert!(made[0].path.as_ref().is_some_and(|path| path.exists()));
+    assert!(
+        made[0]
+            .path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).exists())
+    );
     Ok(())
 }
