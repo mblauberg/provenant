@@ -1,7 +1,10 @@
 //! Git for the pull request helpers: bounded, with names checked first.
 use super::{Result, execute_for};
 use provenant_os::exec::Termination;
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 pub(super) const GIT_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -18,6 +21,7 @@ pub(super) fn plain_ref(name: &str) -> bool {
 
 pub(super) struct Git {
     executable: String,
+    host_state: PathBuf,
     facts: provenant_confinement::worktrees::RepoFacts,
     utility: provenant_confinement::utility::UtilityRuntime,
     executor: provenant_os::exec::SystemExecutor,
@@ -36,6 +40,7 @@ impl Git {
             .to_owned();
         Ok(Self {
             executable,
+            host_state: host_state.to_path_buf(),
             facts: provenant_confinement::worktrees::RepoFacts::default(),
             utility: provenant_confinement::utility::UtilityRuntime::read_only(git, host_state)?,
             executor: provenant_os::exec::SystemExecutor::new(1)?,
@@ -231,7 +236,23 @@ impl Git {
             .unwrap_or_default();
         Ok((succeeded, line.chars().take(200).collect()))
     }
-    /// The remote `base` tracks, or `origin`.
+    /// The one resolved forge remote for this checkout: the declared
+    /// `git.remote`, else the branch upstream, else the sole remote. Never a
+    /// compiled-in `origin`.
+    ///
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    fn resolved_remote(&self, dir: &Path) -> Result<String> {
+        let ports = provenant_config::PortTable::read_for(Some(dir), &self.host_state)?;
+        let policy = provenant_config::operation_policy(&self.host_state, dir, &ports);
+        let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+        let git = provenant_config::ForgeGit::new(dir)?;
+        Ok(provenant_config::ForgeContext::remote(&config, &git)?.value)
+    }
+
+    /// The remote `base` tracks, falling back to the one resolved forge remote
+    /// when the branch has no tracking configuration of its own.
+    ///
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
     pub(super) fn remote_of(&self, dir: &Path, base: &str) -> Result<String> {
         let key = format!("branch.{base}.remote");
         let configured = self.config_full(
@@ -240,12 +261,14 @@ impl Git {
             Some("branch tracking key"),
             provenant_os::git_config::Read::Get(&key),
         )?;
-        Ok(configured
+        if let Some(name) = configured
             .as_deref()
             .map(str::trim)
             .filter(|name| plain_ref(name) && *name != ".")
-            .unwrap_or("origin")
-            .to_owned())
+        {
+            return Ok(name.to_owned());
+        }
+        self.resolved_remote(dir)
     }
     pub(super) fn config_full(
         &self,
@@ -497,5 +520,32 @@ mod resolve_commit_tests {
             "HEAD_UNRESOLVED"
         );
         assert!(git.resolve_commit(temp.path(), "feedfacefeed").is_err());
+    }
+}
+
+#[cfg(test)]
+mod remote_of_tests {
+    use super::*;
+
+    /// A PR base with no tracking configuration follows the declared remote,
+    /// not a compiled-in `origin`.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn base_fallback_uses_the_declared_remote_not_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::write(project.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            r#"{"git":{"remote":"pinned"}}"#,
+        )
+        .unwrap();
+
+        let git = Git::new(&state).unwrap();
+        assert_eq!(git.remote_of(&project, "trunk").unwrap(), "pinned");
     }
 }

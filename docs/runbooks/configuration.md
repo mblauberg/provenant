@@ -48,11 +48,13 @@ location.
   `{"git": {"remote": "upstream", "default_branch": "main", "protected": ["release"]}}`.
   An omitted `git.remote` is detected from the current branch's upstream, then
   the sole remote; a refusal lists the remotes seen with close matches instead
-  of assuming `origin`. An omitted `git.default_branch` is resolved from
-  `refs/remotes/<remote>/HEAD`, then the forge API. An omitted `git.protected`
-  is the default branch plus the forge-reported protected branches. These ports
-  report their layer and key in `config ports --json`; detected values report
-  `detected` with the branch key or ref that produced them.
+  of assuming `origin`. A declared `git.default_branch` wins ahead of
+  `refs/remotes/<remote>/HEAD` and the forge API; it is what makes the protected
+  set authoritative when the remote has no HEAD. An omitted `git.protected` is
+  the default branch plus the forge-reported protected branches. These ports
+  report their layer and key in `config ports --json`, which prints the effective
+  remote, default branch and protected set; detected values report `detected`
+  with the branch key or ref that produced them.
 - `verify.base`, when no layer sets it, is inferred from
   `refs/remotes/<remote>/HEAD` for `verify.remote` and shown as inferred. If no
   remote HEAD resolves, the refusal shows an example to put in a ports layer.

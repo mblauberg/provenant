@@ -426,3 +426,65 @@ mod diagnostic_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod forge_remote_tests {
+    /// Cloud fetch and `ls-remote` follow the declared remote, not `origin`.
+    /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+    #[test]
+    fn collect_uses_the_declared_remote_for_ls_remote() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        let bare = temp.path().join("upstream.git");
+        std::fs::create_dir_all(&project)?;
+        std::fs::create_dir_all(&state)?;
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            provenant_os::fixture::run_git(dir, args).map(|_| ())
+        };
+        git(
+            temp.path(),
+            &["init", "--bare", bare.to_str().expect("path")],
+        )?;
+        git(&project, &["init", "-q"])?;
+        std::fs::write(project.join("fixture.txt"), "fixture\n")?;
+        git(&project, &["add", "."])?;
+        git(
+            &project,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        )?;
+        git(
+            &project,
+            &["remote", "add", "upstream", bare.to_str().expect("path")],
+        )?;
+        git(
+            &project,
+            &["push", "-q", "upstream", "HEAD:refs/heads/trunk"],
+        )?;
+        std::fs::create_dir_all(project.join(".provenant"))?;
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            r#"{"git":{"remote":"upstream"}}"#,
+        )?;
+
+        let ports = provenant_config::PortTable::read_for(Some(&project), &state)?;
+        let policy = provenant_config::operation_policy(&state, &project, &ports);
+        let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());
+        let metadata = provenant_config::ForgeGit::new(&project)?;
+        let remote = provenant_config::ForgeContext::remote(&config, &metadata)?.value;
+        assert_eq!(remote, "upstream");
+
+        let found = super::find_branch(&project, "trunk", "nonce", &remote)?
+            .expect("the declared remote's branch is found");
+        assert_eq!(found.0, "refs/heads/trunk");
+        Ok(())
+    }
+}
