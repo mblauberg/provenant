@@ -5,6 +5,9 @@ use crate::{
 };
 use provenant_records::custody::*;
 
+/// Custody records paired with the cursor after each record.
+pub type CustodyRows = Vec<(u64, CustodyRecord)>;
+
 fn canonical(subject: &Subject) -> Result<Subject> {
     text(&subject.id, "custody subject")?;
     if subject.id.chars().any(char::is_control) {
@@ -693,7 +696,7 @@ impl HostStore {
         &self,
         query: &CustodyQuery,
         request: &Request<'_>,
-    ) -> Result<(Vec<(u64, CustodyRecord)>, Option<u64>)> {
+    ) -> Result<(CustodyRows, Option<u64>)> {
         request.check()?;
         let limit = i64::try_from(query.limit).map_err(|_| Error::Invalid("custody limit"))?;
         if !(1..=100).contains(&limit) {
