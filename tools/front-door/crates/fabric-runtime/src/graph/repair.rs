@@ -222,6 +222,7 @@ pub(super) fn split_verdict_patch(parent: &str, revision: u64) -> patch::Patch {
         "id": "adjudicate",
         "kind": "adjudicate",
         "access": "read_only",
+        "route": {"alias": "senior"},
         "after": [parent],
         "inputs": [{"node": parent, "outputs": ["verdict", "findings"]}],
         "require_findings": true,

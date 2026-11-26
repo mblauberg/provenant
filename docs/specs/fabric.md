@@ -509,8 +509,9 @@ against those named invariants, never a fresh full panel; a lens may raise a new
 invariant, which then follows the same contract. Two distinct findings with the
 same invariant are one shared flaw and route to the principal design continuation.
 A split verdict on one head goes to one adjudication node that returns a single
-verdict; the split itself never starts another round, though an upheld
-changes-request legitimately needs repair.
+verdict; the read-only adjudicator runs as an agent on the configured `senior`
+route, and the gate consumes its verdict. The split itself never starts another
+round, though an upheld changes-request legitimately needs repair.
 - Why: writers patch named sites and repeat a flaw elsewhere unless the invariant
   is named and swept; lens verdicts drift when a panel re-runs without a shared
   rubric, and no node resolved a split verdict.
