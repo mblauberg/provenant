@@ -618,7 +618,7 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
 #[test]
 fn stray_work_holds_dependants_instead_of_completing() {
     use crate::run::{
-        CauseSource, Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason,
+        CauseSource, Outcome, SettlementSignal, SettlementNodeOutcome, SettlementReason,
     };
     use crate::settlement::{GitEvidence, LaneRole, PrimaryCheckout, classify::settle};
     let mut evidence = evidence_for(Outcome::ReviewRequired, None);
@@ -638,7 +638,7 @@ fn stray_work_holds_dependants_instead_of_completing() {
     assert_eq!(stray.outcome, Outcome::ReviewRequired);
     assert_eq!(stray.source, CauseSource::Host);
     assert_eq!(stray.node, SettlementNodeOutcome::Failed);
-    assert_eq!(PartialSignal::StrayWork.as_str(), "stray_work");
+    assert_eq!(SettlementSignal::StrayWork.as_str(), "stray_work");
 }
 
 /// A declared writer stop restarts with its edits whether or not it committed

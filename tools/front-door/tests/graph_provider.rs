@@ -6358,9 +6358,9 @@ fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() ->
         } else {
             assert_eq!(lane["state"], "succeeded", "{lane}");
             assert!(lane["cause"].is_null(), "{lane}");
-            let warnings: Vec<provenant_records::run::PartialSignal> =
-                serde_json::from_value(lane["partial_signals"].clone())?;
-            assert!(warnings.contains(&provenant_records::run::PartialSignal::IdentityUnobserved));
+            let warnings: Vec<provenant_records::run::SettlementSignal> =
+                serde_json::from_value(lane["signals"].clone())?;
+            assert!(warnings.contains(&provenant_records::run::SettlementSignal::IdentityUnobserved));
             assert!(lane["observed_route"].is_null(), "{lane}");
             assert!(
                 lane["transcript"]["session"]

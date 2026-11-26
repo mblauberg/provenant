@@ -232,7 +232,7 @@ pub(super) fn stats_inner(
             // Missing evidence cannot certify a complete success.
             partial: record.as_ref().is_none_or(|record| {
                 provenant_telemetry::route_outcomes::provider_work_incomplete(
-                    &record.partial_signals,
+                    &record.signals,
                 )
             }),
         });
@@ -320,13 +320,13 @@ pub(super) fn stats_inner(
     for graph in &graph_quality {
         if graph["checkpoint"] == "read" {
             human.push_str(&format!(
-                "graph {}: verdicts={} findings={} initial_rounds={} repair_rounds={} partial_signals={}\n",
+                "graph {}: verdicts={} findings={} initial_rounds={} repair_rounds={} signals={}\n",
                 graph["graph_id"].as_str().unwrap_or("unknown"),
                 graph["verdicts"],
                 graph["findings"].as_u64().unwrap_or(0),
                 graph["initial_rounds"].as_u64().unwrap_or(0),
                 graph["repair_rounds"].as_u64().unwrap_or(0),
-                graph["partial_signals"]
+                graph["signals"]
             ));
         }
     }
@@ -499,7 +499,7 @@ pub(super) fn stats_inner(
         )),
         Err(cause) => human.push_str(&format!("partial signals: unavailable ({cause})\n")),
     }
-    data["partial_signals"] = partial_signals_value(partial);
+    data["signals"] = signals_value(partial);
     data["handoff_declarations_accepted"] = declarations["accepted"].clone();
     data["handoff_declarations_rejected"] = declarations["rejected"].clone();
     data["handoff_source"] = declarations["sources"].clone();

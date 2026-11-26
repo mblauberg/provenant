@@ -241,7 +241,7 @@ fn apply_route_identity(
     match crate::reader::route_identity(resolved, applied, observed) {
         crate::reader::RouteIdentity::Observed => {}
         crate::reader::RouteIdentity::Unobserved => {
-            fact.signals.push(PartialSignal::IdentityUnobserved);
+            fact.signals.push(SettlementSignal::IdentityUnobserved);
         }
         crate::reader::RouteIdentity::Mismatch => match committed_head {
             Some(head) => {
@@ -306,7 +306,7 @@ mod identity_policy_tests {
                 usage: UsageRecord::default(),
                 session: Some("session".into()),
                 reason: None,
-                partial_signals: vec![],
+                signals: vec![],
             };
             let evidence = provider_identity(&exit, &decoded, &policy);
             assert_eq!(evidence.conflict, conflict);
@@ -2857,7 +2857,7 @@ impl RunStore {
                 observed_route: None,
                 usage: UsageRecord::default(),
                 session: None,
-                partial_signals: Vec::new(),
+                signals: Vec::new(),
                 reason: Some(format!(
                     "cancelled before start: {}",
                     exit.warnings
@@ -2873,7 +2873,7 @@ impl RunStore {
                 observed_route: None,
                 usage: UsageRecord::default(),
                 session: None,
-                partial_signals: Vec::new(),
+                signals: Vec::new(),
                 reason: Some(
                     exit.warnings
                         .first()
@@ -3768,7 +3768,7 @@ impl RunStore {
                 result_empty,
                 reason: decoded.reason.clone(),
                 terminal_note: terminal_note.clone(),
-                signals: decoded.partial_signals.clone(),
+                signals: decoded.signals.clone(),
                 denial: denial
                     .as_ref()
                     .map(|denial| denial.diagnostic().to_string()),

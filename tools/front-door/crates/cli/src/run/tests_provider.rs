@@ -986,7 +986,7 @@ fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
             Path::new("/unused"),
         )
         .unwrap();
-    assert_eq!(decoded.partial_signals, [run::PartialSignal::ProviderStop]);
+    assert_eq!(decoded.signals, [run::SettlementSignal::ProviderStop]);
     assert_eq!(
         decoded.reason.as_deref(),
         Some("provider stopped early; inspect the result and resume if needed")

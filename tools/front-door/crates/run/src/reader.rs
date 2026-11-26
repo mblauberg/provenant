@@ -1601,7 +1601,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                     r.applied_route.as_ref(),
                     r.observed_route.as_ref(),
                 )
-                .permits_success(&r.partial_signals))
+                .permits_success(&r.signals))
         {
             return Err(RunError::Validation("invalid stored success"));
         }
@@ -1617,10 +1617,10 @@ pub(crate) enum RouteIdentity {
     Mismatch,
 }
 impl RouteIdentity {
-    pub(crate) fn permits_success(self, signals: &[PartialSignal]) -> bool {
+    pub(crate) fn permits_success(self, signals: &[SettlementSignal]) -> bool {
         match self {
             Self::Observed => true,
-            Self::Unobserved => signals.contains(&PartialSignal::IdentityUnobserved),
+            Self::Unobserved => signals.contains(&SettlementSignal::IdentityUnobserved),
             Self::Mismatch => false,
         }
     }

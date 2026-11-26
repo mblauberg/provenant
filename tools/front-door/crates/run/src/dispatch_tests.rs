@@ -230,7 +230,7 @@ pub(super) struct Fake {
     /// The answer a decode reports, instead of the captured stdout.
     pub(super) answer: Option<String>,
     /// Partial-finish signals a decode reports.
-    partial: Vec<PartialSignal>,
+    partial: Vec<SettlementSignal>,
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.
     quota_stderr: Option<&'static [u8]>,
     failure_note: Option<String>,
@@ -327,7 +327,7 @@ impl Providers for Fake {
             usage: self.codex_usage.clone().unwrap_or_default(),
             session: self.session.clone(),
             reason: self.reason.clone(),
-            partial_signals: self.partial.clone(),
+            signals: self.partial.clone(),
         })
     }
     fn decode_captures(
@@ -353,7 +353,7 @@ impl Providers for Fake {
 fn settle_with(
     answer: &str,
     outcome: Option<Outcome>,
-    signals: Vec<PartialSignal>,
+    signals: Vec<SettlementSignal>,
 ) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
     settle_with_role(answer, outcome, signals, None)
 }
@@ -361,7 +361,7 @@ fn settle_with(
 fn settle_with_role(
     answer: &str,
     outcome: Option<Outcome>,
-    signals: Vec<PartialSignal>,
+    signals: Vec<SettlementSignal>,
     role: Option<&str>,
 ) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;

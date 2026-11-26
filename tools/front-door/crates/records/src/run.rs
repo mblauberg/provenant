@@ -2714,7 +2714,7 @@ pub struct AttemptRecord {
     /// Signals that the lane finished only part of its brief. Empty for a lane
     /// with none, which is not proof that it finished everything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub partial_signals: Vec<PartialSignal>,
+    pub signals: Vec<SettlementSignal>,
     pub state: AttemptState,
     /// Absent on records written before terminal decisions were recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2927,7 +2927,7 @@ impl<T> Eq for Transient<T> {}
 /// the chair, who decides whether to resume; it never changes the outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PartialSignal {
+pub enum SettlementSignal {
     /// Identity evidence is incomplete; usage stays attributed to the requested account.
     IdentityUnobserved,
     /// A successful final answer did not include a final handoff.
@@ -2946,7 +2946,7 @@ pub enum PartialSignal {
     /// bound worktree.
     StrayWork,
 }
-impl PartialSignal {
+impl SettlementSignal {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::IdentityUnobserved => "identity_unobserved",

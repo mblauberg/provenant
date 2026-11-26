@@ -286,7 +286,7 @@ pub struct Decoded {
     pub session: Option<String>,
     pub reason: Option<String>,
     /// Partial-finish signals the provider decode found; run adds its own.
-    pub partial_signals: Vec<PartialSignal>,
+    pub signals: Vec<SettlementSignal>,
 }
 /// A task-local preparation refusal, retaining candidate classifications.
 #[derive(Debug, thiserror::Error)]
@@ -906,7 +906,7 @@ pub trait Providers {
                 reason: Some(
                     "provider decoder cannot verify the retained continuation session".into(),
                 ),
-                partial_signals: Vec::new(),
+                signals: Vec::new(),
             });
         }
         self.decode_captures(

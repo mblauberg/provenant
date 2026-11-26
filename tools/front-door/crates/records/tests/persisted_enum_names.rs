@@ -19,7 +19,7 @@ use provenant_records::{
     },
     run::{
         AccountSource, AttemptState, CancellationDisposition, CauseSource, ChildWait,
-        EffectDisposition, LaneAccess, OriginReceipt, Outcome, PartialSignal, PathScope,
+        EffectDisposition, LaneAccess, OriginReceipt, Outcome, SettlementSignal, PathScope,
         PreparationFailure, RepositoryAdmissionPhase, RequestedRoute, SandboxFloorStrength,
         SettlementEffect, SettlementReason, SkipKind, StopWorkPush, StopWorkTrigger, CauseKind,
         TerminalEvidence, UserSkillsMode, WriteGrantLimitOrigin, WriteSource, WriterDeliveryStage,
@@ -271,8 +271,8 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             ("lost", json!({"kind": "lost", "reason": "fixture"})),
         ],
     )?;
-    assert_unit_names::<PartialSignal>(
-        "PartialSignal",
+    assert_unit_names::<SettlementSignal>(
+        "SettlementSignal",
         &[
             "identity_unobserved",
             "handoff_missing",

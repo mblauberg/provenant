@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::declaration::{DeclarationCounts, DeclarationEvidence};
 use crate::handoff::Handoff;
 use crate::run::{
-    CauseSource, Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason, CauseKind,
+    CauseSource, Outcome, SettlementSignal, SettlementNodeOutcome, SettlementReason, CauseKind,
     TerminalEvidence,
 };
 use crate::settlement::policy::{AppliedPolicy, SettlementPolicy};
@@ -60,7 +60,7 @@ pub struct HostVerdict {
     pub result_empty: bool,
     pub reason: Option<String>,
     pub terminal_note: Option<String>,
-    pub signals: Vec<PartialSignal>,
+    pub signals: Vec<SettlementSignal>,
     pub denial: Option<String>,
     pub stopped_handoff: Option<Handoff>,
 }
@@ -149,7 +149,7 @@ pub struct OutcomeFact {
     pub source: CauseSource,
     pub node: SettlementNodeOutcome,
     pub terminal_evidence: TerminalEvidence,
-    pub signals: Vec<PartialSignal>,
+    pub signals: Vec<SettlementSignal>,
     pub progress: Option<Progress>,
     pub handoff: crate::handoff::HandoffResult,
     pub handoff_source: Option<HandoffSource>,

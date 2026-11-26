@@ -43,10 +43,10 @@ fn exact_route(route: &provenant_records::RouteFact) -> Option<String> {
 
 /// Account identity evidence is independent of whether provider work finished.
 /// Q1 keeps unobserved accounts unknown; it must not invent model failures.
-pub fn provider_work_incomplete(signals: &[provenant_records::run::PartialSignal]) -> bool {
+pub fn provider_work_incomplete(signals: &[provenant_records::run::SettlementSignal]) -> bool {
     signals
         .iter()
-        .any(|signal| *signal != provenant_records::run::PartialSignal::IdentityUnobserved)
+        .any(|signal| *signal != provenant_records::run::SettlementSignal::IdentityUnobserved)
 }
 
 // Host stops still describe who stopped the process. A settlement declaration

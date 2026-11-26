@@ -12,7 +12,7 @@ use provenant_records::declaration::{
 };
 use provenant_records::handoff::{Handoff, HandoffError, HandoffStatus};
 use provenant_records::provenance::{Layer, Source, Sourced};
-use provenant_records::run::{Outcome, PartialSignal, SettlementReason, CauseKind};
+use provenant_records::run::{Outcome, SettlementSignal, SettlementReason, CauseKind};
 use provenant_records::settlement::{
     CustodyFacts, GitEvidence, HandoffSource, HostVerdict, IdentityEvidence, IdentityPolicyEffect,
     LaneRole, PrimaryCheckout, Progress, SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
@@ -104,7 +104,7 @@ struct Row {
     cause: Option<CauseKind>,
     reason: SettlementReason,
     stop: Option<StopCause>,
-    signals: Vec<PartialSignal>,
+    signals: Vec<SettlementSignal>,
     progress: Option<Progress>,
 }
 
@@ -215,7 +215,7 @@ fn rows() -> Vec<Row> {
             cause: Some(CauseKind::Blocked),
             reason: SettlementReason::DeclaredStop,
             stop: Some(StopCause::Blocked),
-            signals: vec![PartialSignal::DeclaredStop],
+            signals: vec![SettlementSignal::DeclaredStop],
             progress: Some(Progress::Moved),
         },
         Row {
@@ -235,7 +235,7 @@ fn rows() -> Vec<Row> {
             cause: None,
             reason: SettlementReason::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
-            signals: vec![PartialSignal::DeclaredStop],
+            signals: vec![SettlementSignal::DeclaredStop],
             progress: Some(Progress::Moved),
         },
         Row {
@@ -245,7 +245,7 @@ fn rows() -> Vec<Row> {
             cause: None,
             reason: SettlementReason::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
-            signals: vec![PartialSignal::DeclaredStop],
+            signals: vec![SettlementSignal::DeclaredStop],
             progress: Some(Progress::Moved),
         },
         Row {
@@ -255,7 +255,7 @@ fn rows() -> Vec<Row> {
             cause: None,
             reason: SettlementReason::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
-            signals: vec![PartialSignal::DeclaredStop],
+            signals: vec![SettlementSignal::DeclaredStop],
             progress: Some(Progress::Moved),
         },
         Row {
@@ -265,7 +265,7 @@ fn rows() -> Vec<Row> {
             cause: Some(CauseKind::StoppedNoWork),
             reason: SettlementReason::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
-            signals: vec![PartialSignal::DeclaredStop],
+            signals: vec![SettlementSignal::DeclaredStop],
             progress: Some(Progress::Unchanged),
         },
         Row {
@@ -275,7 +275,7 @@ fn rows() -> Vec<Row> {
             cause: None,
             reason: SettlementReason::DeclaredStop,
             stop: Some(StopCause::StoppedEarly),
-            signals: vec![PartialSignal::DeclaredStop],
+            signals: vec![SettlementSignal::DeclaredStop],
             progress: Some(Progress::Unknown),
         },
         Row {
@@ -285,7 +285,7 @@ fn rows() -> Vec<Row> {
             cause: None,
             reason: SettlementReason::StrayWork,
             stop: None,
-            signals: vec![PartialSignal::StrayWork],
+            signals: vec![SettlementSignal::StrayWork],
             progress: Some(Progress::Moved),
         },
         Row {
@@ -295,7 +295,7 @@ fn rows() -> Vec<Row> {
             cause: None,
             reason: SettlementReason::HandoffMalformed,
             stop: Some(StopCause::HandoffMalformed),
-            signals: vec![PartialSignal::HandoffMalformed],
+            signals: vec![SettlementSignal::HandoffMalformed],
             progress: None,
         },
         Row {
@@ -305,7 +305,7 @@ fn rows() -> Vec<Row> {
             cause: None,
             reason: SettlementReason::HandoffMissing,
             stop: Some(StopCause::HandoffMissing),
-            signals: vec![PartialSignal::HandoffMissing],
+            signals: vec![SettlementSignal::HandoffMissing],
             progress: None,
         },
         Row {
@@ -335,7 +335,7 @@ fn rows() -> Vec<Row> {
             cause: Some(CauseKind::EmptyWriterResult),
             reason: SettlementReason::EmptyResult,
             stop: Some(StopCause::EmptyResult),
-            signals: vec![PartialSignal::HandoffMissing],
+            signals: vec![SettlementSignal::HandoffMissing],
             progress: None,
         },
         Row {
@@ -345,7 +345,7 @@ fn rows() -> Vec<Row> {
             cause: None,
             reason: SettlementReason::UncommittedWork,
             stop: Some(StopCause::Uncommitted),
-            signals: vec![PartialSignal::UncommittedWork],
+            signals: vec![SettlementSignal::UncommittedWork],
             progress: Some(Progress::Moved),
         },
         Row {
@@ -561,9 +561,9 @@ fn handoff_missing_fail_settles_failed_with_its_source() {
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Failed);
     assert_eq!(fact.settlement_reason, SettlementReason::Failed);
-    assert!(fact.signals.contains(&PartialSignal::HandoffMissing));
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMissing));
     assert_eq!(fact.applied.len(), 1);
-    assert_eq!(fact.applied[0].signal, PartialSignal::HandoffMissing);
+    assert_eq!(fact.applied[0].signal, SettlementSignal::HandoffMissing);
     assert_eq!(fact.applied[0].action, SignalAction::Fail);
     assert_eq!(fact.applied[0].source.layer, Layer::Project);
 }
@@ -579,7 +579,7 @@ fn handoff_missing_off_records_the_signal_but_releases_dependants() {
         fact.node,
         provenant_records::run::SettlementNodeOutcome::Succeeded
     );
-    assert!(fact.signals.contains(&PartialSignal::HandoffMissing));
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMissing));
     assert_eq!(fact.applied.len(), 1);
     assert_eq!(fact.applied[0].action, SignalAction::Off);
 }
@@ -594,7 +594,7 @@ fn handoff_malformed_off_keeps_the_error_but_completes_the_lane() {
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Succeeded);
     assert_eq!(fact.settlement_reason, SettlementReason::Completed);
-    assert!(fact.signals.contains(&PartialSignal::HandoffMalformed));
+    assert!(fact.signals.contains(&SettlementSignal::HandoffMalformed));
     assert!(fact.handoff.is_err());
     assert_eq!(fact.applied.len(), 1);
 }
@@ -608,7 +608,7 @@ fn empty_result_fail_overrides_the_default_review() {
     assert_eq!(fact.outcome, Outcome::Failed);
     assert_eq!(fact.settlement_reason, SettlementReason::Failed);
     assert_eq!(fact.applied.len(), 1);
-    assert_eq!(fact.applied[0].signal, PartialSignal::HandoffMissing);
+    assert_eq!(fact.applied[0].signal, SettlementSignal::HandoffMissing);
 }
 
 #[test]
@@ -621,7 +621,7 @@ fn uncommitted_work_off_does_not_downgrade_a_success() {
     let fact = settle(&evidence);
     assert_eq!(fact.outcome, Outcome::Succeeded);
     assert_eq!(fact.settlement_reason, SettlementReason::Completed);
-    assert!(fact.signals.contains(&PartialSignal::UncommittedWork));
+    assert!(fact.signals.contains(&SettlementSignal::UncommittedWork));
     assert_eq!(fact.applied.len(), 1);
 }
 
@@ -636,7 +636,7 @@ fn no_work_off_keeps_a_declared_stop_on_an_unchanged_head() {
     assert_eq!(fact.settlement_reason, SettlementReason::DeclaredStop);
     assert_eq!(fact.applied.len(), 1);
     assert_eq!(fact.applied[0].source.layer, Layer::Route);
-    assert_eq!(fact.applied[0].signal, PartialSignal::DeclaredStop);
+    assert_eq!(fact.applied[0].signal, SettlementSignal::DeclaredStop);
 }
 
 #[test]

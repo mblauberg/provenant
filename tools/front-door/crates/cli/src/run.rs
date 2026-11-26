@@ -1005,7 +1005,7 @@ impl Registry<'_> {
             },
             session: None,
             reason: Some(reason.into()),
-            partial_signals: Vec::new(),
+            signals: Vec::new(),
         };
         let unproven = |reason: &str| run::Decoded {
             cause: None,
@@ -1016,7 +1016,7 @@ impl Registry<'_> {
             usage: run::UsageRecord::default(),
             session: None,
             reason: Some(reason.into()),
-            partial_signals: Vec::new(),
+            signals: Vec::new(),
         };
         let capture_defect = |line: usize, error: &str| {
             let line = line.max(1) as u64;
@@ -1289,7 +1289,7 @@ impl Registry<'_> {
             usage: run::UsageRecord::default(),
             session: outcome.session().map(str::to_owned),
             reason: None,
-            partial_signals: Vec::new(),
+            signals: Vec::new(),
         };
         let mut has_usage = false;
         // The adapter declares what one report means; the accumulator is the
@@ -1317,8 +1317,8 @@ impl Registry<'_> {
                 }
                 ProviderEvent::EarlyStop { .. } => {
                     decoded
-                        .partial_signals
-                        .push(run::PartialSignal::ProviderStop);
+                        .signals
+                        .push(run::SettlementSignal::ProviderStop);
                     early_stop = true;
                 }
                 ProviderEvent::Usage(report) => {
@@ -1922,7 +1922,7 @@ fn graph_quality_rows(
                     == Some(graph_id.as_str())
             })
             .collect();
-        let partial = partial_signals_value(partial_signal_counts(&in_graph, store, call));
+        let partial = signals_value(partial_signal_counts(&in_graph, store, call));
         rows.push(json!({
             "graph_id": graph_id,
             "checkpoint": "read",
@@ -1932,7 +1932,7 @@ fn graph_quality_rows(
             "findings": findings,
             "initial_rounds": initial_rounds,
             "repair_rounds": repair_rounds,
-            "partial_signals": partial,
+            "signals": partial,
         }));
     }
     Ok(rows)
@@ -1950,7 +1950,7 @@ fn partial_signal_counts(
             let record = store
                 .record(fact.attempt_id, call)
                 .map_err(|error| unavailable_cause(&error))?;
-            for signal in record.partial_signals {
+            for signal in record.signals {
                 *partial.entry(signal.as_str().to_owned()).or_default() += 1;
             }
         }
@@ -2052,7 +2052,7 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
 }
 
 /// Partial-signal counts, or a named unavailable field with its cause.
-fn partial_signals_value(counts: Result<BTreeMap<String, u64>, String>) -> Value {
+fn signals_value(counts: Result<BTreeMap<String, u64>, String>) -> Value {
     match counts {
         Ok(counts) => json!(counts),
         Err(cause) => json!({"unavailable": cause}),

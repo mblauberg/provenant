@@ -1725,8 +1725,8 @@ fn empty_committed_writer_requires_review_and_controls_fail()
                     Some(provenant_records::run::SettlementReason::HandoffMissing)
                 );
                 assert_eq!(
-                    finished.partial_signals,
-                    [provenant_records::run::PartialSignal::HandoffMissing]
+                    finished.signals,
+                    [provenant_records::run::SettlementSignal::HandoffMissing]
                 );
                 let AttemptState::Terminal { stop, .. } = &finished.state else {
                     panic!("attempt must be terminal");
@@ -1779,7 +1779,7 @@ fn empty_committed_writer_requires_review_and_controls_fail()
 fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
-    use provenant_records::run::{PartialSignal, SettlementReason};
+    use provenant_records::run::{SettlementSignal, SettlementReason};
 
     const DIRTY: &str = "left-uncommitted.txt";
     for (answer, empty) in [("", true), ("Work remains in the renderer.", false)] {
@@ -1878,10 +1878,10 @@ fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
         )?;
         assert_eq!(terminal.head, launch.base, "recorded head");
         assert_eq!(
-            finished.partial_signals,
+            finished.signals,
             [
-                PartialSignal::HandoffMissing,
-                PartialSignal::UncommittedWork
+                SettlementSignal::HandoffMissing,
+                SettlementSignal::UncommittedWork
             ]
         );
         let stop = stop.as_ref().ok_or("typed stop")?;
@@ -2102,8 +2102,8 @@ fn writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff()
     assert_eq!(*cause, Some(CauseKind::ContextHandoff));
     // Only a declared stop: the owner maps this to the graph's restart.
     assert_eq!(
-        finished.partial_signals,
-        vec![provenant_records::run::PartialSignal::DeclaredStop]
+        finished.signals,
+        vec![provenant_records::run::SettlementSignal::DeclaredStop]
     );
     let result =
         String::from_utf8(read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?)?;

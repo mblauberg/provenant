@@ -43,7 +43,7 @@ fn row() -> LaneRow {
         runtime_deadline: Value::Null,
         overdue: Some(false),
         stale: Some(false),
-        partial_signals: json!([]),
+        signals: json!([]),
         usage: json!({}),
         delivery_id: None,
         write_grants: Some(json!([])),

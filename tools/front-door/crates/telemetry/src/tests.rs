@@ -1651,7 +1651,7 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         Some("senior"),
         Some("review"),
         crate::route_outcomes::provider_work_incomplete(&[
-            provenant_records::run::PartialSignal::IdentityUnobserved,
+            provenant_records::run::SettlementSignal::IdentityUnobserved,
         ]),
         true,
     );

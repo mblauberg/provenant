@@ -225,8 +225,8 @@ fn route_identity_distinguishes_missing_evidence_from_contradictions() {
         );
     }
     assert!(!I::Unobserved.permits_success(&[]));
-    assert!(I::Unobserved.permits_success(&[PartialSignal::IdentityUnobserved]));
-    assert!(!I::Mismatch.permits_success(&[PartialSignal::IdentityUnobserved]));
+    assert!(I::Unobserved.permits_success(&[SettlementSignal::IdentityUnobserved]));
+    assert!(!I::Mismatch.permits_success(&[SettlementSignal::IdentityUnobserved]));
 }
 
 #[test]

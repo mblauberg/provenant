@@ -142,7 +142,7 @@ pub(crate) fn selection_evidence(
                         })
                         .map(|receipt| receipt.pool.clone());
                     let partial = provenant_telemetry::route_outcomes::provider_work_incomplete(
-                        &lane.partial_signals,
+                        &lane.signals,
                     );
                     let fact = run::fact(lane).map_err(|e| e.to_string())?;
                     outcomes.push(provenant_telemetry::route_outcomes::Evidence {

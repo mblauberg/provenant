@@ -7,7 +7,7 @@
 
 use crate::graph::AttemptOutcome;
 use crate::run::{
-    AttemptRecord, AttemptState, Outcome, PartialSignal, PreparationFailure, CauseKind,
+    AttemptRecord, AttemptState, Outcome, SettlementSignal, PreparationFailure, CauseKind,
 };
 
 /// The settlement part of a terminal attempt's graph outcome.
@@ -72,12 +72,12 @@ pub fn graph_outcome(record: &AttemptRecord) -> Option<AttemptOutcome> {
         // uncommitted edits; the graph restarts it on the retained worktree.
         Outcome::ReviewRequired | Outcome::Uncommitted
             if record
-                .partial_signals
-                .contains(&PartialSignal::DeclaredStop)
-                && record.partial_signals.iter().all(|signal| {
+                .signals
+                .contains(&SettlementSignal::DeclaredStop)
+                && record.signals.iter().all(|signal| {
                     matches!(
                         signal,
-                        PartialSignal::DeclaredStop | PartialSignal::UncommittedWork
+                        SettlementSignal::DeclaredStop | SettlementSignal::UncommittedWork
                     )
                 }) =>
         {

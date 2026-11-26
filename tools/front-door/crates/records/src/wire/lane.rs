@@ -90,7 +90,7 @@ lane_row! {
         runtime_deadline: Value => any();
         overdue: Option<bool> => nullable(boolean());
         stale: Option<bool> => nullable(boolean());
-        partial_signals: Value => any();
+        signals: Value => any();
         usage: Value => any();
         delivery_id: Option<String> => nullable(string());
         read_only_writable: Value => nullable(array(nullable(super::schema::worktree_path())));
@@ -587,7 +587,7 @@ impl LaneRow {
             runtime_deadline: json!(lane.runtime_deadline),
             overdue: facts.overdue,
             stale: facts.stale,
-            partial_signals: json!(lane.partial_signals),
+            signals: json!(lane.signals),
             usage: json!(lane.usage),
             delivery_id: lane.delivery_id.map(|id| id.to_string()),
             write_grants: Some(json!(write_grants)),
