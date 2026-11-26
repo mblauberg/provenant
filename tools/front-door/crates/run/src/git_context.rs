@@ -846,6 +846,7 @@ fn fetch_tracking_ref(
                     format!(
                         "base fetch hit a transient ref-lock collision after {MAX_FETCH_ATTEMPTS} attempts; retrying the launch"
                     ),
+                    provenant_records::warning::detected_source(BASE_FETCH_FALLBACK),
                 ));
                 return Err(RunError::Filesystem(FsError::LockTimeout {
                     path: cwd.join(".git").join("refs").join("remotes"),
@@ -956,6 +957,7 @@ fn base_fetch_lock(executor: &dyn Executor, git: &Path, cwd: &Path) -> Option<Lo
             warn(Warning::new(
                 BASE_FETCH_FALLBACK,
                 "base fetch lock is busy; fetching without coalescing",
+                provenant_records::warning::detected_source(BASE_FETCH_FALLBACK),
             ));
             None
         }

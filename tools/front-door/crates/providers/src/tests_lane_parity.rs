@@ -14,15 +14,15 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
     for entry in REGISTRY {
         let declaration =
             AdapterSpec::get(entry.adapter.id()).expect("registered adapter declaration");
-        assert_eq!(declaration.launch.default_network, NetworkAccess::Open);
-        let accesses: &[Access] = if declaration.launch.write {
+        assert_eq!(declaration.capabilities.launch.default_network, NetworkAccess::Open);
+        let accesses: &[Access] = if declaration.capabilities.launch.write.value {
             &[Access::ReadOnly, Access::WorktreeWrite]
         } else {
             &[Access::ReadOnly]
         };
         for &access in accesses {
-            for &network in declaration.launch.network {
-                let base = fixture_network_plan(access, declaration.authentication, network);
+            for &network in declaration.capabilities.launch.network {
+                let base = fixture_network_plan(access, declaration.login.authentication, network);
                 let mut permissions = base.permissions().clone();
                 for name in provenant_core::CARGO_CREDENTIAL_FILES {
                     permissions.credential_roots.add(
@@ -47,8 +47,8 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
                     agy_state: None,
                 })?;
                 let mut route = route(
-                    declaration.name,
-                    if declaration.launch.model {
+                    declaration.identity.name,
+                    if declaration.capabilities.launch.model.value {
                         "fixture-model"
                     } else {
                         ""
@@ -65,7 +65,7 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
                 input.host_var = &host_var;
                 input.credential_roots = plan.permissions().credential_roots.clone();
                 let command_argv = vec!["fixture-command".into()];
-                if declaration.named_entry == provenant_records::NamedEntry::Command {
+                if declaration.identity.named_entry == provenant_records::NamedEntry::Command {
                     input.command = Some(crate::command::Invocation {
                         argv: &command_argv,
                         runtimes: &[],
@@ -75,10 +75,10 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
                 let hook_binary = input.provenant.executable;
                 let hook_state = input.provenant.state;
                 let launch = entry.adapter.prepare(input)?;
-                let context = format!("{} {access:?} {network:?}", declaration.name);
+                let context = format!("{} {access:?} {network:?}", declaration.identity.name);
                 if let Some(install) = declaration.install {
-                    if let Some(instruction) = install.instruction {
-                        assert!(install.instructions.is_supported(), "{context}");
+                    if let Some(instruction) = install.instruction_file {
+                        assert!(install.native.instructions.value, "{context}");
                         let (variable, suffix) = install.lane_home;
                         let child_home = launch
                             .env
@@ -90,11 +90,9 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
                         assert!(launch.setup.iter().any(|step| matches!(step,
                             SetupStep::WriteFile { path, bytes } if path == &destination && bytes.as_slice() == provenant_records::INSTRUCTION_CONTENT
                         )), "{context}: missing shared instruction projection");
-                    } else if let provenant_records::CapabilitySupport::Unsupported {
-                        reason,
-                        source,
-                    } = install.instructions
-                    {
+                    } else if !install.native.instructions.value {
+                        let reason = install.native.instructions.reason;
+                        let source = install.native.instructions.source;
                         assert!(!reason.is_empty() && !source.is_empty(), "{context}");
                     } else {
                         panic!("{context}: supported instruction capability has no path");
@@ -102,7 +100,7 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
                 }
                 if let Some(install) = declaration
                     .install
-                    .filter(|install| install.hooks.is_supported())
+                    .filter(|install| install.native.hooks.value)
                 {
                     let (variable, suffix) = install.lane_home;
                     let child_home = launch

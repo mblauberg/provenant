@@ -420,15 +420,16 @@ impl LaneLimits {
             source: budget.source,
             counted: usage.fresh_tokens(),
             reported_input: usage.input_including_cache(),
-            basis: if spec.is_some_and(|spec| spec.session_wide_usage)
-                && usage.per_attempt != Some(true)
+            basis: if spec.is_some_and(|spec| {
+                spec.capabilities.usage_attribution.value == crate::UsageAttribution::Session
+            }) && usage.per_attempt != Some(true)
             {
                 "session".into()
             } else {
                 "attempt".into()
             },
             notice: spec
-                .and_then(|spec| spec.token_budget_notice)
+                .and_then(|spec| spec.launch.token_budget_notice)
                 .map(str::to_owned),
         })
     }
@@ -617,10 +618,7 @@ mod tests {
         assert_eq!((limit.value, limit.source), (7, Layer::Host));
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
-        assert_eq!(
-            warnings[0].source.as_ref().map(|source| source.layer),
-            Some(Layer::Profile)
-        );
+        assert_eq!(warnings[0].source.layer, Layer::Profile);
 
         let (policy, warnings) = crate::warning::capture(|| {
             BudgetPolicy::resolve(

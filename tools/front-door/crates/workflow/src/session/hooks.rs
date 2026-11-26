@@ -331,7 +331,7 @@ pub fn hook_context_with(
     // shown so that it round-trips, say so rather than show one that would
     // write into the default store.
     let client = client
-        .map(|harness| format!(" --client {}", harness.spec().name))
+        .map(|harness| format!(" --client {}", harness.spec().identity.name))
         .unwrap_or_default();
     // `--project` names this hook's checkout, so the save does not depend on the
     // directory the agent is in when it runs.

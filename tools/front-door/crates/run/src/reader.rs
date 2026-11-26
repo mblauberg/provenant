@@ -891,7 +891,7 @@ impl RunStore {
                                 "terminal read-only review retained a reservation at {}; no Git work is fenced, custody treated as released",
                                 slot.current_path()?.display()
                             ),
-                        )
+                         provenant_records::warning::detected_source(READ_ONLY_RESERVATION_RETAINED))
                         .subject(format!("attempt {}", record.attempt_id)),
                     );
                     return Ok(true);
@@ -1168,6 +1168,8 @@ impl RunStore {
                 #[serde(default)]
                 last_output_at: Option<WallTime>,
                 #[serde(default)]
+                first_output_at: Option<WallTime>,
+                #[serde(default)]
                 priority: Option<i32>,
             }
             let parsed = serde_json::from_slice::<ProcessCheckpoint>(&bytes);
@@ -1192,6 +1194,7 @@ impl RunStore {
             {
                 record.process_observation_valid.0 = true;
                 record.last_output_at = observation.last_output_at;
+                record.first_output_at = observation.first_output_at;
                 record.priority = observation.priority;
             }
         }
@@ -1742,7 +1745,7 @@ pub(crate) fn route_identity(
             && r.provider
                 .as_deref()
                 .and_then(provenant_records::AdapterSpec::get)
-                .is_some_and(|spec| !spec.launch.model));
+                .is_some_and(|spec| !spec.capabilities.launch.model.value));
     if !r.provider.as_ref().is_some_and(|v| !v.is_empty())
         || !valid_model
         || r.provider != a.provider
@@ -1812,7 +1815,7 @@ fn usage_identity(
     let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
         return AccountIdentity::unknown();
     };
-    if !spec.registered_account || spec.is_unregistered_local(account_key) {
+    if !spec.accounts.registered || spec.is_unregistered_local(account_key) {
         return AccountIdentity::unknown();
     }
     AccountIdentity::provider_observation(provider, account_key)

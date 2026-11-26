@@ -108,7 +108,7 @@ fn default_branch(state: &Path, project: &Path) -> Result<String> {
             provenant_records::Warning::new(
                 provenant_records::warning::DEFAULT_BASE_FALLBACK,
                 format!("the forge did not name a default branch for {remote}; using the local remote HEAD symref"),
-            )
+             provenant_records::warning::detected_source(provenant_records::warning::DEFAULT_BASE_FALLBACK))
             .once_per_change(),
         );
         return Ok(branch);

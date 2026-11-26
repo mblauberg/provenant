@@ -24,7 +24,7 @@ pub fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
 pub(super) fn adapter_entry(route: &str) -> Option<(&str, &str)> {
     let (provider, name) = route.split_once('/')?;
     let spec = provenant_records::AdapterSpec::get(provider)?;
-    (!spec.launch.model && !name.is_empty()).then_some((provider, name))
+    (!spec.capabilities.launch.model.value && !name.is_empty()).then_some((provider, name))
 }
 
 /// Exactly one of `ADAPTER/ID`, `ADAPTER/NAME` for a model-less adapter, or a
@@ -135,6 +135,7 @@ pub(super) fn lane_access_checked(
                 Warning::new(
                     CONFIG_KEY_IGNORED,
                     format!("ignored unknown capability {}", plain_text(other, 128)),
+                    provenant_records::warning::detected_source(CONFIG_KEY_IGNORED),
                 )
                 .subject(other),
             ),
@@ -191,8 +192,12 @@ pub(super) fn lane_access_checked(
             Ok(path) if path.is_file() => path,
             _ => {
                 warn(
-                    Warning::new(CONFIG_KEY_IGNORED, "cannot attach path")
-                        .subject(path.display().to_string()),
+                    Warning::new(
+                        CONFIG_KEY_IGNORED,
+                        "cannot attach path",
+                        provenant_records::warning::detected_source(CONFIG_KEY_IGNORED),
+                    )
+                    .subject(path.display().to_string()),
                 );
                 continue;
             }
@@ -394,6 +399,9 @@ pub(super) fn schedule_low_space_gc(state: &Path, home: &Path, worktree: &Path) 
         warn(Warning::new(
             provenant_records::warning::GC_SCHEDULE_FAILED,
             format!("could not schedule low-space GC: {error}"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::GC_SCHEDULE_FAILED,
+            ),
         ));
         false
     } else {
@@ -460,6 +468,9 @@ pub(super) fn check_writer_disk_with_collection(
                 provenant_records::warning::DISK_OBSERVATION_UNAVAILABLE,
                 format!(
                     "writer disk observation unavailable; continuing without the disk floor check: {message}"
+                ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::DISK_OBSERVATION_UNAVAILABLE,
                 ),
             ));
             Ok(())

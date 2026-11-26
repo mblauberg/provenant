@@ -42,7 +42,7 @@ pub(crate) fn reconcile_account(
     }
     const SECTIONS: provenant_config::DomainSections<Domains> =
         provenant_config::DomainSections::new(&[crate::accounts::SECTION]);
-    let adapter = provenant_records::Harness::Agy.spec().name;
+    let adapter = provenant_records::Harness::Agy.spec().identity.name;
     let channel = format!("{adapter}-account-switch");
     let mut changed = false;
     provenant_config::edit_config(

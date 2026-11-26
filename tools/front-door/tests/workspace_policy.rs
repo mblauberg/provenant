@@ -1579,11 +1579,12 @@ fn adapter_policy_excludes_fixture_items_but_scans_production_neighbours() {
 fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
     let names = provenant_records::ADAPTER_SPECS
         .iter()
-        .map(|spec| regex::escape(spec.name))
+        .map(|spec| regex::escape(spec.identity.name))
         .collect::<Vec<_>>()
         .join("|");
     let literal = format!(r#""(?:{names})""#);
-    let harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*\s*\.\s*spec\s*\(\s*\)\s*\.\s*name";
+    let harness =
+        r"Harness::[A-Za-z_][A-Za-z_0-9]*\s*\.\s*spec\s*\(\s*\)\s*\.\s*identity\s*\.\s*name";
     let typed_harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*";
     regex::Regex::new(&format!(
         r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness}|{typed_harness})|(?:{literal}|{harness}|{typed_harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*(?:\||=>|if\b)|matches!\s*\([^,]+,[^;{{}}\n]*(?:{literal}|{harness})|\.\s*(?:eq|ne|eq_ignore_ascii_case)\s*\(\s*(?:{literal}|{harness}|{typed_harness})|{typed_harness}[^,;{{}}]*=>|\blet\s+[^=;{{}}]*{typed_harness}[^=;{{}}]*=|matches!\s*\([^;{{}}]*{typed_harness})"
@@ -1594,10 +1595,10 @@ fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
 fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(), Box<dyn Error>> {
     let comparison = adapter_identity_comparison()?;
     for spec in provenant_records::ADAPTER_SPECS {
-        assert!(comparison.is_match(&format!("adapter == \"{}\"", spec.name)));
-        assert!(comparison.is_match(&format!("\"{}\" => action()", spec.name)));
+        assert!(comparison.is_match(&format!("adapter == \"{}\"", spec.identity.name)));
+        assert!(comparison.is_match(&format!("\"{}\" => action()", spec.identity.name)));
     }
-    assert!(comparison.is_match("adapter == Harness::Codex.spec().name"));
+    assert!(comparison.is_match("adapter == Harness::Codex.spec().identity.name"));
     assert!(comparison.is_match("matches!(adapter, \"codex\")"));
     assert!(comparison.is_match("matches!(adapter, Some(\"codex\"))"));
     assert!(comparison.is_match("matches!(adapter, None | Some(\"codex\"))"));
@@ -1605,7 +1606,7 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     assert!(comparison.is_match("adapter.eq(\"codex\")"));
     assert!(comparison.is_match("adapter.eq_ignore_ascii_case(\"codex\")"));
     assert!(comparison.is_match("\"codex\" if ready => action()"));
-    assert!(comparison.is_match("Harness::Agy.spec().name != adapter"));
+    assert!(comparison.is_match("Harness::Agy.spec().identity.name != adapter"));
     assert!(comparison.is_match("provider == Harness::Claude"));
     for pattern in [
         "Harness::Claude => action()",
@@ -1617,7 +1618,7 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     ] {
         assert!(comparison.is_match(pattern), "{pattern}");
     }
-    assert!(!comparison.is_match("default_value = Harness::Claude.spec().name"));
+    assert!(!comparison.is_match("default_value = Harness::Claude.spec().identity.name"));
     assert!(!comparison.is_match("true => Some(Harness::Codex),\nfalse => None"));
     Ok(())
 }
@@ -1639,7 +1640,7 @@ fn adapter_policy_detects_provider_and_config_identity_branches() -> Result<(), 
     for source in [
         "crate::adapter!(Agy, \"agy\", prepare);",
         "adapter: \"agy\",",
-        "provenant_records::Harness::Agy.spec().name",
+        "provenant_records::Harness::Agy.spec().identity.name",
     ] {
         assert!(!comparison.is_match(source), "false positive: {source}");
     }
@@ -1653,18 +1654,21 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let names = provenant_records::ADAPTER_SPECS
         .iter()
-        .map(|spec| regex::escape(spec.name))
+        .map(|spec| regex::escape(spec.identity.name))
         .collect::<Vec<_>>()
         .join("|");
     let literal = regex::Regex::new(&format!(r#""(?:{names})""#))?;
     let comparison = adapter_identity_comparison()?;
     let mut sources = Vec::new();
-    // Every production crate that can dispatch on adapter identity is in scope.
-    // Providers and config declare their own adapter bindings and name adapters
-    // in declarative data and diagnostics, so only identity comparisons are
-    // policy there; the routing/cli/quota side has no such declarations.
-    for name in ["cli", "routing", "quota", "providers", "config"] {
-        rust_sources(&root.join("crates").join(name).join("src"), &mut sources)?;
+    // Every crate can dispatch on adapter identity, so every crate is in scope.
+    // Provider, config and registry sources declare their own adapter bindings
+    // and name adapters in declarative data and diagnostics, so only identity
+    // comparisons are policy there; elsewhere a bare adapter literal is policy.
+    for entry in fs::read_dir(root.join("crates"))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_symlink() {
+            rust_sources(&entry.path().join("src"), &mut sources)?;
+        }
     }
     rust_sources(&root.join("src"), &mut sources)?;
     let mut violations = Vec::new();
@@ -1678,7 +1682,8 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
         let declarative = path.starts_with(root.join("src"))
             || path == root.join("crates/cli/src/hooks.rs")
             || path.starts_with(root.join("crates/providers/src"))
-            || path.starts_with(root.join("crates/config/src"));
+            || path.starts_with(root.join("crates/config/src"))
+            || path == root.join("crates/records/src/adapters.rs");
         let checks: Vec<_> = if declarative {
             vec![&comparison]
         } else {
@@ -1700,7 +1705,28 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
                 || (path.ends_with("run/status.rs")
                     && source[found.end()..].starts_with(": cursor"))
                 || (path.ends_with("run/provider/preparation.rs")
-                    && source[found.end()..].starts_with(':'));
+                    && source[found.end()..].starts_with(':'))
+                // Chair telemetry reads the Claude transcript format only.
+                || (path.ends_with("telemetry/src/ingest.rs")
+                    && line_text.contains("PROVIDER"))
+                // Host credential declarations are declarative adapter data.
+                || path.ends_with("confinement/src/permissions/policy/host.rs")
+                // Built-in credential inventory is declarative adapter data.
+                || path.ends_with("core/src/credential_declarations.rs")
+                // A name-kind example in documentation, not an adapter identity.
+                || (path.ends_with("core/src/names.rs") && line_text.contains("///"))
+                // Fixture document data, not an adapter policy branch.
+                || path.ends_with("fabric-runtime/src/graph/cutover_followup_invariants.rs")
+                // A declared host-native constant, not an adapter policy branch.
+                || (path.ends_with("fabric-runtime/src/graph/next_step.rs")
+                    && line_text.contains("HOST_NATIVE"))
+                // Result-envelope schema field names, not adapter identities.
+                || path.ends_with("records/src/wire/mod.rs")
+                // CLI event JSON field names, not adapter identities.
+                || path.ends_with("telemetry/src/signals.rs")
+                // A declared cache inventory, not an adapter policy branch.
+                || (path.ends_with("run/src/retention.rs")
+                    && source[..found.start()].contains("PROVIDER_CACHES"));
             if non_adapter_literal {
                 continue;
             }
@@ -1914,6 +1940,7 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "accounts set",
         "accounts show",
         "accounts sync",
+        "adapter capabilities",
         "admit",
         "adopt",
         "answer",
@@ -2232,6 +2259,234 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
     assert!(
         violations.is_empty(),
         "production files grew past their line ceilings:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
+
+// The `warning: ` prefix belongs only to the binary edge's emitter. A library
+// that writes its own prefix bypasses dedup and JSON delivery, so the source
+// check scans records too. Spec: docs/specs/cli.md#warnings-are-typed-values
+const WARNING_EMITTERS: &[&str] = &["src/output.rs"];
+
+/// Byte offsets of string literals whose text starts with `warning: `.
+/// Comments and character literals are skipped so examples cannot trip the
+/// rule; raw and byte strings are handled like plain ones.
+fn warning_prefix_literals(source: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"//") {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i..].starts_with(b"/*") {
+            i += 2;
+            let mut depth = 1;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i..].starts_with(b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        let raw_start = if bytes[i..].starts_with(b"br") || bytes[i..].starts_with(b"cr") {
+            i + 1
+        } else {
+            i
+        };
+        if bytes.get(raw_start) == Some(&b'r') {
+            let mut quote = raw_start + 1;
+            while bytes.get(quote) == Some(&b'#') {
+                quote += 1;
+            }
+            if bytes.get(quote) == Some(&b'"') {
+                let hashes = quote - raw_start - 1;
+                let start = quote + 1;
+                i = start;
+                while i < bytes.len() {
+                    if bytes[i] == b'"'
+                        && bytes
+                            .get(i + 1..i + 1 + hashes)
+                            .is_some_and(|tail| tail.iter().all(|byte| *byte == b'#'))
+                    {
+                        break;
+                    }
+                    i += 1;
+                }
+                if source[start..i.min(source.len())].starts_with("warning: ") {
+                    found.push(raw_start);
+                }
+                i = (i + hashes + 1).min(bytes.len());
+                continue;
+            }
+        }
+        if bytes[i] == b'\'' {
+            let mut end = i + 1;
+            if bytes.get(end) == Some(&b'\\') {
+                end = (end + 2).min(bytes.len());
+            } else if let Some(character) = source[end..].chars().next() {
+                end += character.len_utf8();
+            }
+            if bytes.get(end) == Some(&b'\'') {
+                i = end + 1;
+                continue;
+            }
+        }
+        if bytes[i] == b'"' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i = (i + 2).min(bytes.len()),
+                    b'"' => {
+                        i += 1;
+                        break;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let text = &source[start + 1..i.saturating_sub(1).max(start + 1)];
+            if text.starts_with("warning: ") {
+                found.push(start);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    found
+}
+
+/// Whether the literal at `at` is an argument of a write/print macro that
+/// targets a standard stream. `format!` and other string builders are how the
+/// emitter renders a human view; they are not direct writes.
+fn warning_prefix_stream_write(source: &str, at: usize) -> bool {
+    const MACROS: &[&str] = &["eprintln", "eprint", "println", "print", "writeln", "write"];
+    let before = &source[..at];
+    let window = before.len().saturating_sub(240);
+    let mut nearest: Option<(usize, &str)> = None;
+    for name in MACROS {
+        let needle = format!("{name}!");
+        let Some(relative) = before[window..].rfind(&needle) else {
+            continue;
+        };
+        let position = window + relative;
+        let boundary = position == 0
+            || !before.as_bytes()[position - 1].is_ascii_alphanumeric()
+                && before.as_bytes()[position - 1] != b'_';
+        if boundary && nearest.is_none_or(|(found, _)| position > found) {
+            nearest = Some((position, name));
+        }
+    }
+    let Some((position, name)) = nearest else {
+        return false;
+    };
+    let Some(open) = source[position..at].find('(') else {
+        return false;
+    };
+    // The literal must be inside this invocation, not merely nearby code.
+    let mut depth = 0_i32;
+    for byte in source[position + open + 1..at].bytes() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    let invocation = &source[position..at];
+    match name {
+        "eprintln" | "eprint" | "println" | "print" => true,
+        _ => invocation.contains("stderr") || invocation.contains("stdout"),
+    }
+}
+
+fn warning_prefix_write_violations(source: &str, test_file: bool) -> bool {
+    let offset = |part: &str| part.as_ptr() as usize - source.as_ptr() as usize;
+    let tests = selected_test_scopes(source, test_file, false);
+    warning_prefix_literals(source).into_iter().any(|at| {
+        let in_test = tests.iter().any(|scope| {
+            let start = offset(scope);
+            (start..start + scope.len()).contains(&at)
+        });
+        !in_test && warning_prefix_stream_write(source, at)
+    })
+}
+
+#[test]
+fn warning_prefix_rule_distinguishes_emission_from_prose() {
+    for source in [
+        "fn f() { eprintln!(\"warning: x\"); }",
+        "fn f() { println!(\"warning: {}\", x); }",
+        "fn f() { writeln!(std::io::stderr().lock(), \"warning: {}\", x); }",
+        "fn f() { write!(io::stdout(), \"warning: {}\", x); }",
+        "fn f() { eprintln!(r#\"warning: x\"#); }",
+        "fn f() { let before = 1; eprintln!(\"warning: x\"); }",
+    ] {
+        assert!(
+            warning_prefix_write_violations(source, false),
+            "missed: {source}"
+        );
+    }
+    for source in [
+        "/// prints `warning: <message>` to stderr",
+        "// eprintln!(\"warning: x\");",
+        "fn f() { let text = \"warning: x\"; }",
+        "fn f() { let text = format!(\"warning: {x}\"); }",
+        "fn f() { writeln!(human, \"warning: {}\", x); }",
+        "fn f() { let x = 1; let text = \"warning: x\"; }",
+        "#[cfg(test)] fn f() { eprintln!(\"warning: x\"); }",
+        "#[cfg(test)] mod tests { fn f() { eprintln!(\"warning: x\"); } }",
+    ] {
+        assert!(
+            !warning_prefix_write_violations(source, false),
+            "false positive: {source}"
+        );
+    }
+    assert!(!warning_prefix_write_violations(
+        "fn f() { eprintln!(\"warning: x\"); }",
+        true
+    ));
+}
+
+#[test]
+fn warning_prefix_is_written_only_by_the_emitter() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    for path in source_roots() {
+        rust_sources(&path, &mut sources)?;
+    }
+    let mut violations = Vec::new();
+    for path in sources {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if WARNING_EMITTERS.contains(&relative.as_str()) {
+            continue;
+        }
+        let source = fs::read_to_string(&path)?;
+        if warning_prefix_write_violations(&source, is_test_source(&path.to_string_lossy())) {
+            violations.push(relative);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "route warnings through provenant_records::warning::warn; only the edge writes the prefix:\n{}",
         violations.join("\n")
     );
     Ok(())

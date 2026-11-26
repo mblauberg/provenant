@@ -1,6 +1,8 @@
 //! Pure explicit routing over immutable snapshots. No process or state effects.
 #![forbid(unsafe_code)]
+
 mod catalog;
+pub mod compatibility;
 mod discovery;
 mod monthly;
 pub use monthly::*;
@@ -100,15 +102,15 @@ impl provenant_core::Catalogue for AdapterCatalogue {
     fn names(&self) -> Vec<String> {
         provenant_records::ADAPTER_SPECS
             .iter()
-            .map(|spec| spec.name.to_owned())
+            .map(|spec| spec.identity.name.to_owned())
             .collect()
     }
 
     fn lookup(&self, canonical: &str) -> Option<Self::Item> {
         provenant_records::ADAPTER_SPECS
             .iter()
-            .find(|spec| spec.name == canonical)
-            .map(|spec| spec.name)
+            .find(|spec| spec.identity.name == canonical)
+            .map(|spec| spec.identity.name)
     }
 }
 

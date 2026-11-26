@@ -51,7 +51,7 @@ pub fn parse_codex_models(
     for row in listing.models {
         let model = ModelId::parse(&format!(
             "{}/{}",
-            provenant_records::Harness::Codex.spec().name,
+            provenant_records::Harness::Codex.spec().identity.name,
             row.slug
         ))?;
         let efforts: Vec<_> = row
@@ -83,7 +83,11 @@ pub fn parse_codex_models(
         return Err(RoutingError::Catalogue);
     }
     Ok(DiscoverySnapshot {
-        adapter: provenant_records::Harness::Codex.spec().name.into(),
+        adapter: provenant_records::Harness::Codex
+            .spec()
+            .identity
+            .name
+            .into(),
         observed_at,
         models,
     })
@@ -96,13 +100,14 @@ pub fn parse_text_models(
     text: &str,
     observed_at: i64,
 ) -> Result<DiscoverySnapshot, RoutingError> {
-    let (cursor_format, effort_suffixes) =
-        match provenant_records::AdapterSpec::get(adapter).and_then(|spec| spec.model_listing) {
-            Some(provenant_records::ModelListingFormat::CursorText) => (true, true),
-            Some(provenant_records::ModelListingFormat::AgyText) => (false, true),
-            Some(provenant_records::ModelListingFormat::OpencodeText) => (false, false),
-            _ => return Err(RoutingError::unknown_adapter(adapter)),
-        };
+    let (cursor_format, effort_suffixes) = match provenant_records::AdapterSpec::get(adapter)
+        .and_then(|spec| spec.identity.model_listing)
+    {
+        Some(provenant_records::ModelListingFormat::CursorText) => (true, true),
+        Some(provenant_records::ModelListingFormat::AgyText) => (false, true),
+        Some(provenant_records::ModelListingFormat::OpencodeText) => (false, false),
+        _ => return Err(RoutingError::unknown_adapter(adapter)),
+    };
     let mut models = std::collections::BTreeMap::<ModelId, DiscoveredModel>::new();
     let mut raw_ids = std::collections::BTreeSet::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {

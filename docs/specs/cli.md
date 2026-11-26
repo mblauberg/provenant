@@ -148,10 +148,12 @@ that cannot publish a result carries a bounded marker in `data` (`truncated`,
 error. Paged reads bind the cursor to the input, terminal text escapes control
 sequences, unknown facts stay unknown, and `--json` always preserves the envelope.
 The envelope is version 2: it always carries a `warnings` array (empty when the
-command raised none). Under `--json` no warning is written to stderr; human mode
-prints `warning: <message>` and its repair to stderr as each warning arrives and
-collapses repeats by key. Per-change keys are remembered in the state root, so a
-warning shows once until its key changes. The envelope also always carries a
+command raised none). Under `--json` no warning is written to stderr and every
+warning is kept as data, repeats included; a JSON envelope never marks a key as
+shown. Human mode prints `warning: <message>` and its repair to stderr as each
+warning arrives and collapses repeats by key. Only a warning actually shown to a
+person marks its per-change key in the state root, so a warning shows once until
+its key changes while a later envelope still lists it. The envelope also always carries a
 `next` array of suggested commands: each value has an `argv` array of literal
 arguments and a `why` sentence stating the reason from the state the owner
 holds. The binary edge renders these once for human output through the one
@@ -177,12 +179,12 @@ passing `--project PATH` as the repair.
 ### Warnings are typed values
 
 A warning is a typed value: a stable UPPER_SNAKE code from one of the two
-declared catalogues, a one-sentence message, and optional subject, source and
-repair.
+declared catalogues, a one-sentence message, a required structured source, and
+optional subject and repair.
 Library code never writes a warning itself: one function routes each warning to
 the innermost thread-local capture on this thread, then to the command's process
-sink, then to stderr as `warning: <message>` when neither is installed. A sink
-guard restores the previous sink when it is dropped. Codes follow the same
+sink, then retains it for the caller when neither is installed. A sink guard
+restores the previous sink when it is dropped. Codes follow the same
 stability rules as refusal codes, so a consumer branches on the code and never
 on the prose, and adding a code is additive. A repeated key collapses per
 invocation or per change; a per-change key hashes the code, subject and message
@@ -193,8 +195,9 @@ malformed and nothing else. The const catalogue in
 a one-line meaning and the upper-snake test derives its list from those consts.
 Policy rule codes are the second catalogue, declared in the compiled policy
 table `run/assets/policy.toml` and read by `crates/records/src/policy.rs`; a
-violated rule warns under its own rule code and reaches the same sink and
-envelope. Both catalogues follow the same stability rules: a code names one event
+violated observational rule warns under its own rule code, carries the layer and
+knob that set the rule as its source, and asks to be shown once per change while
+every JSON envelope still lists it. Both catalogues follow the same stability rules: a code names one event
 for the lifetime of its declaration and adding a code is additive.
 - Why: a consumer needs to act on a warning without matching text, and a
   command that returns warnings as data must not also print them.

@@ -79,6 +79,9 @@ fn warn_adopt(hook: &str, reason: &dyn std::fmt::Display) {
                 "adopting clean worktree: {}",
                 reason.to_string().chars().take(512).collect::<String>()
             ),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::WORKTREE_ADOPTED_DIRTY,
+            ),
         )
         .subject(hook)
         .once_per_change(),
@@ -314,7 +317,7 @@ pub fn create(globals: &Globals) -> u8 {
                     "worktree-create: worktree name {:?} is not a plain slug; using branch {branch}",
                     input.name.chars().take(64).collect::<String>()
                 ),
-            )
+             provenant_records::warning::detected_source(provenant_records::warning::NAME_CASE_FOLDED))
             .subject(branch.clone()),
         );
     }

@@ -22,9 +22,17 @@ fn branch_behind_base_warning(
         "branch {branch} at {head} does not contain base {base}; {behind}; reusing the branch at {head} with {base} as its merge target; the lane may merge it"
     );
     warn(
-        Warning::new(BRANCH_BEHIND_BASE, message.clone())
-            .subject(branch.to_owned())
-            .repair("merge the base into the branch before landing".to_owned()),
+        Warning::new(
+            BRANCH_BEHIND_BASE,
+            message.clone(),
+            provenant_records::warning::detected_source(BRANCH_BEHIND_BASE),
+        )
+        .subject(branch.to_owned())
+        .source(provenant_records::Source {
+            layer: provenant_records::Layer::Detected,
+            origin: Some(format!("git base {base}")),
+        })
+        .repair("merge the base into the branch before landing".to_owned()),
     );
     message
 }
@@ -1073,9 +1081,13 @@ pub fn default_creation_base(
     use provenant_records::warning::{DEFAULT_BASE_FALLBACK, Warning, warn};
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     warn(
-        Warning::new(DEFAULT_BASE_FALLBACK, warning.clone())
-            .subject(oid.to_string())
-            .once_per_change(),
+        Warning::new(
+            DEFAULT_BASE_FALLBACK,
+            warning.clone(),
+            provenant_records::warning::detected_source(DEFAULT_BASE_FALLBACK),
+        )
+        .subject(oid.to_string())
+        .once_per_change(),
     );
     Ok((oid, vec![warning]))
 }
@@ -1656,6 +1668,7 @@ pub(super) fn warn_cache_removal(error: &crate::permissions::PermissionError) {
     warn(Warning::new(
         CACHE_REMOVAL_FAILED,
         format!("could not remove worktree lane cache: {error}"),
+        provenant_records::warning::detected_source(CACHE_REMOVAL_FAILED),
     ));
 }
 

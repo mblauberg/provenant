@@ -798,8 +798,8 @@ fn provider_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
         projects,
         provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|spec| spec.peer_bootstrap)
-            .map(|spec| spec.binary)
+            .filter(|spec| spec.accounts.peer_bootstrap)
+            .map(|spec| spec.identity.binary)
             .chain(["rustc"]),
     )
 }
@@ -868,7 +868,7 @@ fn scheduler_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
         projects,
         provenant_records::ADAPTER_SPECS
             .iter()
-            .map(|spec| spec.binary)
+            .map(|spec| spec.identity.binary)
             .chain(["gh", "rustc"]),
     )
 }

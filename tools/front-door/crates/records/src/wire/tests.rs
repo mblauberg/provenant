@@ -37,6 +37,7 @@ fn row() -> LaneRow {
         priority: Some(10),
         finished_at: Value::Null,
         last_output_at: Value::Null,
+        first_output_at: Value::Null,
         last_event_at: Value::Null,
         last_event_source: None,
         stalled: None,

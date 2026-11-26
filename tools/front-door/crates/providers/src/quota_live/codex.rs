@@ -28,7 +28,7 @@ impl LiveQuota {
             "{\"id\":2,\"method\":\"account/rateLimits/read\"}\n"
         );
         let out = self.command(
-            provenant_records::Harness::Codex.spec().binary,
+            provenant_records::Harness::Codex.spec().identity.binary,
             &["-s", "read-only", "-a", "never", "app-server"],
             Some(("CODEX_HOME", &account.identity_dir)),
             Some(input.as_bytes()),

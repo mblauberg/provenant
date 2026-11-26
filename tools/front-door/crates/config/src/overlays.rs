@@ -57,6 +57,7 @@ impl fmt::Display for OverlayWarning {
 pub struct OverlayLayer {
     pub source: Layer,
     pub text: String,
+    pub path: std::path::PathBuf,
 }
 
 /// Read one named overlay table from the host and project config layers, in
@@ -104,7 +105,7 @@ pub fn read_layers(
             ));
             continue;
         }
-        layers.push(OverlayLayer { source, text });
+        layers.push(OverlayLayer { source, text, path });
     }
     // The one declaration owns the order: stable sorting keeps host and
     // host-project (both reported as Host) in the order they were read.

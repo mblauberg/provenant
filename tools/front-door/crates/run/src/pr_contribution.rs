@@ -56,8 +56,12 @@ impl crate::RunStore {
             use provenant_records::warning::{PR_CONTRIBUTION_BINDING_FAILED, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             warn(
-                Warning::new(PR_CONTRIBUTION_BINDING_FAILED, message.trim().to_owned())
-                    .subject(format!("attempt {attempt}")),
+                Warning::new(
+                    PR_CONTRIBUTION_BINDING_FAILED,
+                    message.trim().to_owned(),
+                    provenant_records::warning::detected_source(PR_CONTRIBUTION_BINDING_FAILED),
+                )
+                .subject(format!("attempt {attempt}")),
             );
         }
     }

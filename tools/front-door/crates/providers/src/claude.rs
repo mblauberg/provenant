@@ -758,7 +758,7 @@ fn refresh_account_with_clock_and_lock_observer(
     clock: &dyn Clock,
     before_lock: &dyn Fn(&Directory),
 ) -> Result<OauthToken, ProviderError> {
-    let own_adapter = provenant_records::Harness::Claude.spec().name;
+    let own_adapter = provenant_records::Harness::Claude.spec().identity.name;
     if account.adapter() != own_adapter || login.config_dir != account.directory() {
         return Err(ProviderError::IdentityMismatch);
     }

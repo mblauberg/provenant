@@ -5,7 +5,7 @@ pub(crate) fn decode_source(
     capture: &provenant_quota::ProbeCapture,
 ) -> Result<QuotaSnapshot, QuotaError> {
     super::decode_source(
-        provenant_records::Harness::Opencode.spec().name,
+        provenant_records::Harness::Opencode.spec().identity.name,
         plan,
         capture,
         |payload, windows, details| {
@@ -50,7 +50,7 @@ fn status(
         return QuotaStatus::Unknown;
     }
     let can_use_credits = provenant_records::AdapterSpec::get(adapter)
-        .is_some_and(|spec| spec.quota_credits)
+        .is_some_and(|spec| spec.quota.credits)
         && details
             .is_some_and(|details| super::positive_balance(details.credit_balance.as_deref()));
     super::status_from_windows(windows, |_| true, can_use_credits)

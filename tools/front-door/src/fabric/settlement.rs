@@ -199,6 +199,9 @@ pub(crate) fn advance_graphs_after_settlement(
                             "steer restart staggered by {} ms (source: {source})",
                             waited / 1_000
                         ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::STEER_RESTART_STAGGERED,
+                        ),
                     ));
                 }
             }
@@ -529,6 +532,9 @@ pub(crate) fn settle_owned_worktree(
                 provenant_records::warning::GC_SCHEDULE_FAILED,
                 format!(
                     "completion GC did not start: {error}; the next gc sweep collects the worktree"
+                ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::GC_SCHEDULE_FAILED,
                 ),
             )
             .repair("the next gc sweep collects the worktree"),

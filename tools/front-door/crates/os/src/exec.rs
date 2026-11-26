@@ -504,6 +504,7 @@ fn check_process_budget(probe: io::Result<ProcessBudget>) -> Result<(), ExecErro
             warn(Warning::new(
                 PROCESS_BUDGET_PROBE_FAILED,
                 format!("detached worker: process budget probe failed: {error}"),
+                provenant_records::warning::detected_source(PROCESS_BUDGET_PROBE_FAILED),
             ));
             Ok(())
         }

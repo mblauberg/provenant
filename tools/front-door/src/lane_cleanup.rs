@@ -81,6 +81,7 @@ fn removal_warning(outcome: &ArtefactOutcome) -> Warning {
             outcome.name,
             outcome.reason.as_deref().unwrap_or("unknown error")
         ),
+        provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
     )
     .subject(outcome.name.clone())
 }
@@ -94,6 +95,9 @@ fn warn(outcome: &ArtefactOutcome) {
                     "could not remove {}: {}; it is retained",
                     outcome.name,
                     outcome.reason.as_deref().unwrap_or("unknown error")
+                ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::CACHE_REMOVAL_FAILED,
                 ),
             )
             .subject(outcome.name.to_string()),

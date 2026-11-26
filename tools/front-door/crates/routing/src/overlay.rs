@@ -479,6 +479,7 @@ mod tests {
         let efforts = format!("{:?}", entry.efforts).replace('"', "'");
         let layer = provenant_config::OverlayLayer {
             source: Layer::Host,
+            path: "state/config.toml".into(),
             text: format!(
                 "[[catalogue.models]]\nmodel = '{}'\nefforts = {efforts}\nevidence_ref = 'owner fact'\nfamily = 'overlay-family'\n",
                 model.as_str()
@@ -511,6 +512,7 @@ mod tests {
         let efforts = format!("{:?}", member.efforts).replace('"', "'");
         let layer = provenant_config::OverlayLayer {
             source: Layer::Host,
+            path: "state/config.toml".into(),
             text: format!(
                 "[[catalogue.pool_members]]\npool = '{pool}'\nmodel = '{}'\nweight = 1\nefforts = {efforts}\n",
                 member.model.as_str()

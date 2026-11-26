@@ -1568,10 +1568,12 @@ pub(crate) fn run(
     }
     if command.targets.is_empty() && command.prs.is_empty() {
         if provenant_cli::fabric::in_lane() {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: [TARGET_REQUIRED] wait inside a lane named no targets; waiting on this lane's children through the owner relay"
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::WAIT_TARGET_FALLBACK,
+                    "[WAIT_TARGET_FALLBACK] wait inside a lane named no targets; waiting on this lane's children through the owner relay",
+                 provenant_records::warning::detected_source(provenant_records::warning::WAIT_TARGET_FALLBACK))
+                .once_per_change(),
             );
             // The local project journal is unavailable inside a lane and the
             // project-wide unsettled set would include this lane's own pending
@@ -1733,8 +1735,12 @@ pub(crate) fn run(
                                 "#{number}: local tip {local} differs from GitHub head {}; waiting for the local tip",
                                 reported.sha
                             ),
-                        )
-                        .subject(reported.branch.clone()),
+                         provenant_records::warning::detected_source(provenant_records::warning::BRANCH_BEHIND_BASE))
+                        .subject(reported.branch.clone())
+                        .source(provenant_records::Source {
+                            layer: provenant_records::Layer::Detected,
+                            origin: Some(format!("GitHub #{number}")),
+                        }),
                     );
                     local
                 })
@@ -2119,7 +2125,7 @@ pub(crate) fn run(
                         provenant_records::warning::warn(provenant_records::warning::Warning::new(
                             provenant_records::warning::PR_JOURNAL_UNAVAILABLE,
                             format!("PR journal unavailable; reconciling after gaps: {error}"),
-                        ));
+                         provenant_records::warning::detected_source(provenant_records::warning::PR_JOURNAL_UNAVAILABLE)));
                         None
                     }
                 };

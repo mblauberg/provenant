@@ -676,14 +676,14 @@ fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
     ];
     for entry in REGISTRY.iter().filter(|entry| {
         provenant_records::AdapterSpec::get(entry.adapter.id())
-            .is_some_and(|spec| spec.launch.model)
+            .is_some_and(|spec| spec.capabilities.launch.model.value)
     }) {
         let id = entry.adapter.id();
         let declared = provenant_records::AdapterSpec::get(id).expect("registered adapter spec");
         let mut route = route(id, "fixture-model");
         route.account_key = None;
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
-            let plan = fixture_access_plan(access, declared.authentication, false);
+            let plan = fixture_access_plan(access, declared.login.authentication, false);
             let launch = entry.adapter.prepare(fixture_input(
                 &route,
                 &plan,
@@ -883,9 +883,9 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
     let host_home = std::path::Path::new("/fixture/home");
     for declared in provenant_records::ADAPTER_SPECS
         .iter()
-        .filter(|spec| spec.install.is_some() && spec.launch.model)
+        .filter(|spec| spec.install.is_some() && spec.capabilities.launch.model.value)
     {
-        let id = declared.name;
+        let id = declared.identity.name;
         let adapter = REGISTRY
             .iter()
             .find(|entry| entry.adapter.id() == id)
@@ -921,11 +921,11 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
         if let Some(config) = install.default_home_config {
             host_config_roots.push(host_home.join(config));
         }
-        if let Some(skills) = declared.skills {
+        if let Some(skills) = declared.launch.skill_location {
             host_config_roots.push(host_home.join(skills.fallback).join(skills.suffix));
         }
         host_config_roots.extend(
-            declared
+            declared.launch
                 .skill_install_roots
                 .iter()
                 .map(|root| host_home.join(root)),
@@ -939,7 +939,7 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
             for session in [Session::Fresh, Session::Resume] {
                 let plan = fixture_access_plan(
                     access,
-                    declared.authentication,
+                    declared.login.authentication,
                     session == Session::Resume,
                 );
                 let mut input = fixture_input(

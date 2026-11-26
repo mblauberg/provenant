@@ -57,8 +57,11 @@ pub(super) fn prepare_command(
 ) -> Result<run::PreparedLaunch, PrepareError> {
     #[cfg(feature = "fixture")]
     hold_command_preparation_for_fixture();
+    // Load the owner capability entries once for this launch.
+    let roots = registry.roots.ok_or("routing context is unavailable")?;
+    let capability_overlay = crate::config_reads::capability_overlay(roots);
     if !AdapterSpec::get(provider)
-        .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)
+        .is_some_and(|spec| spec.identity.named_entry == provenant_records::NamedEntry::Command)
     {
         let hint =
             provenant_routing::close_matches_hint(&provenant_routing::adapter_candidates(provider));
@@ -66,7 +69,7 @@ pub(super) fn prepare_command(
             "{provider} has no named model-less entries{hint}"
         )));
     }
-    AdapterSpec::get(provider)
+    let check = AdapterSpec::get(provider)
         .ok_or_else(|| {
             format!(
                 "unknown adapter `{provider}`{}",
@@ -75,19 +78,23 @@ pub(super) fn prepare_command(
                 ))
             )
         })?
+        .with_overlay(&capability_overlay)
         .check_launch(&provenant_records::LaunchRequest {
             resume: resume.is_some(),
             write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
             network: task.access.network,
             skill_location: task.profile.require_skill_location,
+            gap_policy: provenant_records::GapPolicy::default(),
             ..Default::default()
-        })?;
+        });
+    if let Some(decision) = check.refusal() {
+        return Err(PrepareError::Unsupported(decision.clone()));
+    }
     let adapter = REGISTRY
         .iter()
         .find(|entry| entry.adapter.id() == provider)
         .map(|entry| entry.adapter)
         .ok_or_else(|| unavailable(format!("{provider} is not registered")))?;
-    let roots = registry.roots.ok_or("routing context is unavailable")?;
     let project = registry
         .project_id
         .ok_or("selected project identity is unavailable")?;
@@ -202,6 +209,7 @@ pub(super) fn prepare_command(
                     ))
                 )
             })?
+            .capabilities
             .launch
             .default_network,
     );
@@ -331,10 +339,27 @@ pub(super) fn prepare_command(
     if let Some(alias) = &paths.temporary_alias {
         alias_temporary_env(&mut spec.env, &scratch, &alias.join(&scratch_name));
     }
-    let mut launch_warnings =
-        super::preparation::image_input_warning(provider, &task.access.attachments)
-            .into_iter()
-            .collect::<Vec<_>>();
+    let mut launch_warnings = Vec::new();
+    let image_input = !task.access.attachments.is_empty();
+    if let Some(spec) = AdapterSpec::get(provider) {
+        let spec = spec.with_overlay(&capability_overlay);
+        let gap_policy = capability_overlay.gap_policy(provider, &launch_policy);
+        let check = spec.check_launch(&provenant_records::LaunchRequest {
+            image_input,
+            gap_policy,
+            ..Default::default()
+        });
+        // An owner-set `refuse` image gap stops the launch; otherwise a
+        // degraded image input leaves the attachments as readable paths.
+        if let Some(decision) = check.refusal() {
+            return Err(PrepareError::Unsupported(decision.clone()));
+        }
+        if let Some(decision) = check.degraded(provenant_records::LaunchField::ImageInput)
+            && decision.warn
+        {
+            launch_warnings.push(format!("warning: {decision}; attachments remain readable"));
+        }
+    }
     launch_warnings.extend(protection_warnings);
     launch_warnings.extend(super::preparation::ignore_file_warnings(
         provider,

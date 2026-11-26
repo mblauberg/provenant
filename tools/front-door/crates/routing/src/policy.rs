@@ -31,14 +31,17 @@ impl RouteIntent {
         spec: &provenant_records::AdapterSpec,
         model: &str,
         effort: Option<&str>,
-    ) -> Result<(), provenant_records::UnsupportedLaunch> {
+        gap_policy: provenant_records::GapPolicy,
+    ) -> provenant_records::LaunchCheck {
         spec.check_launch(&provenant_records::LaunchRequest {
             model: Some(model),
             effort,
+            image_input: self.image_input,
             resume: false,
             network: self.network,
             write: self.writes,
             skill_location: self.skill_location,
+            gap_policy,
         })
     }
 }
@@ -247,7 +250,7 @@ impl ModelPolicy {
     /// task-boundary advice, never guessed provider environment variables.
     pub fn launch_env(&self, adapter: &str) -> Vec<(String, String)> {
         if let Some(variable) = provenant_records::AdapterSpec::get(adapter)
-            .and_then(|spec| spec.compaction_env)
+            .and_then(|spec| spec.launch.compaction_env)
             .filter(|_| self.compaction.mode != Some(CompactionMode::Never))
         {
             self.compaction
@@ -1016,10 +1019,16 @@ mod tests {
         use provenant_records::run::NetworkAccess;
         use provenant_records::{ADAPTER_SPECS, AdapterSpec, LaunchCapabilities, LaunchField};
         let narrow = AdapterSpec {
-            launch: LaunchCapabilities {
-                network: &[NetworkAccess::Provider],
-                write: false,
-                ..ADAPTER_SPECS[0].launch
+            capabilities: provenant_records::Capabilities {
+                launch: LaunchCapabilities {
+                    network: &[NetworkAccess::Provider],
+                    write: provenant_records::AdapterFact::unsupported(
+                        "fixture has no write",
+                        provenant_records::ADAPTER_ROW_SOURCE,
+                    ),
+                    ..ADAPTER_SPECS[0].capabilities.launch
+                },
+                ..ADAPTER_SPECS[0].capabilities
             },
             ..ADAPTER_SPECS[0]
         };
@@ -1049,8 +1058,13 @@ mod tests {
         ] {
             assert_eq!(
                 intent
-                    .check_launch(&narrow, "model", None)
-                    .err()
+                    .check_launch(
+                        &narrow,
+                        "model",
+                        None,
+                        provenant_records::GapPolicy::default(),
+                    )
+                    .refusal()
                     .map(|e| e.field),
                 expected
             );
@@ -1823,7 +1837,7 @@ mod tests {
             )
             .policy;
         let variable = provenant_records::AdapterSpec::get("claude")
-            .and_then(|spec| spec.compaction_env)
+            .and_then(|spec| spec.launch.compaction_env)
             .ok_or("Claude compaction control declaration")?;
         assert_eq!(
             claude.launch_env("claude"),

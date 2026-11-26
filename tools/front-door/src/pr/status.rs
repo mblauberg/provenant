@@ -951,14 +951,14 @@ pub(crate) fn wait_line_observed(
             provenant_records::warning::Warning::new(
                 provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
                 "Actions runs unavailable for this head (no runs found); using observed checks only",
-            )
+             provenant_records::warning::detected_source(provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE))
             .subject(line.head.clone()),
         ),
         Err(error) => provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
                 provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
                 format!("Actions runs unavailable for this head ({error}); using observed checks only"),
-            )
+             provenant_records::warning::detected_source(provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE))
             .subject(line.head.clone()),
         ),
     }

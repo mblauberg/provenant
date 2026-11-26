@@ -118,10 +118,14 @@ fn config_warning(path: &Path, finding: &Finding) -> provenant_records::Warning 
         "unknown_key" => CONFIG_KEY_IGNORED,
         _ => CONFIG_MALFORMED,
     };
-    provenant_records::Warning::new(code, finding.message.clone())
-        .subject(format!("{}:{}", path.display(), finding.line))
-        .repair("run `provenant check config --json` and correct the reported setting")
-        .once_per_change()
+    provenant_records::Warning::new(
+        code,
+        finding.message.clone(),
+        provenant_records::warning::detected_source(code),
+    )
+    .subject(format!("{}:{}", path.display(), finding.line))
+    .repair("run `provenant check config --json` and correct the reported setting")
+    .once_per_change()
 }
 
 pub(crate) fn warn_config(path: &Path, finding: &Finding) {
@@ -149,6 +153,7 @@ pub(crate) fn warn_unknown_input_once(
                 "{}: {}: unknown configuration key; ignored",
                 warning.source, warning.key
             ),
+            provenant_records::warning::detected_source(CONFIG_KEY_IGNORED),
         )
         .subject(format!("{}: {}", warning.source, warning.key))
         .repair("remove the unknown key from the host configuration")
@@ -785,6 +790,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
             "clean_config",
             "profile",
             "out_of_scope_pin",
+            "version_probe",
+            "version_probe_timeout_seconds",
         ] {
             origins.insert(format!("providers.{provider}.{field}"), compiled.clone());
         }
@@ -2727,7 +2734,7 @@ mod warning_tests {
 
     #[test]
     fn answer_delivery_hook_arguments_are_identified() {
-        let claude = provenant_records::Harness::Claude.spec().name;
+        let claude = provenant_records::Harness::Claude.spec().identity.name;
         for command in [
             provenant_records::HookAction::PreToolUse.command(),
             provenant_records::HookAction::PostToolUse.command(),

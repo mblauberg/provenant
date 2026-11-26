@@ -24,7 +24,7 @@ fn registrations_for(harnesses: &[Harness], lane: bool) -> Vec<HookRegistration>
         .filter_map(|harness| {
             let spec = harness.spec();
             let install = spec.install?;
-            if !install.hooks.is_supported() {
+            if !install.native.hooks.value {
                 return None;
             }
             let protocol = install.hook_protocol?;
@@ -48,7 +48,7 @@ fn registrations_for(harnesses: &[Harness], lane: bool) -> Vec<HookRegistration>
                         if lane && action.is_answer_delivery() {
                             return None;
                         }
-                        if action.is_answer_delivery() && !install.answer_delivery.is_supported() {
+                        if action.is_answer_delivery() && !install.native.answer_delivery.value {
                             return None;
                         }
                         if matches!(
@@ -56,7 +56,7 @@ fn registrations_for(harnesses: &[Harness], lane: bool) -> Vec<HookRegistration>
                             HookAction::ChairPrompt
                                 | HookAction::ChairStart
                                 | HookAction::ChairStop
-                        ) && !spec.chair_switch
+                        ) && !spec.launch.chair_switch
                         {
                             return None;
                         }
@@ -90,7 +90,7 @@ fn hook_command(
     let state = state
         .to_str()
         .ok_or(InstallError::InvalidConfig("hook state root must be UTF-8"))?;
-    let adapter = spec.harness.spec().name;
+    let adapter = spec.harness.spec().identity.name;
     Ok([
         binary,
         "--state-dir",
@@ -159,7 +159,7 @@ pub(crate) fn value(spec: &HookRegistration, targets: &Targets) -> Result<Value,
 
 fn identity(spec: &HookRegistration, command: &str) -> HookIdentity {
     HookIdentity {
-        harness: spec.harness.spec().name.into(),
+        harness: spec.harness.spec().identity.name.into(),
         action: spec.action.command().into(),
         event: spec.event.into(),
         matcher: spec.matcher.map(str::to_owned),
@@ -192,7 +192,7 @@ fn read_identity(selector: &str) -> Result<HookIdentity, InstallError> {
 fn harness(identity: &HookIdentity) -> Result<Harness, InstallError> {
     ADAPTER_SPECS
         .iter()
-        .find(|spec| spec.name == identity.harness)
+        .find(|spec| spec.identity.name == identity.harness)
         .map(|spec| spec.id)
         .ok_or(InstallError::InvalidConfig("hook adapter"))
 }
@@ -458,7 +458,7 @@ pub(crate) fn register(
     let inherited_actions: BTreeSet<HookAction> = inherited
         .iter()
         .filter_map(|selector| read_identity(selector).ok())
-        .filter(|old| old.harness == harness.spec().name)
+        .filter(|old| old.harness == harness.spec().identity.name)
         .filter_map(|old| action(&old).ok())
         .collect();
     // An upgrade can retire an action and declare its replacement. The receipt
@@ -564,7 +564,7 @@ pub fn hook_plugin_source(binary: &Path, state: &Path) -> Result<Vec<u8>, Instal
         .map_err(|_| InstallError::InvalidConfig("hook executable"))?;
     let state =
         serde_json::to_string(state).map_err(|_| InstallError::InvalidConfig("hook state root"))?;
-    let adapter = serde_json::to_string(Harness::Opencode.spec().name)
+    let adapter = serde_json::to_string(Harness::Opencode.spec().identity.name)
         .map_err(|_| InstallError::InvalidConfig("hook adapter"))?;
     Ok(format!(
         r#"import {{ Plugin }} from "@opencode/plugin"
@@ -758,13 +758,13 @@ mod tests {
                 else {
                     return None;
                 };
-                if (!spec.chair_switch
+                if (!spec.launch.chair_switch
                     && matches!(
                         action,
                         HookAction::ChairPrompt | HookAction::ChairStart | HookAction::ChairStop
                     ))
                     || (action.is_answer_delivery()
-                        && (lane || !install.answer_delivery.is_supported()))
+                        && (lane || !install.native.answer_delivery.value))
                 {
                     return None;
                 }
@@ -781,7 +781,7 @@ mod tests {
             let Some(install) = adapter.install else {
                 continue;
             };
-            if !install.hooks.is_supported() {
+            if !install.native.hooks.value {
                 continue;
             }
             let native = registrations(&[adapter.id]);
@@ -790,7 +790,7 @@ mod tests {
                 native.len(),
                 declared_native.len(),
                 "{} native",
-                adapter.name
+                adapter.identity.name
             );
             for (action, event, matcher, timeout) in declared_native {
                 assert_eq!(
@@ -805,14 +805,19 @@ mod tests {
                         .count(),
                     1,
                     "{} {:?}",
-                    adapter.name,
+                    adapter.identity.name,
                     action
                 );
             }
 
             let lane = registrations_for(&[adapter.id], true);
             let declared_lane = declared(adapter.id, true);
-            assert_eq!(lane.len(), declared_lane.len(), "{} lane", adapter.name);
+            assert_eq!(
+                lane.len(),
+                declared_lane.len(),
+                "{} lane",
+                adapter.identity.name
+            );
             for (action, event, matcher, timeout) in declared_lane {
                 assert_eq!(
                     lane.iter()
@@ -825,7 +830,7 @@ mod tests {
                         .count(),
                     1,
                     "{} lane {:?}",
-                    adapter.name,
+                    adapter.identity.name,
                     action
                 );
             }
@@ -843,7 +848,7 @@ mod tests {
                     assert!(
                         source.contains(&encoded),
                         "{} {:?}",
-                        adapter.name,
+                        adapter.identity.name,
                         row.action
                     );
                 }
@@ -855,7 +860,7 @@ mod tests {
                     assert!(
                         !source.contains(&format!("\"action\":\"{}\"", action.command())),
                         "{} {:?}",
-                        adapter.name,
+                        adapter.identity.name,
                         action
                     );
                 }

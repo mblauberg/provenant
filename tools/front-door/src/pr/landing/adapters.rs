@@ -1731,6 +1731,9 @@ fn observe_checks_with(
                             "candidate {} check read skipped: {message}",
                             candidate.commit
                         ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::GH_RATE_LIMITED,
+                        ),
                     )
                     .subject(candidate.commit.clone()),
                 );
