@@ -1964,9 +1964,36 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+/// True when the declaration at `index` is guarded by `gate` in its own
+/// attribute stack. Other attributes may be stacked above it (including a
+/// multi-line clippy allow) and function bodies indent them; neither changes
+/// which cfg governs the declaration.
+fn declaration_is_gated(lines: &[&str], index: usize, gate: &str) -> bool {
+    let mut cursor = index;
+    let mut depth = 0usize;
+    while cursor > 0 {
+        cursor -= 1;
+        let line = lines[cursor].trim();
+        if line == gate {
+            return true;
+        }
+        // Walking up, a closing bracket opens an attribute body and an
+        // opening bracket closes it; a one-line attribute nets to zero.
+        let opens = line.chars().filter(|character| *character == '[').count();
+        let closes = line.chars().filter(|character| *character == ']').count();
+        depth = depth.saturating_add(closes).saturating_sub(opens);
+        if depth > 0 || line.starts_with("#[") {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
 #[test]
 fn worktree_driver_links_the_library_instead_of_including_source() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture_gate = "#[cfg(any(test, feature = \"fixture\"))]";
     let driver = fs::read_to_string(root.join("tests/worktree_driver.rs"))?;
     assert!(
         !driver.contains("include!"),
@@ -1988,12 +2015,12 @@ fn worktree_driver_links_the_library_instead_of_including_source() -> Result<(),
         }
     }
     let lib = fs::read_to_string(root.join("src/lib.rs"))?;
-    let fixture_gated = lib.lines().collect::<Vec<_>>().windows(2).any(|pair| {
-        pair[0] == "#[cfg(any(test, feature = \"fixture\"))]"
-            && pair[1] == "pub mod worktree_tests;"
-    });
+    let lib_lines = lib.lines().collect::<Vec<_>>();
+    let worktree_module = lib_lines
+        .iter()
+        .position(|line| line.trim() == "pub mod worktree_tests;");
     assert!(
-        fixture_gated,
+        worktree_module.is_some_and(|index| declaration_is_gated(&lib_lines, index, fixture_gate)),
         "worktree_tests must stay fixture-gated so native worker observations never reach release builds"
     );
     let manifest = fs::read_to_string(root.join("Cargo.toml"))?;
@@ -2027,30 +2054,62 @@ fn linked_harness_keeps_its_native_observation_seams_under_fixture() -> Result<(
     let gc = fs::read_to_string(root.join("src/fabric/gc_cleanup.rs"))?;
     let gc_lines = gc.lines().collect::<Vec<_>>();
     assert!(
-        gc.contains(&format!("{fixture_gate}\nthread_local! {{")),
+        gc_lines.windows(2).any(|pair| {
+            pair[0].trim() == fixture_gate && pair[1].trim_start() == "thread_local! {"
+        }),
         "SPAWNED must exist in fixture builds so the harness can inject collection failures"
     );
+    let spawned = gc_lines.iter().position(|line| {
+        line.trim_start()
+            .starts_with("return SPAWNED.with_borrow_mut")
+    });
     assert!(
-        gc_lines.windows(2).any(|pair| {
-            pair[0] == fixture_gate
-                && pair[1]
-                    .trim_start()
-                    .starts_with("return SPAWNED.with_borrow_mut")
-        }),
+        spawned.is_some_and(|index| declaration_is_gated(&gc_lines, index, fixture_gate)),
         "detached collection must record its request in the fixture-linked library"
     );
     assert!(
-        gc.contains(&format!("{production_gate}\n    {{")),
+        gc_lines
+            .windows(2)
+            .any(|pair| pair[0].trim() == production_gate && pair[1].trim() == "{"),
         "real detached collection must stay disabled whenever the harness is linked"
     );
 
     let land = fs::read_to_string(root.join("src/pr/land.rs"))?;
     let land_lines = land.lines().collect::<Vec<_>>();
+    let delete = land_lines
+        .iter()
+        .position(|line| line.trim() == "pub(crate) fn delete_after_check(");
     assert!(
-        land_lines.windows(2).any(|pair| {
-            pair[0] == fixture_gate && pair[1] == "pub(crate) fn delete_after_check("
-        }),
+        delete.is_some_and(|index| declaration_is_gated(&land_lines, index, fixture_gate)),
         "delete_after_check must compile into the fixture-linked library"
+    );
+    Ok(())
+}
+
+#[test]
+fn linked_harness_receives_the_production_binary_from_its_driver() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let driver = fs::read_to_string(root.join("tests/worktree_driver.rs"))?;
+    assert!(
+        driver.contains("option_env!(\"CARGO_BIN_EXE_provenant\")")
+            && driver.contains("worktree_tests::main("),
+        "the linked driver must pass Cargo's production binary path to the harness"
+    );
+    let harness = fs::read_to_string(root.join("src/worktree_tests.rs"))?;
+    assert!(
+        harness.contains("set_production_binary(production_binary)"),
+        "the harness entry must install the supplied path before dispatch"
+    );
+    let support = fs::read_to_string(root.join("tests/support/mod.rs"))?;
+    assert!(
+        support.contains("pub fn production_binary()") && support.contains("OnceLock<PathBuf>"),
+        "fixtures must read the explicit path before Cargo's integration-only default"
+    );
+    let compose = fs::read_to_string(root.join("src/compose_tests.rs"))?;
+    assert!(
+        compose.contains("production_binary()?")
+            && !compose.contains("option_env!(\"CARGO_BIN_EXE_provenant\")"),
+        "fixture-linked dispatch must use the handed-off binary path"
     );
     Ok(())
 }
