@@ -3,8 +3,9 @@ use super::{
     LandingError,
     model::*,
     ports::{
-        AlarmSink, Approval, Forge, GateRunner, MergeTree, PullRequestInfo, PullRequestState, Repo,
-        ReviewRecord, ReviewRecordSource, Reviews, StackMember, StackMembership,
+        AlarmSink, Approval, Forge, GateRunner, MergeTree, Mergeability, PullRequestInfo,
+        PullRequestState, Repo, RequiredCiCheck, ReviewRecord, ReviewRecordSource, Reviews,
+        StackMember, StackMembership,
     },
 };
 use crate::pr::{
@@ -164,6 +165,7 @@ pub(crate) fn gate_checks(runs: Vec<Check>) -> (Vec<CheckEvidence>, GateResult) 
         .map(|run| CheckEvidence {
             name: run.name,
             issuer: run.app_slug,
+            app_id: run.app,
             result: match run.bucket.as_str() {
                 "pass" => GateResult::Passed,
                 "pending" => GateResult::Pending,
@@ -473,6 +475,13 @@ impl GhForge {
 
 fn pull_info(number: u64, pull: RestPull) -> PullRequestInfo {
     let merged = pull.merged_at.is_some();
+    let mergeability = match (pull.mergeable, pull.mergeable_state.as_deref()) {
+        (Some(true), Some("clean")) => Mergeability::Clean,
+        (Some(false), Some("dirty")) | (_, Some("dirty")) => Mergeability::Conflicting,
+        (Some(false), _) => Mergeability::Conflicting,
+        (_, None | Some("unknown")) | (None, Some("unstable")) => Mergeability::Unknown,
+        _ => Mergeability::Unclean,
+    };
     PullRequestInfo {
         number,
         head: pull.head.sha.to_string(),
@@ -485,6 +494,7 @@ fn pull_info(number: u64, pull: RestPull) -> PullRequestInfo {
         } else {
             PullRequestState::Closed
         },
+        mergeability,
         merged_commit: if merged { pull.merge_commit_sha } else { None },
         stack: pull.stack.map(|stack| StackMembership {
             number: stack.number,
@@ -812,6 +822,40 @@ impl Forge for GhForge {
             reused_from_commit: None,
             extra: Default::default(),
         }])
+    }
+    fn required_ci_policy(
+        &mut self,
+        base_branch: &str,
+    ) -> Result<Option<Vec<RequiredCiCheck>>, LandingError> {
+        let repository = self.repository_name()?;
+        let read_error = std::cell::RefCell::new(None);
+        let policy = crate::pr::status::required_policy_for(
+            &format!("repos/{repository}"),
+            base_branch,
+            &|args| match self.reader().read(args) {
+                Ok(output) => Some(output),
+                Err(error) => {
+                    *read_error.borrow_mut() = Some(failed(error));
+                    None
+                }
+            },
+        );
+        let Some(policy) = policy else {
+            return match read_error.into_inner() {
+                Some(error) => Err(error),
+                None => Ok(None),
+            };
+        };
+        Ok(Some(
+            policy
+                .checks
+                .into_iter()
+                .map(|required| RequiredCiCheck {
+                    name: required.name,
+                    app_id: required.app,
+                })
+                .collect(),
+        ))
     }
     #[allow(clippy::disallowed_methods)]
     fn checks_with_timeout(
@@ -1538,17 +1582,28 @@ pub(super) fn bind_evidence(
         .checks
         .iter()
         .map(|name| {
-            let matching = observed.checks.iter().filter(|check| {
-                check.name == *name
-                    && definition
-                        .issuer
-                        .as_ref()
-                        .is_none_or(|issuer| check.issuer.as_ref() == Some(issuer))
-            });
-            let results: Vec<GateResult> = matching.clone().map(|c| c.result.clone()).collect();
+            let matching: Vec<_> = observed
+                .checks
+                .iter()
+                .filter(|check| {
+                    check.name == *name
+                        && definition
+                            .issuer
+                            .as_ref()
+                            .is_none_or(|issuer| check.issuer.as_ref() == Some(issuer))
+                })
+                .collect();
+            let results: Vec<GateResult> =
+                matching.iter().map(|check| check.result.clone()).collect();
+            let app_id = matching
+                .first()
+                .map(|check| check.app_id)
+                .filter(|first| matching.iter().all(|check| check.app_id == *first))
+                .flatten();
             CheckEvidence {
                 name: name.clone(),
-                issuer: matching.filter_map(|check| check.issuer.clone()).next(),
+                issuer: matching.first().and_then(|check| check.issuer.clone()),
+                app_id,
                 result: if results.is_empty() {
                     GateResult::Missing
                 } else {
@@ -2004,6 +2059,7 @@ esac
             "stack":{"number":42,"size":2,"position":2,"base":{"ref":"main","sha":head}}
         });
         let info = pull_info(102, serde_json::from_value(payload.clone()).unwrap());
+        assert_eq!(info.mergeability, Mergeability::Clean);
         assert_eq!(
             info.stack,
             Some(StackMembership {
@@ -2017,6 +2073,15 @@ esac
         assert_eq!(
             pull_info(102, serde_json::from_value(payload).unwrap()).stack,
             None
+        );
+        let unknown = serde_json::json!({
+            "state":"open", "head":{"sha":head,"ref":"upper"},
+            "base":{"sha":head,"ref":"main"}, "mergeable":null,
+            "mergeable_state":"unknown", "merged_at":null, "title":"fixture"
+        });
+        assert_eq!(
+            pull_info(102, serde_json::from_value(unknown).unwrap()).mergeability,
+            Mergeability::Unknown
         );
     }
 
@@ -2302,6 +2367,7 @@ esac
                 &mut FakeAlarms::default(),
                 driver::Request {
                     pins: &Default::default(),
+                    delivery_queue: false,
                     numbers: &[7],
                     target: "main",
                     settings: &settings,
@@ -2658,6 +2724,7 @@ esac
                 .map(|(name, issuer, result)| CheckEvidence {
                     name: (*name).into(),
                     issuer: issuer.map(str::to_owned),
+                    app_id: None,
                     result: result.clone(),
                 })
                 .collect(),

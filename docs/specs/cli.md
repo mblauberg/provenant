@@ -21,6 +21,22 @@ when the metadata or the registry omits one.
 - Why: three independently kept lists drift silently unless each is checked
   against what the runtime accepts.
 
+## Chair hook budget
+
+`domains.hooks.timeout_secs` (default 10) is the one installed timeout for
+chair-start, chair-stop and chair-prompt, both for native registrations and for
+the chair's own switch settings. Every hook runs under a single local budget of
+60% of that value. A hook that reaches the budget warns with `HOOK_BUDGET_OVERRUN`,
+records the overrun and its setting source under the state root's
+`hooks/diagnostics/failures.jsonl`, and returns before the host timeout. Usage
+ingest is never done on the hook path: chair hooks queue a detached
+`telemetry ingest --incremental` worker, which resumes durable transcript cursors
+and has no time window to rescan. `provenant doctor` (and `provenant hosts doctor`)
+shows the installed timeout with its source and every overrun in the last 24 h.
+
+- Why: a slow transcript must not cost the chair a hook, and the operator can see
+  both the setting and its effect without reading raw diagnostics.
+
 ## Targets
 
 Target verbs share one grammar and resolve only the named graph. Ambiguity is
@@ -257,7 +273,11 @@ Writer presence is `live`, `unattended`, `settling` or `unknown`. `running` show
 only while the recorded guardian or provider identity is present. A changed boot
 proves the old process tree is gone; same-boot absence, a reused PID, an
 unobservable host, incomplete evidence and unreachable peers stay `unknown`,
-because a child may have forked into another session and been reparented. Status
+because a child may have forked into another session and been reparented. A
+reachable peer supplies its own observed presence with the relayed status, so
+its attempt reports `running` on the launching host without that host reading
+the peer's process table; a reconcile hint for a peer-owned attempt names the
+peer's graph target and the host where it resolves. Status
 never mutates or schedules recovery; unattended and settling rows name the scoped
 `provenant reconcile` action, which rechecks custody before settlement. A
 settling row also names PIDs and the custody writer-lock path observed at the

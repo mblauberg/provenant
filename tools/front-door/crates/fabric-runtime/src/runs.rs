@@ -109,6 +109,11 @@ pub enum RunResult {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         lane_waits: Vec<provenant_records::run::LaneWait>,
+        /// The owner's own census-observed presence, relayed because a reader
+        /// on another host cannot observe this host's writers. Absent when the
+        /// owner could not observe it; never inferred from event recency.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presence: Option<provenant_records::wire::LanePresence>,
         #[serde(with = "attempt_wire")]
         attempt: AttemptRecord,
     },
@@ -493,6 +498,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let result = RunResult::Status {
             extra: Default::default(),
+            presence: Some(provenant_records::wire::LanePresence::Live),
             lane_waits: vec![provenant_records::run::LaneWait {
                 extra: Default::default(),
                 attempt_id: AttemptId::from_bytes([1; 16]),

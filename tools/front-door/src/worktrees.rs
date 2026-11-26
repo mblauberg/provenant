@@ -710,6 +710,9 @@ struct GcData {
     /// Resolved `gc.free_floor` and the layer or config file that set it.
     free_floor_bytes: u64,
     free_floor_source: String,
+    /// Resolved `gc.attempt_scratch_max` and where it came from.
+    attempt_scratch_max_bytes: u64,
+    attempt_scratch_max_source: String,
     sweep_cursor: Option<crate::gc_sweep::Cursor>,
     sweep_warning: Option<String>,
     sweep_stopped: bool,
@@ -1262,7 +1265,7 @@ fn gc_compact_summary(data: &GcData, full: bool) -> String {
         .map(|entry| entry.worktrees.removed.len())
         .sum();
     let mut summary = format!(
-        "{}: {trees} worktrees, {} attempt scratch directories, {} known bytes; {} retention errors\nGC sweep budget: {}s (source: {}); free-space floor: {} bytes (source: {})\n",
+        "{}: {trees} worktrees, {} attempt scratch directories, {} known bytes; {} retention errors\nGC sweep budget: {}s (source: {}); free-space floor: {} bytes (source: {}); attempt scratch cap: {} bytes (source: {})\n",
         if data.report.dry_run {
             "would collect"
         } else {
@@ -1274,7 +1277,9 @@ fn gc_compact_summary(data: &GcData, full: bool) -> String {
         data.sweep_budget_seconds,
         data.sweep_budget_source,
         data.free_floor_bytes,
-        data.free_floor_source
+        data.free_floor_source,
+        data.attempt_scratch_max_bytes,
+        data.attempt_scratch_max_source
     );
     summary.push_str(&candidate_progress_line(data));
     for line in gc_uncollected_aggregate_lines(data) {
@@ -1770,6 +1775,8 @@ enum GcOutput<'a> {
         sweep_budget_source: &'a str,
         free_floor_bytes: u64,
         free_floor_source: &'a str,
+        attempt_scratch_max_bytes: u64,
+        attempt_scratch_max_source: &'a str,
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         uncollected: Vec<crate::gc_support::UncollectedItem>,
         sweep_cursor: &'a Option<crate::gc_sweep::Cursor>,
@@ -1861,6 +1868,8 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         sweep_budget_source: &data.sweep_budget_source,
         free_floor_bytes: data.free_floor_bytes,
         free_floor_source: &data.free_floor_source,
+        attempt_scratch_max_bytes: data.attempt_scratch_max_bytes,
+        attempt_scratch_max_source: &data.attempt_scratch_max_source,
         uncollected: gc_uncollected(data),
         sweep_cursor: &data.sweep_cursor,
         sweep_warning: &data.sweep_warning,
@@ -2570,6 +2579,17 @@ fn gc(
             (limits.free_floor, source)
         }
     };
+    // One resolution of the per-attempt scratch cap and its source for the
+    // scratch adapter and for reporting. Zero disables the cap.
+    let attempt_scratch_max_bytes = config
+        .gc
+        .attempt_scratch_max_bytes()
+        .map_err(|_| Error::GcObservation("invalid gc.attempt_scratch_max"))?;
+    let attempt_scratch_max_source = config
+        .origins
+        .get("gc.attempt_scratch_max")
+        .map(gc_origin_source)
+        .unwrap_or_else(|| "compiled default".into());
     if (command.scheduled || command.pressure) && !config.gc.schedule {
         return Ok(GcData {
             report: provenant_confinement::cache::CacheGcReport {
@@ -2581,6 +2601,8 @@ fn gc(
             sweep_budget_source,
             free_floor_bytes: free_floor,
             free_floor_source: free_floor_source.clone(),
+            attempt_scratch_max_bytes,
+            attempt_scratch_max_source: attempt_scratch_max_source.clone(),
             provider_state: Default::default(),
             unobserved_projects,
             skipped_transient,
@@ -2624,6 +2646,8 @@ fn gc(
                     sweep_budget_source,
                     free_floor_bytes: free_floor,
                     free_floor_source: free_floor_source.clone(),
+                    attempt_scratch_max_bytes,
+                    attempt_scratch_max_source: attempt_scratch_max_source.clone(),
                     sweep_warning: warning.clone(),
                     notice: Some(
                         warning.unwrap_or_else(|| "sweep already running; skipped".into()),
@@ -2766,6 +2790,8 @@ fn gc(
                 sweep_budget_source,
                 free_floor_bytes: free_floor,
                 free_floor_source: free_floor_source.clone(),
+                attempt_scratch_max_bytes,
+                attempt_scratch_max_source: attempt_scratch_max_source.clone(),
                 sweep_cursor: initial_cursor,
                 sweep_warning,
                 retired_projects: retired_projects.clone(),
@@ -3154,6 +3180,8 @@ fn gc(
             sweep_budget_source: sweep_budget_source.clone(),
             free_floor_bytes: free_floor,
             free_floor_source: free_floor_source.clone(),
+            attempt_scratch_max_bytes,
+            attempt_scratch_max_source: attempt_scratch_max_source.clone(),
             sweep_warning,
             stranded_work,
             unobserved_projects,
@@ -4353,6 +4381,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 self.home,
                 self.assets,
                 self.data.idle_seconds,
+                self.data.attempt_scratch_max_bytes,
                 (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),
                 self.command.dry_run,
                 cancel,
@@ -5068,6 +5097,8 @@ mod gc_preview_tests {
         let mut data = GcData {
             free_floor_bytes: 4096,
             free_floor_source: "host config.toml".into(),
+            attempt_scratch_max_bytes: 2048,
+            attempt_scratch_max_source: "host config.toml".into(),
             ..GcData::default()
         };
         data.report
@@ -5131,6 +5162,8 @@ mod gc_preview_tests {
         let json = serde_json::to_value(gc_result_data(&data, false)).unwrap();
         assert_eq!(json["free_floor_bytes"], 4096);
         assert_eq!(json["free_floor_source"], "host config.toml");
+        assert_eq!(json["attempt_scratch_max_bytes"], 2048);
+        assert_eq!(json["attempt_scratch_max_source"], "host config.toml");
         assert_eq!(json["uncollected"].as_array().unwrap().len(), rows.len());
         // --json emits the Detailed variant: its uncollected list is the one
         // the CLI actually serialises, not just the Summary variant's.
@@ -5159,6 +5192,7 @@ mod gc_preview_tests {
             "--full must keep per-candidate rows: {full}"
         );
         assert!(human.contains("free-space floor: 4096 bytes (source: host config.toml)"));
+        assert!(human.contains("attempt scratch cap: 2048 bytes (source: host config.toml)"));
     }
 
     #[test]

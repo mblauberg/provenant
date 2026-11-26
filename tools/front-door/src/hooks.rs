@@ -21,7 +21,6 @@ use std::{
     time::{Duration, Instant},
 };
 const INPUT_CAP: usize = 1024 * 1024;
-const LOCAL_BUDGET: Duration = Duration::from_secs(1);
 const ANSWER_BUDGET: Duration = Duration::from_millis(50);
 // Debug builds let integration tests on loaded runners widen delivery; release keeps 50 ms.
 fn answer_budget() -> Duration {
@@ -33,9 +32,7 @@ fn answer_budget() -> Duration {
     }
     ANSWER_BUDGET
 }
-/// Cap for hooks that read lane and PR state through this binary's own commands.
-const SESSION_BUDGET: Duration = Duration::from_secs(4);
-// Leave time for child termination, assembling the digest and writing the hook
+/// Leave time for child termination, assembling the digest and writing the hook
 // response after an inventory reaches its own deadline.
 const SESSION_FINISH_RESERVE: Duration = Duration::from_secs(1);
 
@@ -43,6 +40,51 @@ pub(crate) fn session_collection_deadline(deadline: Instant) -> Instant {
     deadline
         .checked_sub(SESSION_FINISH_RESERVE)
         .unwrap_or(deadline)
+}
+
+/// One local budget for the whole hook, below the timeout written into the
+/// installed registration. The setting and its layer are read once and carried
+/// into the overrun warning and its durable diagnostic.
+struct HookBudget {
+    deadline: Instant,
+    duration: Duration,
+    timeout_secs: u64,
+    source: String,
+}
+
+#[allow(clippy::disallowed_methods)]
+fn local_budget(globals: &Globals, started: Instant) -> HookBudget {
+    let resolved = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Directory,
+        crate::roots::Product::Optional,
+    );
+    let config = resolved
+        .map_err(|error| error.to_string())
+        .and_then(|resolved| {
+            provenant_cli::config_reads::show_for(&resolved.roots, "hook")
+                .map_err(|error| error.to_string())
+        });
+    let (timeout_secs, source) = match config {
+        Ok(read) => (
+            read.domains.hooks.timeout_secs,
+            provenant_cli::config_reads::setting_source(
+                &read.origins,
+                "domains.hooks.timeout_secs",
+            ),
+        ),
+        Err(error) => (
+            provenant_config::DEFAULT_HOOK_TIMEOUT_SECS,
+            format!("compiled defaults (domains.hooks.timeout_secs); config unavailable: {error}"),
+        ),
+    };
+    let duration = provenant_config::hook_budget(timeout_secs);
+    HookBudget {
+        deadline: started + duration,
+        duration,
+        timeout_secs,
+        source,
+    }
 }
 type Error = Box<dyn std::error::Error>;
 
@@ -65,6 +107,29 @@ struct AdvisoryInput {
     source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transcript_path: Option<String>,
+}
+
+/// Whether the host marked this hook as running inside a native subagent. A
+/// subagent has its own task prompt and must not receive the chair's checkpoint,
+/// custody or handoff text. Lanes are excluded earlier by `in_lane`; these
+/// payload markers cover subagents the host launches outside a lane. `agent_type`
+/// is deliberately excluded: Claude Code also sets it for top-level `--agent`
+/// sessions. Present and non-empty is the claim, so an empty marker is not
+/// treated as a subagent.
+pub(crate) fn hook_marks_subagent(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    // `agent_id` identifies a subagent or teammate. A separate transcript path
+    // also unambiguously identifies subagent context when the host provides it.
+    ["agent_id", "agent_transcript_path"]
+        .into_iter()
+        .any(|key| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        })
 }
 
 // Hook I/O and local work are constrained by real monotonic deadlines.
@@ -90,26 +155,20 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
     if provenant_cli::fabric::in_lane() && is_chair_session_handler(spec.handler) {
         return 0;
     }
-    // Test delivery budgets must also fit inside the enclosing delivery budget.
-    // Release builds retain the normal local deadline.
-    let deadline = started
-        + if matches!(spec.handler, Handler::AnswerDelivery) {
-            LOCAL_BUDGET.max(answer_budget())
-        } else {
-            LOCAL_BUDGET
-        };
+    let budget = local_budget(globals, started);
+    let deadline = budget.deadline;
+    let action = spec.action.map_or("unknown", HookAction::command);
     let client = spec.client;
-    match spec.handler {
-        Handler::ChairPrompt => crate::chair::hook(false, globals),
+    let status = match spec.handler {
+        Handler::ChairPrompt => crate::chair::hook(false, globals, deadline),
         Handler::ChairStart => {
-            let status = crate::chair::hook(true, globals);
-            // The chair's spend is most of the total, so its SessionStart also
-            // tops up the native ingest store. The call stops at its wall budget
-            // and is silent.
+            let status = crate::chair::hook(true, globals, deadline);
             crate::usage::ingest_after_chair_hook(globals);
             status
         }
         Handler::ChairStop => {
+            // Queue only. The detached worker owns every transcript read, so a
+            // 200 MB set cannot hold this hook past its budget.
             crate::usage::ingest_after_chair_hook(globals);
             0
         }
@@ -124,7 +183,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
         Handler::PreCompact => advisory(
             Moment::PreCompact,
             globals,
-            started,
+            deadline,
             &failure,
             client,
             spec.event,
@@ -133,7 +192,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
         Handler::Compact => advisory(
             Moment::Compact,
             globals,
-            started,
+            deadline,
             &failure,
             client,
             spec.event,
@@ -142,7 +201,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
         Handler::SessionStart => advisory(
             Moment::Restart,
             globals,
-            started,
+            deadline,
             &failure,
             client,
             spec.event,
@@ -151,7 +210,7 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
         Handler::Stop => advisory(
             Moment::Stop,
             globals,
-            started,
+            deadline,
             &failure,
             client,
             spec.event,
@@ -172,7 +231,32 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
                 }
             }
         }
+    };
+    let elapsed = started.elapsed();
+    if elapsed > budget.duration {
+        let overrun = elapsed - budget.duration;
+        let message = format!(
+            "{action} hook exceeded its local budget by {} ms; the budget is {}% of the {} s installed timeout from {}",
+            overrun.as_millis(),
+            provenant_config::HOOK_BUDGET_PERCENT,
+            budget.timeout_secs,
+            budget.source
+        );
+        warn(
+            Warning::new(
+                provenant_records::warning::HOOK_BUDGET_OVERRUN,
+                message.clone(),
+            )
+            .subject(action),
+        );
+        failure.record_overrun(
+            &format!("hook deadline exceeded by {} ms", overrun.as_millis()),
+            budget.duration,
+            overrun,
+            &budget.source,
+        );
     }
+    status
 }
 fn is_chair_session_handler(handler: Handler) -> bool {
     matches!(
@@ -671,15 +755,13 @@ fn prepare_answers(
 fn advisory(
     moment: Moment,
     globals: &Globals,
-    started: Instant,
+    deadline: Instant,
     failure: &Failure<'_>,
     client: Option<provenant_records::Harness>,
     event_name: &str,
     protocol: Option<HookProtocol>,
 ) -> u8 {
-    // Reading lane and PR state can take longer than a checkpoint read, so
-    // these hooks hold a wider budget; the registered host timeouts are 5s.
-    let deadline = started + SESSION_BUDGET;
+    // The single local budget is already shorter than the installed timeout.
     let input = match hook_io::read_stdin(INPUT_CAP, deadline) {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -687,6 +769,11 @@ fn advisory(
             return 0;
         }
     };
+    // A native subagent gets no checkpoint or custody text on any advisory
+    // event, including SessionStart after compaction.
+    if hook_marks_subagent(&input) {
+        return 0;
+    }
     let parsed = normalise_advisory_input(&input, moment, event_name, protocol);
     let Some(host) = parsed else {
         failure.note("checkpoint unavailable: invalid hook input");
@@ -1573,6 +1660,39 @@ mod answer_delivery_tests {
         )
     }
 
+    // Inner helpers take a concrete deadline; derive it from the same setting
+    // the hook runtime uses instead of pinning a second, stale constant.
+    #[allow(dead_code)] // The worktree driver strips the #[test] items.
+    fn test_budget() -> Duration {
+        provenant_config::hook_budget(provenant_config::DEFAULT_HOOK_TIMEOUT_SECS)
+    }
+
+    #[test]
+    fn local_budget_follows_the_configured_timeout() -> Result<(), Error> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(&state)?;
+        }
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version = 1\n[domains.hooks]\ntimeout_secs = 7\n",
+        )?;
+        let globals = Globals {
+            state_dir: Some(state),
+            project: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let budget = local_budget(&globals, started);
+        assert_eq!(budget.timeout_secs, 7);
+        assert_eq!(budget.duration, Duration::from_millis(4200));
+        assert_eq!(budget.deadline, started + budget.duration);
+        assert!(budget.source.contains("config.toml"), "{}", budget.source);
+        Ok(())
+    }
+
     #[test]
     fn local_gate_modes_and_checkout() -> Result<(), Error> {
         use provenant_cli::domains::{LocalGateMode, LocalGateSettings};
@@ -1717,7 +1837,7 @@ mod answer_delivery_tests {
             answer_delivery_reply(
                 &globals,
                 event,
-                Instant::now() + LOCAL_BUDGET,
+                Instant::now() + test_budget(),
                 false,
                 Some(Harness::Claude),
                 &quiet_failure(),
@@ -1904,7 +2024,7 @@ mod answer_delivery_tests {
                     let result = answer_delivery_reply(
                         &globals,
                         event,
-                        Instant::now() + LOCAL_BUDGET,
+                        Instant::now() + test_budget(),
                         false,
                         Some(Harness::Claude),
                         &quiet_failure(),
@@ -2191,7 +2311,7 @@ mod answer_delivery_tests {
                 let result = answer_delivery_reply(
                     &globals,
                     event,
-                    Instant::now() + LOCAL_BUDGET,
+                    Instant::now() + test_budget(),
                     true,
                     client,
                     &quiet_failure(),
@@ -2269,7 +2389,7 @@ mod answer_delivery_tests {
         retry.delivery.attempts = 1;
         retry.delivery.last_attempt_at = Some(clock.wall_now()?);
         insert(&retry)?;
-        let deadline = Instant::now() + LOCAL_BUDGET;
+        let deadline = Instant::now() + test_budget();
         let (head, next, _) =
             store.read_hook_answer_page(&target, AnswerDeliveryState::Offered, None, deadline)?;
         assert_eq!(head.items.len(), 16);
@@ -2307,7 +2427,7 @@ mod answer_delivery_tests {
             clock.wall_now()?,
             "PostToolUse",
             &CommandPrefix::default(),
-            Instant::now() + LOCAL_BUDGET,
+            Instant::now() + test_budget(),
             &mut pending_marks,
         )?;
         assert_eq!(selected.items.len(), 1);
@@ -2317,17 +2437,17 @@ mod answer_delivery_tests {
             &root,
             &target,
             &pending_marks,
-            Instant::now() + LOCAL_BUDGET,
+            Instant::now() + test_budget(),
         )?;
         let (remaining, _, _) = store.read_hook_answer_page(
             &target,
             AnswerDeliveryState::Queued,
             None,
-            Instant::now() + LOCAL_BUDGET,
+            Instant::now() + test_budget(),
         )?;
         assert_eq!(remaining.items.len(), 1);
         assert_eq!(remaining.items[0].answer, small.answer);
-        let queued = store.read_queued_human_answers(&target, Instant::now() + LOCAL_BUDGET)?;
+        let queued = store.read_queued_human_answers(&target, Instant::now() + test_budget())?;
         assert_eq!(queued.items.len(), 2);
         // An acknowledgement between the page read and offer commit wins.
         db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.state','acknowledged','$.acknowledged_at','2026-10-28T00:00:00.000000Z') AS BLOB) WHERE answer=?1", [small.answer.id.to_string()])?;
@@ -2336,7 +2456,7 @@ mod answer_delivery_tests {
             &target,
             selected,
             clock.wall_now()?,
-            Instant::now() + LOCAL_BUDGET,
+            Instant::now() + test_budget(),
         )?;
         assert!(committed.items.is_empty());
         Ok(())
@@ -2673,6 +2793,6 @@ mod answer_delivery_tests {
         // until released. Returning None here therefore proves the timeout
         // branch; successful release/completion also excludes spawn failure.
         release.send(()).unwrap();
-        completion.recv_timeout(LOCAL_BUDGET).unwrap();
+        completion.recv_timeout(test_budget()).unwrap();
     }
 }

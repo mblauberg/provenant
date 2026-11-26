@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::{
     Result, TestRig, code, install_fake_claude_auth, register_account, set_claude_config_dir,
@@ -76,6 +76,19 @@ fn start_chair_session(rig: &TestRig, session: &str) -> Result {
     Ok(())
 }
 
+/// Every stored ingest row, one JSON line each, across the dated segments.
+fn stored(rig: &TestRig) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    let mut names: Vec<_> = fs::read_dir(rig.state.join("ingest"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::result::Result<_, _>>()?;
+    names.sort();
+    let mut text = String::new();
+    for name in names {
+        text.push_str(&fs::read_to_string(name)?);
+    }
+    Ok(text)
+}
+
 fn fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
     install_fake_claude_auth(&mut rig)?;
@@ -127,14 +140,46 @@ fn fixture() -> Result<TestRig> {
     .join("\n");
     fs::write(&session, format!("{transcript}\n"))?;
     start_chair_session(&rig, "s1")?;
-    let ingested = rig.command(&["telemetry", "ingest", "--provider", "claude", "--json"])?;
-    assert_eq!(
-        code(&ingested),
-        0,
-        "{}",
-        String::from_utf8_lossy(&ingested.stderr.bytes)
-    );
+    // Chair start queues usage ingest on a detached incremental worker and
+    // returns. Ingest takes ingest.lock nonblockingly, so an explicit ingest
+    // issued here races that worker and can be refused with Outcome::Error.
+    // Wait for the worker's rows instead: this is the production path, where
+    // mileage reads the usage the hook already recorded.
+    provenant_test_support::wait_for(
+        "detached chair ingest rows",
+        Duration::from_secs(30),
+        || {
+            stored(&rig)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>()
+        },
+        |rows| {
+            rows.len() >= 2
+                && rows.iter().all(|row| {
+                    row["identity"]["identity"]["state"] == "known"
+                        && row["identity"]["identity"]["account_key"] == identity_key
+                })
+        },
+    )?;
     Ok(rig)
+}
+
+#[test]
+fn chair_start_ingest_is_recorded_before_mileage_reads_it() -> Result {
+    let rig = fixture()?;
+    let rows: Vec<Value> = stored(&rig)?
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    // The hook's detached worker, not a competing explicit ingest, recorded
+    // both transcript messages with the chair's verified identity.
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| {
+        row["source"] == "chair" && row["identity"]["identity"]["state"] == "known"
+    }));
+    Ok(())
 }
 
 #[test]

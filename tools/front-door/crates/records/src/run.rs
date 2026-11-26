@@ -173,6 +173,11 @@ pub struct WorkContext {
     /// Graph retry lineage remains independent of run-policy `retry_of`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer_predecessor: Option<AttemptId>,
+    /// Host-stamped permission to adopt a retained writer owned by a prior
+    /// graph while running the delivery queue. The owner still verifies the
+    /// prior attempt, exact writer identity and released custody at launch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delivery_queue_writer_adoption: bool,
 }
 impl WorkContext {
     /// A new request names only the fixed fields; stored records keep unknown ones for forward compatibility.
@@ -180,6 +185,7 @@ impl WorkContext {
         self.extra.is_empty()
             && self.valid()
             && (!self.graph_template_launch || (self.graph_id.is_some() && self.node_id.is_some()))
+            && (!self.delivery_queue_writer_adoption || self.graph_template_launch)
     }
     pub fn valid(&self) -> bool {
         [
@@ -2266,7 +2272,7 @@ impl SettlementTerminalOutcome {
 /// One declaration owns the durable reasons and their cross-cutting policy.
 /// Generated enum, ALL and table cannot drift apart.
 macro_rules! settlement_reasons {
-    ($($(#[$meta:meta])* $reason:ident { source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
+    ($($(#[$meta:meta])* $reason:ident { code: $code:literal, source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum SettlementReason {
@@ -2275,6 +2281,14 @@ macro_rules! settlement_reasons {
 
         impl SettlementReason {
             pub const ALL: &'static [Self] = &[$(Self::$reason),+];
+
+            /// Stable snake_case code for status and advance diagnostics. It is
+            /// the same value the sealed serde wire name uses.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$reason => $code),+
+                }
+            }
 
             pub const fn rule(self) -> SettlementRule {
                 match self {
@@ -2303,35 +2317,35 @@ macro_rules! settlement_reasons {
 
 settlement_reasons! {
     /// The provider finished and reported its results.
-    Completed { source: Provider, node: Succeeded, outcome: Preserve, stop: None },
+    Completed { code: "completed", source: Provider, node: Succeeded, outcome: Preserve, stop: None },
     /// A complete handoff preceded the host token-budget stop.
-    CompletedBeforeBudget { source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
+    CompletedBeforeBudget { code: "completed_before_budget", source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
     /// The provider finished without a final handoff, so nothing was reported.
-    HandoffMissing { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
+    HandoffMissing { code: "handoff_missing", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
     /// A final handoff was present but malformed; retain its field diagnostics.
-    HandoffMalformed { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
+    HandoffMalformed { code: "handoff_malformed", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
     /// The writer exited without a final message.
-    EmptyResult { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
+    EmptyResult { code: "empty_result", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
     /// The lane declared that work remains.
-    DeclaredStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
+    DeclaredStop { code: "declared_stop", source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
     /// The provider stopped for a reason other than a finished turn.
-    ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
+    ProviderStop { code: "provider_stop", source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
     /// A writer left edits it did not commit.
-    UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    UncommittedWork { code: "uncommitted_work", source: Provider, node: Failed, outcome: Uncommitted, stop: None },
     /// The bound branch stayed at base while the primary checkout moved with
     /// unaccounted work: the lane's work went to the wrong checkout (#3611).
-    StrayWork { source: Host, node: Failed, outcome: ReviewRequired, stop: None },
+    StrayWork { code: "stray_work", source: Host, node: Failed, outcome: ReviewRequired, stop: None },
     /// Refused before any process started.
-    PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
-    Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
+    PreLaunchRefusal { code: "pre_launch_refusal", source: Host, node: Failed, outcome: Preserve, stop: None },
+    Cancelled { code: "cancelled", source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
     /// The host interrupted a run to deliver its queued continuation turn.
-    Steered { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
-    Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
-    Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
+    Steered { code: "steered", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
+    Lost { code: "lost", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
+    Unsettled { code: "unsettled", source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
     /// The provider reported an unclassified error.
-    Unclassified { source: Provider, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
+    Unclassified { code: "unclassified", source: Provider, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
     /// The provider ran and ended in a non-success outcome.
-    Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
+    Failed { code: "failed", source: Provider, node: Failed, outcome: Preserve, stop: None },
 }
 impl SettlementReason {
     /// Derive the reason from the complete terminal facts before any reader
@@ -3775,6 +3789,12 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<WorkContext>(serde_json::to_value(&context)?)?,
             context
+        );
+        context.delivery_queue_writer_adoption = true;
+        assert!(context.accepted());
+        assert_eq!(
+            serde_json::to_value(&context)?["delivery_queue_writer_adoption"],
+            true
         );
         for missing in ["graph_id", "node_id"] {
             let mut value = serde_json::to_value(&context)?;
