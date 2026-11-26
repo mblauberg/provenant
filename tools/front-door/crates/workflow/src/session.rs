@@ -2639,6 +2639,73 @@ mod tests {
         assert!(!text.contains("has no intent section"));
     }
     #[test]
+    fn custody_is_printed_once_and_intent_and_now_survive_the_cap() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        let intent = "Wants A because B; rejected C.";
+        let now = "Reconciling custody with the derived digest.";
+        let custody_line = "lane A is mine";
+        let digest = format!(
+            "Provenant state for this project:\nActive custody:\n- {custody_line}\nLanes in flight (1):\n- g/a#1"
+        );
+        let autosave = format!(
+            "## Provenant session state\nAuto-saved: t1\n\n### Active custody\n- {custody_line}\n\n### Lanes in flight (1)\n- g/a#1\n"
+        );
+        // The autosave lives inside the session store, which production creates
+        // private (mode 0o700) under the state root. Establish that same layout
+        // before planting the fixture: no checkpoint has been saved yet here,
+        // so the directory does not otherwise exist.
+        crate::persistence::directory(&root, project, "sessions", "host-1", true).unwrap();
+        let autosave_path = path(&root, project, "host-1").join("autosave.md");
+        std::fs::write(&autosave_path, autosave.as_bytes()).unwrap();
+        set_test_file_time(&autosave_path);
+        let call = |mtime: i64| {
+            hook_context_with(
+                &root,
+                project,
+                HookEvent::SessionStart,
+                &br#"{"hook_event_name":"SessionStart","session_id":"host-1","transcript_path":"/t/s.jsonl"}"#[..],
+                &clock(mtime),
+                DurationMicros::ZERO,
+                Advice {
+                    digest: &digest,
+                    commands: &CommandPrefix::default(),
+                    client: None,
+                    in_lane: false,
+                },
+            )
+        };
+
+        // Both the digest and the autosave carry the same custody list; only
+        // one copy may reach the chair.
+        save(
+            &selected,
+            format!("# Goal\nGoal text.\n\n## Intent\n{intent}\n\n## Now\n{now}\n").as_bytes(),
+        )
+        .unwrap();
+        let text = compact_text(&call(set_checkpoint_time(&root, project, "host-1")));
+        assert_eq!(text.matches("Active custody").count(), 1, "{text}");
+        assert_eq!(text.matches(custody_line).count(), 1, "{text}");
+        assert!(text.contains(intent) && text.contains(now), "{text}");
+
+        // With the cap reached by a long Plan section, Intent and Now still
+        // survive whole and custody is still printed at most once.
+        let long_tail = "x".repeat(9_000);
+        save(
+            &selected,
+            format!("# Goal\nGoal text.\n\n## Intent\n{intent}\n\n## Plan\n{long_tail}\n\n## Now\n{now}\n").as_bytes(),
+        )
+        .unwrap();
+        let response = call(set_checkpoint_time(&root, project, "host-1"));
+        assert!(response.stdout.len() <= HOOK_OUTPUT_LIMIT);
+        let text = compact_text(&response);
+        assert!(text.matches("Active custody").count() <= 1, "{text}");
+        assert!(text.matches(custody_line).count() <= 1, "{text}");
+        assert!(text.contains(intent), "{text}");
+        assert!(text.contains(now), "{text}");
+    }
+
+    #[test]
     fn pre_compact_instructs_the_summary_to_write_intent() {
         let (_temp, root, project) = setup();
         let response = run_hook(&root, project, "PreCompact", 0);

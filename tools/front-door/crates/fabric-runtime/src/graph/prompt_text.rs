@@ -301,11 +301,11 @@ mod tests {
         ));
         let (safe, calls) = trace(|| {
             let outputs = outputs::make_outputs(Some(&input), None, None, None, None);
-            let outputs = captured_outputs(outputs).unwrap();
-            captured_handoff(&mut input).unwrap();
-            outputs
+            captured_outputs(outputs).unwrap()
         });
         assert_once(&calls, &note);
+        let (_, handoff_calls) = trace(|| captured_handoff(&mut input).unwrap());
+        assert_once(&handoff_calls, &note);
         assert!(
             input
                 .handoff

@@ -652,6 +652,8 @@ mod tests {
         let mut after = before.clone();
         after.expansions.push(Expansion {
             extra: Default::default(),
+            delivery_review_disposition: None,
+            delivery_review_node: None,
             retired: None,
             retry_generation: None,
             final_result: false,
@@ -711,6 +713,8 @@ mod tests {
         let mut after = before.clone();
         after.expansions.push(Expansion {
             extra: Default::default(),
+            delivery_review_disposition: None,
+            delivery_review_node: None,
             retired: None,
             retry_generation: None,
             final_result: false,

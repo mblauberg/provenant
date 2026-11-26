@@ -156,6 +156,21 @@ pub(super) fn make_outputs_with_upstream(
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default();
     let handoff = result.and_then(|capture| capture.handoff.as_ref().ok().and_then(Option::as_ref));
+    let report_handoff = result.and_then(|capture| {
+        if capture.handoff.is_err() {
+            return None;
+        }
+        match plans::reported_handoff(capture) {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                warnings.push(bounded(
+                    &format!("handoff_checkpoint_unavailable: {error}"),
+                    WARNING_BYTES,
+                ));
+                None
+            }
+        }
+    });
     let remaining = handoff.map_or(partial_remaining.as_slice(), |handoff| {
         handoff.remaining.as_slice()
     });
@@ -320,6 +335,9 @@ pub(super) fn make_outputs_with_upstream(
         compact_disposition_findings: None,
         full_disposition_findings: None,
         verdict_error,
+        hygiene: None,
+        publication: None,
+        handoff: report_handoff,
         schema_version: 2,
         decide_outcome: None,
         result,
