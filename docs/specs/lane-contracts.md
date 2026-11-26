@@ -54,7 +54,11 @@ first read, then reconcile from `event_delivery::Journal` replay. Named PR inter
 waiter expiry and the host keeps indexing their outcomes. A PR wait timeout keeps the last
 known state, reports the check summary and next step, and is a timeout outcome, not a CI failure;
 its budget comes from `--timeout` or `domains.wait` with its source shown, with no second
-hard-coded budget. Identifier-only local markers trigger one targeted authoritative read, and
+hard-coded budget. A PR wait pins its subject head at admission; when the PR moves,
+`domains.wait.pr_head_policy` settles `head_moved` or re-pins with `PR_HEAD_FOLLOWED`,
+and a forge head that was never known warns `PR_HEAD_UNPINNED` until the first sample
+pins it. The effective policy and its source travel in the wait JSON.
+Identifier-only local markers trigger one targeted authoritative read, and
 unrelated events trigger none. A gap triggers reconciliation at least every minute, and successful
 host reads refresh a local receipt even on HTTP 304 so quiet, healthy sources do not make every
 waiter poll GitHub. Peer-owned state uses its owner transport, with its declared paced fallback
