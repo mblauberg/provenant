@@ -195,9 +195,7 @@ impl<T> Event<T> {
         let (slot, wake) = &*self.inner;
         let mut slot = slot.lock().unwrap_or_else(|error| error.into_inner());
         while slot.is_none() {
-            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
-                return None;
-            };
+            let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
             let (next, _) = wake
                 .wait_timeout(slot, remaining)
                 .unwrap_or_else(|error| error.into_inner());
@@ -394,7 +392,7 @@ mod tests {
 
     #[test]
     fn event_wakes_a_waiter_without_a_fixed_wait() {
-        let event = super::signal();
+        let event = super::Event::<i32>::new();
         let publisher = event.clone();
         let worker = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(10));

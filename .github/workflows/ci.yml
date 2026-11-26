@@ -1041,7 +1041,9 @@ jobs:
         if: steps.candidates.outputs.filter != ''
         continue-on-error: true
         working-directory: tools/front-door
-        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level pass --final-status-level pass -E '${{ steps.candidates.outputs.filter }}'
+        env:
+          FAILED_TEST_FILTER: ${{ steps.candidates.outputs.filter }}
+        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level pass --final-status-level pass -E "$FAILED_TEST_FILTER"
       - name: Upload re-run results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
