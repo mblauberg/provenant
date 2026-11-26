@@ -75,6 +75,9 @@ pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
             warn(Warning::new(
                 provenant_records::warning::MODEL_CATALOGUE_UNAVAILABLE,
                 "invalid provider model discovery cache; using bundled catalogue",
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::MODEL_CATALOGUE_UNAVAILABLE,
+                ),
             ));
             Ok(bundled.with_overlays(&layers, warnings))
         }

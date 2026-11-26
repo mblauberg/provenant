@@ -1022,6 +1022,7 @@ fn warn_stray_check(error: &dyn std::fmt::Display) {
     warn(Warning::new(
         STRAY_WORK_CHECK_FAILED,
         format!("could not check the primary checkout for stray lane work: {error}"),
+        provenant_records::warning::detected_source(STRAY_WORK_CHECK_FAILED),
     ));
 }
 
@@ -1033,6 +1034,7 @@ fn warn_retained_private_git(what: &str, error: &dyn std::fmt::Display) {
     warn(Warning::new(
         PRIVATE_GIT_RETAINED,
         format!("{what}; retaining the private Git: {error}"),
+        provenant_records::warning::detected_source(PRIVATE_GIT_RETAINED),
     ));
 }
 
@@ -1614,6 +1616,7 @@ impl RunStore {
                         warn(Warning::new(
                             PRIVATE_GIT_RETAINED,
                             format!("private Git staged paths unreadable; retaining it: {error}"),
+                            provenant_records::warning::detected_source(PRIVATE_GIT_RETAINED),
                         ));
                         unreadable = true;
                         Vec::new()
@@ -2130,10 +2133,19 @@ impl RunStore {
             format!("{}{steering}", crate::controls::STEER_PROMPT_PREFIX)
         };
         if let Some(warning) = repin_warning.take() {
-            provenant_records::warning::warn(provenant_records::warning::Warning::new(
-                provenant_records::warning::BRANCH_BEHIND_BASE,
-                warning.clone(),
-            ));
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::BRANCH_BEHIND_BASE,
+                    warning.clone(),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::BRANCH_BEHIND_BASE,
+                    ),
+                )
+                .source(provenant_records::Source {
+                    layer: provenant_records::Layer::Detected,
+                    origin: Some("writer branch repin".to_owned()),
+                }),
+            );
             prompt.push_str("\n\n");
             prompt.push_str(&warning);
         }
@@ -3543,6 +3555,9 @@ impl RunStore {
                                         warn(Warning::new(
                                             PRIMARY_MOVED_UNATTRIBUTED,
                                             note.clone(),
+                                            provenant_records::warning::detected_source(
+                                                PRIMARY_MOVED_UNATTRIBUTED,
+                                            ),
                                         ));
                                         primary =
                                             provenant_records::settlement::PrimaryCheckout::Warn {
@@ -3550,7 +3565,13 @@ impl RunStore {
                                             };
                                     }
                                     crate::writer::StrayDisposition::Review { note } => {
-                                        warn(Warning::new(STRAY_LANE_WORK, note.clone()));
+                                        warn(Warning::new(
+                                            STRAY_LANE_WORK,
+                                            note.clone(),
+                                            provenant_records::warning::detected_source(
+                                                STRAY_LANE_WORK,
+                                            ),
+                                        ));
                                         primary = provenant_records::settlement::PrimaryCheckout::Review {
                                             note,
                                         };

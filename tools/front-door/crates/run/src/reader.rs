@@ -891,7 +891,7 @@ impl RunStore {
                                 "terminal read-only review retained a reservation at {}; no Git work is fenced, custody treated as released",
                                 slot.current_path()?.display()
                             ),
-                        )
+                         provenant_records::warning::detected_source(READ_ONLY_RESERVATION_RETAINED))
                         .subject(format!("attempt {}", record.attempt_id)),
                     );
                     return Ok(true);

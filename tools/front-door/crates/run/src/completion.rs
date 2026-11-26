@@ -23,7 +23,14 @@ use toml_edit::Item;
 /// Spec: docs/specs/cli.md#warnings-are-typed-values
 fn handoff_advisory(attempt: provenant_core::AttemptId, detail: impl Into<String>) {
     use provenant_records::warning::{HANDOFF_PARSE_NOTICE, Warning, warn};
-    warn(Warning::new(HANDOFF_PARSE_NOTICE, detail.into()).subject(format!("attempt {attempt}")));
+    warn(
+        Warning::new(
+            HANDOFF_PARSE_NOTICE,
+            detail.into(),
+            provenant_records::warning::detected_source(HANDOFF_PARSE_NOTICE),
+        )
+        .subject(format!("attempt {attempt}")),
+    );
 }
 
 pub(crate) fn guidance() -> &'static str {
@@ -441,7 +448,7 @@ fn brief_roles(text: &str, origin: &str) -> Vec<BriefRole> {
                 Warning::new(
                     CONFIG_MALFORMED,
                     format!("unknown brief preamble role {token:?}; expected writer, review or read-only"),
-                )
+                 provenant_records::warning::detected_source(CONFIG_MALFORMED))
                 .subject(origin.to_owned()),
             ),
         }
@@ -483,7 +490,7 @@ impl BriefPreamble {
                     Warning::new(
                         CONFIG_UNAVAILABLE,
                         format!("brief preamble file {origin} could not be read: {error}; this layer is skipped and the launch proceeds"),
-                    )
+                     provenant_records::warning::detected_source(CONFIG_UNAVAILABLE))
                     .subject(origin.clone())
                     .source(Source {
                         layer,
@@ -559,9 +566,9 @@ impl BriefPreamble {
                     Warning::new(
                         PORT_LANE_CHECK_INVALID,
                         format!("dropped invalid lane verification declaration {subject}"),
+                        source.clone(),
                     )
-                    .subject(subject)
-                    .source(source.clone()),
+                    .subject(subject),
                 );
             }
         }
@@ -688,7 +695,7 @@ impl BriefPreamble {
                     Warning::new(
                         PORT_STATIC_CHECK_INVALID,
                         format!("dropped an invalid {subject} from the writer preamble"),
-                    )
+                     provenant_records::warning::detected_source(PORT_STATIC_CHECK_INVALID))
                     .subject(subject.clone())
                     .source(source.clone())
                     .repair(format!(
@@ -1236,7 +1243,7 @@ mod tests {
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         let warning = &warnings[0];
         assert_eq!(warning.code.as_ref(), PORT_STATIC_CHECK_INVALID.as_str());
-        let warning_source = warning.source.as_ref().expect("warning has a source");
+        let warning_source = &warning.source;
         assert_eq!(warning_source.layer, Layer::Project);
         assert_eq!(
             warning_source.origin.as_deref(),

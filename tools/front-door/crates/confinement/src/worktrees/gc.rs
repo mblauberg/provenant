@@ -312,6 +312,7 @@ impl LocalRetirementScope {
                     Warning::new(
                         FORGE_CONTEXT_UNRESOLVED,
                         format!("forge context unavailable ({cause}); no branch will be retired"),
+                        provenant_records::warning::detected_source(FORGE_CONTEXT_UNRESOLVED),
                     )
                     .repair(repair)
                     .once_per_change(),

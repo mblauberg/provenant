@@ -707,7 +707,11 @@ impl DiskGate {
         );
         match level {
             DiskLevel::Ready => Effect::Proceed,
-            DiskLevel::Warning => Effect::Warn(Warning::new(DISK_FLOOR_LOW, detail)),
+            DiskLevel::Warning => Effect::Warn(Warning::new(
+                DISK_FLOOR_LOW,
+                detail,
+                provenant_records::warning::detected_source(DISK_FLOOR_LOW),
+            )),
             DiskLevel::Critical => {
                 let mut policy = Policy::default();
                 policy.overlay(

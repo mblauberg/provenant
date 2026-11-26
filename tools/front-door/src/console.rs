@@ -617,7 +617,7 @@ fn capped_warning(command: &str, source: &str, repair: &str, omitted: usize) -> 
     Warning::new(
         RESULT_TOO_LARGE,
         format!("[RESULT_TOO_LARGE] {command} exceeds 1 MiB (source: {source}); showing a bounded view with {omitted} bytes omitted"),
-    )
+     provenant_records::warning::detected_source(RESULT_TOO_LARGE))
     .repair(repair)
 }
 

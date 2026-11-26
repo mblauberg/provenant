@@ -151,6 +151,7 @@ fn lane_settings(globals: &crate::Globals) -> DeclarationSettings {
                 Warning::new(
                     CONFIG_UNAVAILABLE,
                     format!("declaration settings unavailable ({error}); using compiled defaults"),
+                    provenant_records::warning::detected_source(CONFIG_UNAVAILABLE),
                 )
                 .subject("domains.run.declaration_*")
                 .once_per_change(),

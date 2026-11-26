@@ -195,7 +195,7 @@ impl SqlCancellation {
                     Warning::new(
                         RESOURCE_PROBE_FAILED,
                         format!("cannot monitor retention SQLite cancellation; using bounded batches: {error}"),
-                    )
+                     provenant_records::warning::detected_source(RESOURCE_PROBE_FAILED))
                     .subject("retention cancellation monitor"),
                 );
                 None

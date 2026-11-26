@@ -2470,6 +2470,10 @@ fn report_config_notices(events: &[ProviderEvent], stderr: &[u8], scan_stderr: b
                         "provider config deprecation ({source}): {}",
                         crate::bounded_text(&key, 512)
                     ),
+                    provenant_records::provenance::Source {
+                        layer: provenant_records::provenance::Layer::Host,
+                        origin: Some(source.clone()),
+                    },
                 )
                 .subject(source)
                 .repair("Fix the key or use providers.codex.clean_config."),

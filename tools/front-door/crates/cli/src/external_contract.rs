@@ -39,6 +39,9 @@ pub enum ExternalInterface {
         command: String,
         stability: Stability,
         schema: JsonOutputSchema,
+        /// Envelope fields a consumer may read, each with its stability. One
+        /// declaration drives both the reference and the spec comparison.
+        fields: Vec<JsonOutputField>,
     },
     WaitJsonLines {
         command: String,
@@ -160,6 +163,26 @@ const fn command_result_schema() -> SchemaReference {
     }
 }
 
+/// One field of an outward JSON envelope and the tier a consumer may rely on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JsonOutputField {
+    pub object: String,
+    pub field: String,
+    pub stability: Stability,
+}
+
+/// Both JSON outputs share the version-2 `CommandResult` envelope, whose
+/// `warnings` array is always present. Warning codes are stable; the field's
+/// name and presence belong to the evolving envelope.
+fn command_result_fields() -> Vec<JsonOutputField> {
+    vec![JsonOutputField {
+        object: "envelope".into(),
+        field: "warnings".into(),
+        stability: Stability::Evolving,
+    }]
+}
+
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
@@ -225,6 +248,7 @@ pub fn external_contract() -> ExternalContract {
                 command: "commands emitting command-result JSON".into(),
                 stability: Stability::Evolving,
                 schema: JsonOutputSchema::CommandResult { envelope },
+                fields: command_result_fields(),
             },
             ExternalInterface::JsonOutput {
                 command: "work-record JSON outputs".into(),
@@ -236,6 +260,7 @@ pub fn external_contract() -> ExternalContract {
                         version: provenant_records::STATE_FORMAT_VERSION,
                     },
                 },
+                fields: command_result_fields(),
             },
             ExternalInterface::WaitJsonLines {
                 command: "provenant wait --json".into(),
@@ -464,9 +489,16 @@ mod tests {
                         assert!(spec.contains(&format!("`{value}`")), "{value}");
                     }
                 }
+                ExternalInterface::JsonOutput { fields, .. } => assert_eq!(
+                    table(&spec, "## JSON output"),
+                    rows(fields.iter().map(|field| [
+                        field.object.clone(),
+                        field.field.clone(),
+                        label(field.stability),
+                    ])),
+                ),
                 // Generated reference lists these; the spec states their rules.
-                ExternalInterface::JsonOutput { .. }
-                | ExternalInterface::WaitJsonLines { .. }
+                ExternalInterface::WaitJsonLines { .. }
                 | ExternalInterface::Commands { .. }
                 | ExternalInterface::RunFiles { .. } => {}
             }

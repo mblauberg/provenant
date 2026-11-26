@@ -416,6 +416,9 @@ pub(super) fn sandbox_mode(
         warn(Warning::new(
             provenant_records::warning::SANDBOX_MODE_OVERRIDDEN,
             message.clone(),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::SANDBOX_MODE_OVERRIDDEN,
+            ),
         ));
     }
     mode
@@ -1970,6 +1973,9 @@ pub(in crate::run) fn read_only_source_ref(
                 "lanes.read_source_fetch_first: fetch from {remote} did not complete; resolving {} from the last fetched refs",
                 choice.value
             ),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::UPSTREAM_UNRESOLVED,
+            ),
         ));
     }
     let repo = utility
@@ -2001,7 +2007,7 @@ pub(in crate::run) fn read_only_source_ref(
             warn(Warning::new(
                 provenant_records::warning::UPSTREAM_UNRESOLVED,
                 format!("read-only source could not resolve this branch's configured upstream; using {} instead, which may not track this checkout", fallback.1),
-            ));
+             provenant_records::warning::detected_source(provenant_records::warning::UPSTREAM_UNRESOLVED)));
             Some(fallback)
         })?
     } else if choice.value == "default_branch" {
@@ -2111,6 +2117,9 @@ fn branch_config_value(
         warn(Warning::new(
             provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
             "read branch Git configuration rejected an invalid key",
+            provenant_records::warning::detected_source(
+                provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
+            ),
         ));
         return None;
     }
@@ -2129,6 +2138,9 @@ fn branch_config_value(
             warn(Warning::new(
                 provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
                 error.to_string(),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
+                ),
             ));
             return None;
         }
@@ -2140,6 +2152,9 @@ fn branch_config_value(
             warn(Warning::new(
                 provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
                 format!("read branch Git configuration ended with {termination:?}"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
+                ),
             ));
             return None;
         }
@@ -2150,6 +2165,9 @@ fn branch_config_value(
             warn(Warning::new(
                 provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
                 format!("parse branch Git configuration failed: {error}"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::BRANCH_CONFIG_UNREADABLE,
+                ),
             ));
             return None;
         }
@@ -2209,7 +2227,7 @@ fn resolved_forge_remote(state: &Path, project: &Path) -> Option<provenant_confi
                 Warning::new(
                     provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
                     format!("configured remote {remote:?} is not a usable Git remote name; keeping the local source behaviour"),
-                )
+                 provenant_records::warning::detected_source(provenant_records::warning::FORGE_CONTEXT_UNRESOLVED))
                 .once_per_change(),
             );
             None

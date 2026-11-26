@@ -43,6 +43,7 @@ pub(crate) fn seal_evidence(
             warn(Warning::new(
                 SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS,
                 "settlement evidence differs on re-drive; sealed copy kept",
+                provenant_records::warning::detected_source(SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS),
             ));
         }
         return Ok((sealed, digest));

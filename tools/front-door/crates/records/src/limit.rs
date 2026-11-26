@@ -617,10 +617,7 @@ mod tests {
         assert_eq!((limit.value, limit.source), (7, Layer::Host));
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
-        assert_eq!(
-            warnings[0].source.as_ref().map(|source| source.layer),
-            Some(Layer::Profile)
-        );
+        assert_eq!(warnings[0].source.layer, Layer::Profile);
 
         let (policy, warnings) = crate::warning::capture(|| {
             BudgetPolicy::resolve(

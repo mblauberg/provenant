@@ -1019,7 +1019,7 @@ fn note_dropped_readiness(adapter: &str, key: &str, version: u64) {
                     "readiness for {adapter}/{key} is from an older release (schema {version}, now {}); dropped until the next observation",
                     provenant_quota::READINESS_SCHEMA_VERSION
                 ),
-            )
+             provenant_records::warning::detected_source(LIVE_RECORD_FORMAT_CHANGED))
             .subject(format!("{adapter}/{key}")),
         );
     }
@@ -1109,6 +1109,9 @@ pub(crate) fn state_freshness(state: &Path) -> provenant_quota::FreshnessPolicy 
             warn(Warning::new(
                 provenant_records::warning::CONFIG_UNAVAILABLE,
                 format!("quota freshness settings unavailable ({error}); using defaults"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                ),
             ));
             provenant_quota::FreshnessPolicy::default()
         }
@@ -1125,6 +1128,9 @@ fn catalogue_pools(roots: &Roots) -> impl Fn(&str, &str) -> Vec<String> {
             warn(Warning::new(
                 provenant_records::warning::MODEL_CATALOGUE_UNAVAILABLE,
                 format!("model catalogue unavailable ({error}); model pools are not applied"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::MODEL_CATALOGUE_UNAVAILABLE,
+                ),
             ));
             None
         }
@@ -1372,6 +1378,9 @@ fn write_intent_at(
         warn(Warning::new(
             provenant_records::warning::QUOTA_READINESS_UNSYNCED,
             format!("could not sync quota readiness: {error}"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::QUOTA_READINESS_UNSYNCED,
+            ),
         ));
     }
     signal_quota(state);
@@ -2442,6 +2451,9 @@ pub(crate) fn execute(
         warn(Warning::new(
             provenant_records::warning::LOGIN_RECORD_UNRETAINED,
             format!("could not deliver login expiry notice: {error}"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::LOGIN_RECORD_UNRETAINED,
+            ),
         ));
     }
     Ok(shown)

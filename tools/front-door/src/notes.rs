@@ -112,6 +112,9 @@ pub fn run(command: Notes, globals: &Globals) -> u8 {
                 format!(
                     "output succeeded but cursor acknowledgement failed; the page may replay: {error}"
                 ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::NOTES_CURSOR_UNACKNOWLEDGED,
+                ),
             ));
             return Ok(3);
         }

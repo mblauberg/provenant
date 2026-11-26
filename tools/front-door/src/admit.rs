@@ -373,6 +373,9 @@ fn check_disk_and_trim(
                 warn(Warning::new(
                     provenant_records::warning::DISK_FLOOR_LOW,
                     format!("available disk ({free_after} B) remains below floor ({floor} B)"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::DISK_FLOOR_LOW,
+                    ),
                 ));
             }
         }
@@ -412,6 +415,9 @@ fn check_memory_and_trim(memory_limit: Option<u64>, trim_action: Option<&str>, c
             format!(
                 "class '{class}' sets a memory limit but no process-tree sample is available; limit not checked"
             ),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::RESOURCE_PROBE_FAILED,
+            ),
         ));
         return;
     };
@@ -433,6 +439,9 @@ fn check_memory_and_trim(memory_limit: Option<u64>, trim_action: Option<&str>, c
                 provenant_records::warning::MEMORY_FLOOR_LOW,
                 format!(
                     "process resident memory ({rss_after} B) exceeds class '{class}' limit ({limit} B)"
+                ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::MEMORY_FLOOR_LOW,
                 ),
             ));
         }
@@ -522,6 +531,9 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
                 warn(Warning::new(
                     provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
                     format!("build context unavailable: {error}; running command locally"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
+                    ),
                 ));
                 let code = execute_and_forward(program, args, &env);
                 if code != 0 {
@@ -756,6 +768,9 @@ fn run_build_job(
         warn(Warning::new(
             provenant_records::warning::BUILD_PRIORITY_ADVISORY,
             warning.clone(),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::BUILD_PRIORITY_ADVISORY,
+            ),
         ));
     }
     let priority = match resolved_priority.value {
@@ -782,6 +797,9 @@ fn run_build_job(
         warn(Warning::new(
             provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
             "build Git binding is unavailable; slot snapshotting will fall back locally",
+            provenant_records::warning::detected_source(
+                provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
+            ),
         ));
         let git_dir = context.worktree.join(".git");
         GitBinding {
@@ -842,6 +860,9 @@ fn run_build_job(
                 warn(Warning::new(
                     provenant_records::warning::BUILD_OUTCOME_ADVISORY,
                     warning.clone(),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::BUILD_OUTCOME_ADVISORY,
+                    ),
                 ));
             }
             if let Some(exit) = result.outcome.exit {
@@ -905,6 +926,9 @@ pub(crate) fn host_build_context(
         warn(Warning::new(
             provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
             "Git repository is unavailable; build will run locally",
+            provenant_records::warning::detected_source(
+                provenant_records::warning::BUILD_CONTEXT_UNAVAILABLE,
+            ),
         ));
     }
     let git_dir = git
@@ -938,6 +962,7 @@ pub(crate) fn host_build_context(
                 format!(
                     "build ports failed validation: {error}; reading configured values for build"
                 ),
+                provenant_records::warning::detected_source(CONFIG_MALFORMED),
             ));
             match if is_repository {
                 provenant_config::PortTable::read_for_inspection(Some(&project), &state)
@@ -950,6 +975,9 @@ pub(crate) fn host_build_context(
                         provenant_records::warning::CONFIG_UNAVAILABLE,
                         format!(
                             "build ports unavailable: {inspection_error}; using builtin build configuration"
+                        ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::CONFIG_UNAVAILABLE,
                         ),
                     ));
                     provenant_config::PortTable::default()
@@ -986,6 +1014,9 @@ pub(crate) fn host_build_context(
             format!(
                 "verify.base {:?} could not be resolved; build context has no verify base",
                 table.verify.base
+            ),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::UPSTREAM_UNRESOLVED,
             ),
         ));
     }
@@ -1095,6 +1126,7 @@ fn warn_readonly_sources(env: &[(OsString, OsString)]) {
                     "Cargo sources are read-only ({} = false; source: {source_str})",
                     provenant_confinement::cargo::SOURCE_WRITES_KNOB
                 ),
+                provenant_records::warning::detected_source(SETTING_LAYER_IGNORED),
             )
             .subject(source_str)
             .repair(repair),
@@ -1107,6 +1139,7 @@ fn warn_readonly_sources(env: &[(OsString, OsString)]) {
                     "Cargo sources are read-only ({} = false; source: compiled default)",
                     provenant_confinement::cargo::SOURCE_WRITES_KNOB
                 ),
+                provenant_records::warning::detected_source(SETTING_LAYER_IGNORED),
             )
             .repair(repair),
         );

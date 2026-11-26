@@ -106,11 +106,17 @@ fn warn_fetch(error: &Error) {
         Error::ForgeContextUnresolved(_) => Warning::new(
             provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
             format!("{error}; using the current integration resolution"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::FORGE_CONTEXT_UNRESOLVED,
+            ),
         )
         .repair(error.repair()),
         _ => Warning::new(
             provenant_records::warning::REMOTE_FETCH_FAILED,
             format!("{error}; using the current integration resolution"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::REMOTE_FETCH_FAILED,
+            ),
         ),
     };
     warn(warning.once_per_change());
@@ -2210,6 +2216,9 @@ fn warn_import_pin_collection(project: &Path, error: &(impl std::fmt::Display + 
                 "import pin collection failed for {}: {error}",
                 project.display()
             ),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::IMPORT_PIN_COLLECTION_FAILED,
+            ),
         )
         .subject(project.display().to_string())
         .once_per_change(),
@@ -3940,6 +3949,9 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                                     format!(
                                         "settled lane collection failed for {}: {error}",
                                         project.path.display()
+                                    ),
+                                    provenant_records::warning::detected_source(
+                                        provenant_records::warning::SETTLED_LANE_COLLECTION_FAILED,
                                     ),
                                 )
                                 .subject(project.path.display().to_string()),

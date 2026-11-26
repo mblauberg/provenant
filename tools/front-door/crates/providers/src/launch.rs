@@ -480,6 +480,7 @@ pub(crate) fn policy_warning(
                     diagnostic
                         .detail
                         .unwrap_or_else(|| "provider policy refused an operation".to_owned()),
+                    provenant_records::warning::detected_source(PROVIDER_POLICY_UNEXPECTED),
                 )
                 .subject(code),
             );

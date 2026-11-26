@@ -2339,6 +2339,7 @@ fn catalogue_warning(
     Warning::new(
         ROUTE_MODEL_NOT_CATALOGUED,
         format!("route {adapter}/{model} is not in the catalogue; {repair}"),
+        provenant_records::warning::detected_source(ROUTE_MODEL_NOT_CATALOGUED),
     )
 }
 

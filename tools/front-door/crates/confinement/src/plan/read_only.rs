@@ -44,10 +44,14 @@ impl ReadOnlyPolicy {
         for warning in warnings {
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             warn(
-                Warning::new(CONFIG_KEY_IGNORED, warning.to_string())
-                    .subject(format!("{}: {}", warning.source, warning.key))
-                    .repair("remove the unknown key from the host read-only policy")
-                    .once_per_change(),
+                Warning::new(
+                    CONFIG_KEY_IGNORED,
+                    warning.to_string(),
+                    provenant_records::warning::detected_source(CONFIG_KEY_IGNORED),
+                )
+                .subject(format!("{}: {}", warning.source, warning.key))
+                .repair("remove the unknown key from the host read-only policy")
+                .once_per_change(),
             );
         }
         Ok(policy)

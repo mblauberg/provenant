@@ -859,9 +859,13 @@ fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
                 worktrees_path.display()
             );
             warn(
-                Warning::new(GIT_OPERATION_RETAINED, message.clone())
-                    .subject(worktrees_path.display().to_string())
-                    .once_per_change(),
+                Warning::new(
+                    GIT_OPERATION_RETAINED,
+                    message.clone(),
+                    provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+                )
+                .subject(worktrees_path.display().to_string())
+                .once_per_change(),
             );
             return Some(message);
         }
@@ -876,9 +880,13 @@ fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
                 worktrees_path.display()
             );
             warn(
-                Warning::new(GIT_OPERATION_RETAINED, message.clone())
-                    .subject(worktrees_path.display().to_string())
-                    .once_per_change(),
+                Warning::new(
+                    GIT_OPERATION_RETAINED,
+                    message.clone(),
+                    provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+                )
+                .subject(worktrees_path.display().to_string())
+                .once_per_change(),
             );
             return Some(message);
         }
@@ -909,9 +917,13 @@ fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
         inspection_issue?
     };
     warn(
-        Warning::new(GIT_OPERATION_RETAINED, message.clone())
-            .subject(worktrees_path.display().to_string())
-            .once_per_change(),
+        Warning::new(
+            GIT_OPERATION_RETAINED,
+            message.clone(),
+            provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+        )
+        .subject(worktrees_path.display().to_string())
+        .once_per_change(),
     );
     Some(message)
 }
@@ -948,9 +960,13 @@ fn warn_live_record_change(
         ),
     };
     warn(
-        Warning::new(LIVE_RECORD_FORMAT_CHANGED, message.clone())
-            .subject(destination.state.as_path().display().to_string())
-            .once_per_change(),
+        Warning::new(
+            LIVE_RECORD_FORMAT_CHANGED,
+            message.clone(),
+            provenant_records::warning::detected_source(LIVE_RECORD_FORMAT_CHANGED),
+        )
+        .subject(destination.state.as_path().display().to_string())
+        .once_per_change(),
     );
     Some(message)
 }
@@ -1551,9 +1567,13 @@ fn apply_install(
         && let Some(message) = reporter.stopped_report(&state)
     {
         warn(
-            Warning::new(GIT_OPERATION_RETAINED, message.clone())
-                .subject(state.display().to_string())
-                .once_per_change(),
+            Warning::new(
+                GIT_OPERATION_RETAINED,
+                message.clone(),
+                provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+            )
+            .subject(state.display().to_string())
+            .once_per_change(),
         );
     }
     let result = match result {
@@ -1624,9 +1644,13 @@ fn apply_install(
         && let Some(message) = reporter.stopped_report(&state)
     {
         warn(
-            Warning::new(GIT_OPERATION_RETAINED, message.clone())
-                .subject(state.display().to_string())
-                .once_per_change(),
+            Warning::new(
+                GIT_OPERATION_RETAINED,
+                message.clone(),
+                provenant_records::warning::detected_source(GIT_OPERATION_RETAINED),
+            )
+            .subject(state.display().to_string())
+            .once_per_change(),
         );
     }
     Ok(Applied {
@@ -1759,9 +1783,13 @@ fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
                 path.display()
             );
             warn(
-                Warning::new(STATE_ROOT_OVERLAP, message.clone())
-                    .subject(path.display().to_string())
-                    .once_per_change(),
+                Warning::new(
+                    STATE_ROOT_OVERLAP,
+                    message.clone(),
+                    provenant_records::warning::detected_source(STATE_ROOT_OVERLAP),
+                )
+                .subject(path.display().to_string())
+                .once_per_change(),
             );
             return Some(message);
         }
@@ -1772,9 +1800,13 @@ fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
             path.display()
         );
         warn(
-            Warning::new(STATE_ROOT_OVERLAP, message.clone())
-                .subject(path.display().to_string())
-                .once_per_change(),
+            Warning::new(
+                STATE_ROOT_OVERLAP,
+                message.clone(),
+                provenant_records::warning::detected_source(STATE_ROOT_OVERLAP),
+            )
+            .subject(path.display().to_string())
+            .once_per_change(),
         );
         return Some(message);
     }
@@ -1791,9 +1823,13 @@ fn retire_cargo_target_seeds(state: &Path) -> Option<String> {
     };
     if message.starts_with("could not remove") {
         warn(
-            Warning::new(STATE_ROOT_OVERLAP, message.clone())
-                .subject(path.display().to_string())
-                .once_per_change(),
+            Warning::new(
+                STATE_ROOT_OVERLAP,
+                message.clone(),
+                provenant_records::warning::detected_source(STATE_ROOT_OVERLAP),
+            )
+            .subject(path.display().to_string())
+            .once_per_change(),
         );
     } else {
         let _ = writeln!(io::stderr().lock(), "{message}");
@@ -2525,6 +2561,9 @@ fn report_smoke_cleanup<T>(
         Warning::new(
             provenant_records::warning::SMOKE_BINDING_RETAINED,
             warning.clone(),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::SMOKE_BINDING_RETAINED,
+            ),
         )
         .once_per_change(),
     );
