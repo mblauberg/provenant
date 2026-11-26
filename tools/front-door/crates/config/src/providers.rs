@@ -140,6 +140,7 @@ impl ProviderSettings {
             Warning::new(
                 PROVIDER_SETTING_OUT_OF_RANGE,
                 format!("{key} = {seconds} is outside 1-60; using {DEFAULT_SECONDS}"),
+                provenant_records::warning::detected_source(PROVIDER_SETTING_OUT_OF_RANGE),
             )
             .subject(key),
         );
@@ -222,6 +223,13 @@ mod tests {
                     .contains("providers.codex.version_probe_timeout_seconds")
             );
             assert!(warnings[0].message.contains(&seconds.to_string()));
+            // Spec: docs/specs/cli.md#warnings-are-typed-values -- a typed
+            // warning always names the structured state that caused it.
+            assert_eq!(warnings[0].source.layer, provenant_records::Layer::Detected);
+            assert_eq!(
+                warnings[0].source.origin.as_deref(),
+                Some("warning:PROVIDER_SETTING_OUT_OF_RANGE")
+            );
         }
     }
 
