@@ -74,9 +74,10 @@ fn settlement_reasons_round_trip_against_the_declared_rules() {
 #[test]
 fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
     use crate::run::{
-        CauseSource, Outcome, PartialSignal, SETTLEMENT_TABLE, SettlementNodeOutcome,
-        SettlementReason, TerminalCause, TerminalEvidence,
+        CauseSource, Outcome, SETTLEMENT_TABLE, SettlementNodeOutcome, SettlementReason,
+        TerminalCause,
     };
+    use crate::settlement::{LaneRole, classify::settle};
     for reason in SettlementReason::ALL {
         let encoded = serde_json::to_value(reason).unwrap();
         assert_eq!(
@@ -96,59 +97,37 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
         ));
     }
 
-    let evidence = TerminalEvidence::ProcessExit;
-    let completed = SettlementReason::classify(
-        Outcome::ReviewRequired,
-        Some(&evidence),
-        &[],
-        None,
-        Ok(None),
-    )
-    .unwrap();
+    let mut completed_evidence = evidence_for(Outcome::ReviewRequired, None);
+    completed_evidence.lane = LaneRole::Reader;
+    let completed = settle(&completed_evidence);
     assert_eq!(completed.reason, SettlementReason::Completed);
     assert_eq!(completed.source, CauseSource::Provider);
-    assert_eq!(completed.node_outcome, SettlementNodeOutcome::Succeeded);
+    assert_eq!(completed.node, SettlementNodeOutcome::Succeeded);
     assert!(completed.stop.is_none());
 
-    let handoff_missing = SettlementReason::classify(
-        Outcome::Succeeded,
-        Some(&evidence),
-        &[PartialSignal::HandoffMissing],
-        None,
-        Ok(None),
-    )
-    .unwrap();
+    let handoff_missing = settle(&evidence_for(Outcome::Succeeded, None));
     assert_eq!(handoff_missing.reason, SettlementReason::HandoffMissing);
     assert_eq!(handoff_missing.outcome, Outcome::ReviewRequired);
     assert_eq!(
         handoff_missing.stop.as_ref().map(Stop::cause),
         Some(StopCause::HandoffMissing)
     );
-    assert_eq!(handoff_missing.node_outcome, SettlementNodeOutcome::Failed);
+    assert_eq!(handoff_missing.node, SettlementNodeOutcome::Failed);
 
-    let empty = SettlementReason::classify(
+    let empty = settle(&evidence_for(
         Outcome::ReviewRequired,
-        Some(&evidence),
-        &[PartialSignal::HandoffMissing],
         Some(TerminalCause::EmptyWriterResult),
-        Ok(None),
-    )
-    .unwrap();
+    ));
     assert_eq!(empty.reason, SettlementReason::EmptyResult);
     let stop = empty.stop.as_ref().unwrap();
     assert_eq!(stop.cause(), StopCause::EmptyResult);
     assert_eq!(stop.cause().default_next(), NextStep::NewRoute);
-    assert_eq!(empty.node_outcome, SettlementNodeOutcome::Failed);
+    assert_eq!(empty.node, SettlementNodeOutcome::Failed);
 
     let blocked_handoff = handoff(HandoffStatus::Blocked, "Needs an owner decision.");
-    let blocked = SettlementReason::classify(
-        Outcome::Succeeded,
-        Some(&evidence),
-        &[],
-        Some(TerminalCause::Blocked),
-        Ok(Some(&blocked_handoff)),
-    )
-    .unwrap();
+    let mut blocked_evidence = evidence_for(Outcome::Succeeded, Some(TerminalCause::Blocked));
+    blocked_evidence.handoff = accepted(blocked_handoff);
+    let blocked = settle(&blocked_evidence);
     assert_eq!(blocked.reason, SettlementReason::DeclaredStop);
     assert_eq!(blocked.outcome, Outcome::ReviewRequired);
     assert_eq!(blocked.source, CauseSource::Owner);
@@ -156,7 +135,7 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
         blocked.stop.as_ref().map(Stop::cause),
         Some(StopCause::Blocked)
     );
-    assert_eq!(blocked.node_outcome, SettlementNodeOutcome::Failed);
+    assert_eq!(blocked.node, SettlementNodeOutcome::Failed);
 
     for cause in StopCause::ALL {
         if cause.default_next() == NextStep::Chair {
@@ -170,10 +149,8 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
 
 #[test]
 fn host_stops_preserve_complete_handoffs_and_completed_budgets_succeed() {
-    use crate::run::{
-        CauseSource, Outcome, SettlementNodeOutcome, SettlementReason, TerminalCause,
-        TerminalEvidence,
-    };
+    use crate::run::{CauseSource, Outcome, SettlementNodeOutcome, TerminalCause};
+    use crate::settlement::{GitEvidence, PrimaryCheckout, classify::settle};
     let handoff: Handoff = serde_json::from_value(json!({
         "schema_version": 2, "status": "done", "note": "Delivered and pushed",
         "remaining": [], "decisions": [], "verify": ["Reviewed"]
@@ -186,24 +163,25 @@ fn host_stops_preserve_complete_handoffs_and_completed_budgets_succeed() {
         let stop = Stop::new(cause, Some(handoff.clone())).unwrap();
         assert_eq!(stop.handoff(), Some(&handoff));
     }
-    for partial in [vec![], vec![crate::run::PartialSignal::UncommittedWork]] {
-        let classified = SettlementReason::classify(
-            Outcome::Failed,
-            Some(&TerminalEvidence::ProcessExit),
-            &partial,
-            Some(TerminalCause::TokenBudget),
-            Ok(Some(&handoff)),
-        )
-        .unwrap();
-        assert_eq!(classified.source, CauseSource::Host);
-        assert_eq!(classified.stop.as_ref().unwrap().handoff(), Some(&handoff));
-        if partial.is_empty() {
-            assert_eq!(classified.outcome, Outcome::Succeeded);
-            assert_eq!(classified.node_outcome, SettlementNodeOutcome::Succeeded);
-        } else {
-            assert_eq!(classified.node_outcome, SettlementNodeOutcome::Failed);
-        }
-    }
+    let mut budget = evidence_for(Outcome::Failed, Some(TerminalCause::TokenBudget));
+    budget.handoff = accepted(handoff.clone());
+    let classified = settle(&budget);
+    assert_eq!(classified.source, CauseSource::Host);
+    assert_eq!(classified.stop.as_ref().unwrap().handoff(), Some(&handoff));
+    assert_eq!(classified.outcome, Outcome::Succeeded);
+    assert_eq!(classified.node, SettlementNodeOutcome::Succeeded);
+
+    // Dirty work is a separate signal: it keeps dependants held even when a
+    // clean, done declaration arrived before the budget boundary.
+    let mut dirty = evidence_for(Outcome::Succeeded, Some(TerminalCause::TokenBudget));
+    dirty.handoff = accepted(handoff);
+    dirty.git = Some(GitEvidence {
+        pinned: None,
+        head: None,
+        uncommitted: Some("M src/main.rs".into()),
+        primary: PrimaryCheckout::NotChecked,
+    });
+    assert_eq!(settle(&dirty).node, SettlementNodeOutcome::Failed);
 }
 
 #[test]
@@ -419,6 +397,59 @@ fn handoff(status: HandoffStatus, note: &str) -> Handoff {
     }
 }
 
+/// A launched, process-exited writer with no declaration and no Git evidence.
+fn evidence_for(
+    outcome: crate::run::Outcome,
+    cause: Option<crate::run::TerminalCause>,
+) -> crate::settlement::SettlementEvidence {
+    use crate::settlement::{
+        CustodyFacts, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
+        SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
+    };
+    SettlementEvidence {
+        schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
+        lane: LaneRole::ModelWriter,
+        host: HostVerdict {
+            outcome,
+            cause,
+            complete: true,
+            result_empty: false,
+            reason: None,
+            terminal_note: None,
+            signals: vec![],
+            denial: None,
+            stopped_handoff: None,
+        },
+        handoff: crate::declaration::DeclarationEvidence::Missing,
+        git: None,
+        custody: CustodyFacts {
+            launched: true,
+            cancelled: false,
+            steered: false,
+            cancellation_delivered: Some(true),
+            import_cancelled: false,
+            process_exit: true,
+            stall: None,
+            identity: IdentityEvidence {
+                conflict: false,
+                incomplete: IdentityPolicyEffect::Complete,
+                eof_fragment_unsettles: false,
+            },
+        },
+    }
+}
+
+/// The last accepted line of a declaration journal.
+fn accepted(handoff: Handoff) -> crate::declaration::DeclarationEvidence {
+    crate::declaration::DeclarationEvidence::Accepted(crate::declaration::SealedDeclaration {
+        schema_version: crate::declaration::DECLARATION_SCHEMA,
+        sequence: 1,
+        request_id: "format2".into(),
+        digest: CanonicalV1::file_digest(b"format2"),
+        handoff,
+    })
+}
+
 #[test]
 fn a_declared_stop_needs_the_handoff_that_declared_it() {
     let blocked = handoff(HandoffStatus::Blocked, "Needs the owner to pick a schema.");
@@ -584,21 +615,23 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
 fn stray_work_holds_dependants_instead_of_completing() {
     use crate::run::{
         CauseSource, Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason,
-        TerminalEvidence,
     };
-    let evidence = TerminalEvidence::ProcessExit;
-    let stray = SettlementReason::classify(
-        Outcome::ReviewRequired,
-        Some(&evidence),
-        &[PartialSignal::StrayWork],
-        None,
-        Ok(None),
-    )
-    .unwrap();
+    use crate::settlement::{GitEvidence, LaneRole, PrimaryCheckout, classify::settle};
+    let mut evidence = evidence_for(Outcome::ReviewRequired, None);
+    evidence.lane = LaneRole::Reader;
+    evidence.git = Some(GitEvidence {
+        pinned: None,
+        head: None,
+        uncommitted: None,
+        primary: PrimaryCheckout::Review {
+            note: "primary checkout moved without a bound-branch commit".into(),
+        },
+    });
+    let stray = settle(&evidence);
     assert_eq!(stray.reason, SettlementReason::StrayWork);
     assert_eq!(stray.outcome, Outcome::ReviewRequired);
     assert_eq!(stray.source, CauseSource::Host);
-    assert_eq!(stray.node_outcome, SettlementNodeOutcome::Failed);
+    assert_eq!(stray.node, SettlementNodeOutcome::Failed);
     assert_eq!(PartialSignal::StrayWork.as_str(), "stray_work");
 }
 

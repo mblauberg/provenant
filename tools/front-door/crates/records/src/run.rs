@@ -2248,7 +2248,7 @@ pub enum SettlementTerminalOutcome {
 }
 
 impl SettlementTerminalOutcome {
-    fn apply(self, observed: Outcome) -> Outcome {
+    pub(crate) fn apply(self, observed: Outcome) -> Outcome {
         match self {
             Self::Preserve => observed,
             Self::Succeeded => Outcome::Succeeded,
@@ -2335,72 +2335,6 @@ settlement_reasons! {
     Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
 }
 impl SettlementReason {
-    /// Derive the reason from the complete terminal facts before any reader
-    /// interprets the outcome, stop or next step independently.
-    pub fn derive(
-        outcome: Outcome,
-        evidence: Option<&TerminalEvidence>,
-        partial: &[PartialSignal],
-        terminal_cause: Option<TerminalCause>,
-        handoff: Result<Option<&crate::handoff::Handoff>, &crate::handoff::HandoffError>,
-    ) -> Self {
-        match (evidence, outcome) {
-            (_, Outcome::Lost) => Self::Lost,
-            (_, Outcome::Unsettled) => Self::Unsettled,
-            (_, Outcome::Unclassified) => Self::Unclassified,
-            (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
-            (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
-            (_, Outcome::Cancelled) if terminal_cause == Some(TerminalCause::Steered) => {
-                Self::Steered
-            }
-            (_, Outcome::Cancelled) => Self::Cancelled,
-            (Some(TerminalEvidence::PreLaunchRefusal), _) => Self::PreLaunchRefusal,
-            _ if handoff.is_err() => Self::HandoffMalformed,
-            _ => match terminal_cause {
-                Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
-                Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
-                Some(
-                    TerminalCause::ProviderEarlyStop
-                    | TerminalCause::ProviderStalled
-                    | TerminalCause::ProviderStalledRetry,
-                ) => Self::ProviderStop,
-                _ if partial.contains(&PartialSignal::StrayWork) => Self::StrayWork,
-                _ if handoff
-                    .is_ok_and(|handoff| handoff.is_some_and(|handoff| handoff.unfinished())) =>
-                {
-                    Self::DeclaredStop
-                }
-                _ if partial.contains(&PartialSignal::DeclaredStop) => Self::DeclaredStop,
-                _ if partial.contains(&PartialSignal::HandoffMissing) => Self::HandoffMissing,
-                _ if partial.contains(&PartialSignal::ProviderStop) => Self::ProviderStop,
-                _ if partial.contains(&PartialSignal::UncommittedWork)
-                    || outcome == Outcome::Uncommitted =>
-                {
-                    Self::UncommittedWork
-                }
-                Some(TerminalCause::TokenBudget)
-                    if matches!(
-                        outcome,
-                        Outcome::Succeeded
-                            | Outcome::ReviewRequired
-                            | Outcome::Failed
-                            | Outcome::TimedOut
-                    ) && handoff.is_ok_and(|handoff| {
-                        handoff.is_some_and(|handoff| {
-                            !handoff.unfinished() && handoff.validate().is_ok()
-                        })
-                    }) =>
-                {
-                    Self::CompletedBeforeBudget
-                }
-                _ if matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired) => {
-                    Self::Completed
-                }
-                _ => Self::Failed,
-            },
-        }
-    }
-
     /// A completed budget boundary retains its host stop without closing
     /// dependants. Other typed stops keep dependants closed.
     pub const fn node_outcome(self, stop: Option<crate::stop::StopCause>) -> SettlementNodeOutcome {
@@ -2415,48 +2349,6 @@ impl SettlementReason {
             self.rule().node_outcome
         }
     }
-
-    /// Derive the persisted reason, sealed stop, source and graph result from
-    /// the same complete terminal facts.
-    pub fn classify(
-        outcome: Outcome,
-        evidence: Option<&TerminalEvidence>,
-        partial: &[PartialSignal],
-        terminal_cause: Option<TerminalCause>,
-        handoff: Result<Option<&crate::handoff::Handoff>, &crate::handoff::HandoffError>,
-    ) -> Result<SettlementClassification, crate::stop::StopError> {
-        let reason = Self::derive(outcome, evidence, partial, terminal_cause, handoff);
-        let outcome = reason.rule().terminal_outcome.apply(outcome);
-        let stop = crate::stop::Stop::sealed(
-            terminal_cause,
-            outcome,
-            reason,
-            handoff
-                .map(|handoff| handoff.cloned())
-                .map_err(Clone::clone),
-        )?;
-        let stop_cause = stop.as_ref().map(crate::stop::Stop::cause);
-        let source = stop_cause.map_or(reason.rule().source, crate::stop::StopCause::source);
-        let node_outcome = reason.node_outcome(stop_cause);
-        Ok(SettlementClassification {
-            outcome,
-            reason,
-            stop,
-            source,
-            node_outcome,
-        })
-    }
-}
-
-/// Complete terminal classification shared by persistence, graph transitions
-/// and route quality.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SettlementClassification {
-    pub outcome: Outcome,
-    pub reason: SettlementReason,
-    pub stop: Option<crate::stop::Stop>,
-    pub source: CauseSource,
-    pub node_outcome: SettlementNodeOutcome,
 }
 
 /// Independently retried work after a terminal decision.
@@ -3924,27 +3816,6 @@ mod tests {
         wire["custody_project"] = serde_json::json!({"id": "invalid"});
         assert!(serde_json::from_value::<WriterRequest>(wire).is_err());
         Ok(())
-    }
-
-    #[test]
-    fn a_lost_or_unsettled_outcome_names_its_reason_with_any_evidence() {
-        // The process ran, but custody or reporting was not proven.
-        for evidence in [
-            TerminalEvidence::ProcessExit,
-            TerminalEvidence::PreLaunchRefusal,
-            TerminalEvidence::Lost {
-                reason: "gone".into(),
-            },
-        ] {
-            assert_eq!(
-                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[], None, Ok(None)),
-                SettlementReason::Lost
-            );
-            assert_eq!(
-                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[], None, Ok(None)),
-                SettlementReason::Unsettled
-            );
-        }
     }
 
     #[test]
