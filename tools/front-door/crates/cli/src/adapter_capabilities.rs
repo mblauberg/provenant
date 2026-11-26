@@ -1079,17 +1079,13 @@ mod tests {
         };
         let route: GraphRoute =
             serde_json::from_value(json!({"adapter": "command", "effort": "high"}))?;
-        let nodes = [
-            GraphNode {
-                id: "pinned".into(),
-                route: Some(route),
-                ..Default::default()
-            },
-            GraphNode {
-                id: "unrouted".into(),
-                ..Default::default()
-            },
-        ];
+        // GraphNode keeps expansion state private, so set the public fields.
+        let mut pinned = GraphNode::default();
+        pinned.id = "pinned".into();
+        pinned.route = Some(route);
+        let mut unrouted = GraphNode::default();
+        unrouted.id = "unrouted".into();
+        let nodes = [pinned, unrouted];
         // No owner setting: the compiled default warns and names both settings.
         let config = configured(&temp, &state)?;
         let rows = explain_capability_gaps(&roots(&temp)?, "project", &config, &nodes);
