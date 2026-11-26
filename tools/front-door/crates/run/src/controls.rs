@@ -2,7 +2,10 @@
 //! process state; uncertain custody stays fenced and is reported as such.
 use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_core::{AttemptId, MessageId, OperationId, WallTime};
-use provenant_records::{custody::Scope, warning::Warning};
+use provenant_records::{
+    custody::Scope,
+    warning::{self, Warning},
+};
 use provenant_supervisor::{
     census::{ProcessObserver, SystemProcessObserver},
     custody::{self, CustodyError, Observation, RecoveryState, StopReceipt},
@@ -820,6 +823,13 @@ pub fn unreadable_record_warning(source: &UnreadableSource, released: bool) -> W
     )
     .subject(source.to_string())
     .repair("inspect the preserved copy under quarantine/, then rerun reconcile")
+}
+
+fn attributed_orphan_warning(message: String, attempt: impl ToString) -> Warning {
+    let code = warning::ORPHAN_PROCESS_ATTRIBUTED;
+    Warning::new(code, message, warning::detected_source(code))
+        .subject(attempt.to_string())
+        .once_per_change()
 }
 
 fn reservation_issue_blocks_report(reservation: &std::path::Path, issue: &std::path::Path) -> bool {
@@ -2834,7 +2844,6 @@ impl RunStore {
                 pids.sort_unstable();
                 pids.dedup();
                 if !report.reported.is_empty() {
-                    use provenant_records::warning::{self, Warning};
                     // A report-only process must remain visible in status
                     // while the attempt stays fenced, just like a stall.
                     let names = report
@@ -2854,11 +2863,7 @@ impl RunStore {
                             RECORD_LIMIT,
                         )?;
                     }
-                    warning::warn(
-                        Warning::new(warning::ORPHAN_PROCESS_ATTRIBUTED, message)
-                            .subject(record.attempt_id.to_string())
-                            .once_per_change(),
-                    );
+                    warning::warn(attributed_orphan_warning(message, record.attempt_id));
                 }
                 return Ok(Some(Reconciled::Escaped { pids }));
             }

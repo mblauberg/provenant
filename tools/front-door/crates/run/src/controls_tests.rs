@@ -2,6 +2,30 @@ use super::*;
 
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+// Spec: docs/specs/cli.md#warnings-are-typed-values
+#[test]
+fn attributed_orphan_warning_identifies_its_detected_source_and_attempt() {
+    use provenant_records::provenance::Layer;
+    use provenant_records::warning::{self, Dedup};
+
+    let ((), warnings) = warning::capture(|| {
+        warning::warn(attributed_orphan_warning(
+            "orphan reported".into(),
+            "attempt-1",
+        ));
+    });
+    assert_eq!(warnings.len(), 1);
+    let warning = &warnings[0];
+    assert_eq!(warning.code, warning::ORPHAN_PROCESS_ATTRIBUTED.as_str());
+    assert_eq!(warning.source.layer, Layer::Detected);
+    assert_eq!(
+        warning.source.origin.as_deref(),
+        Some("warning:ORPHAN_PROCESS_ATTRIBUTED")
+    );
+    assert_eq!(warning.subject.as_deref(), Some("attempt-1"));
+    assert_eq!(warning.dedup, Dedup::PerChange);
+}
+
 // Spec: docs/specs/run-settlement.md#settlement
 #[test]
 fn a_writer_lock_holder_with_a_live_settlement_owner_is_never_escalated() {
