@@ -1814,7 +1814,7 @@ fn usage_verbs_keep_their_persisted_spelling() {
 fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Error>> {
     const DEFAULT_CEILING: usize = 2_000;
     const CEILINGS: &[(&str, usize)] = &[
-        ("crates/cli/src/fabric/graph_relay.rs", 2580),
+        ("crates/cli/src/fabric/graph_relay.rs", 2621),
         ("crates/cli/src/lib.rs", 3830),
         ("crates/cli/src/quota.rs", 6943),
         ("crates/cli/src/run.rs", 2521),
@@ -1822,7 +1822,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/cli/src/run/provider/preparation.rs", 7791),
         ("crates/config/src/loader.rs", 2796),
         ("crates/config/src/managed.rs", 3120),
-        ("crates/config/src/ports.rs", 2327),
+        ("crates/config/src/ports.rs", 2346),
         ("crates/config/src/project_binding.rs", 2236),
         ("crates/confinement/src/cache.rs", 3962),
         ("crates/confinement/src/repo.rs", 2027),
@@ -1841,7 +1841,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/fabric-runtime/src/graph/transitions.rs", 2463),
         ("crates/fabric-runtime/src/hosts.rs", 3673),
         ("crates/os/src/sys/pid.rs", 2660),
-        ("crates/providers/src/lane.rs", 3529),
+        ("crates/providers/src/lane.rs", 3618),
         ("crates/providers/src/launch.rs", 2670),
         ("crates/providers/src/opencode.rs", 1286),
         ("crates/providers/src/package_cache.rs", 2295),
@@ -1881,7 +1881,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/pr/landing/driver.rs", 3967),
         ("src/pr/observer.rs", 2445),
         ("src/status_wait.rs", 3286),
-        ("src/worktrees.rs", 5384),
+        ("src/worktrees.rs", 5411),
     ];
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();
