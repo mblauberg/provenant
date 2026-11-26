@@ -7,20 +7,19 @@
 //! lifecycle start removes fixtures left behind by crashed runs.
 
 use provenant_cli::fabric::Context;
-use provenant_core::{CancelToken, Clock, GitOid, HostId, WaitBudget};
+use provenant_core::{CancelToken, Clock, GitOid, HostId, WaitBudget, WallTime};
 use provenant_fabric_runtime::{
     coordination::facade::FacadeError,
     hosts::{PeerAction, PeerResult, SmokeFixtureOp, SmokeFixtureReceipt},
 };
-use provenant_records::{
-    warning::{SMOKE_BINDING_RETAINED, SMOKE_PEER_FIXTURE_UNSUPPORTED},
-    warning::{Warning, warn},
+use provenant_records::warning::{
+    SMOKE_BINDING_RETAINED, SMOKE_FIXTURE_FOREIGN, SMOKE_PEER_FIXTURE_UNSUPPORTED, Warning, warn,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 /// The two commits a deterministic fixture creates: the base the writer starts
@@ -29,6 +28,76 @@ use std::{
 pub(crate) struct FixtureCommits {
     pub base: GitOid,
     pub head: GitOid,
+}
+
+/// The current deterministic fixture recipe. A peer echoes the recipe it built;
+/// a mismatch fails the lifecycle rather than passing two different fixtures off
+/// as the same one. Bump this when the fixture identity changes.
+pub const FIXTURE_RECIPE: u32 = 1;
+
+/// The ownership record written inside `.git`, outside the committed tree so
+/// the nonce still determines both commit OIDs. A directory without a valid
+/// marker is foreign and is never removed by the sweep.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FixtureMarker {
+    pub schema_version: u32,
+    pub nonce: String,
+    pub created_at: WallTime,
+    pub recipe: u32,
+}
+
+/// The typed verdict of a smoke lifecycle. A pass requires the nonce in both
+/// read rows; an unverified result can never be presented as a pass.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum SmokeVerdict {
+    Passed,
+    Failed { row: String, reason: String },
+    Unverified { reason: String },
+}
+
+/// One measured phase of a lifecycle. The five names are fixed: fixture,
+/// launch, wait, status and cleanup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmokePhase {
+    pub name: String,
+    pub elapsed_ms: u64,
+}
+
+/// The structured result of one lifecycle: verdict, phase timings and the
+/// typed envelopes that produced them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmokeOutcome {
+    pub verdict: SmokeVerdict,
+    pub phases: Vec<SmokePhase>,
+    pub output: String,
+}
+
+impl SmokeOutcome {
+    /// The typed result line: verdict fields and all five phase timings. It
+    /// carries no command envelope, so verdict readers keep using the child
+    /// envelopes in `output`.
+    pub fn result_json(&self) -> Value {
+        let mut value = serde_json::to_value(&self.verdict).unwrap_or(Value::Null);
+        if let Some(map) = value.as_object_mut() {
+            map.insert(
+                "phases".into(),
+                serde_json::to_value(&self.phases).unwrap_or(Value::Null),
+            );
+        }
+        value
+    }
+
+    /// The text result published by both entry points: child envelopes, then
+    /// the typed verdict and phase line. A failure names its row in that line.
+    pub fn text(&self) -> String {
+        let result = serde_json::to_string(&self.result_json()).unwrap_or_default();
+        if self.output.is_empty() {
+            result
+        } else {
+            format!("{}\n{result}", self.output)
+        }
+    }
 }
 
 /// A nonce is the only path input. It is always twelve lowercase hex digits,
@@ -139,6 +208,25 @@ pub(crate) fn create_fixture(
     let head_text = git(&fixture, &["rev-parse", "HEAD"], &[])?;
     let head = GitOid::parse(&head_text).map_err(|error| error.to_string())?;
 
+    // The marker lives in .git, so it cannot change either commit OID. It is
+    // the recoverable ownership record the sweep uses to tell our fixtures
+    // from anything else a user put under the fixture root.
+    let created_at = provenant_os::clock::SystemClock::new()
+        .wall_now()
+        .map_err(|error| error.to_string())?;
+    let marker = FixtureMarker {
+        schema_version: 1,
+        nonce: nonce.to_owned(),
+        created_at,
+        recipe: FIXTURE_RECIPE,
+    };
+    let marker_text = serde_json::to_string(&marker).map_err(|error| error.to_string())?;
+    std::fs::write(
+        fixture.join(".git").join("provenant-smoke.json"),
+        marker_text,
+    )
+    .map_err(|error| error.to_string())?;
+
     let roots =
         crate::roots::child(home, home, state.to_path_buf()).map_err(|error| error.to_string())?;
     let project = std::fs::canonicalize(&fixture).map_err(|error| error.to_string())?;
@@ -171,27 +259,39 @@ pub(crate) fn remove_fixture(state: &Path, home: &Path, nonce: &str) -> Result<(
     Ok(())
 }
 
-/// Remove fixtures older than twenty-four hours at lifecycle start. Each
-/// removal is returned as a warning; a bind that cannot be forgotten is left
-/// for the next sweep rather than failing the current smoke.
+/// Remove fixtures older than twenty-four hours at lifecycle start. Only a
+/// directory with a parsed marker whose nonce matches its name and whose
+/// creation time is past the threshold is ours to remove; a directory without
+/// such a marker is foreign and is left in place with SMOKE_FIXTURE_FOREIGN.
+/// Each removal is returned as a warning; a bind that cannot be forgotten is
+/// left for the next sweep rather than failing the current smoke.
 pub(crate) fn sweep_fixtures(state: &Path, home: &Path) -> Vec<String> {
     let mut warnings = Vec::new();
     let Ok(entries) = std::fs::read_dir(fixture_root(home)) else {
         return warnings;
     };
-    let now = std::time::SystemTime::now();
+    let now = provenant_os::clock::SystemClock::new()
+        .wall_now()
+        .map(|time| time.as_micros())
+        .unwrap_or(i64::MAX);
+    let threshold = 24 * 60 * 60 * 1_000_000_i64;
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !valid_nonce(&name) {
+        if !entry.path().is_dir() {
             continue;
         }
-        let age = entry
-            .metadata()
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let marker = std::fs::read(entry.path().join(".git").join("provenant-smoke.json"))
             .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|modified| now.duration_since(modified).ok())
-            .unwrap_or_default();
-        if age < Duration::from_secs(24 * 60 * 60) {
+            .and_then(|bytes| serde_json::from_slice::<FixtureMarker>(&bytes).ok())
+            .filter(|marker| marker.schema_version == 1 && marker.nonce == name);
+        let Some(marker) = marker else {
+            let message = format!("smoke fixture {name} has no ownership marker; left in place");
+            warn(Warning::new(SMOKE_FIXTURE_FOREIGN, message.clone()).once_per_change());
+            warnings.push(message);
+            continue;
+        };
+        let age = now.saturating_sub(marker.created_at.as_micros());
+        if age < threshold {
             continue;
         }
         match remove_fixture(state, home, &name) {
@@ -232,6 +332,7 @@ fn peer_fixture(
     let op = if create {
         SmokeFixtureOp::Create {
             nonce: nonce.to_owned(),
+            recipe: FIXTURE_RECIPE,
         }
     } else {
         SmokeFixtureOp::Remove {
@@ -262,6 +363,24 @@ fn peer_fixture(
 /// Whether a peer failure means the peer cannot speak the fixture protocol at all.
 fn peer_too_old(error: &str) -> bool {
     error == "SMOKE_PEER_TOO_OLD"
+}
+
+/// A peer must echo the recipe it built and the same two commits. A recipe
+/// mismatch is named explicitly so drift is not mistaken for a different head.
+fn peer_fixture_matches(
+    receipt: &SmokeFixtureReceipt,
+    commits: FixtureCommits,
+) -> Result<(), String> {
+    let peer_recipe = receipt.recipe.unwrap_or(0);
+    if peer_recipe != FIXTURE_RECIPE {
+        return Err(format!(
+            "peer fixture recipe {peer_recipe} differs from {FIXTURE_RECIPE}"
+        ));
+    }
+    if receipt.base != Some(commits.base) || receipt.head != Some(commits.head) {
+        return Err("peer fixture differs".into());
+    }
+    Ok(())
 }
 
 /// A unique graph name for this lifecycle invocation.
@@ -305,19 +424,36 @@ fn summary_has(row: &Value, nonce: &str) -> bool {
         .is_some_and(|summary| summary.contains(nonce))
 }
 
+/// A failure always carries the row that caused it and the reason, so the
+/// verdict text names exactly which node lost its fixture.
+fn failed(row: &str, reason: String) -> SmokeVerdict {
+    SmokeVerdict::Failed {
+        row: row.to_owned(),
+        reason,
+    }
+}
+
 /// Verify that the reported rows are the ones this lifecycle produced. A
 /// verdict without the nonce is a false pass: name the failing row so an
 /// operator can see which node lost its fixture.
-fn verify_status(status: &str, nonce: &str, write_enabled: bool) -> Result<(), String> {
+fn verify_status(status: &str, nonce: &str, write_enabled: bool) -> Result<(), SmokeVerdict> {
     let rows = status_rows(status);
     if rows.is_empty() {
-        return Err(format!("smoke status named no rows for nonce {nonce}"));
+        return Err(failed(
+            "status",
+            format!("smoke status named no rows for nonce {nonce}"),
+        ));
     }
-    let read = row_for(&rows, "read")
-        .ok_or_else(|| format!("smoke status named no read row for nonce {nonce}"))?;
+    let read = row_for(&rows, "read").ok_or_else(|| {
+        failed(
+            "read",
+            format!("smoke status named no read row for nonce {nonce}"),
+        )
+    })?;
     if !summary_has(read, nonce) {
-        return Err(format!(
-            "smoke read row does not report nonce {nonce}: {read}"
+        return Err(failed(
+            "read",
+            format!("smoke read row does not report nonce {nonce}: {read}"),
         ));
     }
     let reviewer = if write_enabled {
@@ -325,28 +461,40 @@ fn verify_status(status: &str, nonce: &str, write_enabled: bool) -> Result<(), S
     } else {
         "review-fixture"
     };
-    let review = row_for(&rows, reviewer)
-        .ok_or_else(|| format!("smoke status named no {reviewer} row for nonce {nonce}"))?;
+    let review = row_for(&rows, reviewer).ok_or_else(|| {
+        failed(
+            reviewer,
+            format!("smoke status named no {reviewer} row for nonce {nonce}"),
+        )
+    })?;
     if !summary_has(review, nonce) {
-        return Err(format!(
-            "smoke {reviewer} row does not report nonce {nonce}: {review}"
+        return Err(failed(
+            reviewer,
+            format!("smoke {reviewer} row does not report nonce {nonce}: {review}"),
         ));
     }
-    let write = row_for(&rows, "write")
-        .ok_or_else(|| format!("smoke status named no write row for nonce {nonce}"))?;
+    let write = row_for(&rows, "write").ok_or_else(|| {
+        failed(
+            "write",
+            format!("smoke status named no write row for nonce {nonce}"),
+        )
+    })?;
     let accepted = if write_enabled {
         write["state"] == "succeeded"
     } else {
         write["state"] == "skipped"
     };
     if !accepted {
-        return Err(format!(
-            "smoke write row is not {} for nonce {nonce}: {write}",
-            if write_enabled {
-                "succeeded"
-            } else {
-                "skipped"
-            }
+        return Err(failed(
+            "write",
+            format!(
+                "smoke write row is not {} for nonce {nonce}: {write}",
+                if write_enabled {
+                    "succeeded"
+                } else {
+                    "skipped"
+                }
+            ),
         ));
     }
     Ok(())
@@ -371,20 +519,31 @@ pub(crate) fn report_smoke_cleanup<T>(
 }
 
 /// Run one hermetic smoke graph: create the fixture, verify the peer's fixture
-/// when placed remotely, launch, wait, status, and always clean up. Success
-/// requires the nonce in both read and review results; an old peer can only
-/// produce an unverified result, never a pass.
+/// when placed remotely, launch, wait, status, and always clean up. The typed
+/// outcome carries the verdict and five phase timings; a pass requires the
+/// nonce in both read rows, and an old peer can only produce an unverified
+/// result, never a pass.
 pub(crate) fn run_lifecycle(
+    clock: &dyn Clock,
     runner: &crate::install::ChildRunner,
     program: &Path,
     state: &Path,
     home: &Path,
     args: &cli::Upgrade,
-) -> Result<String, String> {
+) -> Result<SmokeOutcome, String> {
     let mut warnings = sweep_fixtures(state, home);
     let nonce = nonce()?;
+    let initial = clock.mono_now();
+    // Each phase keeps its begin/end reading; skipped phases stay at zero.
+    let mut fixture_phase = (initial, initial);
+    let mut launch_phase = (initial, initial);
+    let mut wait_phase = (initial, initial);
+    let mut status_phase = (initial, initial);
+    let mut cleanup_phase = (initial, initial);
+
+    fixture_phase.0 = clock.mono_now();
     let commits = create_fixture(state, home, &nonce)?;
-    let mut unverified = false;
+    let mut verdict = SmokeVerdict::Passed;
     let host = args
         .host
         .as_deref()
@@ -392,17 +551,19 @@ pub(crate) fn run_lifecycle(
     if let Some(host) = host {
         match peer_fixture(state, home, host, &nonce, true) {
             Ok(receipt) => {
-                if receipt.base != Some(commits.base) || receipt.head != Some(commits.head) {
+                if let Err(error) = peer_fixture_matches(&receipt, commits) {
                     let _ = peer_fixture(state, home, host, &nonce, false);
                     let _ = remove_fixture(state, home, &nonce);
-                    return Err("peer fixture differs".into());
+                    return Err(error);
                 }
             }
             Err(error) if peer_too_old(&error) => {
                 warnings.push(format!(
                     "smoke peer {host} cannot verify a fixture: {error}"
                 ));
-                unverified = true;
+                verdict = SmokeVerdict::Unverified {
+                    reason: "the peer fixture could not be checked".into(),
+                };
             }
             Err(error) => {
                 let _ = remove_fixture(state, home, &nonce);
@@ -410,6 +571,7 @@ pub(crate) fn run_lifecycle(
             }
         }
     }
+    fixture_phase.1 = clock.mono_now();
     let graph = smoke_graph_name();
     let fixture = fixture_root(home).join(&nonce);
     let program = program.as_os_str().to_owned();
@@ -456,9 +618,15 @@ pub(crate) fn run_lifecycle(
         ]);
     }
     let write_enabled = !args.set.iter().any(|setting| setting == "write=false");
-    let outcome = match runner.execute(&run, None, 1_048_576, 3600) {
+    let mut output = String::new();
+    launch_phase.0 = clock.mono_now();
+    let launched = runner.execute(&run, None, 1_048_576, 3600);
+    launch_phase.1 = clock.mono_now();
+    match launched {
         Ok(launched) => {
-            let wait = runner.execute(
+            output.push_str(&String::from_utf8_lossy(&launched));
+            wait_phase.0 = clock.mono_now();
+            let waited = runner.execute(
                 &[
                     program.clone(),
                     "--project".into(),
@@ -475,7 +643,9 @@ pub(crate) fn run_lifecycle(
                 1_048_576,
                 3700,
             );
-            let status = runner.execute(
+            wait_phase.1 = clock.mono_now();
+            status_phase.0 = clock.mono_now();
+            let reported = runner.execute(
                 &[
                     program,
                     "--project".into(),
@@ -490,56 +660,61 @@ pub(crate) fn run_lifecycle(
                 1_048_576,
                 60,
             );
-            let combined = format!(
-                "{}{}{}",
-                String::from_utf8_lossy(&launched),
-                wait.as_ref()
-                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-                    .unwrap_or_else(|error| error.clone()),
-                status
+            status_phase.1 = clock.mono_now();
+            output.push_str(
+                &waited
                     .as_ref()
                     .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-                    .unwrap_or_else(|error| error.clone())
+                    .unwrap_or_else(|error| error.clone()),
             );
-            match (wait, status) {
-                (Ok(_), Ok(status)) => {
-                    if unverified {
-                        Ok(combined)
-                    } else {
-                        verify_status(&String::from_utf8_lossy(&status), &nonce, write_enabled)
-                            .map(|()| combined)
+            let status_text = reported
+                .as_ref()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                .unwrap_or_else(|error| error.clone());
+            output.push_str(&status_text);
+            match (waited, reported) {
+                (Ok(_), Ok(status_bytes)) => {
+                    if matches!(&verdict, SmokeVerdict::Passed)
+                        && let Err(failure) = verify_status(
+                            &String::from_utf8_lossy(&status_bytes),
+                            &nonce,
+                            write_enabled,
+                        )
+                    {
+                        verdict = failure;
                     }
                 }
-                (Err(error), status) => Err(format!(
-                    "{}\nsmoke node report: {}",
-                    error,
-                    status
-                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                        .unwrap_or_else(|err| err)
-                )),
-                (Ok(_), Err(error)) => Err(format!(
-                    "{error}\nsmoke launch: {}",
-                    String::from_utf8_lossy(&launched)
-                )),
+                (Err(error), status) => {
+                    verdict = failed(
+                        "wait",
+                        format!(
+                            "{}\nsmoke node report: {}",
+                            error,
+                            status
+                                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                                .unwrap_or_else(|err| err)
+                        ),
+                    );
+                }
+                (Ok(_), Err(error)) => {
+                    verdict = failed(
+                        "status",
+                        format!(
+                            "{error}\nsmoke launch: {}",
+                            String::from_utf8_lossy(&launched)
+                        ),
+                    );
+                }
             }
         }
-        Err(error) => Err(error),
-    };
-    // An unverified peer can never produce a pass, whatever the status rows
-    // say. Keep the report but change the outcome so the caller cannot present
-    // it as a verified smoke.
-    let outcome = if unverified {
-        match outcome {
-            Ok(output) => Err(format!(
-                "{output}\nsmoke result is unverified: the peer fixture could not be checked"
-            )),
-            Err(error) => Err(error),
+        Err(error) => {
+            verdict = failed("launch", error.clone());
+            output.push_str(&error);
         }
-    } else {
-        outcome
-    };
+    }
     // The peer request still needs the local fixture path to build its
     // locator, so remove remotely first and locally afterwards.
+    cleanup_phase.0 = clock.mono_now();
     let peer_cleanup = match host {
         Some(host) => match peer_fixture(state, home, host, &nonce, false) {
             Ok(_) => Ok(()),
@@ -549,8 +724,9 @@ pub(crate) fn run_lifecycle(
         None => Ok(()),
     };
     let local_cleanup = remove_fixture(state, home, &nonce);
-    let cleanup = peer_cleanup.and(local_cleanup);
-    if unverified {
+    let cleanup_result = peer_cleanup.and(local_cleanup);
+    cleanup_phase.1 = clock.mono_now();
+    if matches!(verdict, SmokeVerdict::Unverified { .. }) {
         warn(
             Warning::new(
                 SMOKE_PEER_FIXTURE_UNSUPPORTED,
@@ -559,15 +735,31 @@ pub(crate) fn run_lifecycle(
             .once_per_change(),
         );
     }
-    let suffix = if warnings.is_empty() {
-        String::new()
-    } else {
-        format!("\n{}", warnings.join("\n"))
+    if !warnings.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&warnings.join("\n"));
+    }
+    let phases = [
+        ("fixture", fixture_phase),
+        ("launch", launch_phase),
+        ("wait", wait_phase),
+        ("status", status_phase),
+        ("cleanup", cleanup_phase),
+    ]
+    .into_iter()
+    .map(|(name, (begin, end))| SmokePhase {
+        name: name.to_owned(),
+        elapsed_ms: end.as_micros().saturating_sub(begin.as_micros()) / 1000,
+    })
+    .collect();
+    let outcome = SmokeOutcome {
+        verdict,
+        phases,
+        output,
     };
-    let outcome = outcome
-        .map(|output| format!("{output}{suffix}"))
-        .map_err(|error| format!("{error}{suffix}"));
-    report_smoke_cleanup(outcome, cleanup)
+    report_smoke_cleanup(Ok(outcome), cleanup_result)
 }
 
 #[cfg(test)]
@@ -605,25 +797,161 @@ mod tests {
         );
         verify_status(&good, nonce, true).expect("the nonce is present in every required row");
         let bad = good.replace(&format!("nonce: {nonce}"), "no nonce here");
-        let error = verify_status(&bad, nonce, true).expect_err("a false pass is refused");
-        assert!(error.contains("read"), "{error}");
+        let SmokeVerdict::Failed { row, reason } =
+            verify_status(&bad, nonce, true).expect_err("a false pass is refused")
+        else {
+            panic!("a false pass must be a failed verdict");
+        };
+        assert_eq!(row, "read");
+        assert!(reason.contains(nonce), "{reason}");
         let no_review = good.replace(
             "\"node_id\":\"review-write\"",
             "\"node_id\":\"review-fixture\"",
         );
         assert!(
-            verify_status(&no_review, nonce, true)
-                .expect_err("the wrong reviewer is refused")
-                .contains("review"),
+            matches!(
+                verify_status(&no_review, nonce, true),
+                Err(SmokeVerdict::Failed { ref row, .. }) if row == "review-write"
+            ),
+            "the wrong reviewer is refused"
         );
         let skipped = good.replace(
             "\"node_id\":\"write\",\"state\":\"succeeded\"",
             "\"node_id\":\"write\",\"state\":\"skipped\"",
         );
         assert!(
-            verify_status(&skipped, nonce, true)
-                .expect_err("a skipped writer is not a pass when write is enabled")
-                .contains("write"),
+            matches!(
+                verify_status(&skipped, nonce, true),
+                Err(SmokeVerdict::Failed { ref row, .. }) if row == "write"
+            ),
+            "a skipped writer is not a pass when write is enabled"
         );
+    }
+
+    #[test]
+    fn verdict_and_phases_are_typed_result_data() {
+        let outcome = SmokeOutcome {
+            verdict: SmokeVerdict::Failed {
+                row: "read".into(),
+                reason: "the nonce is missing".into(),
+            },
+            phases: ["fixture", "launch", "wait", "status", "cleanup"]
+                .into_iter()
+                .map(|name| SmokePhase {
+                    name: name.to_owned(),
+                    elapsed_ms: 1,
+                })
+                .collect(),
+            output: "child envelopes".into(),
+        };
+        let json = outcome.result_json();
+        assert_eq!(json["verdict"], "failed");
+        assert_eq!(json["row"], "read");
+        assert_eq!(json["reason"], "the nonce is missing");
+        assert_eq!(json["phases"].as_array().map(Vec::len), Some(5));
+        let text = outcome.text();
+        assert!(text.starts_with("child envelopes\n"), "{text}");
+        assert!(text.contains("\"verdict\":\"failed\""), "{text}");
+        assert_eq!(
+            serde_json::from_str::<SmokeVerdict>(r#"{"verdict":"passed"}"#).unwrap(),
+            SmokeVerdict::Passed
+        );
+    }
+
+    #[test]
+    fn peer_fixture_mismatch_names_both_recipes() {
+        let commits = FixtureCommits {
+            base: GitOid::parse(&"11".repeat(20)).unwrap(),
+            head: GitOid::parse(&"22".repeat(20)).unwrap(),
+        };
+        let receipt = SmokeFixtureReceipt {
+            extra: Default::default(),
+            base: Some(commits.base),
+            head: Some(commits.head),
+            recipe: Some(FIXTURE_RECIPE),
+            reason: None,
+        };
+        assert!(peer_fixture_matches(&receipt, commits).is_ok());
+        let drift = SmokeFixtureReceipt {
+            recipe: Some(FIXTURE_RECIPE + 1),
+            ..receipt
+        };
+        let error = peer_fixture_matches(&drift, commits).unwrap_err();
+        assert!(error.contains(&FIXTURE_RECIPE.to_string()), "{error}");
+        assert!(error.contains(&(FIXTURE_RECIPE + 1).to_string()), "{error}");
+    }
+
+    #[test]
+    fn fixture_marker_is_written_inside_git() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home)?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let nonce = "0123456789ab";
+        create_fixture(&state, &home, nonce)?;
+        let bytes = std::fs::read(
+            fixture_root(&home)
+                .join(nonce)
+                .join(".git")
+                .join("provenant-smoke.json"),
+        )?;
+        let marker: FixtureMarker = serde_json::from_slice(&bytes)?;
+        assert_eq!(marker.schema_version, 1);
+        assert_eq!(marker.nonce, nonce);
+        assert_eq!(marker.recipe, FIXTURE_RECIPE);
+        Ok(())
+    }
+
+    #[test]
+    fn sweep_removes_only_expired_marked_fixtures() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home)?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let fresh = "000000000001";
+        let stale = "000000000002";
+        create_fixture(&state, &home, fresh)?;
+        create_fixture(&state, &home, stale)?;
+        let marker_path = fixture_root(&home)
+            .join(stale)
+            .join(".git")
+            .join("provenant-smoke.json");
+        let mut marker: FixtureMarker = serde_json::from_slice(&std::fs::read(&marker_path)?)?;
+        marker.created_at = WallTime::from_micros(0)?;
+        std::fs::write(&marker_path, serde_json::to_string(&marker)?)?;
+        let warnings = sweep_fixtures(&state, &home);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("removed stale fixture") && warning.contains(stale)),
+            "{warnings:?}"
+        );
+        assert!(!fixture_root(&home).join(stale).exists());
+        assert!(fixture_root(&home).join(fresh).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn sweep_leaves_foreign_directories_with_a_typed_warning()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home)?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        std::fs::create_dir_all(fixture_root(&home))?;
+        let foreign = fixture_root(&home).join("000000000003");
+        std::fs::create_dir(&foreign)?;
+        let (_, warnings) = provenant_records::warning::capture(|| sweep_fixtures(&state, &home));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code.as_ref() == SMOKE_FIXTURE_FOREIGN.0),
+            "{warnings:?}"
+        );
+        assert!(foreign.exists(), "a foreign directory is never removed");
+        Ok(())
     }
 }

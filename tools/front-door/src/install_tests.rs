@@ -620,16 +620,21 @@ fn smoke_removes_its_fixture_and_binding() -> Result<(), Box<dyn std::error::Err
         };
         let runner = smoke_runner(temp.path(), &home)?;
         let result = crate::smoke::run_lifecycle(
+            &provenant_os::clock::SystemClock::new(),
             &runner,
             &program,
             &state,
             &home,
             &smoke_upgrade(None, Vec::new()),
         );
+        let outcome = result.map_err(|error| std::io::Error::other(format!("{name}: {error}")))?;
         if name == "success" {
-            result.map_err(|error| std::io::Error::other(format!("{name}: {error}")))?;
+            assert_eq!(outcome.verdict, crate::smoke::SmokeVerdict::Passed);
         } else {
-            assert!(result.is_err(), "{name} must fail");
+            assert!(
+                matches!(&outcome.verdict, crate::smoke::SmokeVerdict::Failed { .. }),
+                "{name} must fail"
+            );
         }
         let recorded = std::fs::read_to_string(&calls).unwrap_or_default();
         let project = recorded
@@ -699,6 +704,7 @@ fn smoke_never_reads_the_caller_checkout() -> Result<(), Box<dyn std::error::Err
         std::fs::write(&calls, "")?;
         let runner = smoke_runner(temp.path(), &cwd)?;
         crate::smoke::run_lifecycle(
+            &provenant_os::clock::SystemClock::new(),
             &runner,
             &program,
             &state,
@@ -734,15 +740,24 @@ fn smoke_fails_without_the_nonce() -> Result<(), Box<dyn std::error::Error>> {
     provenant_os::fixture::private_state_dir(&state)?;
     let (program, _) = smoke_program(temp.path(), "no nonce here")?;
     let runner = smoke_runner(temp.path(), &home)?;
-    let error = crate::smoke::run_lifecycle(
+    let outcome = crate::smoke::run_lifecycle(
+        &provenant_os::clock::SystemClock::new(),
         &runner,
         &program,
         &state,
         &home,
         &smoke_upgrade(None, Vec::new()),
-    )
-    .expect_err("the nonce is absent, so the smoke must fail");
-    assert!(error.contains("read"), "{error}");
+    )?;
+    let crate::smoke::SmokeVerdict::Failed { row, reason } = &outcome.verdict else {
+        panic!("the nonce is absent, so the smoke must fail");
+    };
+    assert_eq!(row.as_str(), "read");
+    assert!(reason.contains("read"), "{reason}");
+    assert!(
+        outcome.text().contains("\"verdict\":\"failed\""),
+        "{}",
+        outcome.text()
+    );
     Ok(())
 }
 
@@ -757,14 +772,15 @@ fn smoke_wait_and_status_name_the_fixture_project() -> Result<(), Box<dyn std::e
     provenant_os::fixture::private_state_dir(&state)?;
     let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
     let runner = smoke_runner(temp.path(), &home)?;
-    let output = crate::smoke::run_lifecycle(
+    let outcome = crate::smoke::run_lifecycle(
+        &provenant_os::clock::SystemClock::new(),
         &runner,
         &program,
         &state,
         &home,
         &smoke_upgrade(None, Vec::new()),
     )?;
-    assert!(output.contains("complete"), "{output}");
+    assert!(outcome.output.contains("complete"), "{}", outcome.text());
     let calls = std::fs::read_to_string(calls)?;
     let lines: Vec<&str> = calls.lines().collect();
     assert_eq!(lines.len(), 3, "{calls}");
@@ -791,6 +807,7 @@ fn smoke_lifecycle_pins_the_review_to_the_fixture_head() -> Result<(), Box<dyn s
     let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
     let runner = smoke_runner(temp.path(), &home)?;
     crate::smoke::run_lifecycle(
+        &provenant_os::clock::SystemClock::new(),
         &runner,
         &program,
         &state,
@@ -840,6 +857,7 @@ fn remote_smoke_carries_the_writer_branch_and_fixture_nonce()
     let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
     let runner = smoke_runner(temp.path(), &home)?;
     crate::smoke::run_lifecycle(
+        &provenant_os::clock::SystemClock::new(),
         &runner,
         &program,
         &state,
@@ -882,17 +900,22 @@ fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::E
     )?;
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
     let runner = smoke_runner(temp.path(), &home)?;
-    let error = crate::smoke::run_lifecycle(
+    let outcome = crate::smoke::run_lifecycle(
+        &provenant_os::clock::SystemClock::new(),
         &runner,
         &program,
         &state,
         &home,
         &smoke_upgrade(None, Vec::new()),
-    )
-    .expect_err("a failed smoke node must fail verification");
-    assert!(error.contains("\"node\":\"smoke/write\""), "{error}");
-    assert!(error.contains("\"node\":\"smoke/retry-probe\""), "{error}");
-    assert!(error.contains("\"node\":\"smoke/steer-probe\""), "{error}");
+    )?;
+    assert!(
+        matches!(&outcome.verdict, crate::smoke::SmokeVerdict::Failed { .. }),
+        "a failed smoke node must fail verification"
+    );
+    let text = outcome.text();
+    assert!(text.contains("\"node\":\"smoke/write\""), "{text}");
+    assert!(text.contains("\"node\":\"smoke/retry-probe\""), "{text}");
+    assert!(text.contains("\"node\":\"smoke/steer-probe\""), "{text}");
     Ok(())
 }
 
