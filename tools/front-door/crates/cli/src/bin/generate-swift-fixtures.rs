@@ -70,6 +70,28 @@ fn first_different_line(actual: &str, expected: &str) -> Option<usize> {
     unreachable!()
 }
 
+/// Every committed fixture whose bytes differ from its projection, with the
+/// first differing line, so one run names all drift rather than the first.
+fn drifted(fixtures: &[(&'static str, Value)], committed: &Path) -> Result<Vec<String>, String> {
+    let mut drifted = Vec::new();
+    for (name, value) in fixtures {
+        let mut expected =
+            serde_json::to_string_pretty(value).map_err(|error| format!("{name}: {error}"))?;
+        expected.push('\n');
+        let path = committed.join(format!("{name}.json"));
+        match std::fs::read_to_string(&path) {
+            Ok(actual) if actual == expected => {}
+            Ok(actual) => drifted.push(format!(
+                "{name} (first difference at line {})",
+                first_different_line(&actual, &expected)
+                    .map_or_else(|| "after final line".to_owned(), |line| line.to_string())
+            )),
+            Err(error) => drifted.push(format!("{name} ({error})")),
+        }
+    }
+    Ok(drifted)
+}
+
 fn main() -> Result<(), String> {
     let mut out: Option<PathBuf> = None;
     let mut check: Option<PathBuf> = None;
@@ -87,22 +109,7 @@ fn main() -> Result<(), String> {
 
     let fixtures = fixtures::all()?;
     if let Some(committed) = check {
-        let mut drifted = Vec::new();
-        for (name, value) in &fixtures {
-            let mut expected =
-                serde_json::to_string_pretty(value).map_err(|error| format!("{name}: {error}"))?;
-            expected.push('\n');
-            let path = committed.join(format!("{name}.json"));
-            match std::fs::read_to_string(&path) {
-                Ok(actual) if actual == expected => {}
-                Ok(actual) => drifted.push(format!(
-                    "{name} (first difference at line {})",
-                    first_different_line(&actual, &expected)
-                        .map_or_else(|| "after final line".to_owned(), |line| line.to_string())
-                )),
-                Err(error) => drifted.push(format!("{name} ({error})")),
-            }
-        }
+        let drifted = drifted(&fixtures, &committed)?;
         if !drifted.is_empty() {
             return Err(format!(
                 "Swift replay fixtures are stale: {}. Regenerate with: cd tools/front-door && cargo run -p provenant-cli --bin generate-swift-fixtures -- --out ../../apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures",
@@ -2221,17 +2228,18 @@ mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_fixtures, fixtures};
+    use super::{default_fixtures, drifted, fixtures};
 
     #[test]
     fn committed_fixtures_match_every_projected_byte() {
-        for (name, value) in fixtures::all().expect("synthetic fixtures") {
-            let mut expected = serde_json::to_string_pretty(&value).expect("fixture JSON");
-            expected.push('\n');
-            let actual = std::fs::read_to_string(default_fixtures().join(format!("{name}.json")))
-                .expect("committed fixture");
-            assert_eq!(actual, expected, "fixture {name} must match its projection");
-        }
+        let fixtures = fixtures::all().expect("synthetic fixtures");
+        let drifted = drifted(&fixtures, &default_fixtures()).expect("fixture JSON");
+        assert!(
+            drifted.is_empty(),
+            "committed fixtures must match their projections; drifted: {}. CI's \
+             `Check Swift replay fixtures` step prints the regeneration patch.",
+            drifted.join(", ")
+        );
     }
 
     #[test]

@@ -683,7 +683,7 @@
             "protected_paths": [],
             "queued_at": "2026-11-02T01:57:31.075623Z",
             "read_only_writable": [],
-            "reason": "the writer process state cannot be verified; run `provenant reconcile run-the-whole-test-suite/task#1` to inspect recovery before retrying",
+            "reason": "the writer process state cannot be verified; run `provenant reconcile run-the-whole-test-suite/task--writer#2` to inspect recovery before retrying",
             "recorded_state": "running",
             "requested_route": {
               "effort": "high",

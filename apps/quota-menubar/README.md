@@ -52,7 +52,10 @@ cd tools/front-door && cargo run -p provenant-cli --bin generate-swift-fixtures 
 ```
 
 `scripts/check-swift-fixtures` regenerates in memory from those same
-projections and fails on drift; CI runs it beside `swift test`. A change to a
+projections and fails on drift; CI runs it beside `swift test`. On drift it
+regenerates the fixtures and prints the exact patch to its log, so a change
+made without a local build applies that patch rather than editing fixture
+bytes by hand. A change to a
 console projection or a wire type therefore fails that check before the
 regenerated fixtures make the Swift decode tests fail until the decoders catch
 up. `Replay.fixture` names are the file names without `.json`, so keep those
