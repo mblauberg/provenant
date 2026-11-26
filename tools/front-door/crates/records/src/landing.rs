@@ -2,6 +2,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 /// Member identities remain numbers even when Serde buffers an internally tagged
 /// enum. JSON object keys would turn them into strings before the value is read.
 mod member_map {
@@ -85,6 +89,10 @@ pub struct LandRequest {
     pub members: Vec<LandMember>,
     pub authority: Authority,
     pub policy: PolicyChoice,
+    /// Queue submissions require fresh exact-head CI and a known-clean forge
+    /// mergeability observation at the final merge boundary.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub delivery_queue: bool,
     /// Root branch/ref all members in this request land against.
     pub target: Option<String>,
     pub dependency_edges: Vec<DependencyEdge>,
@@ -114,29 +122,55 @@ impl LandingId {
             head: &'a Option<String>,
             base: &'a Option<String>,
         }
-        #[derive(Serialize)]
-        struct Input<'a> {
-            repository: &'a str,
-            target: &'a str,
-            members: Vec<MemberPin<'a>>,
-            dependencies: &'a [DependencyEdge],
+        let members = request
+            .members
+            .iter()
+            .map(|member| MemberPin {
+                pr: member.pr,
+                head: &member.head,
+                base: &member.base,
+            })
+            .collect();
+        if request.delivery_queue {
+            #[derive(Serialize)]
+            struct DeliveryInput<'a> {
+                repository: &'a str,
+                target: &'a str,
+                delivery_queue: bool,
+                members: Vec<MemberPin<'a>>,
+                dependencies: &'a [DependencyEdge],
+            }
+            crate::CanonicalV1::record_digest(
+                "landing_request",
+                3,
+                &DeliveryInput {
+                    repository,
+                    target,
+                    delivery_queue: true,
+                    members,
+                    dependencies: &request.dependency_edges,
+                },
+            )
+        } else {
+            #[derive(Serialize)]
+            struct LegacyInput<'a> {
+                repository: &'a str,
+                target: &'a str,
+                members: Vec<MemberPin<'a>>,
+                dependencies: &'a [DependencyEdge],
+            }
+            crate::CanonicalV1::record_digest(
+                "landing_request",
+                2,
+                &LegacyInput {
+                    repository,
+                    target,
+                    members,
+                    dependencies: &request.dependency_edges,
+                },
+            )
         }
-        let input = Input {
-            repository,
-            target,
-            members: request
-                .members
-                .iter()
-                .map(|member| MemberPin {
-                    pr: member.pr,
-                    head: &member.head,
-                    base: &member.base,
-                })
-                .collect(),
-            dependencies: &request.dependency_edges,
-        };
-        crate::CanonicalV1::record_digest("landing_request", 2, &input)
-            .map_err(<serde_json::Error as serde::ser::Error>::custom)
+        .map_err(<serde_json::Error as serde::ser::Error>::custom)
     }
 
     pub fn of(
@@ -691,6 +725,9 @@ pub enum GateResult {
 pub struct CheckEvidence {
     pub name: String,
     pub issuer: Option<String>,
+    /// GitHub App ID that reported this status, when the forge supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<u64>,
     pub result: GateResult,
 }
 
@@ -928,6 +965,19 @@ mod tests {
             id,
             LandingId::of("repo", "main", &request(members.clone(), 1), "plan-a")?
         );
+        let mut queue = first.clone();
+        queue.delivery_queue = true;
+        assert_ne!(
+            id.request,
+            LandingId::of("repo", "main", &queue, "plan-a")?.request
+        );
+        assert!(
+            serde_json::to_value(&first)?
+                .get("delivery_queue")
+                .is_none()
+        );
+        let restored: LandRequest = serde_json::from_value(serde_json::to_value(&queue)?)?;
+        assert!(restored.delivery_queue);
         let changed_plan = LandingId::of("repo", "main", &first, "plan-b")?;
         assert_ne!(id, changed_plan);
         assert_eq!(id.request, changed_plan.request);

@@ -328,6 +328,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     service.execute(
         InboxInput::Answer {
             extra: Default::default(),
+                    queue_control: None,
             id: ask.id,
             action: AnswerAction::Choose,
             option_id: Some("accept".into()),

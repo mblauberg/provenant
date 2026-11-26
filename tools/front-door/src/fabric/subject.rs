@@ -456,6 +456,7 @@ impl Factory {
     pub(crate) fn admit_subject(
         &self,
         input: &Value,
+        writer_base_input: Option<&Value>,
         document: &GraphDocument,
         remote: bool,
         cancel: &CancelToken,
@@ -515,7 +516,7 @@ impl Factory {
         // A writer's base is resolved by role: explicit base, branch default,
         // named worktree HEAD, then no base at all. A missing base is advisory.
         let writer_base = resolve_writer_base(
-            input,
+            writer_base_input.unwrap_or(input),
             &self.context.project_root,
             &self.cwd,
             self.context.roots.state.as_path(),

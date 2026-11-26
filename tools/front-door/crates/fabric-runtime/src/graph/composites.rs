@@ -136,9 +136,13 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
                 Some(SourceBinding::Head { node }) => bind(node, &writer_aliases),
                 Some(SourceBinding::Node { node: target }) => {
                     if let Some(writer) = result_aliases.get(target) {
+                        // The exported writer is usable only after its boundary settles,
+                        // including for nested consumers with their own local edges.
+                        if !node.depends_on.contains(target) {
+                            node.after_settled.retain(|parent| parent != target);
+                            node.depends_on.push(target.clone());
+                        }
                         *target = writer.clone();
-                        // Keep the composite dependency as its settlement gate,
-                        // and retain the direct edge required by a Node source.
                         if !node.depends_on.contains(writer) {
                             node.depends_on.push(writer.clone());
                         }
@@ -152,10 +156,16 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
             if let Some(land) = &mut node.land {
                 bind(&mut land.node, &writer_aliases);
             }
-            if let Some(GateCondition::Ci {
-                target: CiTarget::Node { node, .. },
-                ..
-            }) = &mut node.condition
+            if let Some(
+                GateCondition::Ci {
+                    target: CiTarget::Node { node, .. },
+                    ..
+                }
+                | GateCondition::Conflict {
+                    target: CiTarget::Node { node, .. },
+                    ..
+                },
+            ) = &mut node.condition
             {
                 bind(node, &writer_aliases);
             }
@@ -260,10 +270,26 @@ fn children(
             ));
         }
         for parent in &mut node.depends_on {
-            *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
+            *parent = reference(prefix, parent, &locals, incoming)
+                .or_else(|| {
+                    if prefix.is_empty() {
+                        visible_names.get(parent.as_str()).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or("dependency")?;
         }
         for parent in &mut node.after_settled {
-            *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
+            *parent = reference(prefix, parent, &locals, incoming)
+                .or_else(|| {
+                    if prefix.is_empty() {
+                        visible_names.get(parent.as_str()).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or("dependency")?;
         }
         for input in &mut node.inputs {
             if !input.node.starts_with("previous.") {
@@ -286,6 +312,7 @@ fn children(
             && !source.starts_with("previous.")
         {
             *source = reference(prefix, source, &locals, incoming)
+                .or_else(|| visible_names.get(source).cloned())
                 .unwrap_or_else(|| scoped(prefix, source));
         }
         if let Some(SourceBinding::Head { node: writer }) = &mut node.source {
@@ -294,16 +321,46 @@ fn children(
                 .cloned()
                 .unwrap_or_else(|| writer.clone());
         }
-        if let Some(GateCondition::Ci {
-            target: CiTarget::Node { node: target, .. },
-            ..
-        }) = &mut node.condition
+        if let Some(
+            GateCondition::Ci {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            }
+            | GateCondition::Conflict {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            },
+        ) = &mut node.condition
             && !target.starts_with("previous.")
         {
             *target = visible_names
                 .get(target)
                 .cloned()
                 .unwrap_or_else(|| target.clone());
+        }
+        if let Some(loop_spec) = &mut node.loop_body {
+            for initial in loop_spec.previous_bindings.values_mut() {
+                let target = initial.clone();
+                *initial = reference(prefix, &target, &locals, incoming)
+                    .or_else(|| visible_names.get(&target).cloned())
+                    .ok_or("loop previous binding")?;
+            }
+            if let Some(initial) = &mut loop_spec.initial_publication {
+                let target = initial.clone();
+                *initial = reference(prefix, &target, &locals, incoming)
+                    .or_else(|| visible_names.get(&target).cloned())
+                    .ok_or("loop initial publication")?;
+            }
+        }
+        if let Some(edge) = node
+            .loop_body
+            .as_mut()
+            .and_then(|spec| spec.outcome_edge.as_mut())
+        {
+            let target = edge.node.clone();
+            edge.node = reference(prefix, &target, &locals, incoming)
+                .or_else(|| visible_names.get(&target).cloned())
+                .unwrap_or_else(|| scoped(prefix, &target));
         }
         // A continued or landed writer may sit inside or outside the composite.
         for writer in node
@@ -396,12 +453,13 @@ fn children(
                 }
                 if child.loop_body.is_some()
                     || child.kind == Some(NodeKind::Loop)
-                    || child.on_fail.is_some()
                     || child.delivery.as_ref().is_some_and(|mode| {
                         !matches!(mode, provenant_records::run::DeliveryMode::Integrate(_))
                     })
                 {
-                    return Err("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into());
+                    return Err(
+                        "loop body cannot nest loops and may only deliver by integrate:".into(),
+                    );
                 }
             }
             spec.body = children(
@@ -552,6 +610,9 @@ fn outputs(
         result: None,
         verdict: None,
         verdict_error: None,
+        hygiene: None,
+        publication: None,
+        handoff: None,
         findings: Vec::new(),
         findings_available: None,
         branch: None,
@@ -1334,14 +1395,23 @@ fn state(
                 NodeState::Pending
             };
         }
-        if !node
-            .composite
-            .as_ref()
-            .is_some_and(|spec| spec.reduce_verdict)
-            && members
-                .iter()
-                .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))
-        {
+        let skipped_non_export = node.composite.as_ref().is_some_and(|spec| {
+            !spec.reduce_verdict
+                && node
+                    .composite_members
+                    .iter()
+                    .zip(&members)
+                    .any(|(member, state)| {
+                        matches!(state, NodeState::Blocked | NodeState::Skipped)
+                            && (*state == NodeState::Blocked
+                                || spec.min_successful.is_none()
+                                || !spec
+                                    .exports
+                                    .iter()
+                                    .any(|export| export.node.as_str() == member.as_str()))
+                    })
+        });
+        if skipped_non_export {
             return NodeState::Blocked;
         }
         // A review group can still produce a useful degraded receipt when no

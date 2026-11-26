@@ -1536,6 +1536,7 @@ mod tests {
             crate::pr::observer::Check {
                 head: "old-head".into(),
                 name: "x".repeat(700),
+                job_id: None,
                 bucket: "pass".into(),
                 app: None,
                 app_slug: None,
@@ -1633,6 +1634,7 @@ mod tests {
                 crate::pr::observer::Check {
                     head: "abc".into(),
                     name: "x".repeat(700),
+                    job_id: None,
                     bucket: "fail".into(),
                     app: None,
                     app_slug: None,

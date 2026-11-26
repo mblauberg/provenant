@@ -4,6 +4,38 @@ use provenant_fabric_runtime::graph::{
     GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
 };
 
+// Spec: docs/specs/delivery-queue.md#queue-and-controls
+#[test]
+fn status_projects_recorded_delivery_progress_into_the_digest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut value = serde_json::to_value(checkpoint("g"))?;
+    let node = &mut value["nodes"][0];
+    let key = json!({"graph_id":"g","node_id":"parent","attempt":1,"route_index":0});
+    node["delivery_loop"] = json!({"name":"repair","round":2,"last_attempt":key});
+    node["escalation"] = json!({"rung":1,"cause":"ci_red","transition_attempt":key});
+    node["delivery_park"] = json!({"transition_id":"p1","operation_id":"p1",
+        "item":"issue-42","attempt_key":key,"attempt_ref":null,"reason":"ci_unavailable",
+        "handoff":"inspect checks","head":"abc123","evidence":[],"request_id":null});
+    let checkpoint: GraphCheckpoint = serde_json::from_value(value)?;
+    let target = GraphTarget {
+        graph: "g".into(),
+        node: None,
+        attempt: None,
+    };
+    let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
+    super::status_keys(&mut rows, provenant_core::ProjectId::from_bytes([3; 16]))?;
+    let digests = super::super::graph_status::node_digests(&rows);
+    let digest = digests
+        .iter()
+        .find(|digest| digest.item.as_deref() == Some("issue-42"))
+        .expect("parked item is projected");
+    assert_eq!(digest.delivery_loop["round"], 2);
+    assert_eq!(digest.escalation["rung"], 1);
+    assert_eq!(digest.delivery_park["handoff"], "inspect checks");
+    assert!(digest.line.contains("head=abc123/recorded"));
+    Ok(())
+}
+
 // Spec: docs/specs/cli.md#status-selection
 #[test]
 fn full_status_liveness_detail_names_event_source_directory_command_and_wait() {
@@ -737,35 +769,30 @@ fn the_listing_never_hides_active_work_and_counts_what_it_omits() {
 }
 
 fn digest(presence: Option<&str>) -> super::super::graph_status::NodeDigest {
-    super::super::graph_status::NodeDigest {
-        key: provenant_records::WorkKey::new(
-            provenant_core::ProjectId::from_bytes([7; 16]),
-            "g",
-            "n",
-            1,
-        )
-        .expect("valid work key"),
-        outcome: "running".into(),
-        cause: None,
-        branch: None,
-        pr: json!({"state":"unknown","reference":null}),
-        ci: json!({"state":"unavailable"}),
-        result_path: None,
-        provider_error: None,
-        review_verdict: None,
-        findings_count: None,
-        findings_available: None,
-        review_partial: None,
-        attempt_state: Some("running".into()),
-        attempt_presence: presence.map(str::to_owned),
-        stalled: false,
-        last_event_at: None,
-        line: "  n: running".into(),
-        state: "running".into(),
-        settled: false,
-        handoff_status: None,
-        open_asks: Vec::new(),
-        evidence_error: None,
+    let key = provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([7; 16]),
+        "g",
+        "n",
+        1,
+    )
+    .expect("valid work key");
+    let rows = vec![
+        json!({"kind":"node", "work_key":key, "state":"running"}),
+        json!({"kind":"attempt", "work_key":key, "state":"running", "presence":presence}),
+    ];
+    super::super::graph_status::node_digests(&rows)
+        .into_iter()
+        .next()
+        .expect("fixture projects a node digest")
+}
+
+#[test]
+fn listing_digest_fixture_projects_attempt_presence() {
+    for presence in ["live", "unattended"] {
+        let digest = digest(Some(presence));
+        assert_eq!(digest.attempt_presence.as_deref(), Some(presence));
+        assert!(digest.delivery_loop.is_null());
+        assert!(digest.delivery_park.is_null());
     }
 }
 

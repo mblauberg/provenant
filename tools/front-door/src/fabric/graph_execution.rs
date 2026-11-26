@@ -37,6 +37,72 @@ impl super::Factory {
 use super::*;
 use serde_json::Value;
 
+/// The host must hold exclusive writer custody for this entire transaction.
+pub(super) trait HygieneTransaction {
+    /// Return the exact committed formatter head if a prior invocation of this
+    /// persisted operation already committed and the worktree is still clean.
+    fn reconcile_commit(&mut self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    fn head(&mut self) -> Result<String, String>;
+    /// Includes staged, unstaged and untracked paths, without touching them.
+    fn has_edits(&mut self) -> Result<bool, String>;
+    fn format(&mut self) -> Result<(), String>;
+    /// Commit only the formatter's changes, checking the head and custody again.
+    fn commit_format(&mut self, expected_head: &str) -> Result<(), String>;
+}
+
+/// Run hygiene while preserving the attempt's input head and its handoff.
+/// The diagnostic is separate from the handoff so an operational failure
+/// cannot erase the writer's retained instructions.
+pub(super) fn run_hygiene(
+    transaction: &mut impl HygieneTransaction,
+    input_head: &str,
+    expected_head: &str,
+    handoff: Option<String>,
+) -> (provenant_records::graph::HygieneOutcome, Option<String>) {
+    use provenant_records::graph::{HygieneOutcome, HygieneOutcomeKind};
+
+    let mut outcome = HygieneOutcome {
+        kind: HygieneOutcomeKind::Error,
+        before_head: Some(input_head.to_owned()),
+        after_head: None,
+        handoff,
+    };
+    let result = (|| {
+        if let Some(reconciled_head) = transaction.reconcile_commit()? {
+            outcome.before_head = Some(expected_head.to_owned());
+            outcome.after_head = Some(reconciled_head);
+            outcome.kind = HygieneOutcomeKind::Clean;
+            return Ok(());
+        }
+        let writer_head = transaction.head()?;
+        outcome.before_head = Some(writer_head.clone());
+        outcome.after_head = Some(writer_head.clone());
+        if writer_head != expected_head {
+            return Err("retained writer head changed after its attempt settled".into());
+        }
+        if transaction.has_edits()? {
+            outcome.kind = HygieneOutcomeKind::UncommittedEdits;
+        } else if writer_head == input_head {
+            outcome.kind = HygieneOutcomeKind::NoCommit;
+        } else {
+            transaction.format()?;
+            if transaction.has_edits()? {
+                transaction.commit_format(&writer_head)?;
+                let formatted_head = transaction.head()?;
+                outcome.after_head = Some(formatted_head.clone());
+                if formatted_head == writer_head || transaction.has_edits()? {
+                    return Err("formatter commit did not leave a clean new head".into());
+                }
+            }
+            outcome.kind = HygieneOutcomeKind::Clean;
+        }
+        Ok::<(), String>(())
+    })();
+    (outcome, result.err())
+}
+
 /// The effective writer-dirty setting and the layer that set it, read once at
 /// graph submission. An unreadable host config is advisory: warn and use the
 /// compiled default (`wip_commit`) rather than refusing to observe the setting.
@@ -605,7 +671,7 @@ pub(crate) fn tick_graphs(
     workers: &'static dyn WorkerObserver,
 ) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
     use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
-    let mut report = crate::tick::Graphs::default();
+    let mut report = super::queue_scheduler::reconcile_controls_before_tick(resolved, workers);
     for binding in provenant_config::registered_projects(&resolved.roots)? {
         let project = binding.project_id();
         let ids = match FileJournal::pending_graph_ids(&resolved.roots.state, project) {
@@ -728,11 +794,23 @@ pub(crate) fn tick_graphs(
                     backoff: ThreadPause,
                     executor: SystemExecutor::new(4)?,
                     home: resolved.home.clone(),
-                    cwd: execution.directory,
+                    cwd: execution.directory.clone(),
                     assets: resolved.assets.clone(),
                     host_launch: None,
                     workers,
                 };
+                let (admitted, warnings, waiting) = super::queue_scheduler::admit_graph_tick(
+                    &factory,
+                    &id,
+                    &execution,
+                    &checkpoint,
+                )
+                .map_err(std::io::Error::other)?;
+                report.warnings.extend(warnings);
+                report.warnings.extend(waiting);
+                if !admitted {
+                    return Ok(false);
+                }
                 report
                     .warnings
                     .extend(super::steer::dispatch_pending_steers(
@@ -793,6 +871,10 @@ pub(crate) fn tick_graphs(
             }
         }
     }
+    let queue_report = super::queue_scheduler::tick_queues(resolved, now, workers);
+    report.advanced += queue_report.advanced;
+    report.errors.extend(queue_report.errors);
+    report.warnings.extend(queue_report.warnings);
     Ok(report)
 }
 
@@ -1031,6 +1113,7 @@ impl Factory {
             announce,
             None,
             None,
+            None,
         )
     }
 
@@ -1051,14 +1134,15 @@ impl Factory {
             None,
             None,
             Some((target, request)),
+            None,
         )
     }
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "submission replay disposition is separate from graph advancement"
+        reason = "submission replay disposition and queue launch custody are separate from advancement"
     )]
-    pub(crate) fn graph_launch_result(
+    pub(super) fn graph_launch_result(
         &self,
         input: GraphInput,
         budget: WaitBudget,
@@ -1068,6 +1152,7 @@ impl Factory {
         announce: Option<Announce<'_>>,
         replayed: Option<&mut bool>,
         retry: Option<(&mut super::unified::GraphTarget, &Value)>,
+        queue_launch: Option<&super::queue_registry::AuthorisedQueueLaunch>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         let facts = provenant_confinement::worktrees::RepoFacts::default();
         use provenant_fabric_runtime::coordination::input::ValidateInput;
@@ -1265,6 +1350,8 @@ impl Factory {
                     bases: None,
                     subject: None,
                     extra: Default::default(),
+                    delivery_queue_controls: None,
+                    delivery_ci_superseded: Vec::new(),
                     expansions: Vec::new(),
                     remaining: None,
                     instance_id: None,
@@ -1477,13 +1564,33 @@ impl Factory {
             .map_err(|_| FacadeError::io("access graph journal"))?
         };
         if let Some(document) = &document {
+            let mut checkpoint = journal.load(id).map_err(graph_journal_error)?;
+            if let Some(authorised) = queue_launch {
+                if authorised.item.graph_id.as_str() != id {
+                    return Err(FacadeError::Conflict);
+                }
+                let execution_directory = self.cwd.to_string_lossy();
+                let registry =
+                    super::queue_registry::QueueRegistry::open(self.context.roots.state.as_path())
+                        .map_err(|_| FacadeError::Conflict)?;
+                registry
+                    .revalidate_launch(
+                        authorised,
+                        &self.context.identity.project.to_string(),
+                        execution_directory.as_ref(),
+                        checkpoint.is_some(),
+                        budget,
+                        cancel,
+                        &self.clock,
+                    )
+                    .map_err(|_| FacadeError::Conflict)?;
+            }
             // GC and admission hold this graph's lock. If collection removed
             // the source after it was read, restore the exact bytes before
             // publishing a new pending checkpoint or launching a node.
             if let Some((directory, name, bytes)) = &scratch_source {
                 restore_scratch_source(directory, name, bytes)?;
             }
-            let mut checkpoint = journal.load(id).map_err(graph_journal_error)?;
             let existing = checkpoint.is_some();
             let bound_execution = if existing {
                 Some(
@@ -1508,6 +1615,28 @@ impl Factory {
             } else {
                 document
             };
+            if resume
+                && bound_execution
+                    .as_ref()
+                    .is_some_and(|bound| bound.document.queue.is_some())
+            {
+                let pending_control = checkpoint
+                    .as_ref()
+                    .map(super::queue_controls::checkpoint_has_pending_control)
+                    .transpose()?
+                    .unwrap_or(false);
+                if pending_control
+                    && !retry.as_ref().is_some_and(|(_, request)| {
+                        request.get("queue_control").is_some()
+                            || request.get("queue_accept_retry").is_some()
+                    })
+                {
+                    return Err(FacadeError::Busy);
+                }
+                if !super::queue_controls::reserve_control_capacity(self, id, budget, cancel)? {
+                    return Err(FacadeError::Busy);
+                }
+            }
             let extensions = match &input {
                 GraphInput::Resume { extend, .. } => extend.as_slice(),
                 _ => &[],
@@ -1540,11 +1669,12 @@ impl Factory {
             let mut retry_changed = false;
             if let Some((target, request)) = retry {
                 let brief_given = request.get("brief").is_some_and(|v| !v.is_null());
-                self.prepare_retry(
+                self.prepare_retry_with_journal(
                     target,
                     request,
                     document,
                     checkpoint.as_mut().ok_or(FacadeError::NotFound)?,
+                    &mut journal,
                 )?;
                 // Read the target after preparation: a settled one-node graph
                 // infers its node there, and that retry must be staged as a
@@ -2116,6 +2246,130 @@ pub(super) fn graph_operation(
 )]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct HygieneFixture {
+        head: String,
+        tracked: bool,
+        untracked: bool,
+        format_changes: bool,
+        format_fails: bool,
+        commit_fails: bool,
+        formats: usize,
+        commits: usize,
+        reconciled: Option<String>,
+    }
+
+    impl HygieneTransaction for HygieneFixture {
+        fn reconcile_commit(&mut self) -> Result<Option<String>, String> {
+            Ok(self.reconciled.take())
+        }
+
+        fn head(&mut self) -> Result<String, String> {
+            Ok(self.head.clone())
+        }
+
+        fn has_edits(&mut self) -> Result<bool, String> {
+            Ok(self.tracked || self.untracked)
+        }
+
+        fn format(&mut self) -> Result<(), String> {
+            self.formats += 1;
+            if self.format_fails {
+                return Err("formatter failed".into());
+            }
+            self.tracked = self.format_changes;
+            Ok(())
+        }
+
+        fn commit_format(&mut self, expected_head: &str) -> Result<(), String> {
+            assert_eq!(self.head, expected_head);
+            self.commits += 1;
+            if self.commit_fails {
+                return Err("commit failed".into());
+            }
+            self.tracked = false;
+            self.head = "formatted".into();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hygiene_preserves_the_attempt_handoff_and_commits_formatter_changes() {
+        use provenant_records::graph::HygieneOutcomeKind;
+        let mut fixture = HygieneFixture {
+            head: "writer".into(),
+            format_changes: true,
+            ..Default::default()
+        };
+        let (outcome, diagnostic) =
+            run_hygiene(&mut fixture, "input", "writer", Some("handoff".into()));
+        assert_eq!(outcome.kind, HygieneOutcomeKind::Clean);
+        assert_eq!(outcome.before_head.as_deref(), Some("writer"));
+        assert_eq!(outcome.after_head.as_deref(), Some("formatted"));
+        assert_eq!(outcome.handoff.as_deref(), Some("handoff"));
+        assert_eq!((fixture.formats, fixture.commits), (1, 1));
+        assert!(diagnostic.is_none());
+    }
+
+    #[test]
+    fn hygiene_refuses_writer_edits_and_compares_the_attempt_heads() {
+        use provenant_records::graph::HygieneOutcomeKind;
+        for (tracked, untracked) in [(true, false), (false, true)] {
+            let mut fixture = HygieneFixture {
+                head: "input".into(),
+                tracked,
+                untracked,
+                ..Default::default()
+            };
+            let (outcome, _) = run_hygiene(&mut fixture, "input", "input", None);
+            assert_eq!(outcome.kind, HygieneOutcomeKind::UncommittedEdits);
+            assert_eq!((fixture.formats, fixture.commits), (0, 0));
+        }
+        let mut fixture = HygieneFixture {
+            head: "input".into(),
+            ..Default::default()
+        };
+        let (outcome, _) = run_hygiene(&mut fixture, "input", "input", None);
+        assert_eq!(outcome.kind, HygieneOutcomeKind::NoCommit);
+        assert_eq!((fixture.formats, fixture.commits), (0, 0));
+    }
+
+    #[test]
+    fn hygiene_reports_formatter_and_commit_failures_without_losing_handoff() {
+        use provenant_records::graph::HygieneOutcomeKind;
+        for format_fails in [true, false] {
+            let mut fixture = HygieneFixture {
+                head: "writer".into(),
+                format_changes: true,
+                format_fails,
+                commit_fails: !format_fails,
+                ..Default::default()
+            };
+            let (outcome, diagnostic) =
+                run_hygiene(&mut fixture, "input", "writer", Some("retain".into()));
+            assert_eq!(outcome.kind, HygieneOutcomeKind::Error);
+            assert_eq!(outcome.after_head.as_deref(), Some("writer"));
+            assert_eq!(outcome.handoff.as_deref(), Some("retain"));
+            assert!(diagnostic.is_some());
+        }
+    }
+
+    #[test]
+    fn hygiene_replays_a_committed_operation_without_formatting_again() {
+        use provenant_records::graph::HygieneOutcomeKind;
+        let mut fixture = HygieneFixture {
+            head: "formatted".into(),
+            reconciled: Some("formatted".into()),
+            ..Default::default()
+        };
+        let (outcome, diagnostic) = run_hygiene(&mut fixture, "input", "writer", None);
+        assert_eq!(outcome.kind, HygieneOutcomeKind::Clean);
+        assert_eq!(outcome.before_head.as_deref(), Some("writer"));
+        assert_eq!(outcome.after_head.as_deref(), Some("formatted"));
+        assert_eq!((fixture.formats, fixture.commits), (0, 0));
+        assert!(diagnostic.is_none());
+    }
 
     // A real launch-time submission preflight, not just target lowering: the
     // reused checkout is held by an unsettled attempt's writer reservation, so

@@ -1,5 +1,21 @@
 include!("interface_implement_invariants.rs");
 #[test]
+fn route_overrides_skip_host_owned_delivery_nodes() {
+    use provenant_fabric_runtime::graph::GraphNode;
+    let choice = super::RouteChoice::parse(&json!("writer=junior")).unwrap();
+    for kind in ["hygiene", "publish"] {
+        let mut node: GraphNode = serde_json::from_value(json!({
+            "id":kind, "kind":kind, "access":"worktree_write", "worktree":"retained"
+        }))
+        .unwrap();
+        super::override_tier(&mut node, &choice);
+        super::override_launch(&mut node, &json!({"model":"openai/gpt-5"})).unwrap();
+        assert!(node.route.is_none());
+        assert!(node.routes.is_none());
+    }
+}
+
+#[test]
 fn tier_override_preserves_leaf_family_constraints() {
     use provenant_fabric_runtime::graph::GraphNode;
     let override_route = super::RouteChoice::Alias("senior".into());
@@ -795,7 +811,7 @@ fn tightened_retry_limit_preserves_the_checkpoint_envelope() -> Result {
     let mut target = factory
         .graph_target("g-test/reader")?
         .ok_or("retry target")?;
-    factory.prepare_retry(&mut target, &request, &document, &mut staged)?;
+    factory.prepare_retry_inner(&mut target, &request, &document, &mut staged, None)?;
     provenant_fabric_runtime::graph::admit_candidate(
         &document,
         Some(&staged),
@@ -2229,7 +2245,7 @@ fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> 
     let launch = || {
         barrier.wait();
         provenant_cli::run::with_deferred_provider_launch(|| {
-            factory.launch_submission(document.clone(), &json!({}), budget, &cancel, None)
+            factory.launch_submission(document.clone(), &json!({}), None, budget, &cancel, None)
         })
     };
     let results = std::thread::scope(|scope| {
@@ -2262,8 +2278,14 @@ fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> 
     )?
     .ok_or("checkpoint")?;
     assert_eq!(saved.nodes[0].attempts.len(), 1);
-    let replay =
-        factory.launch_submission(document, &json!({"wait_seconds":30}), budget, &cancel, None)?;
+    let replay = factory.launch_submission(
+        document,
+        &json!({"wait_seconds":30}),
+        None,
+        budget,
+        &cancel,
+        None,
+    )?;
     assert_eq!(replay["replayed"], true);
     assert_eq!(replay["timed_out"], false);
     let after = FileJournal::read_checkpoint(

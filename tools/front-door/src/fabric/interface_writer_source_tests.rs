@@ -246,7 +246,7 @@ fn admitted_subject_records_the_resolved_origin() -> Result {
     let document: provenant_fabric_runtime::graph::GraphDocument = serde_json::from_value(json!({
         "schema_version":2, "graph_id":"subject-origin", "nodes":[]
     }))?;
-    let resolved = factory.admit_subject(&json!({"op":"run"}), &document, false, &cancel)?;
+    let resolved = factory.admit_subject(&json!({"op":"run"}), None, &document, false, &cancel)?;
     let subject = resolved.subject.ok_or("an admitted graph has a subject")?;
     assert_eq!(subject.head.to_string(), head);
     assert!(matches!(

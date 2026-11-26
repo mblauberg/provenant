@@ -116,6 +116,14 @@ struct FakeOwner {
     fallback_custody_pending: bool,
     fail_fallback_evidence: bool,
     fallback_cause: Option<provenant_records::RouteExclusionReason>,
+    hygiene_outcomes: VecDeque<provenant_records::graph::HygieneOutcome>,
+    hygiene_calls: usize,
+    hygiene_requests: Vec<(String, String, String)>,
+    publication_receipts: VecDeque<DeliveryPublication>,
+    publication_calls: usize,
+    publication_requests: Vec<(String, String, String, Option<String>)>,
+    park_calls: Vec<String>,
+    park_receipt: Option<provenant_core::HumanRequestId>,
 }
 
 /// An inbox reply from `chair`, choosing `option` or sending `text`.
@@ -303,6 +311,47 @@ impl AttemptOwner for FakeOwner {
     }
     fn actor(&self) -> String {
         self.actor.clone()
+    }
+    fn run_hygiene(
+        &mut self,
+        request: HygieneRequest<'_>,
+    ) -> Result<HygieneExecution, Self::Error> {
+        self.hygiene_calls += 1;
+        self.hygiene_requests.push((
+            request.operation_id.to_owned(),
+            request.input_head.to_owned(),
+            request.expected_head.to_owned(),
+        ));
+        let outcome = self.hygiene_outcomes.pop_front().ok_or(NoObservation)?;
+        Ok(HygieneExecution {
+            outcome,
+            branch: Some("retained-branch".into()),
+            formatter_source: Some("repository".into()),
+            diagnostic: None,
+        })
+    }
+    fn publish_delivery(
+        &mut self,
+        request: PublicationRequest<'_>,
+    ) -> Result<Option<DeliveryPublication>, Self::Error> {
+        self.publication_calls += 1;
+        self.publication_requests.push((
+            request.operation_id.to_owned(),
+            request.expected_head.to_owned(),
+            request.source_branch.to_owned(),
+            request.expected_remote_head.map(str::to_owned),
+        ));
+        self.publication_receipts
+            .pop_front()
+            .map(Some)
+            .ok_or(NoObservation)
+    }
+    fn park_delivery(
+        &mut self,
+        request: DeliveryParkRequest<'_>,
+    ) -> Result<Option<provenant_core::HumanRequestId>, Self::Error> {
+        self.park_calls.push(request.operation_id.to_owned());
+        Ok(self.park_receipt)
     }
     fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
         let id = &filing.ask.ask_id;
@@ -576,8 +625,33 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
     }
 }
 
+#[test]
+fn ci_admission_wait_retains_bounded_deadline_across_restart() {
+    let mut document = graph(Vec::new());
+    document.queue_ci_wait = Some(provenant_records::Sourced {
+        value: 55,
+        source: provenant_records::Source {
+            layer: provenant_records::Layer::Default,
+            origin: None,
+        },
+    });
+    let now = provenant_core::WallTime::from_micros(10_000_000).unwrap();
+    let wait = start_delivery_ci_wait::<FakeOwner, MemoryJournal>(&document, "publish", Some(now))
+        .unwrap();
+    let restored: DeliveryCiAdmissionWait =
+        serde_json::from_value(serde_json::to_value(&wait).unwrap()).unwrap();
+    assert_eq!(restored.deadline.as_micros(), 65_000_000);
+    let before = provenant_core::WallTime::from_micros(64_500_000).unwrap();
+    let wake = delivery_ci_wait_retry_at(&restored, before);
+    assert_eq!(wake, restored.deadline);
+    assert!(!delivery_ci_wait_expired(&restored, Some(before)));
+    assert!(delivery_ci_wait_expired(&restored, Some(wake)));
+}
+
 fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        queue_ci_wait: None,
+        queue: None,
         review: None,
         subject: None,
         exclude: Vec::new(),

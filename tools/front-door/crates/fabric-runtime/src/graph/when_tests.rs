@@ -45,6 +45,7 @@ fn compile(
 
 fn document(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        queue_ci_wait: None,
         review: None,
         subject: None,
         graph_id: "when".into(),
