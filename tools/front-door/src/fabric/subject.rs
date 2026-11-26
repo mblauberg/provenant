@@ -2,7 +2,7 @@
 //!
 //! A review, a read-only graph and a writer each resolve their subject here;
 //! nothing downstream re-reads a ref or re-resolves a source for this graph.
-use super::interface::{read_source_choice, writer_base_choice};
+use super::source_policy::{read_source_choice, writer_base_choice};
 use super::*;
 use crate::pr::observer::Observer;
 use provenant_cli::run::{

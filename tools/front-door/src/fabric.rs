@@ -7,6 +7,7 @@ mod interface;
 #[cfg(test)]
 mod lane_read_tests;
 mod refusal_detail;
+mod source_policy;
 mod subject;
 pub(crate) mod unified;
 pub(crate) use unified::{

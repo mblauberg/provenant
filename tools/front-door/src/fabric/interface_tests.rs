@@ -3183,15 +3183,17 @@ fn writer_base_knob_resolves_the_sole_remote_and_launch_base_wins() -> Result {
 #[test]
 fn writer_base_value_reads_both_toml_shapes() {
     assert_eq!(
-        super::writer_base_value("[knobs]\n'lanes.writer_base'='checkout'\n"),
+        super::super::source_policy::writer_base_value("[knobs]\n'lanes.writer_base'='checkout'\n"),
         Some("checkout".to_owned())
     );
     assert_eq!(
-        super::writer_base_value("[knobs.lanes]\nwriter_base='refs/heads/topic'\n"),
+        super::super::source_policy::writer_base_value(
+            "[knobs.lanes]\nwriter_base='refs/heads/topic'\n"
+        ),
         Some("refs/heads/topic".to_owned())
     );
     assert_eq!(
-        super::writer_base_value("[knobs]\nlanes.read_source='auto'\n"),
+        super::super::source_policy::writer_base_value("[knobs]\nlanes.read_source='auto'\n"),
         None
     );
 }
