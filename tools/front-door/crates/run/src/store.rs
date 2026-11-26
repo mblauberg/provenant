@@ -1323,13 +1323,13 @@ impl RunStore {
             .unwrap_or_default();
         let refusal_result = provenant_core::bounded_line(&raw_refusal, 256);
         use provenant_records::settlement::{
-            CustodyFacts, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
+            CustodyFacts, HostFacts, IdentityEvidence, IdentityPolicyEffect, LaneRole,
             SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence, classify::settle,
         };
         let evidence = SettlementEvidence {
             schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
             lane: LaneRole::Reader,
-            host: HostVerdict {
+            host: HostFacts {
                 outcome,
                 cause: cause,
                 complete: true,
@@ -1942,14 +1942,14 @@ impl RunStore {
         };
         let revision = old.revision;
         use provenant_records::settlement::{
-            CustodyFacts, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
+            CustodyFacts, HostFacts, IdentityEvidence, IdentityPolicyEffect, LaneRole,
             SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence, classify::settle,
         };
         let bounded_reason = provenant_core::bounded_line(reason, 4096);
         let evidence = SettlementEvidence {
             schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
             lane: LaneRole::Reader,
-            host: HostVerdict {
+            host: HostFacts {
                 outcome: Outcome::Cancelled,
                 cause: None,
                 complete: true,

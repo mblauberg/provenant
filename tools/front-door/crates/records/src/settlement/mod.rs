@@ -21,7 +21,7 @@ pub const SETTLEMENT_EVIDENCE_SCHEMA: u64 = 1;
 pub struct SettlementEvidence {
     pub schema_version: u64,
     pub lane: LaneRole,
-    pub host: HostVerdict,
+    pub host: HostFacts,
     pub handoff: DeclarationEvidence,
     /// Every declaration line, not just the one that settled the lane.
     #[serde(default)]
@@ -53,7 +53,7 @@ pub enum LaneRole {
 /// The holder's host phase result, before settlement classification.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct HostVerdict {
+pub struct HostFacts {
     pub outcome: Outcome,
     pub cause: Option<CauseKind>,
     pub complete: bool,
@@ -170,7 +170,7 @@ impl SettlementEvidence {
         Self {
             schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
             lane,
-            host: HostVerdict {
+            host: HostFacts {
                 outcome,
                 cause,
                 complete: true,

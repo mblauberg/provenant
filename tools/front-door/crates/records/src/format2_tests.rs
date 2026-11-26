@@ -405,13 +405,13 @@ fn evidence_for(
     cause: Option<crate::run::CauseKind>,
 ) -> crate::settlement::SettlementEvidence {
     use crate::settlement::{
-        CustodyFacts, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
+        CustodyFacts, HostFacts, IdentityEvidence, IdentityPolicyEffect, LaneRole,
         SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
     };
     SettlementEvidence {
         schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
         lane: LaneRole::ModelWriter,
-        host: HostVerdict {
+        host: HostFacts {
             outcome,
             cause,
             complete: true,

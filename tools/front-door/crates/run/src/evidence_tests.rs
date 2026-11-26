@@ -7,7 +7,7 @@ use provenant_records::{
     declaration::DeclarationEvidence,
     run::Outcome,
     settlement::{
-        CustodyFacts, GitEvidence, HostVerdict, IdentityEvidence, IdentityPolicyEffect, LaneRole,
+        CustodyFacts, GitEvidence, HostFacts, IdentityEvidence, IdentityPolicyEffect, LaneRole,
         PrimaryCheckout, HeadProgress, SETTLEMENT_EVIDENCE_SCHEMA,
     },
 };
@@ -22,7 +22,7 @@ fn evidence(pinned: Option<GitOid>, head: Option<GitOid>) -> SettlementEvidence 
     SettlementEvidence {
         schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
         lane: LaneRole::ModelWriter,
-        host: HostVerdict {
+        host: HostFacts {
             outcome: Outcome::Succeeded,
             cause: None,
             complete: true,

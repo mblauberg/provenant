@@ -3761,7 +3761,7 @@ impl RunStore {
         let evidence = provenant_records::settlement::SettlementEvidence {
             schema_version: provenant_records::settlement::SETTLEMENT_EVIDENCE_SCHEMA,
             lane,
-            host: provenant_records::settlement::HostVerdict {
+            host: provenant_records::settlement::HostFacts {
                 outcome: decoded.outcome,
                 cause: decoded.cause,
                 complete: decoded.complete,

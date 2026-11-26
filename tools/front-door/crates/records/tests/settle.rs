@@ -14,7 +14,7 @@ use provenant_records::handoff::{Handoff, HandoffError, HandoffStatus};
 use provenant_records::provenance::{Layer, Source, Sourced};
 use provenant_records::run::{Outcome, SettlementSignal, SettlementClass, CauseKind};
 use provenant_records::settlement::{
-    CustodyFacts, GitEvidence, HandoffSource, HostVerdict, IdentityEvidence, IdentityPolicyEffect,
+    CustodyFacts, GitEvidence, HandoffSource, HostFacts, IdentityEvidence, IdentityPolicyEffect,
     LaneRole, PrimaryCheckout, HeadProgress, SETTLEMENT_EVIDENCE_SCHEMA, SettlementEvidence,
     classify::budget_completed,
     classify::settle,
@@ -54,7 +54,7 @@ fn base(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> Settlemen
     SettlementEvidence {
         schema_version: SETTLEMENT_EVIDENCE_SCHEMA,
         lane,
-        host: HostVerdict {
+        host: HostFacts {
             outcome,
             cause,
             complete: true,
