@@ -2386,7 +2386,7 @@ fn writer_lock_contention_waits_without_blocking_settlement() -> TestResult {
         );
     }
     let reason = diagnostic()?;
-    assert!(!reason.contains("settlement blocked"), "{reason}");
+    assert!(!reason.contains("settlement held"), "{reason}");
     assert!(reason.contains("retry pending"), "{reason}");
     assert!(reason.contains("held by attempt X"), "{reason}");
     // A real failure still spends the budget and blocks at the limit.
@@ -2398,7 +2398,7 @@ fn writer_lock_contention_waits_without_blocking_settlement() -> TestResult {
     for _ in 0..crate::settlement::LIMIT {
         store.track_reconcile_progress(id, failed.clone(), &call);
     }
-    assert!(diagnostic()?.contains("settlement blocked"));
+    assert!(diagnostic()?.contains("settlement held"));
     Ok(())
 }
 

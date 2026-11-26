@@ -524,7 +524,7 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         attempt_id: id,
         found: cancel::ReconciledWire::Settling {
             phase: "delivering".into(),
-            blocking_reason: None,
+            held_reason: None,
         },
     }]);
     data.lanes = Some(vec![row()]);

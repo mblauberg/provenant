@@ -1246,7 +1246,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             return Err(custody_error(RunError::Contention));
         }
         if recovery.is_none() {
-            crate::settlement::clear_blocked(attempt, exit.scope).map_err(custody_error)?;
+            crate::settlement::clear_held(attempt, exit.scope).map_err(custody_error)?;
         }
         Ok(())
     }
