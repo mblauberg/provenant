@@ -1934,7 +1934,7 @@ fn smoke_review_uses_existing_branch_checkout_head_as_its_base() -> Result {
         &rig,
         &[
             "-C",
-            worktree,
+            &worktree,
             "commit",
             "--allow-empty",
             "-qm",
@@ -1945,14 +1945,14 @@ fn smoke_review_uses_existing_branch_checkout_head_as_its_base() -> Result {
         &rig,
         &[
             "-C",
-            worktree,
+            &worktree,
             "commit",
             "--allow-empty",
             "-qm",
             "prior change two",
         ],
     )?;
-    let pre_write_head = git(&rig, &["-C", worktree, "rev-parse", "HEAD"])?;
+    let pre_write_head = git(&rig, &["-C", &worktree, "rev-parse", "HEAD"])?;
 
     let preview = factory.graph_document(
         json!({"op":"run", "template":"smoke", "branch":branch, "explain":true}),
