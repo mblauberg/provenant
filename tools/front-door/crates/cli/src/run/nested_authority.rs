@@ -19,10 +19,17 @@ pub(super) fn caller_is_guardian_descendant(
     peer_pid: Option<i64>,
     guardian: Option<&ProcessIdentity>,
 ) -> bool {
+    caller_is_guardian_descendant_with(&SystemProcessObserver, peer_pid, guardian)
+}
+
+fn caller_is_guardian_descendant_with(
+    observer: &dyn ProcessObserver,
+    peer_pid: Option<i64>,
+    guardian: Option<&ProcessIdentity>,
+) -> bool {
     let (Some(peer_pid), Some(guardian)) = (peer_pid, guardian) else {
         return false;
     };
-    let observer = SystemProcessObserver;
     let ProcessObservation::Present(guardian_now) = observer.observe(guardian.pid) else {
         return false;
     };
@@ -34,11 +41,14 @@ pub(super) fn caller_is_guardian_descendant(
     };
     let census = match observer.live_census(guardian, &[], MAX_CENSUS_ENTRIES) {
         Ok(Some(census)) => census,
-        Ok(None) => match observer.census(MAX_CENSUS_ENTRIES) {
+        // A scoped macOS walk can fail on process churn or an unreadable
+        // process. Its own contract says persistent churn and unavailable
+        // observations reach the full-scan backstop; refusing here would
+        // present a healthy relay guardian as replaced (`relay_peer_refused`).
+        Ok(None) | Err(_) => match observer.census(MAX_CENSUS_ENTRIES) {
             Ok(census) => census,
             Err(_) => return false,
         },
-        Err(_) => return false,
     };
     descendant_in_census(peer_pid, &peer_now.identity, guardian, &census)
 }
@@ -81,6 +91,7 @@ pub(crate) fn same_worktree_incarnation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_supervisor::census::CensusError;
 
     fn identity(pid: i64, start: u64) -> ProcessIdentity {
         ProcessIdentity {
@@ -195,6 +206,79 @@ mod tests {
             &child,
             &stale_guardian,
             &census,
+        ));
+    }
+
+    /// A scoped live-census failure is not an absence proof: the full census
+    /// backstop still has to prove the caller's ancestry before the relay
+    /// sends a proposal. On macOS the scoped walk fails transiently, and the
+    /// old `Err(_) => false` branch made a healthy relay answer
+    /// `relay_peer_refused`.
+    struct FailingScopedObserver {
+        facts: Vec<provenant_supervisor::census::ProcessFact>,
+    }
+
+    impl ProcessObserver for FailingScopedObserver {
+        fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+            Ok("fixture-boot".into())
+        }
+
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            self.facts
+                .iter()
+                .find(|current| current.identity.pid == pid)
+                .cloned()
+                .map_or(ProcessObservation::Absent, ProcessObservation::Present)
+        }
+
+        fn census(&self, max_entries: usize) -> std::result::Result<Census, CensusError> {
+            Census::from_observations(self.facts.clone(), [], [], true, false, max_entries)
+        }
+
+        fn live_census(
+            &self,
+            _root: &ProcessIdentity,
+            _known: &[ProcessIdentity],
+            _max_entries: usize,
+        ) -> std::result::Result<Option<Census>, CensusError> {
+            Err(CensusError::ProcessList(std::io::Error::other(
+                "scoped walk unavailable",
+            )))
+        }
+    }
+
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
+    #[test]
+    fn scoped_census_failure_uses_the_full_census_backstop() {
+        let system = identity(1, 1);
+        let guardian = identity(10, 10);
+        let child = identity(11, 11);
+        let observer = FailingScopedObserver {
+            facts: vec![
+                fact(system, 0),
+                fact(guardian.clone(), 1),
+                fact(child.clone(), 10),
+            ],
+        };
+        assert!(caller_is_guardian_descendant_with(
+            &observer,
+            Some(child.pid),
+            Some(&guardian),
+        ));
+
+        let sibling = identity(21, 21);
+        let outsider = FailingScopedObserver {
+            facts: vec![
+                fact(identity(1, 1), 0),
+                fact(guardian.clone(), 1),
+                fact(identity(20, 20), 1),
+                fact(sibling.clone(), 20),
+            ],
+        };
+        assert!(!caller_is_guardian_descendant_with(
+            &outsider,
+            Some(sibling.pid),
+            Some(&guardian),
         ));
     }
 }

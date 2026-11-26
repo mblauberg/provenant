@@ -778,6 +778,21 @@ jobs:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: ../../scripts/run-native-test-group tls cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'package(=provenant-providers) & test(claude_network_on)'
 
+      # Issue #4070: these fixtures failed only on a clean macOS host (long
+      # TMPDIR, APFS non-UTF-8 names, and a scoped macOS census). Run them on
+      # every macOS native batch so the repaired behaviour stays pinned.
+      - name: Pin macOS socket and relay fixtures
+        if: ${{ !cancelled() && matrix.group == 'light' }}
+        working-directory: tools/front-door
+        run: >-
+          cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst"
+          --workspace-remap "$GITHUB_WORKSPACE/tools/front-door"
+          --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite
+          -E 'test(=fabric::lane_read_tests::parent_reads_child_result_failure_status_and_trace_through_host_relay)
+          | test(=run::tests::access_tests::lane_access_keeps_non_utf8_origin_json_safe)
+          | test(=run::tests::access_tests::non_utf8_origin_is_json_safe_without_a_filesystem_name)
+          | test(=tests::ssh_agent_follows_lane_access)'
+
       - name: Preserve native test evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

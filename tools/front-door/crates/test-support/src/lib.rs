@@ -167,6 +167,24 @@ fn report_unavailable_sandbox(
     )
 }
 
+/// Report a test skipped because the host filesystem cannot provide a
+/// prerequisite entry, for example a non-UTF-8 name that APFS refuses to
+/// create. A filesystem limitation is not a lane-policy failure: required
+/// native tiers get the reported skip instead of a false failure.
+// Test diagnostics print the skip on stderr so the harness captures it.
+#[allow(clippy::disallowed_methods)]
+pub fn skip_filesystem_dependent_test(reason: impl Display) -> Result<(), String> {
+    report_filesystem_dependent_skip(reason.to_string(), &mut std::io::stderr(), &SKIP_COUNT)
+}
+
+fn report_filesystem_dependent_skip(
+    reason: String,
+    output: &mut impl Write,
+    count: &AtomicUsize,
+) -> Result<(), String> {
+    report_missing_prerequisite(false, reason, output, count)
+}
+
 /// Fail a required native prerequisite, or print a numbered local skip.
 // Test diagnostics print the prerequisite context on stderr for the harness.
 #[allow(clippy::disallowed_methods)]
@@ -221,6 +239,22 @@ mod tests {
                 assert!(output.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn filesystem_dependent_skip_reports_a_reason_and_never_fails() {
+        let mut output = Vec::new();
+        let count = AtomicUsize::new(0);
+        let result = super::report_filesystem_dependent_skip(
+            "APFS rejects non-UTF-8 names".into(),
+            &mut output,
+            &count,
+        );
+        assert!(result.is_ok());
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "SKIP #1: APFS rejects non-UTF-8 names\n"
+        );
     }
 
     #[test]

@@ -695,6 +695,9 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             )
         },
     );
+    // Only a bind-time permission failure is an environment prerequisite: a
+    // `relay_peer_refused` from the lane CLI is a real defect (the macOS scoped
+    // census had to fall back to the full census), so it must fail the test.
     let relay = match relay {
         Ok(relay) => relay,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
