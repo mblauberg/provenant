@@ -2551,7 +2551,9 @@ fn smoke_explanation_uses_selected_project_from_credential_containing_cwd() -> R
     let rows = reply["data"]["source_admission"]
         .as_array()
         .ok_or("source admission")?;
-    for node in ["read", "review"] {
+    // With no writer the review node is skipped by the issue's gating, so only
+    // the read route is admitted here; a caller commit no longer enables review.
+    for node in ["read"] {
         assert!(
             rows.iter().any(|row| row["node"]
                 .as_str()

@@ -163,8 +163,9 @@ in its own clone from a scratch branch supplied by the launch's sourced default;
 pass `--branch B --base REF` to override it, while a caller worktree path is
 refused. A manual
 `run smoke` reviews the writer's own scratch commit: the review node runs after
-the write and reads the writer's head against the commit it branched from, so
-the cost is bounded by the smoke change and never by the caller checkout. A
+the write and reads the commit the writer produced in its scratch worktree
+against the commit it branched from, so the cost is bounded by the smoke change
+and never by the caller checkout. A
 launch with no writer skips review with a sourced reason. Supply
 `--set diff_base=BASE` to override the review base; its source is shown in the
 warnings.

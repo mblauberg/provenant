@@ -954,8 +954,10 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
         .compile(&json!({"id":"smoke", "use":"smoke"}))
         .unwrap();
     let composite = node.composite.unwrap();
+    // With no writer there is no scratch commit to review, so the read node is
+    // the graph's result; review is gated on smoke-write by the issue's change.
     assert_eq!(composite.exports.len(), 1);
-    assert_eq!(composite.exports[0].node, "review");
+    assert_eq!(composite.exports[0].node, "read");
     let children = composite.nodes;
     let by_id = |id: &str| children.iter().find(|node| node.id == id).unwrap();
     assert_eq!(
@@ -977,7 +979,10 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
             "with":{"worktree":"/fixture/writer", "smoke-write":true}
         }))
         .unwrap();
-    assert_eq!(node.composite.unwrap().exports[0].node, "write");
+    // With a writer and review enabled, the bounded review is the result.
+    let composite = node.composite.unwrap();
+    assert_eq!(composite.exports.len(), 1);
+    assert_eq!(composite.exports[0].node, "review");
 }
 
 #[test]
@@ -1063,7 +1068,10 @@ fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
             .unwrap();
         let composite = compiled.composite.unwrap();
         // The review runs after the write so its source is the writer's own
-        // scratch commit, not whatever commit the caller checkout is on.
+        // scratch commit, not whatever commit the caller checkout is on. A node
+        // source, not a head source: head is reserved for delivered pr/push
+        // writers and would refuse a graph whose writer only makes a local
+        // scratch commit.
         assert_eq!(
             composite
                 .nodes
@@ -1080,9 +1088,9 @@ fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
         assert!(
             matches!(
                 &review.source,
-                Some(SourceBinding::Head { node }) if node == "write"
+                Some(SourceBinding::Node { node }) if node == "write"
             ),
-            "the smoke review must read the writer's head: {review:?}"
+            "the smoke review must read the writer's scratch commit: {review:?}"
         );
         review.composite.unwrap().nodes
     };
