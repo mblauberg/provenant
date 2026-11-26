@@ -318,6 +318,91 @@ fn soft_panel_settles_and_names_its_stopped_lens() {
 
 // Spec: docs/specs/fabric.md#composite-settlement
 #[test]
+fn blocked_environment_lens_settles_the_panel_and_names_the_gap() {
+    let clean = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n";
+    let blocked = format!(
+        "```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: INCONCLUSIVE\n```handoff\n{{\"schema_version\":2,\"status\":\"blocked\",\"blocked_on\":\"environment\",\"note\":\"the shared cargo lock\",\"remaining\":[],\"decisions\":[],\"verify\":[]}}\n```\n"
+    );
+    let lens = |id: &str| {
+        serde_json::json!({
+            "id": id, "access": "read_only", "review_lens": id,
+            "review_behaviour": "lens", "prompt": "review", "route": {"alias": "fixture"}
+        })
+    };
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "blocked-lens-panel", "nodes": [
+            {"id":"panel", "kind":"composite", "access":"read_only", "composite": {
+                "min_successful":2, "reduce_verdict":true,
+                "nodes":[lens("lens-a"), lens("lens-b"), lens("lens-c")],
+                "exports":["lens-a","lens-b","lens-c"].iter().map(|id| serde_json::json!({
+                    "node":id, "outputs":["result","findings","verdict"]
+                })).collect::<Vec<_>>()
+            }},
+            {"id":"post", "access":"read_only", "prompt":"report the panel result",
+             "route":{"alias":"fixture"}, "depends_on":["panel"],
+             "inputs":[{"node":"panel","outputs":["result"]}]}
+        ]
+    }))
+    .unwrap();
+    let mut blocked_observation =
+        terminal_with_result(GraphAttemptOutcome::DeclaredStop, &blocked);
+    if let AttemptObservation::Terminal { stop, .. } = &mut blocked_observation {
+        *stop = Some(provenant_records::StopCause::BlockedEnvironment);
+    }
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(GraphAttemptOutcome::Succeeded, clean),
+            blocked_observation,
+            terminal_with_result(GraphAttemptOutcome::Succeeded, clean),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "posted"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let panel = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "panel")
+        .unwrap();
+    assert_eq!(panel.state, NodeState::Succeeded);
+    let output = panel.outputs.as_ref().unwrap();
+    assert_eq!(output.verdict.as_deref(), Some("VERDICT: INCONCLUSIVE"));
+    assert!(!review::partial(output));
+    assert_eq!(output.findings_available, Some(true));
+    let excerpt = output.result.as_ref().unwrap().excerpt.as_str();
+    assert!(excerpt.contains("lens-b"), "{excerpt}");
+    assert!(excerpt.contains("blocked_environment"), "{excerpt}");
+    assert!(excerpt.contains("the shared cargo lock"), "{excerpt}");
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("blocked_environment")),
+        "{:?}",
+        output.warnings
+    );
+    let post = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "post")
+        .unwrap();
+    assert_eq!(post.state, NodeState::Succeeded);
+    assert!(owner.prompts[3].contains("blocked_environment"), "{}", owner.prompts[3]);
+    assert_eq!(run.outcome, Some(GraphOutcome::Partial));
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+// Spec: docs/specs/fabric.md#composite-settlement
+#[test]
 fn final_panel_settlement_keeps_missing_lens_names_through_synthesis() {
     let clean = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n";
     let lens = |id: &str| {

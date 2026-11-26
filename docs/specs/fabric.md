@@ -343,7 +343,11 @@ skipped and needs no launch route; active agent nodes still require one.
 Review panels settle with partial coverage by default. The panel keeps successful
 evidence, marks its verdict inconclusive unless blocking findings require
 changes, and names unavailable lenses in its result and coverage warning. A
-shortfall warns; a project floor declaring `hard = true` refuses when required
+lens whose sealed stop is `blocked_environment` is unavailable evidence rather
+than a finished review: the panel settles on the lenses that did finish, names
+that lens and its cause as a gap, and keeps its complete findings so a posting
+step can report the gap. No same-route retry or chair pause answers that lens.
+A shortfall warns; a project floor declaring `hard = true` refuses when required
 lenses or the reviewer minimum are missing.
 - Why: an unavailable reviewer must not discard useful evidence, while a project
   may require coverage for its own boundaries.

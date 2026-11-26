@@ -839,11 +839,23 @@ fn outputs(
         .exports
         .iter()
         .any(|export| template::review_behaviour(&plan.nodes[positions[&export.node]]).is_some());
-    if (!unavailable.is_empty() && review_members)
-        || !missing_review_lenses.is_empty()
-        || review::partial(&selected)
+    let postable_gap = blocked_environment_gap(spec, plan, checkpoint, positions);
+    if review::partial(&selected)
+        || (!postable_gap
+            && ((!unavailable.is_empty() && review_members) || !missing_review_lenses.is_empty()))
     {
         review::mark_partial(&mut selected);
+    } else if postable_gap
+        && selected
+            .verdict
+            .as_deref()
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+            != Some(provenant_records::workflow::ReviewVerdict::RequestChanges)
+    {
+        // A named blocked-environment gap keeps the verdict inconclusive and
+        // the available findings intact, so a delivery review can post the gap
+        // report. Blocking findings and hard floors still refuse above.
+        selected.verdict = Some("VERDICT: INCONCLUSIVE".into());
     }
     if !missing_review_lenses.is_empty() && selected.warnings.len() < MAX_WARNINGS {
         selected.warnings.push(bounded(
@@ -1135,6 +1147,30 @@ fn unavailable(
             format!("{}{lens}: {reason}", progress.id)
         })
         .collect()
+}
+
+/// A review panel whose only failed exporting members are lenses blocked by
+/// their environment has a named gap, not broken evidence. The panel keeps the
+/// complete evidence from the lenses that did finish and posts the gap instead
+/// of treating the whole boundary as malformed (#4108).
+fn blocked_environment_gap(
+    spec: &CompositeSpec,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    let mut any = false;
+    let mut all = true;
+    for member in exporting_members(spec, positions) {
+        let progress = &checkpoint.nodes[member];
+        if progress.state != NodeState::Failed {
+            continue;
+        }
+        any = true;
+        all &= progress.advance_code.as_deref() == Some("blocked_environment")
+            && plan.nodes[positions[&progress.id]].review_lens.is_some();
+    }
+    any && all
 }
 
 /// Missing lens evidence can sit below a verifier or synthesis node instead of

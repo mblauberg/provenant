@@ -524,6 +524,21 @@ pub(super) fn apply_attempt_observation(
                     .as_ref()
                     .and_then(|capture| capture.handoff.as_ref().ok())
                     .and_then(Option::as_ref);
+                // A lens whose environment could not be built is unavailable
+                // coverage, not a finished review. Name it as a missing-evidence
+                // gap and let the panel settle on the lenses that did finish.
+                // The sealed stop is fenced below so no same-route retry or
+                // chair pause sinks the whole graph (#4108).
+                let blocked_lens = !warned
+                    && disposition_error.is_none()
+                    && node.access == AccessMode::ReadOnly
+                    && template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens)
+                    && (stop == Some(provenant_records::StopCause::BlockedEnvironment)
+                        || handoff.is_some_and(|handoff| {
+                            handoff.status == provenant_records::handoff::HandoffStatus::Blocked
+                                && handoff.blocked_on()
+                                    == Some(provenant_records::handoff::BlockedOn::Environment)
+                        }));
                 let outcome = if matches!(
                     outcome,
                     GraphAttemptOutcome::Succeeded
@@ -533,7 +548,11 @@ pub(super) fn apply_attempt_observation(
                 ) && disposition_error.is_some()
                 {
                     GraphAttemptOutcome::TaskFailed
-                } else if outcome == GraphAttemptOutcome::DeclaredStop && review_result && !warned {
+                } else if outcome == GraphAttemptOutcome::DeclaredStop
+                    && review_result
+                    && !warned
+                    && !blocked_lens
+                {
                     GraphAttemptOutcome::Succeeded
                 } else if !warned
                     && launched
@@ -848,6 +867,19 @@ pub(super) fn apply_attempt_observation(
                                 .map(|w| bounded(w, MAX_ADVANCE_NOTE_BYTES));
                         } else {
                             progress.state = NodeState::Failed;
+                        }
+                        if blocked_lens && progress.state == NodeState::Failed {
+                            next_step::fence_stopped(progress);
+                            progress.advance_code = Some("blocked_environment".into());
+                            progress.advance_note = Some(bounded(
+                                &format!(
+                                    "blocked_environment: {}",
+                                    handoff.map_or("environment unavailable", |handoff| {
+                                        handoff.note.as_str()
+                                    })
+                                ),
+                                MAX_ADVANCE_NOTE_BYTES,
+                            ));
                         }
                         false
                     }
