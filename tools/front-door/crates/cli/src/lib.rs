@@ -3304,6 +3304,26 @@ mod tests {
         assert_eq!(wait.head.as_deref(), Some(sha.as_str()));
         invalid(&["wait", "--pr", "2721", "--head", "abc"]);
         invalid(&["wait", "--pr", "2721", "--head", "zz"]);
+        let Command::Wait(wait) =
+            valid(&["wait", "--pr", "2721", "--pr-head-policy", "follow_latest"]).command
+        else {
+            panic!("wait command")
+        };
+        assert_eq!(
+            wait.pr_head_policy,
+            Some(provenant_records::subject::SubjectPolicy::FollowLatest)
+        );
+        invalid(&["wait", "--pr-head-policy", "follow_latest"]);
+        invalid(&["wait", "--pr", "2721", "--pr-head-policy", "unknown"]);
+        invalid(&[
+            "wait",
+            "--pr",
+            "2721",
+            "--head",
+            &sha,
+            "--pr-head-policy",
+            "pinned",
+        ]);
         invalid(&["wait", "--all", "--any"]);
         invalid(&["wait", "--any", "--fail-fast"]);
         for timeout in ["1", "4h", "14400"] {

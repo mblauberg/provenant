@@ -344,6 +344,8 @@ pub const SMOKE_FIXTURE_FOREIGN: WarningCode = WarningCode("SMOKE_FIXTURE_FOREIG
 pub const PR_HEAD_FOLLOWED: WarningCode = WarningCode("PR_HEAD_FOLLOWED");
 /// A pull request wait has not yet pinned a head.
 pub const PR_HEAD_UNPINNED: WarningCode = WarningCode("PR_HEAD_UNPINNED");
+/// A local head was requested but the pull request branch has no local tip.
+pub const PR_HEAD_LOCAL_UNAVAILABLE: WarningCode = WarningCode("PR_HEAD_LOCAL_UNAVAILABLE");
 /// A live read source was pinned for a peer.
 pub const READ_SOURCE_PINNED_FOR_PEER: WarningCode = WarningCode("READ_SOURCE_PINNED_FOR_PEER");
 /// A build ledger rotated and some rotation entries expired.

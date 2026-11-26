@@ -1130,6 +1130,56 @@ mod tests {
     }
 
     #[test]
+    fn wait_head_settings_show_host_and_project_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        let edited = edit(
+            &roots,
+            json!({
+                "domains.wait.pr_head_policy": "follow_latest",
+                "domains.wait.pr_head_source": "forge",
+                "domains.wait.pr_head_unpinned": "refuse",
+                "domains.wait.projects.demo.pr_head_policy": "pinned",
+            }),
+        )
+        .unwrap();
+        let current = provenant_config::read_with_domains(&roots, &SECTIONS).unwrap();
+        let schema = provenant_config::schema(&current, &SECTIONS, String::new()).unwrap();
+        let field = |path: &str| {
+            schema
+                .fields
+                .iter()
+                .find(|field| field.path == path)
+                .unwrap()
+        };
+        for path in [
+            "domains.wait.pr_head_policy",
+            "domains.wait.pr_head_source",
+            "domains.wait.pr_head_unpinned",
+        ] {
+            assert_eq!(field(path).source, provenant_config::Layer::User, "{path}");
+        }
+        let effective = edited.config.domains.wait.pr_head(Some("demo"));
+        assert_eq!(
+            effective.policy,
+            provenant_records::subject::SubjectPolicy::Pinned,
+            "a project row beats the host value"
+        );
+        assert_eq!(
+            effective.policy_key,
+            "domains.wait.projects.demo.pr_head_policy"
+        );
+        assert!(
+            matches!(
+                edited.config.origins.get(&effective.policy_key),
+                Some(provenant_config::Origin::User { .. })
+            ),
+            "the source names the project row's file"
+        );
+    }
+
+    #[test]
     fn login_warning_default_and_override_report_their_origins() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
@@ -1268,6 +1318,23 @@ mod tests {
             (pr_head_policy.kind, &pr_head_policy.default),
             ("string", &json!("pinned"))
         );
+        let pr_head_source = field("domains.wait.pr_head_source");
+        assert_eq!(
+            (pr_head_source.kind, &pr_head_source.default),
+            ("string", &json!("auto"))
+        );
+        let pr_head_unpinned = field("domains.wait.pr_head_unpinned");
+        assert_eq!(
+            (pr_head_unpinned.kind, &pr_head_unpinned.default),
+            ("string", &json!("first_sample"))
+        );
+        for path in [
+            "domains.wait.projects.{project}.pr_head_policy",
+            "domains.wait.projects.{project}.pr_head_source",
+            "domains.wait.projects.{project}.pr_head_unpinned",
+        ] {
+            assert_eq!(field(path).kind, "string");
+        }
         let idle = field("gc.idle");
         assert_eq!(
             (idle.kind, idle.min, idle.max, &idle.default),
