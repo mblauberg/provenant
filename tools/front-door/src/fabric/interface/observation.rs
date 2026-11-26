@@ -1,5 +1,110 @@
 use super::*;
 
+pub(in crate::fabric) fn advance_after_remote_terminal(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    remote_terminal: bool,
+    advance: impl FnOnce() -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+    if remote_terminal
+        && run
+            .checkpoint
+            .nodes
+            .iter()
+            .any(|node| !node.state.settled())
+    {
+        advance()
+    } else {
+        Ok(run.clone())
+    }
+}
+
+/// Status retains the unknown projection; a wait also needs the typed peer failure.
+pub(in crate::fabric) fn remote_status_reading(
+    rows: &[serde_json::Value],
+    peer_error: Option<FacadeError>,
+) -> Result<bool, FacadeError> {
+    if let Some(error) = peer_error {
+        return Err(error);
+    }
+    Ok(rows
+        .iter()
+        .all(|row| row["kind"] != "attempt" || row["state"] == "terminal"))
+}
+
+impl Factory {
+    pub(super) fn observe_remote_graph_attempts(
+        &self,
+        run: &provenant_fabric_runtime::graph::GraphRun,
+        target: &super::super::unified::GraphTarget,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+        if cancel.is_cancelled() || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
+            return Ok(run.clone());
+        }
+        let mut rows = super::super::unified::status_rows(run, target);
+        let local_host = self.context.identity.host;
+        rows.retain(|row| {
+            row["kind"] == "attempt"
+                && row["attempt_id"].as_str().is_some_and(|reference| {
+                    reference.split_once('/').is_some_and(|(owner, _)| {
+                        owner.parse::<provenant_core::HostId>() != Ok(local_host)
+                    })
+                })
+        });
+        if rows.is_empty() {
+            return Ok(run.clone());
+        }
+        let peer_error = super::super::unified::observe_status_rows_within(
+            &mut rows,
+            &self.context,
+            &self.clock,
+            cancel,
+            budget,
+        )?;
+        // A terminal remote read is the signal to retry graph advancement. The
+        // status path only reads a checkpoint, so it cannot settle a node whose
+        // earlier advancement failed while the home endpoint was unavailable.
+        let remote_terminal = remote_status_reading(&rows, peer_error)?;
+        let advanced = advance_after_remote_terminal(run, remote_terminal, || {
+            self.graph(
+                GraphInput::Resume {
+                    extra: Default::default(),
+                    document: run.checkpoint.graph_id.clone().into(),
+                    extend: Vec::new(),
+                },
+                budget,
+                cancel,
+            )
+        })?;
+        // A successful reading of a finished lane supersedes the transport
+        // failure held while its home endpoint was unreachable.
+        if remote_terminal
+            && advanced
+                .checkpoint
+                .nodes
+                .iter()
+                .all(|node| node.state.settled())
+            && FileJournal::read_advance_error(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &advanced.checkpoint.graph_id,
+            )
+            .map_err(|_| FacadeError::io("access graph journal"))?
+            .is_some()
+        {
+            FileJournal::set_advance_error(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &advanced.checkpoint.graph_id,
+                None,
+            )
+            .map_err(|_| FacadeError::io("access graph journal"))?;
+        }
+        Ok(advanced)
+    }
+}
+
 fn graph_run_has_remote_pending(
     run: &provenant_fabric_runtime::graph::GraphRun,
     local_host: Option<provenant_core::HostId>,
@@ -95,6 +200,10 @@ pub(in crate::fabric) fn graph_wait_needs_refresh(
 pub(super) struct GraphObservationHistory {
     remote_source_seen: bool,
     pub(super) reader_woken: bool,
+    /// The most recent failed remote reading. A later success clears it, so a
+    /// wait that ends on its budget names the last failure rather than the
+    /// first one it saw.
+    last_remote_error: Option<FacadeError>,
 }
 impl GraphObservationHistory {
     fn record(
@@ -106,6 +215,12 @@ impl GraphObservationHistory {
         let remote_pending = graph_run_has_remote_pending(run, local_host, target);
         self.remote_source_seen |= remote_pending;
         remote_pending
+    }
+
+    /// An unreachable home endpoint is a pending observation, not a failed
+    /// wait: keep reading and keep only the newest error.
+    fn record_remote(&mut self, result: Result<(), FacadeError>) {
+        self.last_remote_error = result.err();
     }
 
     pub(super) fn report(&self, observation: &crate::status_wait::LocalObservation) -> String {
@@ -149,7 +264,8 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
     mut observe_remote: impl FnMut(
         &provenant_fabric_runtime::graph::GraphRun,
-    ) -> Result<(), FacadeError>,
+    )
+        -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
 ) -> Result<
     (
         provenant_fabric_runtime::graph::GraphRun,
@@ -175,7 +291,12 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
         run = observe(&run)?;
         remote_pending = history.record(&run, local_host, remote_target);
         if remote_pending {
-            observe_remote(&run)?;
+            let observed = observe_remote(&run);
+            if let Ok(observed) = &observed {
+                run = observed.clone();
+                remote_pending = history.record(&run, local_host, remote_target);
+            }
+            history.record_remote(observed.map(|_| ()));
         }
         remote_deadline = next_remote_deadline(
             remote_deadline,
@@ -201,7 +322,12 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
                 remote_pending = history.record(&run, local_host, remote_target);
             }
             if remote_due && remote_pending {
-                observe_remote(&run)?;
+                let observed = observe_remote(&run);
+                if let Ok(observed) = &observed {
+                    run = observed.clone();
+                    remote_pending = history.record(&run, local_host, remote_target);
+                }
+                history.record_remote(observed.map(|_| ()));
             }
             remote_deadline = next_remote_deadline(
                 remote_deadline,
@@ -248,7 +374,12 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
             remote_pending = history.record(&run, local_host, remote_target);
         }
         if remote_due && remote_pending {
-            observe_remote(&run)?;
+            let observed = observe_remote(&run);
+            if let Ok(observed) = &observed {
+                run = observed.clone();
+                remote_pending = history.record(&run, local_host, remote_target);
+            }
+            history.record_remote(observed.map(|_| ()));
         }
         remote_deadline = next_remote_deadline(
             remote_deadline,
@@ -257,6 +388,17 @@ pub(super) fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
             clock.mono_now().as_micros(),
             interval_micros(interval),
         );
+    }
+    // The wait kept reading through remote failures. If it ended still
+    // pending, name the last failed reading on the returned run so the final
+    // status line reports that failure instead of the first one held at the
+    // start. A settled or cancelled wait has no pending failure to name.
+    if active(&run) {
+        if let Some(error) = history.last_remote_error.take() {
+            run.advance_error = Some(error.to_string());
+        }
+    } else {
+        history.last_remote_error = None;
     }
     Ok((run, history))
 }
@@ -271,7 +413,9 @@ pub(in crate::fabric) fn wait_submission<C: provenant_core::Clock + ?Sized>(
     observation: &mut crate::status_wait::LocalObservation,
     local_host: Option<provenant_core::HostId>,
     mut observe: impl FnMut(&str) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
-    observe_remote: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> Result<(), FacadeError>,
+    observe_remote: impl FnMut(
+        &provenant_fabric_runtime::graph::GraphRun,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
 ) -> Result<(provenant_fabric_runtime::graph::GraphRun, String, bool), FacadeError> {
     let (run, history) = wait_graph_updates(
         run,
