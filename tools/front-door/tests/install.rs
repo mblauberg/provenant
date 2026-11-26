@@ -2362,6 +2362,38 @@ fn check_install_warns_on_a_leftover_menu_login_item() -> Result {
 }
 
 #[test]
+fn installer_warns_about_default_bundle_for_custom_apps_dir_with_trailing_slash() -> Result {
+    let mut rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let stale = rig.home.join("Applications/Provenant Console.app");
+    fs::create_dir_all(&stale)?;
+    let custom = rig.root.join("custom-apps");
+    fs::create_dir_all(&custom)?;
+    rig.env.push((
+        "PROVENANT_APPS_DIR".into(),
+        format!("{}/", custom.display()).into(),
+    ));
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    let result = rig.execute_os(
+        Path::new("/bin/sh"),
+        &[
+            script.into_os_string(),
+            "--source".into(),
+            stage.into_os_string(),
+            "--yes".into(),
+        ],
+        None,
+    )?;
+    let output = String::from_utf8_lossy(&result.stderr.bytes);
+    assert!(output.contains("a Provenant app remains at"), "{output}");
+    assert!(
+        output.contains("PROVENANT_APPS_DIR installs to"),
+        "{output}"
+    );
+    Ok(())
+}
+
+#[test]
 fn source_upgrade_builds_tracked_files_on_each_host() -> Result {
     let mut rig = TestRig::new()?;
     let peer = TestRig::new()?;

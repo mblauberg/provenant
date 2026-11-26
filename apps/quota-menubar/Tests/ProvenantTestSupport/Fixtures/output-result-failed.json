@@ -1,0 +1,152 @@
+{
+  "command": "output",
+  "data": {
+    "account": null,
+    "applied_route": null,
+    "attempt_directory": {
+      "kind": "path",
+      "relative": {
+        "encoding": "utf8",
+        "path": "fixture/attempts/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+      },
+      "root": "/"
+    },
+    "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+    "attempt_number": 1,
+    "bytes": {
+      "data": "provider exited with an error",
+      "encoding": "utf8"
+    },
+    "cache_read_share": null,
+    "changed_files": null,
+    "changed_files_total": null,
+    "clipped": false,
+    "complete": true,
+    "continuation": null,
+    "declaration_source": null,
+    "delivery": null,
+    "delivery_id": null,
+    "digest": null,
+    "eof": true,
+    "exit_code": 1,
+    "finished_at": "1970-01-01T00:00:00.000002Z",
+    "git_grants_digest": null,
+    "graph": "output-result-failed",
+    "head": null,
+    "lane_class": null,
+    "last_event_at": "2026-11-02T01:57:31.075623Z",
+    "last_event_source": "queued",
+    "last_output_at": null,
+    "length": 29,
+    "next_offset": 29,
+    "node": "task",
+    "observed_route": null,
+    "offset": 0,
+    "overdue": false,
+    "part": "result",
+    "payload": "evicted",
+    "planner_fallback": {
+      "reason": "planner route failed; static stage selected",
+      "stage": "static"
+    },
+    "presence": null,
+    "priority": null,
+    "project_id": "01010101010101010101010101010101",
+    "protected_paths": [],
+    "provider_error": "provider exited with an error",
+    "publication": null,
+    "pushed_head": null,
+    "queued_at": "2026-11-02T01:57:31.075623Z",
+    "read_only_writable": [],
+    "reason": "the lane failed; inspect its result and local evidence",
+    "recorded_state": null,
+    "requested_route": {
+      "effort": "high",
+      "kind": "model",
+      "model": "fixture/model",
+      "provider": "fixture"
+    },
+    "residual_tree": null,
+    "result_path": {
+      "kind": "path",
+      "relative": {
+        "encoding": "utf8",
+        "path": "fixture/attempts/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3/result.md"
+      },
+      "root": "/"
+    },
+    "result_projection": {
+      "attempt": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "header": {
+        "schema_version": 1
+      },
+      "host_facts": {
+        "ci": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        },
+        "commands": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        },
+        "git": {
+          "completeness": "unknown",
+          "source": "host-observation",
+          "value": {
+            "base": null,
+            "commits": [],
+            "diffstat": null,
+            "head": null,
+            "shared_worktree": false
+          }
+        },
+        "scope": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        }
+      },
+      "lane_claims": {
+        "handoff": null,
+        "verify": null
+      }
+    },
+    "retry_of": null,
+    "runtime_deadline": null,
+    "settlement": {
+      "reason": "the lane failed; inspect its result and local evidence"
+    },
+    "settlement_class": "failed",
+    "signals": [],
+    "skipped_routes": [],
+    "stale": null,
+    "started_at": null,
+    "state": "failed",
+    "superseded_by": null,
+    "title": "Failed output fixture",
+    "transcript": null,
+    "usage": {
+      "context_basis_points": null,
+      "source": "stream",
+      "tokens": {
+        "cache_read": null,
+        "cache_write": null,
+        "cache_write_1h": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
+    },
+    "waiting_for": null,
+    "write_grants": [],
+    "writer_base": null,
+    "writer_head": null
+  },
+  "error": null,
+  "next": [],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}

@@ -1,0 +1,149 @@
+{
+  "command": "output",
+  "data": {
+    "account": null,
+    "applied_route": null,
+    "attempt_directory": {
+      "kind": "path",
+      "relative": {
+        "encoding": "utf8",
+        "path": "fixture/attempts/c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+      },
+      "root": "/"
+    },
+    "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+    "attempt_number": 1,
+    "bytes": {
+      "data": "tail bytes",
+      "encoding": "utf8"
+    },
+    "cache_read_share": null,
+    "clipped": true,
+    "complete": false,
+    "continuation": null,
+    "delivery": null,
+    "delivery_id": null,
+    "digest": null,
+    "eof": true,
+    "exit_code": null,
+    "finished_at": null,
+    "git_grants_digest": null,
+    "graph": "output-result-tail-bytes",
+    "head": null,
+    "lane_class": null,
+    "last_event_at": "2026-11-02T01:57:31.075623Z",
+    "last_event_source": "queued",
+    "last_output_at": null,
+    "length": 132,
+    "next_offset": 132,
+    "node": "task",
+    "observed_route": null,
+    "offset": 122,
+    "overdue": false,
+    "part": "result",
+    "presence": "live",
+    "priority": null,
+    "project_id": "01010101010101010101010101010101",
+    "protected_paths": [],
+    "queued_at": "2026-11-02T01:57:31.075623Z",
+    "read_only_writable": [],
+    "reason": null,
+    "recorded_state": null,
+    "requested_route": {
+      "effort": "high",
+      "kind": "model",
+      "model": "fixture/model",
+      "provider": "fixture"
+    },
+    "result": "partial",
+    "result_path": {
+      "kind": "path",
+      "relative": {
+        "encoding": "utf8",
+        "path": "fixture/attempts/c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6/result.md"
+      },
+      "root": "/"
+    },
+    "result_projection": {
+      "attempt": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+      "header": {
+        "schema_version": 1
+      },
+      "host_facts": {
+        "ci": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        },
+        "commands": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        },
+        "git": {
+          "completeness": "unknown",
+          "source": "host-observation",
+          "value": {
+            "base": null,
+            "commits": [],
+            "diffstat": null,
+            "head": null,
+            "shared_worktree": false
+          }
+        },
+        "scope": {
+          "completeness": "unknown",
+          "source": "unavailable",
+          "value": null
+        }
+      },
+      "lane_claims": {
+        "handoff": null,
+        "verify": null
+      }
+    },
+    "retry_of": null,
+    "runtime_deadline": null,
+    "settlement": null,
+    "settlement_class": null,
+    "signals": [],
+    "skipped_routes": [],
+    "stale": false,
+    "started_at": null,
+    "state": "running",
+    "status": "running",
+    "superseded_by": null,
+    "tail": 10,
+    "tail_clamped": false,
+    "title": "Tail output fixture",
+    "transcript": null,
+    "usage": {
+      "context_basis_points": null,
+      "source": "stream",
+      "tokens": {
+        "cache_read": null,
+        "cache_write": null,
+        "cache_write_1h": null,
+        "input": null,
+        "output": null,
+        "reasoning": null
+      }
+    },
+    "waiting_for": null,
+    "write_grants": []
+  },
+  "error": null,
+  "next": [
+    {
+      "argv": [
+        "provenant",
+        "wait",
+        "output-result-tail-bytes/task#1"
+      ],
+      "why": "wait for this work to settle"
+    }
+  ],
+  "schema_version": 2,
+  "status": "ok",
+  "warnings": []
+}

@@ -34,23 +34,33 @@ quit it with Command-Q.
 ## Test and render
 
 Run `swift test` in this directory. Tests replay CLI output from
-`Tests/ProvenantTestSupport/Fixtures`. Those files are **generated**: the Rust
-wire types and the projection functions the commands use are their single
-source of truth. Values are synthetic (fixed ids, `/fixture` paths, fixed
-timestamps); no live CLI capture belongs in the checkout. Regenerate after any
-wire change from the repository root:
+`Tests/ProvenantTestSupport/Fixtures`. Those files are **generated**. The
+generator builds one synthetic set of loaded values (fixed ids, `/fixture`
+paths, fixed timestamps) and passes it to the same pure projection functions
+in `provenant_cli::console::projection` that the owner commands call. This
+includes row, node, edge, artifact, timing, filter, snapshot and result-evidence
+projection, including sealed Git diagnostics on full results; sessions and projects use their real wire types. The envelope is
+the real `CommandResult` wire type. Quota, inbox and answer fixtures re-serialise
+their real wire types directly. No console projection row is hand-written in
+the generator, and no live CLI capture belongs in the checkout. Regenerate
+after any wire or projection change from the repository
+root:
 
 ```sh
 cd tools/front-door && cargo run -p provenant-cli --bin generate-swift-fixtures -- \
   --out ../../apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures
 ```
 
-`scripts/check-swift-fixtures` regenerates in memory and fails on drift; CI
-runs it beside `swift test`. A wire change first fails that check, then the
-regenerated fixtures make the Swift decode tests fail until the decoders
-catch up. `Replay.fixture` names are the file names without `.json`, so keep
-those names when adding a fixture. For visual inspection, build the debug
-targets and render from fixtures without running the CLI:
+`scripts/check-swift-fixtures` regenerates in memory from those same
+projections and fails on drift; CI runs it beside `swift test`. On drift it
+regenerates the fixtures and prints the exact patch to its log, so a change
+made without a local build applies that patch rather than editing fixture
+bytes by hand. A change to a
+console projection or a wire type therefore fails that check before the
+regenerated fixtures make the Swift decode tests fail until the decoders catch
+up. `Replay.fixture` names are the file names without `.json`, so keep those
+names when adding a fixture. For visual inspection, build the debug targets and
+render from fixtures without running the CLI:
 
 ```sh
 swift build
