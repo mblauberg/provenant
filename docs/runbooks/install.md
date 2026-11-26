@@ -158,8 +158,19 @@ would launch; the candidate's graph is exercised only after it installs. The
 scratch fixture commits a base and a fixture change, and both verification modes
 bind that commit as the review nodes' `diff_base`, so the review nodes have a
 non-empty range; its write node runs in a worktree the verification creates on a
-branch of that fixture. A manual `run smoke` with no `diff_base` leaves the
-review nodes unbound, so the usual no-base refusal applies. The scratch
+branch of that fixture. On a peer the writer runs in a worktree the peer creates
+in its own clone from a scratch branch supplied by the launch's sourced default;
+pass `--branch B --base REF` to override it, while a caller worktree path is
+refused. A remote smoke reader is pinned to the peer clone's own checkout HEAD
+and its first parent, never to the sender's scratch commit, so a stale peer
+still reads a valid tree and sees the fixture staged into its lane scratch. The
+staged fixture carries a fresh random fact absent from the committed tree and
+the bundled template: a reader that reconstructs the answer from source cannot
+report it. A manual
+`run smoke` with no `diff_base` uses the checkout's first parent as a fixed
+review range and warns with its source. If the parent is unavailable, it skips
+review with a reason; supply `--set diff_base=BASE` to enable review.
+The scratch
 project's host binding is removed when the verification ends, including on
 failure, so the deleted fixture never
 becomes a registered project. The human view leads with one status line per host
@@ -172,8 +183,10 @@ set, so run `provenant upgrade --verify --json` for the full per-host detail.
 The smoke builds its own scratch checkout, so a verification run from outside a
 Git checkout is not refused just for that reason. `provenant run smoke` by hand, from any checkout,
 runs only the read-only
-nodes (the receipt names the skipped write node); add `--branch B --base REF` or
-`--worktree PATH` to run the write node too.
+nodes on this host (the receipt names the skipped write node); add `--branch B
+--base REF` or `--worktree PATH` to run the write node too. With `--host PEER`
+the bundled smoke writer runs from a sourced scratch branch even without a
+branch control.
 
 ### Bundled macOS app
 

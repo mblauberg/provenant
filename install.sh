@@ -277,11 +277,37 @@ else
             tag=$(git -C "$repo" describe --tags --exact-match HEAD </dev/null 2>/dev/null || :)
         fi
     fi
+    # One bounded, resumable fetch for the package and its checksum. A dropped
+    # stream resumes the partial file inside a fixed attempt budget; the
+    # checksum below still refuses any payload that is not byte-complete.
+    dl_release_artefact() {
+        dl_name=$1
+        dl_dest=$2
+        dl_label=$3
+        dl_attempts=0
+        dl_max_attempts=3
+        : > "$dl_dest"
+        dl_start=$(date +%s)
+        while [ "$dl_attempts" -lt "$dl_max_attempts" ]; do
+            dl_attempts=$((dl_attempts + 1))
+            if curl -fLsS --proto '=https' --tlsv1.2 -C - \
+                --retry 5 --retry-all-errors --retry-delay 1 \
+                "$base/$dl_name" -o "$dl_dest" </dev/null; then
+                return 0
+            fi
+        done
+        dl_bytes=$(wc -c < "$dl_dest" 2>/dev/null | tr -d '[:space:]') || dl_bytes=0
+        [ -n "$dl_bytes" ] || dl_bytes=0
+        dl_elapsed=$(( $(date +%s) - dl_start ))
+        printf 'Cannot download release %s after %s attempts: received %s bytes in %s seconds\n' \
+            "$dl_label" "$dl_attempts" "$dl_bytes" "$dl_elapsed" >&2
+        exit 4
+    }
     base=https://github.com/mblauberg/provenant/releases
     if [ -n "$tag" ]; then base=$base/download/$tag; else base=$base/latest/download; fi
     archive=provenant-$target.tar.gz
-    curl -fLsS --proto '=https' --tlsv1.2 "$base/$archive" -o "$scratch/package.tar.gz" </dev/null || die 4 'Cannot download release package'
-    curl -fLsS --proto '=https' --tlsv1.2 "$base/$archive.sha256" -o "$scratch/checksum" </dev/null || die 4 'Cannot download release checksum'
+    dl_release_artefact "$archive" "$scratch/package.tar.gz" package
+    dl_release_artefact "$archive.sha256" "$scratch/checksum" checksum
     expected=$(awk 'NR == 1 {print $1}' "$scratch/checksum")
     [ "${#expected}" -eq 64 ] || die 4 'Invalid checksum'
     case "$expected" in *[!0-9a-fA-F]*) die 4 'Invalid checksum' ;; esac

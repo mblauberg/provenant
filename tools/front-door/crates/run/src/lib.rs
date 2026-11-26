@@ -1,5 +1,9 @@
 //! Durable execution records and bounded, project-scoped readers.
 #![forbid(unsafe_code)]
+/// Named ref a pinned review view ships at the host-supplied base. A review
+/// lane cannot fetch, so this ref is how the base stays available in a detached
+/// view that carries no remote default ref.
+pub const REVIEW_BASE_REF: &str = "refs/provenant/review/base";
 mod admission;
 mod artifacts;
 mod board;
@@ -31,6 +35,8 @@ pub use pr_contribution::{Contribution, Contributions, PullRequest, WEIGHT_ONE};
 pub mod reactions;
 pub use reactions::Reaction;
 mod reader;
+mod verification;
+pub use verification::{VerificationResolution, conflict_cause};
 mod retention;
 mod service;
 #[cfg(test)]
@@ -44,6 +50,7 @@ mod limits;
 pub use limits::{HostCaps, gh_budget, lane_limits, writer_budget_limits};
 mod ci_scope;
 pub use ci_scope::{CiScope, ResolvedCiScope};
+pub use provenant_config::{PrPolicy, ResolvedPrPolicy};
 mod gh_usage;
 pub mod token_budget;
 mod transcript;
@@ -60,11 +67,14 @@ pub use admission::{
 pub use controls::{
     AttemptPresence, CancelReceipt, Reconciled, Resume, SteerIntent, SteerReceipt, TemporaryReason,
     TemporaryReasonKind, UncertainReason, attempt_presence, attempt_presence_with_census,
-    attempt_presence_with_unavailable_census, holder_absent, overdue_at,
+    attempt_presence_with_unavailable_census, holder_absent, overdue_at, stalled_at,
 };
 #[cfg(any(test, feature = "fixture"))]
 pub use delivery::forge_for;
-pub use delivery::{FilteredLanePath, ForgeOnce, HostDeliveryContext, resolve_forge};
+pub use delivery::{
+    FilteredLanePath, ForgeOnce, GraphAdoptionTarget, GraphPublicationReceipt, HostDeliveryContext,
+    resolve_forge,
+};
 pub use git_context::{
     GitContext, ReviewDiffContext, continuation_history, ensure_local_branch,
     ensure_recorded_local_branch, resolve_git_base, resolve_git_base_with_facts,
@@ -84,12 +94,13 @@ pub use launch::{
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::{
-    isolated_read_only_plan, live_read_only_plan, prepare_read_only_git, read_only_plan,
+    ATTEMPT_SCRATCH, isolated_read_only_plan, live_read_only_plan, prepare_read_only_git,
+    read_only_plan, scratch_root,
 };
 pub use retention::{
-    AttemptLogRemoval, AttemptTmpRemoval, PayloadEviction, PayloadReport, ProviderStateGc,
-    ProviderStateIssue, RetentionScan, ScratchOwner, ScratchOwnerResolver, ScratchPolicy,
-    TOMBSTONE, gc_import_pins, payload_totals,
+    AttemptLogRemoval, AttemptTmpRemoval, DeferredScratch, PayloadEviction, PayloadReport,
+    ProviderStateGc, ProviderStateIssue, RetentionScan, ScratchOwner, ScratchOwnerResolver,
+    ScratchPolicy, TOMBSTONE, gc_import_pins, payload_totals,
 };
 pub use writer::{
     BoundSandboxBackend, LaunchConfinement, RepinOutcome, WriterFence, WriterLaunch,
@@ -352,8 +363,10 @@ impl std::fmt::Display for ArtifactProvenance {
     }
 }
 
-/// A source error whose fixed cause the run diagnostic may disclose. Its
-/// text, which can name paths or Git output, stays in the error chain only.
+/// A source error whose text can name paths or Git output. The raw text may
+/// reach an owner-facing local diagnostic through `DiagnosticFact`, but never
+/// the peer wire: facts are serde-skipped and only typed, sanitised fields are
+/// projected for a peer. `cause` is the fixed text safe to disclose there.
 #[derive(Debug)]
 pub(crate) struct CausedSource {
     text: String,
@@ -674,9 +687,9 @@ pub enum RunError {
     ObjectImportLimit(&'static str),
     /// The lane's history forked from the host branch and the configured
     /// history policy retained it. Its commits stay in the attempt's private
-    /// Git; the setting that would publish a host merge names itself here.
+    /// Git; the setting that would publish the lane's history names itself here.
     #[error(
-        "lane history diverged from the host branch; its commits are retained in the attempt's private Git for host recovery; {setting}; set it to allow to publish a host merge"
+        "lane history diverged from the host branch; its commits are retained in the attempt's private Git for host recovery; {setting}; set it to allow to publish the lane's history"
     )]
     PublicationDiverged { setting: String },
     /// A host merge of a diverged lane tip conflicted. The lane's commits stay
@@ -1078,10 +1091,14 @@ impl RunError {
                     };
                     diagnostic = diagnostic.detail(detail).next(next);
                 }
-                if let WorktreeError::WriterLeaseHeld { .. } = error {
+                if let WorktreeError::WriterLeaseHeld { holder, .. } = error {
+                    // A diagnostic has no store to resolve the holder's work key:
+                    // the shared formatter advises the bare sweep and names the
+                    // attempt. The submission preflight resolves the key and
+                    // prints a target that names the holder directly.
                     diagnostic = diagnostic
                         .detail(error.to_string())
-                        .next("reconcile the holding attempt before retrying writer binding");
+                        .next(crate::writer_dirty::held_writer_next(Some(*holder), None));
                 }
                 if let WorktreeError::WriterBusy {
                     holder: Some(holder),
@@ -1173,29 +1190,74 @@ impl RunError {
                 diagnostic = diagnostic.next("inspect the host I/O failure before retrying");
             }
             Self::OperationIo {
-                operation, source, ..
+                operation,
+                path,
+                source,
             } => {
                 diagnostic = diagnostic
                     .fact(DiagnosticFact::Filesystem {
                         operation,
+                        detail: Some(Box::new(provenant_records::diagnostic::FilesystemDetail {
+                            path: path
+                                .as_ref()
+                                .map(|path| path.to_string_lossy().into_owned()),
+                            source: Some(source.to_string()),
+                        })),
                         cause: CausedSource::cause(source),
                     })
                     .next("inspect the host I/O failure before retrying");
             }
             Self::Filesystem(error) | Self::Publication(error) => {
                 use provenant_os::fs::FsError;
-                let operation = match error {
-                    FsError::Io { operation, .. } => *operation,
-                    FsError::ReadIo { .. } => "read file",
-                    FsError::Rename { .. } => "rename",
-                    FsError::Symlink { .. } => "resolve path",
-                    FsError::CrossDevice { .. } => "verify filesystem device",
-                    FsError::LockTimeout { .. } | FsError::Cancelled { .. } => "acquire lock",
-                    FsError::LockDeadlineOverflow { .. } => "set lock deadline",
-                    _ => "verify filesystem entry",
+                let (operation, path, source) = match error {
+                    FsError::Io {
+                        operation,
+                        path,
+                        source,
+                    } => (
+                        *operation,
+                        Some(path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::ReadIo { path, source } => (
+                        "read file",
+                        Some(path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::Rename {
+                        to_path, source, ..
+                    } => (
+                        "rename",
+                        Some(to_path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::Symlink { path, source } => (
+                        "resolve path",
+                        Some(path.to_string_lossy().into_owned()),
+                        Some(source.to_string()),
+                    ),
+                    FsError::CrossDevice { path } => (
+                        "verify filesystem device",
+                        Some(path.to_string_lossy().into_owned()),
+                        None,
+                    ),
+                    FsError::LockTimeout { path, .. } | FsError::Cancelled { path } => (
+                        "acquire lock",
+                        Some(path.to_string_lossy().into_owned()),
+                        None,
+                    ),
+                    FsError::LockDeadlineOverflow { path } => (
+                        "set lock deadline",
+                        Some(path.to_string_lossy().into_owned()),
+                        None,
+                    ),
+                    _ => ("verify filesystem entry", None, None),
                 };
                 diagnostic = diagnostic.fact(DiagnosticFact::Filesystem {
                     operation,
+                    detail: (path.is_some() || source.is_some()).then(|| {
+                        Box::new(provenant_records::diagnostic::FilesystemDetail { path, source })
+                    }),
                     cause: None,
                 });
             }
@@ -1291,6 +1353,23 @@ mod remoteless_writer_tests;
 mod tests;
 
 #[cfg(test)]
+mod error_size_tests {
+    use super::*;
+
+    /// Every CLI result carries this error, so a wide refusal cause would make
+    /// clippy's `result_large_err` fire across the workspace. Large causes are
+    /// boxed to keep the error below that 128-byte threshold.
+    #[test]
+    fn run_error_stays_below_clippy_large_err_threshold() {
+        let size = std::mem::size_of::<RunError>();
+        assert!(
+            size < 128,
+            "RunError grew to {size} bytes; box wide refusal causes so CLI results stay small"
+        );
+    }
+}
+
+#[cfg(test)]
 mod diagnostic_projection_tests {
     use super::*;
     use provenant_records::diagnostic::{BoundaryClass, Destination};
@@ -1317,6 +1396,27 @@ mod diagnostic_projection_tests {
             "{detail}"
         );
         assert!(detail.contains("utility command timed out"), "{detail}");
+    }
+
+    #[test]
+    fn writer_lease_held_diagnostic_names_holder_and_exact_reconcile_command() {
+        let holder = provenant_core::AttemptId::from_bytes([53; 16]);
+        let error = RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::WriterLeaseHeld {
+                holder,
+                branch: "refs/heads/holder".into(),
+                worktree: PathBuf::from("/fixture/holder"),
+                age: "4d 1h".into(),
+                live: Some(false),
+            },
+        );
+        let diagnostic = error.diagnostic(Destination::Local);
+        let detail = diagnostic.detail.unwrap();
+        let next = diagnostic.next.unwrap();
+        assert!(detail.contains(&holder.to_string()), "{detail}");
+        assert!(next.contains(&holder.to_string()), "{next}");
+        assert!(next.contains("provenant reconcile"), "{next}");
+        assert!(!next.contains("commit or preserve"), "{next}");
     }
 
     #[test]
@@ -1501,7 +1601,7 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn untrusted_error_sources_do_not_enter_diagnostics() {
+    fn untrusted_error_sources_never_reach_the_peer_wire() {
         use provenant_confinement::worktrees::WorktreeError;
         use provenant_records::diagnostic::DiagnosticFact;
         let cases = [
@@ -1527,11 +1627,13 @@ mod diagnostic_projection_tests {
                 assert!(!encoded.chars().any(char::is_control));
                 if matches!(&error, RunError::Filesystem(_)) {
                     assert!(matches!(
-                        projection.fact,
+                        &projection.fact,
                         Some(DiagnosticFact::Filesystem {
                             operation: "read file",
                             cause: None,
-                        })
+                            detail: Some(detail),
+                        }) if detail.path.as_deref() == Some("/private/host")
+                            && detail.source.as_deref() == Some("TOKEN_SENTINEL")
                     ));
                 }
             }

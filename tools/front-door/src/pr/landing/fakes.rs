@@ -16,6 +16,10 @@ pub struct FakeForge {
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
     pub check_runs: BTreeMap<String, Vec<GateEvidence>>,
     pub check_sequences: BTreeMap<String, VecDeque<Vec<GateEvidence>>>,
+    pub required_ci_policies: BTreeMap<String, Option<Vec<RequiredCiCheck>>>,
+    pub move_head_after_checks: BTreeMap<String, String>,
+    pub move_base_after_checks: BTreeMap<String, String>,
+    pub mergeability_after_checks: BTreeMap<String, Mergeability>,
     pub check_timeouts: Vec<std::time::Duration>,
     pub next_observation_interval: Option<std::time::Duration>,
     pub labels: BTreeMap<u64, Vec<String>>,
@@ -38,6 +42,7 @@ pub struct FakeForge {
     pub merges: Vec<(u64, String, MergeMethod)>,
     pub merge_attempts: Vec<u64>,
     pub stack_merge_attempts: Vec<u64>,
+    pub events: Vec<String>,
     pub reverts: Vec<(u64, String, String, String)>,
 }
 impl Forge for FakeForge {
@@ -66,6 +71,10 @@ impl Forge for FakeForge {
         {
             pr.draft = true;
         }
+        self.events.push(format!(
+            "pull_request:{number}:{:?}:{}",
+            pr.mergeability, pr.head
+        ));
         Ok(pr)
     }
     fn target_branch(&mut self) -> Result<String, LandingError> {
@@ -111,17 +120,49 @@ impl Forge for FakeForge {
     }
     #[allow(clippy::disallowed_methods, reason = "simulate a slow forge in tests")]
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
+        self.events.push(format!("checks:{commit}"));
         if self.fail_checks.as_ref().is_some_and(|flag| flag.get()) {
             return Err(LandingError::Failed("checks unavailable".into()));
         }
-        if let Some(observation) = self
+        let observations = if let Some(observation) = self
             .check_sequences
             .get_mut(commit)
             .and_then(VecDeque::pop_front)
         {
-            return Ok(observation);
+            observation
+        } else {
+            self.check_runs.get(commit).cloned().unwrap_or_default()
+        };
+        if let Some(head) = self.move_head_after_checks.remove(commit)
+            && let Some((number, pr)) = self
+                .pull_requests
+                .iter_mut()
+                .find(|(_, pr)| pr.head == commit)
+        {
+            pr.head = head.clone();
+            self.heads.insert(*number, head);
         }
-        Ok(self.check_runs.get(commit).cloned().unwrap_or_default())
+        if let Some(base) = self.move_base_after_checks.remove(commit)
+            && let Some(pr) = self.pull_requests.values_mut().find(|pr| pr.head == commit)
+        {
+            pr.base_branch = base;
+        }
+        if let Some(mergeability) = self.mergeability_after_checks.remove(commit)
+            && let Some(pr) = self.pull_requests.values_mut().find(|pr| pr.head == commit)
+        {
+            pr.mergeability = mergeability;
+        }
+        Ok(observations)
+    }
+    fn required_ci_policy(
+        &mut self,
+        base_branch: &str,
+    ) -> Result<Option<Vec<RequiredCiCheck>>, LandingError> {
+        Ok(self
+            .required_ci_policies
+            .get(base_branch)
+            .cloned()
+            .unwrap_or(None))
     }
     fn checks_with_timeout(
         &mut self,
@@ -137,10 +178,11 @@ impl Forge for FakeForge {
         head: &str,
         method: MergeMethod,
     ) -> Result<String, LandingError> {
-        self.merge_attempts.push(number);
         if self.head(number)? != head {
             return Err(LandingError::Failed("head moved".into()));
         }
+        self.events.push(format!("merge:{number}:{head}"));
+        self.merge_attempts.push(number);
         if self.fail_merge == Some(number) {
             return Err(LandingError::Failed("transport unavailable".into()));
         }
@@ -546,6 +588,7 @@ impl GateRunner for FakeGate {
                         } else {
                             definition.issuer.clone()
                         },
+                        app_id: None,
                         result: result.clone(),
                     })
                     .collect(),
@@ -612,6 +655,7 @@ mod tests {
                 base_branch: "main".into(),
                 author: "author".into(),
                 state: PullRequestState::Open,
+                mergeability: Mergeability::Unknown,
                 merged_commit: None,
                 stack: None,
                 draft: false,

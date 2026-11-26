@@ -158,12 +158,25 @@ Git configuration; confinement protects the repository's shared Git state.
 Import uses Git's quarantined receive and verification, and publication compare-and-swaps the
 host branch against the tip it observed. A lane whose history diverged from the branch is merged
 by the host and published when the merge is clean and `lanes.history.rebase` is `allow` (the
-default). A real conflict, unrelated histories, a configured merge driver, or `rebase = refuse`
-retains the lane's private Git and names the cause and the setting; a branch rewound behind the
+default). When the branch still equals its custody-pinned launch tip, a lane rewrite moves it to
+the lane head with a rewritten-history warning; the displaced tip is retained at
+`refs/provenant/recovery/<oid>` in the same ref transaction. This does not depend on a push or a
+remote-tracking ref. A host tip advanced during the lane takes the merge path regardless of those
+refs. A real
+conflict, unrelated histories, a configured merge driver, or `rebase = refuse` retains the lane's
+private Git and names the cause and the setting; a branch rewound behind the
 pinned launch base is refused rather than fast-forwarded over, and is judged before the unrooted
 tip. `lanes.history.unrooted_tip` judges the lane head before any merge runs, so a merge cannot
 supply ancestry the head lacks; its `warn` and `off` values never override an unrelated-history
 refusal. The base stays pinned until publication.
+
+At launch, `--base` on an existing branch names that branch's merge target rather than an ancestry
+requirement: the lane starts at the branch tip, and a branch behind its base warns
+`BRANCH_BEHIND_BASE` with the number of commits behind while keeping its tip and the given base.
+A branch that already contains its base launches without that warning. A base with no merge base
+with the branch cannot be its merge target and refuses with `WRITER_SCOPE`, naming `--worktree` and
+a merge or rebase remedy; a shallow clone whose missing history prevents proof warns and proceeds.
+These rules apply both to a free managed path and to a clean checkout reused at an occupied path.
 
 The worktree's native index follows the branch from a recorded commit and the digest of the
 index Provenant left, advanced under a per-worktree lock (never the admission gate) after
@@ -188,8 +201,12 @@ withholds host token variables, `injected` passes only the selected token, `ambi
 preserves the host environment and pins `GH_CONFIG_DIR` to the host's gh directory (as gh
 resolves it) in the lane environment and `gh` shim, because an adapter may re-point the
 lane's `XDG_CONFIG_HOME`. The receipt's `detail` names the directory and the setting that
-chose it. A lane opens its own pull request with `gh pr create --body-file`;
-`provenant pr open` needs a settled attempt.
+chose it. A lane's pull requests follow `lanes.pr` (default `never`, so a leaf
+implement lane does not open one): the provider's `gh` tool refuses PR writes
+and mutating forge calls under `never`, forces drafts under `draft`, and only
+forwards unchanged under `allowed`. The value and its source appear in the
+preamble and launch receipt. `provenant pr open` needs a settled attempt and is
+a host operation, not a lane one.
 - Why: untrusted lane state must not alter shared Git or publish over another writer.
 
 ## Writer pin and re-pin
@@ -203,7 +220,16 @@ paths and the setting; `continue_in_place` keeps the edits and warns naming the 
 paths. A worktree another lane holds is always refused (boundary 2). The preflight covers
 writer leaves in composites and loops. WIP mutation holds writer exclusion, refuses unsettled
 reservations and rechecks head and dirty paths under it. Credential and Git-internal roots are
-refused under every value.
+refused under every value. Launch and retry make one fresh `git status --porcelain`
+observation of the checkout, excluding ignored paths; the typed DirtyWriter refusal names the
+counted paths (the first few relative paths plus a count of the rest), display-sanitised and
+bounded, while untrusted free-form reason text is never echoed into a diagnostic. A recorded
+private attempt index is an earlier attempt's snapshot, not an observation of this checkout, so
+it does not gate a new writer: it survives the stop and is checked only by removal and GC, which
+would destroy it and its staged work.
+- Why: a stopped lane's worktree committed clean by the operator, with only ignored output
+  left, must accept a new writer, while a genuinely dirty tree still refuses.
+- Owner: `crates/confinement/src/worktrees/custody.rs`
 
 On a manual retry whose worktree head descends from the pinned commit, the retry re-pins to
 that head and warns with both ids. A head that is not a descendant is refused, naming the pin
@@ -212,6 +238,19 @@ and the head and what to do.
   cause sends the operator to the wrong place.
 - Owner: `crates/run/src/writer_dirty.rs`, `crates/run/src/writer.rs`,
   `src/fabric/graph_execution.rs`, `src/fabric/owner.rs`
+
+A steer successor re-pins the same way: when the retained writer committed after its
+predecessor was sealed, the successor adopts that descendant head, keeps the original
+source pin and warns with both ids. Launch still requires the head to come from the same
+lane-owned writer and descend from the sealed head. Admission checks that ownership before
+adopting a changed head; an adopted or unowned checkout cannot authorise that re-pin. A head
+that moved elsewhere is a typed continuation refusal, so the graph pauses for retry instead of failing and the queued steering
+text stays recorded. A route without a resumable session continues the lane through
+`fresh_with_handoff` (the default), re-pinned from the same retained worktree.
+- Why: an interrupt must not turn the lane's own commits into a failed graph, and the
+  operator must not lose a queued instruction when the head advanced under its custody.
+- Owner: `crates/run/src/holder.rs`, `crates/run/src/controls.rs`,
+  `src/fabric/settlement.rs`
 
 ## PR contributions JSON reference
 
@@ -231,8 +270,16 @@ A delivered steer may preserve committed work while its authorised intent still 
 current explicit owner cancellation separately permits preservation under proven quiescent
 custody, including after an earlier steer or natural exit, and vetoes continuation without
 changing the provider's sealed stop cause. A replacement request invalidates an in-flight
-preservation token. A stop requested after a natural exit does not turn the finished attempt
-into a cancellation.
+preservation token. An attempt stop requested after a natural exit does not turn the finished
+attempt into a cancellation. For graph stop, a Running attempt whose sealed provider exit makes
+status report `settling` has a provider that can no longer act on a stop intent: when no holder
+or settlement driver is live, the stop settles it as cancelled from the provider's own exit,
+keeping that exit, the handoff and every captured artifact as evidence. The owner stop does not
+prove delivery to the exited provider. Publication and crash replay retain that distinction.
+A prelaunch explicit cancellation remains effective even when a never-spawned exit was sealed;
+a wall deadline is not an explicit cancellation.
+A live holder still gets the ordinary stop request and settles the attempt itself; an active
+settlement driver or an already sealed terminal intent keeps ownership of it.
 - Why: every stop reader needs the same meaning, and a steer must never cancel the work it
   intends to continue.
 - Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/settlement.rs`
@@ -257,6 +304,13 @@ stop left committed work: `writer_declared_stop` when the head moved past its so
 `stopped_no_work` otherwise. Both take the `stopped_early` row unless the node overrides it:
 a new route in a fresh session on the retained worktree. A junior route escalates to senior;
 otherwise a declared route not yet launched is used, and an alias route may resolve again.
+
+A lane's graph outcome is classified from evidence, not from the stop path that reported it:
+commits ahead of the node's input head count whether or not they were pushed, and a sealed `done`
+handoff closes the brief. Neither a terminal cause nor a partial signal may call a lane with new
+commits `stopped_no_work`; with a done handoff and a moved head the node succeeds even when a stop
+was recorded. The same observed refs decide the advance code: `writer_declared_stop` when a stop
+left new commits, `stopped_no_work` only when it left none.
 
 With no different route, a stop that can continue on its own route (`stopped_early`,
 `lane_token_lost`, `context_handoff`) takes the same route with a fresh session on the
@@ -309,6 +363,7 @@ chair as an environment problem; `blocked_dependency` pauses as a wait. Neither 
 | `write_grants_refused` | `chair` | no | 0 |
 | `worktree_busy` | `chair` | no | 0 |
 | `launch_handoff_refused` | `chair` | no | 0 |
+| `preparation_refused` | `chair` | no | 0 |
 | `retained_writer_import` | `chair` | no | 0 |
 | `unsupported_platform` | `chair` | no | 0 |
 | `unknown_pacing_account` | `chair` | no | 0 |

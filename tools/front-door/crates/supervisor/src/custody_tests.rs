@@ -61,6 +61,34 @@ fn every_stop_uses_one_intent_and_cancel_file_cannot_carry_a_steer() -> TestResu
 }
 
 #[test]
+fn advisory_stop_never_replaces_an_existing_stop() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let requester = ActorId::from_bytes([3; 16]);
+    request_stop(
+        directory.try_clone()?,
+        scope(),
+        requester,
+        StopReason::WallDeadline,
+    )?;
+    let handle = CustodyHandle {
+        directory: directory.try_clone()?,
+        scope: scope(),
+        requester,
+        held: false,
+    };
+    assert!(matches!(
+        stop_if_unrequested(&handle, StopReason::SupervisorSignal),
+        Err(CustodyError::StopConflict)
+    ));
+    let StopIntentState::Requested(intent) = read_stop_intent(&directory, scope())? else {
+        return Err("missing stop intent".into());
+    };
+    assert_eq!(intent.reason, StopReason::WallDeadline);
+    Ok(())
+}
+
+#[test]
 fn admission_clock_error_stays_an_admission_refusal() {
     let error = CustodyError::from(AdmissionError::Clock);
     assert!(matches!(
@@ -167,6 +195,8 @@ fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
         launch_state: LaunchState::Prepared,
         attempt_device: None,
         attempt_inode: None,
+        attempt_path: None,
+        requester: None,
         reservation_device: evidence_identity.device,
         reservation_inode: evidence_identity.inode,
         binding: StoredWriterBinding::Worktree {
@@ -271,53 +301,10 @@ fn reservation_listing_isolates_an_inaccessible_slot() -> TestResult {
 }
 
 #[test]
-fn legacy_guardian_evidence_is_reported_and_still_fences_its_slot() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let slot_path = root.path().join("writer");
-    std::fs::create_dir(&slot_path)?;
-    let slot = Directory::open_anchor(&slot_path)?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let legacy = crate::fixture::acquire_writer(
-        slot.try_clone()?,
-        scope(),
-        WaitBudget::cli(clock.mono_now(), 1)?,
-        &cancel,
-        &clock,
-    )?;
-    let legacy_path = slot_path.join(scope().attempt.to_string());
-    drop(legacy);
-    std::fs::write(
-        legacy_path.join("guardian-lock.json"),
-        br#"{"schema_version":1}"#,
-    )?;
-
-    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
-    assert_eq!(listing.issues.len(), 1);
-    assert_eq!(listing.issues[0].kind, ReservationIssueKind::LegacyEvidence);
-    assert_eq!(
-        listing.issues[0].reservation,
-        PathBuf::from("writer")
-            .join(scope().attempt.to_string())
-            .join("reservation.json")
-    );
-
-    let other_attempt = Scope {
-        attempt: AttemptId::from_bytes([4; 16]),
-        generation: 1,
-    };
-    let error = acquire_writer_with_observer(
-        slot,
-        other_attempt,
-        WriterBinding::read_only(),
-        WaitBudget::nonblocking(clock.mono_now()),
-        &cancel,
-        &clock,
-        &EmptyNativeWorld,
-    )
-    .expect_err("legacy sibling evidence must keep its worktree fenced");
-    assert!(matches!(error, CustodyError::Fenced));
-    Ok(())
+fn legacy_evidence_remedy_names_a_current_version_command() {
+    let remedy = CustodyError::LegacyEvidence.to_string();
+    assert!(remedy.contains("provenant reconcile"), "{remedy}");
+    assert!(!remedy.contains("previous Provenant version"), "{remedy}");
 }
 
 #[test]
@@ -559,6 +546,7 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         unresolved_cleanup: true,
         unresolved_pids: vec![],
         unresolved_identities: vec![],
+        observed_holders: vec![],
         settlement_evidence: SettlementEvidence::Unresolved,
         stdout: CaptureTotals::default(),
         stderr: CaptureTotals::default(),
@@ -613,6 +601,88 @@ fn acquire(root: &std::path::Path) -> Result<CustodyLease> {
         &CancelToken::new(),
         &clock,
     )
+}
+
+#[test]
+fn durable_stop_intent_allows_relaunch_to_wait_before_settling() -> TestResult {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let root = tempfile::tempdir()?;
+    let slot_path = root.path().join("slot");
+    let attempt_path = root.path().join("attempt");
+    std::fs::DirBuilder::new().mode(0o700).create(&slot_path)?;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&attempt_path)?;
+    let slot = Directory::open_anchor(&slot_path)?;
+    let attempt = Directory::open_anchor(&attempt_path)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let lease = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope(),
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    let metadata = attempt.metadata()?;
+    let requester = ActorId::from_bytes([3; 16]);
+    let mut reservation = lease.reservation.clone();
+    reservation.launch_state = LaunchState::HandingOff;
+    reservation.attempt_device = Some(metadata.device);
+    reservation.attempt_inode = Some(metadata.inode);
+    reservation.attempt_path = Some(attempt.current_path()?);
+    reservation.requester = Some(requester);
+    write_record(
+        &lease.directory,
+        "reservation.json",
+        &reservation,
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    let evidence = lease.directory.try_clone()?;
+    drop(lease);
+    let held = slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+    let budget = || WaitBudget::cli(clock.mono_now(), 5);
+    assert!(matches!(
+        lock_writer_occupancy(&slot, budget()?, &cancel, &clock),
+        Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
+    ));
+    assert_eq!(
+        request_stop(
+            attempt,
+            scope(),
+            requester,
+            StopReason::ExplicitCancellation
+        )?,
+        StopReceipt::Requested
+    );
+    WRITER_LOCK_WAIT_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            reservation.launch_state = LaunchState::Settling;
+            reservation.guardian = Some(ProcessIdentity {
+                boot: reservation.boot.clone(),
+                pid: 10,
+                native_start: 1,
+                group_id: 10,
+                session_id: 10,
+            });
+            reservation.unresolved_cleanup = false;
+            reservation.census_incomplete = false;
+            write_record(
+                &evidence,
+                "reservation.json",
+                &reservation,
+                PublishMode::Replace,
+            )
+            .expect("publish settling")
+            .require_durable()
+            .expect("durable settling");
+            drop(held);
+        }));
+    });
+    drop(lock_writer_occupancy(&slot, budget()?, &cancel, &clock)?);
+    Ok(())
 }
 
 #[test]

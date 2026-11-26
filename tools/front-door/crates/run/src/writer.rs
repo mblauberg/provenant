@@ -442,6 +442,10 @@ pub struct WriterLaunch {
     pub(crate) facts: worktrees::RepoFacts,
 }
 impl WriterLaunch {
+    /// The commit this writer launch was prepared from.
+    pub fn base(&self) -> GitOid {
+        self.base
+    }
     /// Lanes that hold or retain this worktree's occupancy: every recorded
     /// reservation, plus an unnamed entry when a live holder has none. Empty
     /// means no other lane is attached. Observation only; it never locks.
@@ -466,6 +470,23 @@ impl WriterLaunch {
             lanes.push("a live lane".to_owned());
         }
         Ok(lanes)
+    }
+
+    /// The single reservation attempt attached to this worktree, when one is
+    /// recorded. A live holder with no reservation, or several reservations,
+    /// has no unambiguous attempt to name in a refusal. Observation only.
+    pub fn attached_holder(&self) -> Result<Option<provenant_core::AttemptId>> {
+        let Some((slot, _)) = &self.custody else {
+            return Ok(None);
+        };
+        let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(slot)
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        let mut attempts = listing
+            .reservations
+            .iter()
+            .map(|reservation| reservation.scope.attempt);
+        let holder = attempts.next();
+        Ok(holder.filter(|_| attempts.next().is_none()))
     }
 
     pub(crate) fn other_holders_live(&self, attempt: Option<&Directory>) -> Result<bool> {
@@ -1342,6 +1363,37 @@ struct PrimaryPin {
 pub(crate) struct StrayWork {
     /// The finding: the stray branch or commits and where they were made.
     pub note: String,
+    /// The bound branch advanced during the attempt, so the lane's work is on
+    /// the branch it was bound to. A primary move it cannot attribute to the
+    /// lane is then a warning rather than a failed settlement.
+    pub bound_branch_advanced: bool,
+    /// The primary checkout's HEAD at settlement, named in the warning.
+    pub primary_head: String,
+}
+
+/// How settlement treats a primary move that no launch ref, fetched tip or
+/// other worktree accounts for. Work on the bound branch is the lane doing its
+/// job: the move is someone else's and is left intact with a warning. Without
+/// it the work may be in the primary checkout, so the lane is held for review.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StrayDisposition {
+    Warn { note: String },
+    Review { note: String },
+}
+
+impl StrayWork {
+    pub(crate) fn disposition(self) -> StrayDisposition {
+        if self.bound_branch_advanced {
+            StrayDisposition::Warn {
+                note: format!(
+                    "the primary checkout moved to {} during the attempt; the bound branch advanced, so the move cannot be attributed to this lane and is left intact",
+                    self.primary_head
+                ),
+            }
+        } else {
+            StrayDisposition::Review { note: self.note }
+        }
+    }
 }
 
 /// Commits the report lists and the cap on how many Git is asked for.
@@ -1359,6 +1411,8 @@ struct StrayPlan {
     tips: Vec<GitOid>,
     tip_names: Vec<String>,
     excluded: Vec<GitOid>,
+    bound_branch_advanced: bool,
+    primary_head: String,
 }
 
 fn short_branch(name: &str) -> &str {
@@ -1367,10 +1421,25 @@ fn short_branch(name: &str) -> &str {
 
 impl StrayPlan {
     fn new(
+        branch: &str,
         launch_head: Option<&str>,
         launch: &std::collections::BTreeMap<String, GitOid>,
         now: &crate::objects::PrimaryRefs,
     ) -> Self {
+        // A tip different from the one sealed at launch means the lane put its
+        // work on the branch it was bound to. Git cannot attribute the primary
+        // move to any actor, so this is the evidence that settles the question.
+        let bound_branch_advanced = now
+            .refs
+            .get(branch)
+            .is_some_and(|tip| launch.get(branch) != Some(tip));
+        let primary_head = now.head.map_or_else(
+            || "an unborn HEAD".to_owned(),
+            |head| match now.head_ref.as_deref() {
+                Some(name) => format!("{} ({})", head, short_branch(name)),
+                None => format!("{head} (a detached HEAD)"),
+            },
+        );
         let new_branch = now
             .head_ref
             .as_deref()
@@ -1409,6 +1478,8 @@ impl StrayPlan {
             tips,
             tip_names,
             excluded,
+            bound_branch_advanced,
+            primary_head,
         }
     }
 
@@ -1446,6 +1517,8 @@ impl StrayPlan {
                 findings.join("; "),
                 worktree.display()
             ),
+            bound_branch_advanced: self.bound_branch_advanced,
+            primary_head: self.primary_head.clone(),
         })
     }
 }
@@ -2584,6 +2657,115 @@ impl crate::RunStore {
             }
         }
         Ok(projects)
+    }
+
+    /// Recover unindexed reservations under writer exclusion. The host store
+    /// owns the attempt index; an unavailable index or mismatched bound attempt
+    /// leaves the reservation in place.
+    pub fn recover_orphan_reservations(
+        &self,
+        host_wide: bool,
+        call: &crate::Request<'_>,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        let listing = if host_wide {
+            let mut result = provenant_supervisor::custody::ReservationListing::default();
+            let root = match Directory::open_anchor(&self.writer_registry.join("worktrees")) {
+                Ok(root) => root,
+                Err(error) if error.is_not_found() => return Ok(Vec::new()),
+                Err(error) => return Err(error.into()),
+            };
+            for name in root.entries()? {
+                let name = name?;
+                if name
+                    .to_str()
+                    .and_then(|name| ProjectId::parse(name).ok())
+                    .is_none()
+                {
+                    continue;
+                }
+                let project = root.open_verified_directory(&name)?;
+                let path = self.writer_registry.join("worktrees").join(&name);
+                let mut listing = provenant_supervisor::custody::list_writer_reservations(&project)
+                    .map_err(error("list writer reservations", Some(&path)))?;
+                for reservation in &mut listing.reservations {
+                    reservation.reservation = path.join(&reservation.reservation);
+                }
+                result.reservations.extend(listing.reservations);
+            }
+            result
+        } else {
+            self.writer_fence_listing_for_admission(true)?
+        };
+        // Unbound preparations carry no store identity. A nested store could
+        // own the row, so absence in this database proves an orphan only when
+        // this is the host store and no child store is present or unobservable.
+        let unbound_store_proven =
+            if self.context.state_root.as_path() == self.writer_registry.as_path() {
+                match self.root.open_verified_directory(OsStr::new("children")) {
+                    Ok(children) => children.entries()?.next().is_none(),
+                    Err(error) if error.is_not_found() => true,
+                    Err(_) => false,
+                }
+            } else {
+                false
+            };
+        let mut recovered = Vec::new();
+        for fence in listing.reservations {
+            if call.cancel.is_cancelled() {
+                break;
+            }
+            let Some(path) = fence.custody_directory() else {
+                continue;
+            };
+            let slot = match Directory::open_anchor(path) {
+                Ok(slot) => slot,
+                Err(_) => continue,
+            };
+            let recovery = match provenant_supervisor::custody::acquire_recovery(
+                slot,
+                fence.scope,
+                provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                call.cancel,
+                call.clock,
+            ) {
+                Ok(recovery) if recovery.scope() == fence.scope => recovery,
+                _ => continue,
+            };
+            // Attempt IDs are globally unique within this store, including
+            // refused rows and rows owned by another project.
+            let exists: bool = self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?1)",
+                rusqlite::params![fence.scope.attempt.to_string()],
+                |row| row.get(0),
+            )?;
+            if exists {
+                continue;
+            }
+            let attempt = match self.root.open_verified_directory(OsStr::new("attempts")) {
+                Ok(attempts) => match attempts
+                    .open_verified_directory(OsStr::new(&fence.scope.attempt.to_string()))
+                {
+                    Ok(attempt) => Some(attempt),
+                    Err(error) if error.is_not_found() => None,
+                    Err(_) => continue,
+                },
+                Err(error) if error.is_not_found() => None,
+                Err(_) => continue,
+            };
+            if recovery
+                .withdraw_orphan(
+                    attempt.as_ref(),
+                    unbound_store_proven,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+                .unwrap_or(false)
+            {
+                recovered.push(fence.reservation);
+            }
+        }
+        Ok(recovered)
     }
 
     pub fn writer_fence_listing(
@@ -3783,7 +3965,7 @@ impl WriterLaunch {
         let Some((checkout, now)) = self.primary_state(git)? else {
             return Ok(None);
         };
-        let plan = StrayPlan::new(launch_head, launch_refs, &now);
+        let plan = StrayPlan::new(self.branch.as_str(), launch_head, launch_refs, &now);
         let repo = self.worktree.repo();
         let mut excluded = plan.excluded.clone();
         excluded.extend(crate::objects::linked_worktree_heads(git, repo)?);

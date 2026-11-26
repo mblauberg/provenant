@@ -74,13 +74,22 @@ catalogue once, at launch selection: the provider is launched with the exact
 model and the launch receipt carries it, while the attempt's requested route
 keeps the alias. An unknown or ambiguous alias warns.
 
-For adapters that report per-account offered models, a catalogued
-`superseded_by` edge withholds an older shipped pool member on an account that
-offers a superseding model, and an unpinned selection never picks an account
-whose known offer list lacks the model. `route resolve` reports the exclusion
-with the recorded offers. With no observed offer list, shipped members stay and
-supersedence is not applied; owner-configured pools stay pinned regardless. An
-explicit `--account` pin is attempted with a warning rather than withheld.
+For adapters that report per-account offered models, one rule decides offer
+evidence for selection, resolve and launch preparation: a fresh keychain-stamped
+usage probe comes first, a fresh quota snapshot counts only when the probe has
+not run, and stale or expired availability is never offer evidence — it keeps
+its `StaleAvailability` re-probe path instead of refusing the account. A
+catalogued `superseded_by` edge withholds an older shipped pool member on an
+account that offers a superseding model, and an unpinned selection never picks
+an account whose known offer list lacks the model. `route resolve` reports the
+exclusion with the recorded offers. With no observed offer list, shipped members
+stay and supersedence is not applied; owner-configured pools stay pinned
+regardless. An explicit `--account` pin is judged by the same recorded offers:
+it is refused at resolve and at launch preparation with the same reason, which
+names the account and model, the recorded offers and their age, and names an
+offering account or `provenant quota tick` as the repair. The resolve selection
+line names the pinned account even when the account is refused, so another
+account of the same provider is never shown in its place.
 
 `quota tick` refreshes listings for installed adapters with a registered
 account and an enabled quota probe, concurrently within the tick's remaining
@@ -116,7 +125,8 @@ exclusive with `--pr`, since both would name the head and `--pr` takes it
 from the forge. Diff evidence and selection use base...head, including branches that
 merged main. Because the forge can report the previous head seconds after a
 push, `--pr N --head SHA` pins the expected head: the host rereads the forge
-within a bounded wait and refuses, naming both SHAs, if the mismatch persists.
+within a bounded wait and, if the mismatch persists, refuses naming `--head`,
+saying the supplied head is not the PR's head and showing both SHAs.
 Without `--head`, a local remote-tracking ref ahead of the forge warns and
 names both commits. Every pinned launch receipt reports the base and head it
 selected, and nested review launches keep the same pins. Without a subject the
@@ -346,6 +356,18 @@ kept key without an account for that provider, is refused, a same-key account
 from another provider is never substituted, and an absent key stays absent. A
 node-wide account pin does not switch accounts; each fallback candidate of an
 unpinned node may declare its own.
+
+### Launch login recovery
+
+A login failure recorded for an account is cleared at launch only by a probe that
+inspects the credential the lane will use. A CLI `auth status --json` answer names
+the signed-in account but reads only the CLI's local login bit, so it can still
+name the original account after those credentials were replaced. Such a probe
+never clears a recorded failure: launch selects a logged-in account or refuses
+with the account and its sign-in remedy. The rule comes from the adapter registry
+(`account_identity_probe`), not from per-adapter cases in the launch path.
+- Why: an account switch must not make a lane launch on a stale login that the
+  provider then rejects with "Not logged in".
 
 Credential roots must not be HOME or an ancestor of HOME, and directories within
 one account entry are aliases that may overlap. `identity::account_state_paths`

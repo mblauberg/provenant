@@ -24,6 +24,14 @@ provenant --project /absolute/path/to/repo gc --apply --json
 - `gc --idle DURATION` overrides `gc.idle` for one run; `--idle 0` makes
   ownerless idle artefacts eligible at once. `--full` lists each affected PID
   where the text output aggregates them.
+- Attempt scratch is collected before the broader provider-state and payload-cap
+  scans, so those scans do not consume its first pass budget.
+- The advisory dweller census runs after collection with one cached observation
+  per pass, so a large settled store cannot spend `gc.sweep_budget` before
+  anything is collected. The report names how many settled candidates were
+  decided, collected and deferred with their bytes when measured; retained
+  bytes are unknown when not measured. Previews say what would be collected,
+  and a class not reached is unmeasured. An undecided candidate is kept.
 
 ## What is removed and when
 
@@ -42,10 +50,22 @@ trigger; `provenant tick` takes the same path.
   merged or whose PR is closed warns with its age and evidence. `gc --apply`
   stops it through the path `provenant stop` uses.
 - After a merge, background cleanup removes only that branch's worktree and
-  attempt scratch. At lane launch, free space below `gc.free_floor` starts a
-  best-effort background full sweep. Below `gc.critical_free`, work warns and
-  continues unless `policy.DISK_FLOOR` is `refuse` (see the
+  attempt scratch. At lane launch and at settlement, free space on the state
+  volume below `gc.free_floor` starts one bounded best-effort sweep; no daemon
+  is required. The effective floor and its source are printed by `provenant gc`
+  (`free-space floor` in text, `free_floor_bytes`/`free_floor_source` in JSON).
+  Below `gc.critical_free`, work warns and continues unless `policy.DISK_FLOOR`
+  is `refuse` (see the
   [disk spec](../specs/disk.md#dispatch-and-new-build-pressure)).
+- `provenant gc --free-floor SIZE` waits for a sweep already holding the lease
+  for up to `gc.sweep_budget` and then collects on the freed lock with the
+  remaining budget. It never reports an empty skip as success; if the bound
+  expires it fails and says so.
+- The report's `uncollected` rows (text: `uncollected ...`) name what stayed,
+  its bytes (or that bytes are unknown), and why: live holder, uncertain
+  custody, retained evidence, unmerged work and similar. `gc --json` and
+  `gc --full` show one row per candidate; the default text view aggregates
+  them by class and reason.
 - Cargo targets are measured in private bytes (blocks no other clone shares),
   and eviction drops the least recently used first. `gc --dry-run` names each target it
   would remove with its worktree, reason (`worktree gone`, `worktree replaced`,

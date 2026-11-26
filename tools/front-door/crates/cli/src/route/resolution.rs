@@ -1,5 +1,4 @@
 use super::*;
-use provenant_records::warning::{Warning, warn};
 
 fn model_route(model: &ModelId) -> provenant_quota::ReadinessRoute {
     provenant_quota::ReadinessRoute::model(model.adapter(), model.model())
@@ -239,15 +238,14 @@ pub(crate) fn recorded_model_readiness(
         .collect()
 }
 
-/// Remove accounts whose recorded offer list excludes the model. A pinned
-/// account is kept with a warning: an explicit choice is attempted even when
-/// its recorded offers say the model is unavailable.
+/// Remove accounts whose recorded offer list excludes the model, including a
+/// pinned account: resolve and launch preparation refuse the same offer
+/// mismatch with the same reason.
 pub(crate) fn filter_unoffered_readiness(
     rows: Vec<RecordedReadiness>,
     model: &ModelId,
     catalogue: &provenant_routing::Catalogue,
     accounts: &[provenant_quota::AccountRecord],
-    pinned: Option<&str>,
 ) -> (Vec<RecordedReadiness>, Vec<String>) {
     let mut kept = Vec::new();
     let mut exclusions = Vec::new();
@@ -276,26 +274,13 @@ pub(crate) fn filter_unoffered_readiness(
             kept.push(row);
             continue;
         }
-        let offered = offers;
-        let is_pinned = pinned.is_some_and(|pin| {
-            let key = pin.split_once('/').map_or(pin, |(_, key)| key);
-            key == row.account_key || key == row.account
-        });
         let detail = format!(
             "account {} does not offer {} (recorded offers: {})",
             row.account_key,
             model.as_str(),
-            offered.join(", ")
+            offers.join(", ")
         );
-        if is_pinned {
-            warn(
-                Warning::new(provenant_records::warning::ACCOUNT_OFFER_MISMATCH, detail)
-                    .repair("The launch is attempted anyway because the account is pinned."),
-            );
-            kept.push(row);
-        } else {
-            exclusions.push(detail);
-        }
+        exclusions.push(detail);
     }
     (kept, exclusions)
 }

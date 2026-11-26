@@ -155,9 +155,15 @@ mod graph_writer_admission_tests {
                 timeout: Duration::from_secs(5),
             })
         };
+        let registry_holder = provenant_core::AttemptId::from_bytes([8; 16]);
         assert!(matches!(
-            graph_writer_initialisation_error("head", WorktreeError::RegistryLockTimeout),
-            FacadeError::WriterLockBusy
+            graph_writer_initialisation_error(
+                "head",
+                WorktreeError::RegistryLockTimeout {
+                    holder: Some(registry_holder)
+                }
+            ),
+            FacadeError::WriterLockBusy { holder: Some(actual) } if actual == registry_holder
         ));
         assert!(matches!(
             graph_writer_initialisation_error("head", WorktreeError::LockBusy),
@@ -320,7 +326,7 @@ mod graph_writer_admission_tests {
         }))
         .unwrap();
 
-        let lock_timeout = WorktreeError::RegistryLockTimeout;
+        let lock_timeout = WorktreeError::RegistryLockTimeout { holder: None };
 
         let mut owner = MockWriterOwner {
             errors: std::collections::VecDeque::from([lock_timeout]),
@@ -352,23 +358,23 @@ mod graph_writer_admission_tests {
     #[test]
     fn native_timeout_rereads_local_state_only_for_launch_retry() {
         use crate::status_wait::ObservationWake;
-        assert!(super::interface::graph_wait_needs_refresh(
+        assert!(super::interface::observation::graph_wait_needs_refresh(
             ObservationWake::NativeTimeout,
             true,
         ));
-        assert!(!super::interface::graph_wait_needs_refresh(
+        assert!(!super::interface::observation::graph_wait_needs_refresh(
             ObservationWake::NativeTimeout,
             false,
         ));
-        assert!(super::interface::graph_wait_needs_refresh(
+        assert!(super::interface::observation::graph_wait_needs_refresh(
             ObservationWake::Changed,
             false,
         ));
-        assert!(super::interface::graph_wait_needs_refresh(
+        assert!(super::interface::observation::graph_wait_needs_refresh(
             ObservationWake::PacedFallback,
             false,
         ));
-        assert!(!super::interface::graph_wait_needs_refresh(
+        assert!(!super::interface::observation::graph_wait_needs_refresh(
             ObservationWake::Cancelled,
             true,
         ));
@@ -377,15 +383,15 @@ mod graph_writer_admission_tests {
     #[test]
     fn remote_fallback_deadline_survives_local_graph_events() {
         assert_eq!(
-            super::interface::next_remote_deadline(Some(500), true, false, 450, 100),
+            super::interface::observation::next_remote_deadline(Some(500), true, false, 450, 100),
             Some(500),
         );
         assert_eq!(
-            super::interface::next_remote_deadline(Some(500), true, true, 550, 100),
+            super::interface::observation::next_remote_deadline(Some(500), true, true, 550, 100),
             Some(650),
         );
         assert_eq!(
-            super::interface::next_remote_deadline(Some(500), false, false, 550, 100),
+            super::interface::observation::next_remote_deadline(Some(500), false, false, 550, 100),
             None,
         );
     }
@@ -407,10 +413,10 @@ mod graph_writer_admission_tests {
             let admission_seconds = 30;
             let budget = WaitBudget::cli(clock.mono_now(), admission_seconds + 1).unwrap();
             let errors = match scenario {
-                "release" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout)
+                "release" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout { holder: None })
                     .take(2)
                     .collect(),
-                "held" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout)
+                "held" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout { holder: None })
                     .take(10)
                     .collect(),
                 _ => vec![WorktreeError::LiveWriter],
@@ -734,7 +740,7 @@ mod graph_writer_admission_tests {
         }))
         .unwrap();
         let mut owner = MockWriterOwner {
-            errors: std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout)
+            errors: std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout { holder: None })
                 .take(8)
                 .collect(),
             calls: 0,
@@ -838,7 +844,9 @@ mod graph_writer_admission_tests {
         use provenant_records::diagnostic::{PressureLevel, PressureThreshold, ResourceFact, Layer, };
         for cause in [
             FacadeError::DispatchRefused {
-                fact: Some(DispatchRefusalFact::DirtyWriter),
+                fact: Some(DispatchRefusalFact::DirtyWriter {
+                    paths: String::new(),
+                }),
                 disk: None,
                 reason: "TOKEN_SENTINEL".into(),
             },
@@ -1052,6 +1060,7 @@ mod graph_writer_admission_tests {
                 confinement_guard: None,
                 continuation_guard: None,
                 cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
+                offer_mismatch: None,
                 detail: "pacing reserve".into(),
             });
         pacing.skipped_routes[0].detail = "monthly policy=Pace source=configuration knob=domains.routing.pacing.monthly; window=thirty_day".into();
@@ -1482,6 +1491,7 @@ mod graph_ask_inbox_tests {
             service.execute(
                 InboxInput::Answer {
                     extra: Default::default(),
+                    queue_control: None,
                     id: request,
                     action: if option.is_some() {
                         AnswerAction::Choose
@@ -1800,6 +1810,7 @@ mod graph_ask_inbox_tests {
         service.execute(
             InboxInput::Answer {
                 extra: Default::default(),
+                    queue_control: None,
                 id: open.id,
                 action: AnswerAction::Choose,
                 option_id: Some("hold".into()),
@@ -1904,6 +1915,7 @@ mod graph_ask_inbox_tests {
         service.execute(
             InboxInput::Answer {
                 extra: Default::default(),
+                    queue_control: None,
                 id: open[0].id,
                 action: AnswerAction::Choose,
                 option_id: Some("ship".into()),
@@ -3838,6 +3850,9 @@ mod provisioned_writer_submission_tests {
                 },
                 read_roots: &[],
                 attachments: &[],
+                worktree: None,
+                fixture: None,
+                fixture_bytes: None,
                 capabilities: None,
                 capability_sources: None,
                 attempt: Some(&spec),

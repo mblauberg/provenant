@@ -213,6 +213,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "write_grants_refused",
             "worktree_busy",
             "handoff_refused",
+            "preparation_refused",
             "retained_writer_import",
             "unsupported_platform",
             "unknown_pacing_account",
@@ -284,7 +285,12 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
     )?;
     assert_unit_names::<PreparationFailure>(
         "PreparationFailure",
-        &["auth_required", "usage_limited", "adapter_unavailable"],
+        &[
+            "auth_required",
+            "usage_limited",
+            "adapter_unavailable",
+            "git_setup",
+        ],
     )?;
     assert_unit_names::<CancellationDisposition>(
         "CancellationDisposition",
@@ -523,6 +529,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "free_tier_refused",
             "provider_refused",
             "invalid_account_evidence",
+            "account_does_not_offer",
         ],
     )?;
     assert_unit_names::<BoundaryClass>(
@@ -788,6 +795,7 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "handoff_malformed",
             "steered",
             "unclassified",
+            "preparation_refused",
         ],
     )?;
     assert_unit_names::<HandoffStatus>("HandoffStatus", &["done", "stopped_early", "blocked"])?;

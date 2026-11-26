@@ -63,8 +63,11 @@ pub(super) fn handoff_writable(permissions: &PlanPermissions) -> bool {
     permissions.private_state.is_some()
 }
 
-/// Point the lane's temporary-directory variables at the short alias of
-/// `scratch`, leaving every other path, and every grant, on the real one.
+/// Point the lane's temporary-directory variables at the short alias of its
+/// scratch directory under `attempt-scratch/<id>/tmp`, leaving every other
+/// path, and every grant, on the real one. The alias target is outside the
+/// attempt record directory, so a relative write from `TMPDIR` cannot reach
+/// settlement's files (#3947).
 pub(super) fn alias_temporary_env(
     env: &mut [(std::ffi::OsString, std::ffi::OsString)],
     scratch: &Path,
@@ -2609,7 +2612,7 @@ mod alias_tests {
 
     #[test]
     fn only_the_temporary_variables_move_to_the_alias() {
-        let scratch = Path::new("/state/attempts/a/tmp/candidate-0");
+        let scratch = Path::new("/state/attempt-scratch/a/tmp/candidate-0");
         let alias = Path::new("/private/tmp/pv-0123/candidate-0");
         let os = std::ffi::OsString::from;
         let mut env = vec![
@@ -2620,6 +2623,7 @@ mod alias_tests {
         ];
         alias_temporary_env(&mut env, scratch, alias);
         assert_eq!(env[0].1, alias.as_os_str());
+        assert!(!Path::new(&env[0].1).starts_with("/state/attempts"));
         assert_eq!(env[1].1, alias.join("zsh").as_os_str());
         assert_eq!(env[2].1, scratch.join("target").as_os_str());
         assert_eq!(env[3].1, scratch.as_os_str());

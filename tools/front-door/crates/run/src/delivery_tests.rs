@@ -312,6 +312,15 @@ impl PrepareFixture {
             .with_forge(forge)
             .prepare(&self.writer, &self.request)
     }
+    /// The production layout for the fixture's terminal attempt: its record
+    /// under `state/attempts/<id>` and its scratch under
+    /// `state/attempt-scratch/<id>/tmp` (#3947).
+    pub(crate) fn attempt_layout(
+        &self,
+    ) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
+        crate::tests::scratch_layout(&self.root.join("state"), crate::tests::exit().scope.attempt)
+    }
+
     pub(crate) fn lane_git(
         &self,
         args: &[&str],
@@ -452,7 +461,7 @@ impl PrepareFixture {
         use std::os::unix::fs::PermissionsExt;
 
         let state = self.root.join("state");
-        let attempt_path = self.root.join("attempt");
+        let (attempt_path, temporary) = self.attempt_layout()?;
         // A lane fixture may already have built the attempt and its scratch tree.
         for path in [&state, &attempt_path] {
             provenant_os::fixture::private_state_dir(path)?;
@@ -527,7 +536,7 @@ impl PrepareFixture {
         .into_recovery()?;
         assert_eq!(recovery.observe(), RecoveryState::Absent);
         write()?;
-        let scratch = attempt_path.join("tmp/candidate-0");
+        let scratch = temporary.join("candidate-0");
         std::fs::create_dir_all(&scratch)?;
         let git_executable = provenant_os::git::git_executable().ok_or("git executable")?;
         let tip = crate::objects::resolve_ref(
@@ -734,6 +743,7 @@ fn stopped_merge_stays_private(
     use provenant_confinement::{UtilityBudget, UtilityRuntime};
     use provenant_core::CancelToken;
     let fixture = PrepareFixture::new()?;
+    let (attempt_path, temporary) = fixture.attempt_layout()?;
     std::fs::write(fixture.writer.worktree.join("conflict.txt"), "ours\n")?;
     fixture.lane_git(&["add", "conflict.txt"])?;
     fixture.commit(&fixture.writer.worktree, "ours")?;
@@ -757,8 +767,8 @@ fn stopped_merge_stays_private(
     let theirs = String::from_utf8(output.stdout)?.trim().to_owned();
     let prepare_private =
         || -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-            let attempt_path = fixture.root.join("attempt");
-            let scratch = attempt_path.join("tmp/candidate-0");
+            let (attempt_path, temporary) = fixture.attempt_layout()?;
+            let scratch = temporary.join("candidate-0");
             std::fs::create_dir_all(&scratch)?;
             let utility =
                 UtilityRuntime::new(&git, fixture.root.join("home"), fixture.root.join("state"))?;
@@ -797,16 +807,10 @@ fn stopped_merge_stays_private(
         assert!(!output.status.success(), "fixture merge must conflict");
         Ok(())
     })?;
-    assert!(
-        fixture
-            .root
-            .join("attempt/private-merge-retained.json")
-            .is_file()
-    );
+    assert!(attempt_path.join("private-merge-retained.json").is_file());
     if budget_stop {
-        let note: serde_json::Value = serde_json::from_slice(&std::fs::read(
-            fixture.root.join("attempt/budget-commit.json"),
-        )?)?;
+        let note: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(attempt_path.join("budget-commit.json"))?)?;
         assert!(
             note["note"]
                 .as_str()
@@ -822,16 +826,11 @@ fn stopped_merge_stays_private(
         assert!(head.status.success());
         assert_eq!(head.stdout, b"ours\n");
         assert_eq!(
-            std::fs::read_to_string(
-                fixture
-                    .root
-                    .join("attempt/tmp/candidate-0/git-common/MERGE_HEAD")
-            )?
-            .trim(),
+            std::fs::read_to_string(temporary.join("candidate-0/git-common/MERGE_HEAD"))?.trim(),
             theirs
         );
     }
-    let private_git = fixture.root.join("attempt/tmp/candidate-0/git-common");
+    let private_git = temporary.join("candidate-0/git-common");
     let private_index_before = std::fs::read(private_git.join("index"))?;
     let output = provenant_os::fixture::git_command_at(&git)
         .env_clear()
@@ -840,7 +839,7 @@ fn stopped_merge_stays_private(
         .env("GIT_COMMON_DIR", &private_git)
         .env(
             "GIT_OBJECT_DIRECTORY",
-            fixture.root.join("attempt/tmp/candidate-0/git-objects"),
+            temporary.join("candidate-0/git-objects"),
         )
         .env("GIT_WORK_TREE", &fixture.writer.worktree)
         .current_dir(&fixture.writer.worktree)
@@ -858,11 +857,10 @@ fn stopped_merge_stays_private(
     let native_merge_head_bytes = std::fs::read(&native_merge_head).ok();
     // A new attempt gets a clean private index. It must leave the first
     // attempt's imported conflict stages and merge metadata available to the host.
-    std::fs::rename(fixture.root.join("state"), fixture.root.join("first-state"))?;
-    std::fs::rename(
-        fixture.root.join("attempt"),
-        fixture.root.join("first-attempt"),
-    )?;
+    let first_state = fixture.root.join("first-state");
+    std::fs::rename(fixture.root.join("state"), &first_state)?;
+    let first_scratch = crate::scratch_root(&first_state, crate::tests::exit().scope.attempt)
+        .join("tmp/candidate-0");
     fixture.terminal(|| {
         let scratch = prepare_private()?;
         let run = |args: &[&str]| -> std::result::Result<std::process::Output, Box<dyn std::error::Error>> {
@@ -894,20 +892,11 @@ fn stopped_merge_stays_private(
     assert!(after_unmerged.stdout.is_empty());
     assert_eq!(worktree_git(&fixture, &git, &["write-tree"])?, native_tree);
     assert_eq!(
-        std::fs::read(
-            fixture
-                .root
-                .join("first-attempt/tmp/candidate-0/git-common/index")
-        )?,
+        std::fs::read(first_scratch.join("git-common/index"))?,
         private_index_before
     );
     assert_eq!(
-        std::fs::read_to_string(
-            fixture
-                .root
-                .join("first-attempt/tmp/candidate-0/git-common/MERGE_HEAD")
-        )?
-        .trim(),
+        std::fs::read_to_string(first_scratch.join("git-common/MERGE_HEAD"))?.trim(),
         theirs
     );
     assert_eq!(
@@ -925,16 +914,27 @@ fn stopped_merge_stays_private(
 /// merged the default branch and pushed does. Returns the fixture, a runner for
 /// private-view Git, and the host's Git environment.
 fn lane_with_committed_merge() -> std::result::Result<
-    (PrepareFixture, std::path::PathBuf, std::path::PathBuf),
+    (
+        PrepareFixture,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ),
     Box<dyn std::error::Error>,
 > {
-    lane_with_git_view("attempt")
+    // The lane view belongs to the attempt the fixture settles.
+    lane_with_git_view(crate::tests::exit().scope.attempt)
 }
 
 fn lane_with_git_view(
-    attempt_name: &str,
+    id: provenant_core::AttemptId,
 ) -> std::result::Result<
-    (PrepareFixture, std::path::PathBuf, std::path::PathBuf),
+    (
+        PrepareFixture,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ),
     Box<dyn std::error::Error>,
 > {
     use provenant_confinement::{UtilityBudget, UtilityRuntime};
@@ -950,8 +950,8 @@ fn lane_with_git_view(
     fixture.git(&["add", "theirs.txt"])?;
     fixture.commit(&fixture.writer.project, "theirs")?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let attempt_path = fixture.root.join(attempt_name);
-    let scratch = attempt_path.join("tmp/candidate-0");
+    let (attempt_path, temporary) = crate::tests::scratch_layout(&fixture.root.join("state"), id)?;
+    let scratch = temporary.join("candidate-0");
     provenant_os::fixture::private_state_dir(&scratch)?;
     // The utility runtime refuses a home that group or others can reach.
     std::fs::set_permissions(
@@ -977,7 +977,7 @@ fn lane_with_git_view(
         "refs/heads/lane",
         base,
     )?;
-    Ok((fixture, scratch, git))
+    Ok((fixture, attempt_path, scratch, git))
 }
 
 pub(crate) fn private_git(
@@ -1006,7 +1006,7 @@ pub(crate) fn private_git(
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
-fn worktree_git(
+pub(crate) fn worktree_git(
     fixture: &PrepareFixture,
     git: &Path,
     args: &[&str],
@@ -1046,7 +1046,7 @@ fn budget_stop_case(
         attempt: provenant_core::AttemptId::from_bytes([4; 16]),
         generation: 1,
     };
-    let (fixture, scratch, git) = lane_with_git_view(&current_scope.attempt.to_string())?;
+    let (fixture, attempt_path, scratch, git) = lane_with_git_view(current_scope.attempt)?;
     let utility = UtilityRuntime::new(&git, fixture.root.join("home"), fixture.root.join("state"))?;
     let executor = SystemExecutor::new(1)?;
     let repo = utility.open_repo(
@@ -1066,7 +1066,7 @@ fn budget_stop_case(
     let slot_path = fixture.root.join("custody-slot-budget");
     std::fs::create_dir_all(&slot_path)?;
     let slot = Directory::open_anchor(&slot_path)?;
-    let attempt = Directory::open_anchor(&fixture.root.join(current_scope.attempt.to_string()))?;
+    let attempt = Directory::open_anchor(&attempt_path)?;
     let mut request = crate::tests::input().request;
     request.task.profile.write_scope = write_scope.iter().map(|path| (*path).to_owned()).collect();
     crate::artifacts::seal(
@@ -1155,7 +1155,7 @@ fn advance_host_lane(
 #[test]
 fn committed_merge_leaves_the_bound_worktree_clean_at_the_lane_tip()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let (fixture, scratch, git) = lane_with_committed_merge()?;
+    let (fixture, _attempt_path, scratch, git) = lane_with_committed_merge()?;
     let theirs = {
         let output = provenant_os::fixture::git_command_at(&git)
             .env_clear()
@@ -1190,7 +1190,7 @@ fn committed_merge_leaves_the_bound_worktree_clean_at_the_lane_tip()
 #[test]
 fn pushed_lane_leaves_the_bound_worktree_clean_at_the_pushed_commit()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let (fixture, scratch, git) = lane_with_committed_merge()?;
+    let (fixture, _attempt_path, scratch, git) = lane_with_committed_merge()?;
     let theirs_tip = {
         let output = provenant_os::fixture::git_command_at(&git)
             .env_clear()
@@ -1249,7 +1249,7 @@ fn pushed_lane_leaves_the_bound_worktree_clean_at_the_pushed_commit()
 #[test]
 fn unpublished_lane_leaves_the_worktree_clean_and_names_the_commit_and_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let (fixture, scratch, git) = lane_with_committed_merge()?;
+    let (fixture, attempt_path, scratch, git) = lane_with_committed_merge()?;
     let wt = &fixture.writer.worktree;
     let base = worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?;
     std::fs::write(wt.join("ours.txt"), "ours\n")?;
@@ -1292,7 +1292,7 @@ fn unpublished_lane_leaves_the_worktree_clean_and_names_the_commit_and_branch()
         custody: None,
         facts: Default::default(),
     };
-    let note = launch.unpublish(&Directory::open_anchor(&fixture.root.join("attempt"))?);
+    let note = launch.unpublish(&Directory::open_anchor(&attempt_path)?);
     assert!(note.contains(&tip), "{note}");
     assert!(note.contains("refs/heads/lane"), "{note}");
     assert_eq!(
@@ -1310,7 +1310,7 @@ fn unpublished_lane_leaves_the_worktree_clean_and_names_the_commit_and_branch()
 fn unpublished_lane_files_move_back_without_touching_foreign_edits()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use crate::objects::worktree::{Stores, converge};
-    let (fixture, scratch, git) = lane_with_committed_merge()?;
+    let (fixture, attempt_path, scratch, git) = lane_with_committed_merge()?;
     let wt = &fixture.writer.worktree;
     std::fs::write(wt.join("base.txt"), "base\n")?;
     fixture.lane_git(&["add", "base.txt"])?;
@@ -1330,8 +1330,7 @@ fn unpublished_lane_files_move_back_without_touching_foreign_edits()
     // Someone else edits a path the lane also committed.
     std::fs::write(wt.join("foreign.txt"), "someone else\n")?;
     let repo_source =
-        crate::objects::bound_source(&Directory::open_anchor(&fixture.root.join("attempt"))?)?
-            .ok_or("source")?;
+        crate::objects::bound_source(&Directory::open_anchor(&attempt_path)?)?.ok_or("source")?;
     let (base_oid, tip_oid) = (GitOid::parse(&base)?, GitOid::parse(&tip)?);
     let scratch_git = scratch.join("git-common");
     let objects = scratch.join("git-objects");
@@ -1367,7 +1366,8 @@ fn unpublished_lane_files_move_back_without_touching_foreign_edits()
 
 #[test]
 fn unpublish_is_noop_when_siblings_live() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let (fixture, scratch, git) = lane_with_git_view("attempt")?;
+    let (fixture, attempt_path, scratch, git) =
+        lane_with_git_view(provenant_core::AttemptId::from_bytes([22; 16]))?;
     let wt = &fixture.writer.worktree;
     let base = worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?;
     std::fs::write(wt.join("ours.txt"), "ours\n")?;
@@ -1401,9 +1401,11 @@ fn unpublish_is_noop_when_siblings_live() -> std::result::Result<(), Box<dyn std
     std::fs::create_dir_all(&slot_path)?;
     let slot_dir = Directory::open_anchor(&slot_path)?;
 
-    // Each real holder owns a slot-local attempt directory and holder.lock.
-    std::fs::create_dir_all(slot_path.join("attempt"))?;
-    let current_attempt = Directory::open_anchor(&slot_path.join("attempt"))?;
+    // Each real holder owns a slot-local attempt directory, named for its
+    // attempt, and holder.lock.
+    let current_slot = slot_path.join(attempt_path.file_name().ok_or("attempt name")?);
+    std::fs::create_dir_all(&current_slot)?;
+    let current_attempt = Directory::open_anchor(&current_slot)?;
     let current_holder_lock = current_attempt.try_lock(
         std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
         provenant_os::fs::LockMode::Exclusive,
@@ -1428,11 +1430,11 @@ fn unpublish_is_noop_when_siblings_live() -> std::result::Result<(), Box<dyn std
         )),
         facts: Default::default(),
     };
-    let note = launch.unpublish(&Directory::open_anchor(&fixture.root.join("attempt"))?);
+    let note = launch.unpublish(&Directory::open_anchor(&attempt_path)?);
     assert!(note.contains("shared worktree left intact"), "{note}");
     assert!(wt.join("ours.txt").exists());
     drop(sibling_lock);
-    let note = launch.unpublish(&Directory::open_anchor(&fixture.root.join("attempt"))?);
+    let note = launch.unpublish(&Directory::open_anchor(&attempt_path)?);
     assert!(note.contains("worktree restored"), "{note}");
     assert!(!wt.join("ours.txt").exists());
     drop(current_holder_lock);
@@ -1840,8 +1842,11 @@ fn staged_snapshot_survives_worktree_restore_and_sibling_launch()
         vec!["snapshot.txt".to_owned()]
     );
 
-    let sibling_path = case.fixture.root.join("sibling-launch-attempt");
-    let sibling_scratch = sibling_path.join("tmp/candidate-0");
+    let (sibling_path, sibling_temporary) = crate::tests::scratch_layout(
+        &case.fixture.root.join("state"),
+        provenant_core::AttemptId::from_bytes([31; 16]),
+    )?;
+    let sibling_scratch = sibling_temporary.join("candidate-0");
     std::fs::create_dir_all(&sibling_scratch)?;
     let sibling_attempt = Directory::open_anchor(&sibling_path)?;
     crate::objects::prepare_bound(

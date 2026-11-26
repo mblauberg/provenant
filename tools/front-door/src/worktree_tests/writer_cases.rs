@@ -279,12 +279,6 @@ pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
         |exists| *exists,
     )?;
 
-    let scratch = context
-        .state_root
-        .as_path()
-        .join("attempts")
-        .join(attempt.to_string())
-        .join("tmp/candidate-0");
     let lane = |args: &[&str]| lane_git(&rig, &context, attempt, &path, args);
     fs::write(path.join("writer.txt"), b"writer change")?;
     lane(&["add", "writer.txt"])?;
@@ -296,10 +290,11 @@ pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
     let terminal = await_terminal(&store, attempt, &call)?;
     let value = serde_json::to_value(&terminal)?;
     let progress = fs::read_to_string(
-        scratch
-            .parent()
-            .and_then(Path::parent)
-            .ok_or("attempt directory")?
+        context
+            .state_root
+            .as_path()
+            .join("attempts")
+            .join(attempt.to_string())
             .join("settlement-progress.json"),
     )
     .unwrap_or_else(|error| error.to_string());
@@ -382,7 +377,7 @@ pub(super) fn writer_terminal_retains_sequencer_state() -> Result {
     let holder = holder_context(&rig, &roots, &context);
     let started = start_writer(&store, record.attempt_id, &provider, &holder, &call)?;
     assert!(matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt));
-    // Spec: docs/specs/run-settlement.md — an unfinished operation in the
+    // Spec: docs/specs/run-settlement.md#settlement — an unfinished operation in the
     // lane's own Git is retained and named; settlement publishes the committed
     // tip instead of refusing the attempt.
     let terminal = await_terminal(&store, attempt, &call)?;

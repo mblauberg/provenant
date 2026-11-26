@@ -742,34 +742,36 @@ fn a_reply_to_a_late_notification_keeps_the_turn_ending_handoff() -> TestResult 
             ..
         }
     ));
-    // Without boundaries the trailing text makes a malformed declaration;
-    // later tool work explicitly invalidates the old turn's declaration.
-    for (turns, malformed) in [
-        (Vec::new(), true),
-        (
-            vec![turn(first.len(), true), turn(answer.len(), true)],
-            false,
-        ),
-    ] {
-        let record = settle_with_turns(&answer, Some(Outcome::Succeeded), Vec::new(), None, turns)?;
-        if malformed {
-            assert_eq!(
-                record.settlement_reason,
-                Some(provenant_records::run::SettlementReason::HandoffMalformed)
-            );
-            assert_eq!(
-                record.state.stop().ok_or("stop")?.cause(),
-                provenant_records::StopCause::HandoffMalformed
-            );
-            assert_eq!(record.partial_signals, [PartialSignal::HandoffMalformed]);
-        } else {
-            assert_eq!(
-                record.settlement_reason,
-                Some(provenant_records::run::SettlementReason::Completed)
-            );
-            assert!(record.partial_signals.is_empty());
+    // Redesigned for #3928: without boundaries the trailing prose is now
+    // tolerated, so the declaration still settles as a declared stop; later
+    // tool work explicitly invalidates the old turn's declaration.
+    let record = settle_with_turns(
+        &answer,
+        Some(Outcome::Succeeded),
+        Vec::new(),
+        None,
+        Vec::new(),
+    )?;
+    assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::ReviewRequired,
+            ..
         }
-    }
+    ));
+    let record = settle_with_turns(
+        &answer,
+        Some(Outcome::Succeeded),
+        Vec::new(),
+        None,
+        vec![turn(first.len(), true), turn(answer.len(), true)],
+    )?;
+    assert_eq!(
+        record.settlement_reason,
+        Some(provenant_records::run::SettlementReason::Completed)
+    );
+    assert!(record.partial_signals.is_empty());
     Ok(())
 }
 #[test]
@@ -1158,10 +1160,172 @@ fn graph_readers_get_the_sealed_handoff_not_a_rereading_of_the_text() -> TestRes
         ..Fake::default()
     };
     let record = store.finish(id, &dir, &observed, &fake, &call)?;
-    // The text ends with an acknowledgement, which the whole-answer rule
-    // would call "no handoff"; the graph's capture carries the settled one.
+    // The text ends with an acknowledgement that turn boundaries keep out of
+    // the declaration; the graph's capture carries the settled one.
     let capture = store.stream_result(id, &call, None)?;
     let sealed = store.handoff(&record)??.ok_or("sealed handoff")?;
     assert_eq!(capture.handoff, Ok(Some(sealed)));
+    Ok(())
+}
+
+#[test]
+fn abandon_writer_creation_floor_requires_proven_removed_lane_worktree() -> TestResult {
+    use crate::{RunStore, Service, WriterRequest};
+    use provenant_confinement::worktrees::{WorktreeOrigin, WorktreeOwner};
+
+    fn setup_registration(
+        common: &std::path::Path,
+        worktree: &std::path::Path,
+        attempt_id: Option<AttemptId>,
+        origin: WorktreeOrigin,
+    ) -> TestResult {
+        let reg = common.join("worktrees/lane");
+        std::fs::create_dir_all(&reg)?;
+        let owner = WorktreeOwner {
+            attempt_id,
+            operation_id: Some("op-floor".parse()?),
+            branch: "fix/3914".into(),
+            base: "1".repeat(40),
+            host: provenant_core::HostId::from_bytes([3; 16]),
+            created_at: WallTime::from_micros(1_780_000_010_000_000)?,
+            origin,
+            label: None,
+            reference: None,
+        };
+        std::fs::write(reg.join("gitdir"), format!("{}/.git\n", worktree.display()))?;
+        std::fs::write(
+            reg.join("provenant-owner.json"),
+            serde_json::to_vec(&owner)?,
+        )?;
+        Ok(())
+    }
+
+    let queued_at = WallTime::from_micros(1_780_000_005_000_000)?;
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let ctx = context(temp.path())?;
+    let checkout = std::fs::canonicalize(temp.path())?.join("checkout");
+    let common = checkout.join(".git");
+    let worktree = checkout.join(".worktrees/lane");
+    let store = RunStore::open(&ctx, &call)?;
+    let service = Service::new(&store);
+
+    let mut fresh = input();
+    fresh.created_at = queued_at;
+    fresh.request.task.writer = Some(WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(ctx.project_id),
+        project: checkout.clone(),
+        worktree: worktree.clone(),
+    });
+    store.create(&fresh, &call)?;
+    let id = fresh.attempt_id;
+
+    // Missing Git registration fails closed.
+    assert_eq!(
+        service.abandon_writer_creation_floor(id, Some(&common), &call)?,
+        None
+    );
+
+    // Valid removed Lane registration for this attempt yields queued_at (both
+    // via explicit common_dir and repository_marker fallback).
+    setup_registration(&common, &worktree, Some(id), WorktreeOrigin::Lane)?;
+    assert_eq!(
+        service.abandon_writer_creation_floor(id, Some(&common), &call)?,
+        Some(queued_at)
+    );
+    assert_eq!(
+        service.abandon_writer_creation_floor(id, None, &call)?,
+        Some(queued_at)
+    );
+
+    // An extant worktree keeps using its own filesystem birth time.
+    std::fs::create_dir_all(&worktree)?;
+    assert_eq!(
+        service.abandon_writer_creation_floor(id, Some(&common), &call)?,
+        None
+    );
+    std::fs::remove_dir(&worktree)?;
+
+    // Adopted origin or another attempt_id fails closed.
+    setup_registration(&common, &worktree, Some(id), WorktreeOrigin::Adopted)?;
+    assert_eq!(
+        service.abandon_writer_creation_floor(id, Some(&common), &call)?,
+        None
+    );
+    let other_id = AttemptId::from_bytes([9; 16]);
+    setup_registration(&common, &worktree, Some(other_id), WorktreeOrigin::Lane)?;
+    assert_eq!(
+        service.abandon_writer_creation_floor(id, Some(&common), &call)?,
+        None
+    );
+
+    // Retry attempts reuse the predecessor's worktree and must fail closed.
+    let mut retry = input();
+    retry.attempt_id = AttemptId::from_bytes([7; 16]);
+    retry.operation_id = "run-retry".parse()?;
+    retry.created_at = WallTime::from_micros(1_780_000_020_000_000)?;
+    retry.request.parent = Some(id);
+    retry.request.task.writer = fresh.request.task.writer.clone();
+    store.create(&retry, &call)?;
+    setup_registration(
+        &common,
+        &worktree,
+        Some(retry.attempt_id),
+        WorktreeOrigin::Lane,
+    )?;
+    assert_eq!(
+        service.abandon_writer_creation_floor(retry.attempt_id, Some(&common), &call)?,
+        None
+    );
+
+    // Graph continuations reuse a predecessor's worktree and must fail closed.
+    let mut cont = input();
+    cont.attempt_id = AttemptId::from_bytes([8; 16]);
+    cont.operation_id = "run-cont".parse()?;
+    cont.created_at = WallTime::from_micros(1_780_000_030_000_000)?;
+    cont.request.task.writer = fresh.request.task.writer;
+    tests::rekey(&mut cont);
+    cont.request
+        .task
+        .context
+        .get_or_insert_with(Default::default)
+        .writer_predecessor = Some(id);
+    store.create(&cont, &call)?;
+    setup_registration(
+        &common,
+        &worktree,
+        Some(cont.attempt_id),
+        WorktreeOrigin::Lane,
+    )?;
+    assert_eq!(
+        service.abandon_writer_creation_floor(cont.attempt_id, Some(&common), &call)?,
+        None
+    );
+
+    // A registration older than the queue sets the floor: a reused checkout
+    // can predate queued_at, and the floor must not move past its creation.
+    let mut late = input();
+    late.attempt_id = AttemptId::from_bytes([5; 16]);
+    late.operation_id = "run-late".parse()?;
+    late.created_at = WallTime::from_micros(4_000_000_000_000_000)?;
+    late.request.task.writer = cont.request.task.writer.clone();
+    tests::rekey(&mut late);
+    store.create(&late, &call)?;
+    setup_registration(
+        &common,
+        &worktree,
+        Some(late.attempt_id),
+        WorktreeOrigin::Lane,
+    )?;
+    let registered =
+        provenant_confinement::worktrees::worktree_registration_for_path(&common, &worktree)?
+            .and_then(|(_, birth)| birth);
+    let floor = service.abandon_writer_creation_floor(late.attempt_id, Some(&common), &call)?;
+    assert_eq!(floor, registered, "the floor is the registration's birth");
+    if let Some(floor) = floor {
+        assert!(floor < late.created_at);
+    }
     Ok(())
 }

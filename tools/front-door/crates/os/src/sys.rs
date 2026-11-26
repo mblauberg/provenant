@@ -230,6 +230,7 @@ mod tests {
 pub mod child;
 pub(crate) mod clock;
 pub(crate) mod pid;
+pub(crate) mod process_start;
 #[doc(hidden)]
 pub mod profile;
 #[doc(hidden)]

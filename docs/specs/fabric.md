@@ -151,9 +151,28 @@ schema capability, structural limits, the fully expanded plan, the checkpoint
 envelope and selected outputs. A launch retry without a wall clock leaves the
 prior checkpoint. Launch and read waits and writer provisioning have independent
 sourced allowances (`domains.fabric.graph.launch_wait_seconds`,
-`domains.fabric.graph.writer_provision_seconds`). An occupied concurrency
+`domains.fabric.graph.writer_provision_seconds`). A launch that contends for a
+writer's custody waits on the provisioning allowance, not the shorter reader
+wait: a concurrent launch holds its per-worktree writer guard across the whole
+worktree add and post-create setup, so the wait must cover one full provisioning
+(default 120 s, matching the writer mutation budget). A writer lease with a
+matching durable stop intent or in its settling phase is the same kind of
+progress: `provenant stop` returns once the cancel is acknowledged, before the guardian publishes the terminal record
+and drops `writer.lock`, so a relaunch in that window waits for the release on
+the store lock budget and on the provisioning allowance rather than refusing a
+just-stopped worktree. A live holder is not that case: it still refuses on the
+first probe so another lane's uncommitted work is never adopted. Only after
+those bounded waits expire does the node settle `blocked` with the contention
+cause, the lock holder when the worktree owner record or writer reservation
+names one, and a `provenant retry` remedy. Writer-custody contention proves the
+launch never reached the host; the disposition records that fact on the attempt
+from the typed error. The retry gate reads that recorded fact together with the
+shared pre-host classifier, and the blocked remedy reads the recorded fact,
+rather than guessing from owner codes (a generic `busy` also covers
+post-acceptance lock timeouts, which may have a live guardian). An occupied concurrency
 threshold warns and proceeds unless its declared policy refuses; writer custody
-remains a Git boundary.
+remains a Git boundary. A launch blocked this way is settled for `retry`, which
+starts the next attempt on the same recorded worktree.
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
@@ -200,7 +219,13 @@ admission. The CLI catalogue exposes those declarations.
 `after_settled` orders a node after its predecessors settle in any state without
 propagating their failure; they stay visible in the graph outcome. Inputs may
 select outputs from either kind of direct dependency; unavailable optional
-outputs stay absent and required outputs still gate admission.
+outputs stay absent and required outputs still gate admission. When loop
+expansion binds a source or gate target that was inherited as an ordering-only
+edge, the source's success requirement replaces that ordering edge; a retry of
+failed hygiene retains its settled-only source edge. Dependencies inherited
+from an enclosing composite are checked against the full expanded graph and
+remain attached to each round under their original graph identities, rather than
+being renamed into the loop namespace.
 
 ### Implementation planning
 
@@ -278,7 +303,8 @@ own `when` condition holds; a composite skipped by its own condition keeps that
 state whatever its members. An explicit `GraphPatch` skip of a composite stays
 authoritative until a later replacement or retry supersedes it, and a patch that
 replaces or skips a member recomputes the affected active composite boundaries in
-the same checkpoint.
+the same checkpoint. A node whose resolved `when` is false remains visible as
+skipped and needs no launch route; active agent nodes still require one.
 - Why: recovery must validate a checkpoint against the topology it records.
 - Owner: `crates/fabric-runtime/src/graph/composites.rs`,
   `crates/fabric-runtime/src/graph/patch.rs`
@@ -302,26 +328,52 @@ steer covers session identity (provider, model, effort, account, host-native
 lane), not route-selection history, so a same-identity continuation always
 resumes.
 
-Delivery is a session-preserving restart, not live injection. The host's shared
+Delivery is a queued turn at the next boundary, not live injection and never an
+interrupt. The owner refuses a route that advertises unsupported continuation
+when `domains.fabric.steer.fallback = "refuse"`, with a typed unsupported
+receipt before saving the steer. Otherwise its text is durable at once and the
+live attempt keeps running. The host's shared
 adapter stream decoder records the first validated session identity against the
-admitted route and spawned process, and the interrupt is requested through the
-attempt's custody owner only after that record is durable; until then the text
-stays queued while the provider continues. After settlement the graph resumes the
+admitted route and spawned process; after settlement the graph resumes the
 same provider, model, account and session with the saved text as the next user
-turn, keeping writer custody. Before interrupting, the owner prints one line
-naming `domains.fabric.steer.fallback` and the layer that set it. When the
+turn, keeping writer custody. When the
 session is unavailable the default `fresh_with_handoff` starts a fresh session
 with the accepted brief, previous bounded handoff and queued steer text;
 `refuse` keeps the steer without a successor. A route, account, session or
 process identity mismatch is fatal and never takes the fresh fallback. Adapters
 advertise `continuation` only when their run path can retain and resume the
-session; other routes are `unsupported` and start fresh. Concurrent restarts are
-spaced by `domains.fabric.steer.restart_spacing_ms`.
+session; other routes are `unsupported` and use the configured fallback.
+Concurrent continuations are spaced by `domains.fabric.steer.restart_spacing_ms`.
 
-A writer's continuation reuses the retained worktree, so admission waits for
+Session readiness is evidence for how the next turn is delivered, not a gate on
+accepting the text: a running attempt is never refused for lacking a session.
+A settled target can hold a note only while another attempt for that same target
+will run to read it (`lanes.steer_settled=queue`). A live sibling does not read a
+node's note, and a completed or cancelled graph, or a terminal attempt with no
+continuation for its node, refuses with `steer_graph_complete` in both human
+and JSON output. The repair names the command that starts a new round on the
+same worktree (`provenant run implement --worktree ... --brief-file FILE`). A
+finished task is terminal for this rule: success never admits a follow-up
+attempt, even when the steering was queued while the writer was live; the note
+stays accepted and resolves as not-continued.
+
+A writer's continuation reuses the retained worktree, including edits left
+uncommitted when a turn finishes naturally. Admission waits for
 settlement to release the steered attempt's custody: steering stays queued and
-the reaction is retried, never dropped. Stopping a terminal steered attempt
-resolves queued steering as not continued (`terminal_stop`). When placement or
+the reaction is retried, never dropped. A custody or writer-lineage check that
+fails while admitting a steer continuation is a typed continuation refusal, not
+an "invalid run record": the accepted text and the settled attempt stay intact.
+When that writer committed after the predecessor was sealed, admission re-pins
+to the descendant under the same lane custody and warns with both ids; a head
+that moved elsewhere stays a refusal that leaves the graph needing retry. Whether
+refused during admission or before provider launch, the recorded continuation
+refusal pauses the graph with a retry remedy, even when all nodes are settled.
+The checkpoint reloads with the settled attempt intact so that retry can proceed;
+the refusal does not replace the predecessor with a refused successor or report a
+failed graph outcome. The accepted text and
+any admitted successor remain available in the run record.
+An explicit stop of an attempt holding accepted steering resolves it as not
+continued (`terminal_stop`). When placement or
 the run owner is temporarily unavailable, the graph journal persists a bounded
 steer intent for the work key and warns; tick replays the original inbox
 operation under its original requester, a committed inbox receipt precedes queue
@@ -339,8 +391,8 @@ continuation has launched. A refused continuation keeps closed facts (authority
 rule, field, failure kind) into its settled reason; provider output and identity
 values never supply that explanation.
 
-The guardian preserves the typed `steered` stop through exit publication, and run
-admits the continuation only when the interrupt was delivered before exit. A live
+For an independently requested `steered` stop, the guardian preserves its typed
+reason through exit publication. A live
 identity conflict (and incomplete identity evidence from oversized, undecodable or
 unreadable output) is sealed separately from the bounded stdout tail, and the
 guardian routes a conflict through its protocol-rejection stop. A conflict is
@@ -433,11 +485,16 @@ explicitly. The `domains.wait.pr_*` settings (conditional requests, intervals)
 change forge-observer request cadence only, never a gate verdict.
 - Why: deterministic decisions need durable evidence without a launch.
 
+The [delivery queue target](delivery-queue.md) extends these graph capabilities
+with bounded conditional cycles, escalation and durable item scheduling.
+
 ### Bounded loops
 
 Admission counts every possible round. A body writer integrates by fast-forward
 only and never merges. Exhaustion pauses the graph without delivery, and an
-extension never adds rounds twice.
+extension never adds rounds twice. Admission treats the edge into a later round
+as a retry on the previous outcome, rather than carrying that round's success
+requirements into its failure path.
 - Why: repeated review and repair needs bounded admission and a human decision at
   the bound.
 
@@ -497,7 +554,9 @@ checkpoint missing launch evidence or its actor is refused.
 
 ### Checkpoint envelope
 
-Admission bounds the worst-case checkpoint before saving the plan. Graph text,
+Admission bounds the worst-case checkpoint before saving the plan. The fixed
+checkpoint envelope is 32 MiB, including the full handoff projections and
+pending-steer reserve for graphs at the default node limit. Graph text,
 identity fields and object keys keep their exact bytes in local state and
 execution context, through captured fragments, retries, template substitutions
 and expansions; heuristic content inspection warns with the field and rule
@@ -524,13 +583,18 @@ when no independent approval remains.
 - Why: an accepted graph must be able to save its checkpoint, and no reader may
   see a state another reader rejects.
 
-### Fallback only for unavailability
+### Route fallback
 
-A node moves to its next route only on a typed pre-launch authentication, quota or
+A node moves to its next route on a typed pre-launch authentication, quota or
 adapter refusal with custody released, or a classified refusal of a launched
-read-only attempt within its [retry](retry-owner.md) budget. Launched writers and
-uncertain launches never switch.
-- Why: a launched writer may already have had effects.
+read-only attempt within its [retry](retry-owner.md) budget. The explicit
+`provider_stalled_retry` outcome is the opt-in exception: run-side custody stops
+the stalled provider before the graph advances, and the switch consumes that
+same retry budget. Its next route reuses the node's worktree so any partial
+effects remain visible to the retry. Fail-policy stalls and uncertain launches
+never switch.
+- Why: preserving a writer's partial work makes an explicit stall retry safe to
+  inspect and continue, while the retry budget bounds route changes.
 
 ### Graph delivery
 

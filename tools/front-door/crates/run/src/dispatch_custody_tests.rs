@@ -125,7 +125,9 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     assert!(prompt.contains(&path.join("process-exit.json").display().to_string()));
     assert!(prompt.contains("only durable outputs"));
     assert!(prompt.contains("Files in $TMPDIR are discarded when the attempt ends."));
-    assert!(prompt.contains("Provider history and handoff progress are kept."));
+    assert!(prompt.contains(
+        "Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them; your progress handoff JSON under provider-state is yours to update throughout the task and is kept."
+    ));
     assert!(prompt.ends_with("exact prompt"));
     let fact = store.attempt(run.attempt_id, &call)?;
     assert_eq!(

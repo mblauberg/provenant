@@ -2145,7 +2145,8 @@ fn collect_impl(
                 }
             };
             let precheck = |verified: &VerifiedWorktree| {
-                let cleanliness = worktree_cleanliness_at(context, verified.repo(), cancel)?;
+                let cleanliness =
+                    worktree_cleanliness_with_attempt_indexes_at(context, verified.repo(), cancel)?;
                 super::lifecycle::removal_verdict(&cleanliness, false, true)?;
                 precheck_removal(
                     context,
@@ -2372,7 +2373,7 @@ fn collect_impl(
                     WorktreeError::UnknownOccupancy { .. }
                     | WorktreeError::UnknownWriter
                     | WorktreeError::UnknownWriterAt { .. } => RemovalUncertainty::CustodyUnknown,
-                    WorktreeError::LockBusy | WorktreeError::RegistryLockTimeout => {
+                    WorktreeError::LockBusy | WorktreeError::RegistryLockTimeout { .. } => {
                         RemovalUncertainty::Busy
                     }
                     WorktreeError::Dirty(_) | WorktreeError::IgnoredPaths(_) => {

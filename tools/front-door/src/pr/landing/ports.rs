@@ -9,9 +9,23 @@ pub struct PullRequestInfo {
     pub base_branch: String,
     pub author: String,
     pub state: PullRequestState,
+    pub mergeability: Mergeability,
     pub merged_commit: Option<String>,
     pub stack: Option<StackMembership>,
     pub draft: bool,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mergeability {
+    Clean,
+    Conflicting,
+    Unclean,
+    #[default]
+    Unknown,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequiredCiCheck {
+    pub name: String,
+    pub app_id: Option<u64>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StackMembership {
@@ -102,6 +116,14 @@ pub trait Forge {
         Ok(Vec::new())
     }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
+    /// Read required checks for the PR's base branch. `None` means the policy
+    /// could not be established; an empty vector is a known empty policy.
+    fn required_ci_policy(
+        &mut self,
+        _base_branch: &str,
+    ) -> Result<Option<Vec<RequiredCiCheck>>, LandingError> {
+        Ok(None)
+    }
     /// Adapter-selected cadence for the next observation, if it owns one.
     /// Callers use their declared policy cadence when the adapter has none.
     /// Where the checks of `commit` can be watched, when the forge has one.

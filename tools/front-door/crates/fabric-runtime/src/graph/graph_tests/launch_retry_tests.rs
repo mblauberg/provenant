@@ -321,7 +321,11 @@ fn writer_lock_contention_retries_the_same_attempt_after_release() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
-        errors: [(1, crate::coordination::facade::FacadeError::WriterLockBusy)].into(),
+        errors: [(
+            1,
+            crate::coordination::facade::FacadeError::WriterLockBusy { holder: None },
+        )]
+        .into(),
         observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
         ..Default::default()
     };
@@ -340,6 +344,78 @@ fn writer_lock_contention_retries_the_same_attempt_after_release() {
     assert_eq!(completed.checkpoint.nodes[0].attempts.len(), 1);
     assert_eq!(owner.calls.len(), 2);
     assert_eq!(owner.calls[0], owner.calls[1]);
+}
+
+// Issue #3991: terminal publication precedes the guardian's release of the
+// worktree lease. A settling lease is a release in progress, so the launch
+// waits on the provisioning allowance instead of settling `blocked` at once.
+// A lease held by a live lane is not that case and still refuses immediately.
+#[test]
+fn settling_writer_lease_waits_but_a_live_holder_refuses() {
+    use crate::coordination::facade::FacadeError;
+    let settling = FacadeError::WriterLeaseHeld {
+        holder: Some(provenant_core::AttemptId::from_bytes([41; 16])),
+        branch: Some("fix/3991".into()),
+        worktree: Some("/project/.worktrees/lane".into()),
+        age: Some("2s".into()),
+        live: Some(false),
+    };
+    let live = FacadeError::WriterLeaseHeld {
+        holder: Some(provenant_core::AttemptId::from_bytes([42; 16])),
+        branch: None,
+        worktree: None,
+        age: None,
+        live: Some(true),
+    };
+    let allowance = crate::config::GraphConfig::default().writer_provision_seconds;
+    let policy = LaunchRetryPolicy {
+        limit: 0,
+        first_seconds: 1,
+        max_seconds: 1,
+        ..Default::default()
+    };
+    let new_checkpoint = || {
+        serde_json::from_value::<GraphCheckpoint>(serde_json::json!({
+            "schema_version":1,"graph_id":"g-test","plan_digest":"digest",
+            "nodes":[{"id":"writer","state":"pending","worktree":null,"attempts":[]}]
+        }))
+        .unwrap()
+    };
+
+    let mut waiting = new_checkpoint();
+    assert!(crate::graph::defer_launch_contention(
+        &mut waiting,
+        0,
+        &settling,
+        Some(at(0)),
+        allowance,
+        policy.clone(),
+    )
+    .unwrap());
+    assert_eq!(waiting.nodes[0].state, NodeState::Running);
+    assert_eq!(
+        waiting.nodes[0].advance_owner_code.as_deref(),
+        Some("writer_lease_held")
+    );
+    let retry = waiting.nodes[0].launch_retry.as_ref().unwrap();
+    assert!(
+        retry
+            .wake_at
+            .is_some_and(|wake| wake <= at(i64::try_from(allowance).unwrap()))
+    );
+
+    let mut refused = new_checkpoint();
+    assert!(!crate::graph::defer_launch_contention(
+        &mut refused,
+        0,
+        &live,
+        Some(at(0)),
+        allowance,
+        policy,
+    )
+    .unwrap());
+    assert_eq!(refused.nodes[0].state, NodeState::Pending);
+    assert!(refused.nodes[0].launch_retry.is_none());
 }
 
 #[test]
@@ -562,7 +638,9 @@ fn launch_succeeds_after_more_than_three_transient_failures() {
                         index,
                         match kind {
                             0 => crate::coordination::facade::FacadeError::Busy,
-                            1 => crate::coordination::facade::FacadeError::WriterLockBusy,
+                            1 => crate::coordination::facade::FacadeError::WriterLockBusy {
+                                holder: None,
+                            },
                             2 => crate::coordination::facade::FacadeError::WriterUnknown,
                             _ => crate::coordination::facade::FacadeError::WriterBusy {
                                 holder: None,
@@ -629,6 +707,7 @@ fn nonterminal_observation_transitions_need_no_owner_or_journal() {
             route_index: 0,
             attempt: 1,
         },
+        escalation_rung: None,
         route: route("first"),
         state: AttemptState::Starting,
         stop: None,
@@ -772,7 +851,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
         FacadeError::HomeUnavailable,
         FacadeError::WriterUnknown,
         FacadeError::WriterBusy { holder: None },
-        FacadeError::WriterLockBusy,
+        FacadeError::WriterLockBusy { holder: None },
         FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
@@ -812,4 +891,88 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     }
     impl Error for Untyped {}
     assert!(!launch_retry_kind(&Untyped));
+}
+
+// Issue #3923: a launch contending for a held writer lock must wait for the
+// full provisioning allowance. This unit test pins the disposition and the
+// default allowance; the launch path against a real held writer guard is
+// pinned in `crates/cli/src/fabric/graph_relay_tests.rs`.
+#[test]
+fn concurrent_launch_waits_the_full_provisioning_allowance_for_a_held_writer_lock() {
+    use crate::coordination::facade::FacadeError;
+    let allowance = crate::config::GraphConfig::default().writer_provision_seconds;
+    assert!(
+        allowance > 55,
+        "provisioning allowance must outlast the old reader contention bound"
+    );
+    let deadline_second = i64::try_from(allowance).unwrap();
+    let holder = provenant_core::AttemptId::from_bytes([43; 16]);
+    let contention = FacadeError::WriterLockBusy {
+        holder: Some(holder),
+    };
+    let policy = LaunchRetryPolicy {
+        limit: 0,
+        first_seconds: 1,
+        max_seconds: 1,
+        ..Default::default()
+    };
+    let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"g-test","plan_digest":"digest",
+        "nodes":[{"id":"writer","state":"pending","worktree":null,"attempts":[]}]
+    }))
+    .unwrap();
+
+    // The real contention path: the bounded wait is still running, so the
+    // node stays Running with a wake derived from writer_provision_seconds.
+    assert!(
+        crate::graph::defer_launch_contention(
+            &mut checkpoint,
+            0,
+            &contention,
+            Some(at(0)),
+            allowance,
+            policy.clone(),
+        )
+        .unwrap()
+    );
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(
+        checkpoint.nodes[0].advance_owner_code.as_deref(),
+        Some("writer_lock_busy")
+    );
+    let retry = checkpoint.nodes[0].launch_retry.as_ref().unwrap();
+    assert_eq!(retry.deadline, Some(at(deadline_second)));
+    assert!(
+        retry
+            .wake_at
+            .is_some_and(|wake| wake <= at(deadline_second))
+    );
+
+    // Past the full allowance the wait expires. The blocked row keeps the
+    // contention cause, names the holder and offers the retry remedy.
+    assert!(
+        crate::graph::defer_launch_contention(
+            &mut checkpoint,
+            0,
+            &contention,
+            Some(at(deadline_second)),
+            allowance,
+            policy,
+        )
+        .unwrap()
+    );
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
+    assert_eq!(
+        checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("launch_retry_exhausted")
+    );
+    let reason = checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(
+        reason.contains(&holder.to_string()),
+        "blocked contention must name the lock holder: {reason}"
+    );
+    assert!(
+        reason.contains("provenant retry"),
+        "settled contention must offer retry: {reason}"
+    );
 }

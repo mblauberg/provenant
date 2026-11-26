@@ -68,7 +68,9 @@ lane.
 `--base` names the pull request's merge target; it never resets the branch. An
 existing branch behind its base warns `BRANCH_BEHIND_BASE` and proceeds at its
 current tip, so re-running a repair keeps the branch's commits. Merge the base
-into the branch before landing when the warning appears.
+into the branch before landing when the warning appears. A `--base` with no merge
+base with the branch refuses: pass `--worktree` to use the existing checkout, or
+merge or rebase the branch onto the intended base before launching again.
 
 ## Merge
 
@@ -113,7 +115,7 @@ Review must be independent of the writer and cover the exact head; a changed
 head needs fresh evidence.
 
 - `LAND_PENDING` and `LAND_BUSY` exit as `pending`: rerun the same `land`.
-  `LAND_CONFLICT` means the PR conflicts with the target: rebase or merge, then
+  `LAND_CONFLICT` means the PR conflicts with the target: merge the base into the branch, then
   push. `LAND_PUBLICATION_UNKNOWN`: see the recovery below.
 - A killed land leaves its candidate ref until the pull request is merged or
   closed; the next land collects it. Changing `domains.pr.land.candidate_ref_prefix`

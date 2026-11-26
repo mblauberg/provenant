@@ -427,6 +427,7 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
                     .idle_seconds()
                     .map_err(|error| error.to_string())?,
                 workers,
+                Some(&resolved.home),
             )
         })();
         let failed = collected.as_ref().err().cloned();
@@ -737,6 +738,7 @@ fn tick(
     let clock = SystemClock;
     let now = clock.wall_now()?;
     let settlement = Task::run("settlement", || reap_projects(&resolved));
+    // Graph tick includes queue-owned replay, pending-item claims and lease reconciliation.
     let graphs =
         crate::fabric::tick_graphs(&resolved, now, workers).unwrap_or_else(|error| Graphs {
             advanced: 0,

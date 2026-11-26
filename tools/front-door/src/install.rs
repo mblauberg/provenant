@@ -2380,6 +2380,17 @@ fn smoke_project(runner: &UpgradeRunner, scratch: &Path) -> Result<SmokeProject,
     ] {
         smoke_git(runner, project, &args)?;
     }
+    // The staged fixture carries a fact that exists in no committed tree and
+    // no source file. A reader that reconstructs the answer from the checkout
+    // or the bundled template cannot report it; only reading the staged bytes
+    // can. This is an uncommitted scratch edit by design: the graph stages the
+    // working-file bytes while its source view reads the committed head.
+    let nonce = provenant_os::fs::entropy_128().map_err(|error| error.to_string())?;
+    std::fs::write(
+        project.join("fixture.txt"),
+        format!("smoke fact {}\n", provenant_core::hex(&nonce[..8])),
+    )
+    .map_err(|error| error.to_string())?;
     Ok(SmokeProject { directory, base })
 }
 
@@ -2409,20 +2420,16 @@ fn verify_smoke_with(
         "--name".into(),
         graph.clone().into(),
     ];
-    let remote = args
-        .host
-        .as_deref()
-        .is_some_and(|host| !matches!(host, "" | "local" | "localhost"));
-    if !remote {
-        // The writer node needs a linked worktree, which a primary checkout
-        // is not; ask the launch to create one on a branch of the fixture.
-        run.extend([
-            "--branch".into(),
-            format!("smoke/{graph}").into(),
-            "--base".into(),
-            "HEAD".into(),
-        ]);
-    }
+    // The writer node needs a linked worktree. Locally the launch creates one
+    // on a branch of the fixture; on a peer the branch and base are carried
+    // across as peer-owned provisioning intent, so the peer creates its own
+    // worktree instead of inheriting this host's scratch path.
+    run.extend([
+        "--branch".into(),
+        format!("smoke/{graph}").into(),
+        "--base".into(),
+        "HEAD".into(),
+    ]);
     if let Some(host) = &args.host {
         run.extend(["--host".into(), host.into()]);
     }
@@ -2733,6 +2740,16 @@ fn render_upgrade_hosts(hosts: &[HostUpgrade], full: bool) -> String {
     human
 }
 
+/// The `sh -c` payload sent to the local host and every Fabric peer. The tag is
+/// resolved once by the caller so all hosts fetch the same release; the embedded
+/// script owns the bounded resume/retry download and verifies it before unpacking.
+fn remote_upgrade_script(tag: &str) -> String {
+    format!(
+        "release_tag='{tag}'\n{}",
+        include_str!("upgrade-release.sh")
+    )
+}
+
 pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
     let (environment, targets) = match selected_targets(globals, &[]) {
         Ok(value) => value,
@@ -2901,11 +2918,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 .ok_or("Latest release has no valid tag")?;
             upgrade_version = Some(tag.trim_start_matches('v').to_owned());
             install_args.extend(["--tag".into(), tag.into()]);
-            script = format!(
-                "release_tag='{tag}'\n{}",
-                include_str!("upgrade-release.sh")
-            )
-            .into_bytes();
+            script = remote_upgrade_script(tag).into_bytes();
         }
         let ssh = if fabric.peers.is_empty() {
             None

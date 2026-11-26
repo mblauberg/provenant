@@ -431,8 +431,9 @@ pub struct LaunchPaths {
     pub deadline_unix_ms: u64,
     pub scratch: PathBuf,
     pub provider_state: PathBuf,
-    /// Private temporary directory for a lane, never a shared system
-    /// one. Terminal commit and withdrawal remove it best-effort.
+    /// Private temporary directory for a lane, under the per-attempt scratch
+    /// root outside the attempt record directory (#3947), never a shared
+    /// system one. Terminal commit and withdrawal remove it best-effort.
     pub temporary: PathBuf,
     /// Short symlink to `temporary` on macOS, for a `TMPDIR` that fits
     /// `sun_path`. Absent when unavailable; grants always use `temporary`.
@@ -446,32 +447,27 @@ pub struct PreparedStart {
     pub attempt: AttemptId,
     pub plan: std::cell::RefCell<Option<PreparedLaunch>>,
     attempts: provenant_os::fs::Directory,
+    scratch: provenant_os::fs::Directory,
+    temporary: std::path::PathBuf,
     retained: bool,
 }
 impl Drop for PreparedStart {
     fn drop(&mut self) {
         if !self.retained {
             // No attempt record survives for retention to find the alias by,
-            // so unlink it before its attempt directory is deleted.
-            let attempt = crate::artifacts::subdir(
-                &self.attempts,
-                std::ffi::OsStr::new(&self.attempt.to_string()),
-                false,
-            );
-            if let Ok(attempt) = attempt {
-                crate::short_temporary::remove(&attempt);
-            }
-            let _ = crate::artifacts::remove_entry_tree(
-                &self.attempts,
-                std::ffi::OsStr::new(&self.attempt.to_string()),
-            );
+            // so unlink it before its scratch and attempt directories go.
+            crate::short_temporary::remove(&self.temporary);
+            let name = self.attempt.to_string();
+            let name = std::ffi::OsStr::new(&name);
+            let _ = crate::artifacts::remove_entry_tree(&self.scratch, name);
+            let _ = crate::artifacts::remove_entry_tree(&self.attempts, name);
         }
     }
 }
 
 fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
     format!(
-        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history and handoff progress are kept. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
+        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them; your progress handoff JSON under provider-state is yours to update throughout the task and is kept. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
         handoff = crate::completion::guidance(),
         result = directory.join("result.md").display(),
         exit = directory.join("process-exit.json").display(),
@@ -486,6 +482,41 @@ fn output_prompt_directs_scratch_outside_worktree() {
     let prompt = output_prompt(std::path::Path::new("/attempt"), "task");
     assert!(prompt.contains("$TMPDIR"));
     assert!(prompt.contains("not in the worktree"));
+}
+
+/// #3844: the launch prompt must not tell a lane to stop updating its own
+/// progress handoff while it also carries the progress-handoff instruction.
+/// Harness ownership is scoped to the attempt's records, not to the lane's
+/// provider-state handoff.
+#[cfg(test)]
+#[test]
+fn output_prompt_keeps_progress_handoff_and_attempt_record_ownership_consistent() {
+    let progress = crate::completion::handoff_progress_guidance(std::path::Path::new(
+        "/state/attempts/6/provider-state/candidate-0/handoff.json",
+    ));
+    let prompt = output_prompt(std::path::Path::new("/attempt"), &progress);
+    // The lane still owns and updates its progress handoff under provider-state.
+    assert!(prompt.contains("Progress handoff JSON:"), "{prompt}");
+    assert!(
+        prompt.contains("Update this file throughout the task"),
+        "{prompt}"
+    );
+    // The harness owns the attempt's own records, including the sealed snapshot.
+    assert!(
+        prompt.contains("harness writes the attempt's own records"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("sealed handoff.json in the attempt directory"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("the lane never writes them"), "{prompt}");
+    // No sentence tells the lane the harness writes its progress handoff.
+    assert!(
+        !prompt.contains("harness-recorded handoff progress"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("never the lane"), "{prompt}");
 }
 
 /// Resolve policy once for this launch from host, project and dispatch settings.
@@ -676,23 +707,39 @@ impl RunStore {
             crate::artifacts::subdir(&self.root, std::ffi::OsStr::new("attempts"), true)?;
         // Exclusive creation makes cleanup safe even if admission races a replay.
         attempts.mkdir(std::ffi::OsStr::new(&input.attempt_id.to_string()), 0o700)?;
+        let scratch_root = crate::artifacts::subdir(
+            &self.root,
+            std::ffi::OsStr::new(crate::plan::ATTEMPT_SCRATCH),
+            true,
+        )?;
+        let scratch = crate::artifacts::subdir(
+            &scratch_root,
+            std::ffi::OsStr::new(&input.attempt_id.to_string()),
+            true,
+        )?;
+        let temporary =
+            crate::plan::scratch_root(self.context.state_root.as_path(), input.attempt_id)
+                .join("tmp");
         let mut ready = PreparedStart {
             task: task.clone(),
             attempt: input.attempt_id,
             plan: std::cell::RefCell::new(None),
             attempts,
+            scratch: scratch_root,
+            temporary: temporary.clone(),
             retained: false,
         };
         ready.attempts.sync()?;
         let directory = self.attempt_dir(input.attempt_id, true)?;
-        for name in ["scratch", "provider-state", "tmp"] {
-            crate::artifacts::subdir(&directory, std::ffi::OsStr::new(name), true)?;
-        }
+        crate::artifacts::subdir(&directory, std::ffi::OsStr::new("provider-state"), true)?;
+        let tmp = crate::artifacts::subdir(&scratch, std::ffi::OsStr::new("tmp"), true)?;
+        crate::artifacts::subdir(&tmp, std::ffi::OsStr::new("scratch"), true)?;
         let base = self
             .context
             .state_root
             .as_path()
             .join(format!("attempts/{}", input.attempt_id));
+        let temporary_alias = crate::short_temporary::ensure(&temporary);
         let paths = LaunchPaths {
             attempt_id: input.attempt_id,
             operation_id: input.operation_id.clone(),
@@ -707,10 +754,10 @@ impl RunStore {
             )
             .unwrap_or(0)
             .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
-            scratch: base.join("scratch"),
+            scratch: temporary.join("scratch"),
             provider_state: base.join("provider-state"),
-            temporary: base.join("tmp"),
-            temporary_alias: crate::short_temporary::ensure(&directory),
+            temporary,
+            temporary_alias,
         };
         let prompt = output_prompt(&base, &input.prompt);
         let policy = launch_policy(
@@ -885,7 +932,7 @@ pub trait Providers {
         )
     }
 }
-enum HandOff {
+pub(crate) enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
     /// A typed boundary refused the prepared handoff.
@@ -912,6 +959,35 @@ enum HandOff {
     /// The guardian may have received the launch.
     Uncertain(String),
 }
+
+/// The typed pre-provider evidence a handoff carries into withdrawal. A
+/// Git-setup preparation refusal is local setup, not an adapter failure: its
+/// typed failure names the step to repair and its note names the remedy implied
+/// by the host's bounded reason. Other local refusals keep the adapter-failure
+/// failure fact and own their note through the refusal kind.
+pub(crate) fn handoff_preparation(
+    error: &HandOff,
+    reason: &str,
+) -> (
+    Option<provenant_records::run::PreparationFailure>,
+    Option<String>,
+) {
+    match error {
+        HandOff::TypedLocal {
+            cause: TerminalCause::PreparationRefused,
+            ..
+        } => (
+            Some(provenant_records::run::PreparationFailure::GitSetup),
+            Some(TerminalCause::preparation_note(reason)),
+        ),
+        HandOff::Local(_) | HandOff::TypedLocal { .. } => (
+            Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
+            None,
+        ),
+        _ => (None, None),
+    }
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Started {
     Launched(AttemptId),
@@ -1181,7 +1257,7 @@ impl RunStore {
                     directory,
                     scope,
                     binding,
-                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.lock_budget(),
                     call.cancel,
                     call.clock,
                 )
@@ -1207,7 +1283,7 @@ impl RunStore {
                     directory,
                     scope,
                     binding,
-                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.lock_budget(),
                     call.cancel,
                     call.clock,
                 )
@@ -1217,7 +1293,8 @@ impl RunStore {
         )
     }
     /// Native observation seam for integration fixtures. The ordinary start
-    /// path always uses supervisor's system observer and nonblocking lease.
+    /// path always uses supervisor's system observer and the store lock budget;
+    /// that budget is spent only when the slot proves a release in progress.
     #[cfg(feature = "fixture")]
     #[allow(clippy::too_many_arguments)]
     pub fn start_with_writer_lease(
@@ -2104,33 +2181,40 @@ impl RunStore {
                 .as_path()
                 .join(format!("attempts/{id}"));
             let prompt = output_prompt(&directory, &prompt);
-            let mut staging_failure = None;
-            for child in ["scratch", "provider-state", "tmp"] {
-                if let Err(error) =
-                    crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new(child), true)
-                {
-                    staging_failure = Some(provenant_core::bounded_line(
+            let staging = (|| -> Result<std::path::PathBuf> {
+                crate::artifacts::subdir(
+                    &attempt_dir,
+                    std::ffi::OsStr::new("provider-state"),
+                    true,
+                )?;
+                let scratch = self.attempt_scratch_dir(id, true)?;
+                let tmp = crate::artifacts::subdir(&scratch, std::ffi::OsStr::new("tmp"), true)?;
+                crate::artifacts::subdir(&tmp, std::ffi::OsStr::new("scratch"), true)?;
+                Ok(crate::plan::scratch_root(self.context.state_root.as_path(), id).join("tmp"))
+            })();
+            let temporary = match staging {
+                Ok(temporary) => temporary,
+                Err(error) => {
+                    let reason = provenant_core::bounded_line(
                         &format!("launch staging failed: {error}"),
                         240,
-                    ));
-                    break;
+                    );
+                    self.settle_starting_refusal(id, &reason, now()?, call)?;
+                    started.push(Started::Refused {
+                        attempt: id,
+                        reason,
+                        kind: RefusalKind::Preparation,
+                    });
+                    continue;
                 }
-            }
-            if let Some(reason) = staging_failure {
-                self.settle_starting_refusal(id, &reason, now()?, call)?;
-                started.push(Started::Refused {
-                    attempt: id,
-                    reason,
-                    kind: RefusalKind::Preparation,
-                });
-                continue;
-            }
+            };
             let base = self
                 .context
                 .state_root
                 .as_path()
                 .join("attempts")
                 .join(id.to_string());
+            let temporary_alias = crate::short_temporary::ensure(&temporary);
             let paths = LaunchPaths {
                 attempt_id: id,
                 operation_id: operation.operation_id.clone(),
@@ -2139,10 +2223,10 @@ impl RunStore {
                 deadline_unix_ms: u64::try_from(now()?.as_micros() / 1000)
                     .unwrap_or(0)
                     .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
-                scratch: base.join("scratch"),
+                scratch: temporary.join("scratch"),
                 provider_state: base.join("provider-state"),
-                temporary: base.join("tmp"),
-                temporary_alias: crate::short_temporary::ensure(&attempt_dir),
+                temporary,
+                temporary_alias,
             };
             let priority = providers.priority(task).unwrap_or_else(|reason| {
                 let fallback = provenant_records::run::default_lane_priority(task.writer.is_some(), task.build_heavy);
@@ -2512,11 +2596,6 @@ impl RunStore {
                         // local lease has been withdrawn. Preserve that typed
                         // pre-provider failure for graph fallback; a boundary or
                         // retained import does not establish safe preparation.
-                        let preparation_failure =
-                            matches!(&error, HandOff::Local(_) | HandOff::TypedLocal { .. })
-                                .then_some(
-                                    provenant_records::run::PreparationFailure::AdapterUnavailable,
-                                );
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
                             HandOff::Boundary { cause, .. } => {
@@ -2528,7 +2607,7 @@ impl RunStore {
                             }
                             _ => Some(TerminalCause::HandoffRefused),
                         };
-                        let (reason, kind) = match error {
+                        let (reason, kind) = match &error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
                             HandOff::Local(error) | HandOff::TypedLocal { message: error, .. } => (
                                 format!("launch preparation failed: {error}"),
@@ -2536,11 +2615,11 @@ impl RunStore {
                             ),
                             HandOff::Boundary { message, class, .. } => (
                                 format!("launch preparation failed: {message}"),
-                                RefusalKind::HandoffBoundary(class),
+                                RefusalKind::HandoffBoundary(*class),
                             ),
                             HandOff::Resource { message, fact } => (
                                 format!("launch preparation failed: {message}"),
-                                RefusalKind::HandoffResource(fact),
+                                RefusalKind::HandoffResource(fact.clone()),
                             ),
                             HandOff::RetainedImport { fence, worktree } => (
                                 RunError::RetainedWriterImport {
@@ -2549,8 +2628,8 @@ impl RunStore {
                                 }
                                 .to_string(),
                                 RefusalKind::RetainedImport {
-                                    fence: *fence,
-                                    worktree,
+                                    fence: (**fence).clone(),
+                                    worktree: worktree.clone(),
                                 },
                             ),
                             _ => unreachable!(),
@@ -2568,6 +2647,8 @@ impl RunStore {
                         } else {
                             (Outcome::Rejected, reason.clone())
                         };
+                        let (preparation_failure, preparation_note) =
+                            handoff_preparation(&error, &reason);
                         match self.withdraw_with_preparation_failure(
                             id,
                             crate::store::Withdrawal {
@@ -2579,7 +2660,7 @@ impl RunStore {
                                 finished_at: now()?,
                                 failure: preparation_failure.filter(|_| !cancelled),
                                 terminal_cause,
-                                terminal_note: kind.terminal_note(),
+                                terminal_note: preparation_note.or_else(|| kind.terminal_note()),
                             },
                             call,
                         ) {
@@ -3227,6 +3308,91 @@ mod policy_reporting_tests {
                 .filter(|line| line.starts_with("lane policy:"))
                 .count(),
             1
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-launch.md#lane-scratch-stays-outside-the-attempt-record
+    #[test]
+    fn launched_lane_scratch_and_tmpdir_stay_outside_the_attempt_record()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        struct Capture(std::cell::RefCell<Option<LaunchPaths>>);
+        impl Providers for Capture {
+            fn prepare(
+                &self,
+                _: &TaskRequest,
+                _: &str,
+                paths: &LaunchPaths,
+                _: Option<&AttemptRecord>,
+            ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
+                *self.0.borrow_mut() = Some(LaunchPaths {
+                    attempt_id: paths.attempt_id,
+                    operation_id: paths.operation_id.clone(),
+                    task_index: paths.task_index,
+                    lane_depth: paths.lane_depth,
+                    deadline_unix_ms: paths.deadline_unix_ms,
+                    scratch: paths.scratch.clone(),
+                    provider_state: paths.provider_state.clone(),
+                    temporary: paths.temporary.clone(),
+                    temporary_alias: paths.temporary_alias.clone(),
+                });
+                Ok(PreparedLaunch {
+                    limits: Default::default(),
+                    continuation_expectation: None,
+                    argv: vec!["fixture".into()],
+                    environment: vec![],
+                    stdin: vec![],
+                    secret_input: None,
+                    cwd: "/".into(),
+                    route: route(),
+                    skipped_routes: vec![],
+                    observed_head: None,
+                    repository: None,
+                    confinement: None,
+                })
+            }
+            fn decode(
+                &self,
+                _: &RouteRecord,
+                _: &[u8],
+                _: &ExitObservation,
+                _: &Path,
+            ) -> std::result::Result<Decoded, String> {
+                unreachable!("no provider runs in this test")
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let short = std::fs::canonicalize(temp.path())?.join("short");
+        std::fs::create_dir(&short)?;
+        crate::short_temporary::use_parent_in_tests(&short);
+        let context = context(temp.path())?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        // Launch preparation creates the attempt directory exclusively, as
+        // dispatch does before it records the attempt.
+        let run = input();
+        let provider = Capture(std::cell::RefCell::new(None));
+        let _ready = store.prepare_fresh_start(&run, &provider, &call)?;
+        let borrowed = provider.0.borrow();
+        let paths = borrowed.as_ref().ok_or("paths captured")?;
+        let attempt = context
+            .state_root
+            .as_path()
+            .join("attempts")
+            .join(run.attempt_id.to_string());
+        assert!(!paths.temporary.starts_with(&attempt));
+        assert_eq!(paths.scratch, paths.temporary.join("scratch"));
+        assert!(paths.scratch.is_dir());
+        assert_eq!(
+            paths.temporary,
+            crate::plan::scratch_root(context.state_root.as_path(), run.attempt_id).join("tmp")
+        );
+        let alias = paths.temporary_alias.as_ref().ok_or("temporary alias")?;
+        assert!(!alias.starts_with(&attempt));
+        assert_eq!(
+            std::fs::canonicalize(alias)?,
+            std::fs::canonicalize(&paths.temporary)?
         );
         Ok(())
     }

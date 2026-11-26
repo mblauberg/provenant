@@ -173,6 +173,11 @@ pub struct WorkContext {
     /// Graph retry lineage remains independent of run-policy `retry_of`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer_predecessor: Option<AttemptId>,
+    /// Host-stamped permission to adopt a retained writer owned by a prior
+    /// graph while running the delivery queue. The owner still verifies the
+    /// prior attempt, exact writer identity and released custody at launch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delivery_queue_writer_adoption: bool,
 }
 impl WorkContext {
     /// A new request names only the fixed fields; stored records keep unknown ones for forward compatibility.
@@ -180,6 +185,7 @@ impl WorkContext {
         self.extra.is_empty()
             && self.valid()
             && (!self.graph_template_launch || (self.graph_id.is_some() && self.node_id.is_some()))
+            && (!self.delivery_queue_writer_adoption || self.graph_template_launch)
     }
     pub fn valid(&self) -> bool {
         [
@@ -207,6 +213,32 @@ impl WorkContext {
             && self.pr != Some(0)
     }
 }
+/// A small, portable file staged into a lane's candidate scratch by the host.
+///
+/// Unlike a path grant, the bytes cross a host boundary with the task, so a
+/// peer can stage the same fixture without inheriting a caller-local path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedFixture {
+    /// A plain file name, never a path: the receiving host places it in its
+    /// own candidate scratch.
+    pub name: String,
+    pub content: Vec<u8>,
+}
+
+impl StagedFixture {
+    /// Fixtures are small, text-sized inputs; a larger file belongs in the
+    /// project checkout or the host-written Git context, not on the wire.
+    pub const MAX_BYTES: usize = 64 * 1024;
+
+    pub fn is_valid(&self) -> bool {
+        !self.name.is_empty()
+            && !self.name.contains(['/', '\\'])
+            && self.name != "."
+            && self.name != ".."
+            && self.content.len() <= Self::MAX_BYTES
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,6 +266,10 @@ pub struct TaskRequest {
     /// Git base for host-written attempt context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// A portable fixture staged into every candidate scratch, so a peer
+    /// places the same bytes as the host without inheriting a caller path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<StagedFixture>,
     /// The caller's Git ref, retained for idempotent operation identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
@@ -793,6 +829,8 @@ pub struct RouteRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci_scope: Option<CiScopeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_policy: Option<PrPolicyReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxModeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_admission: Option<SandboxAdmissionReceipt>,
@@ -1099,6 +1137,20 @@ pub struct GitHubCredentialReceipt {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CiScopeReceipt {
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub source: crate::Layer,
+    #[serde(default)]
+    pub key: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+/// The lane's effective pull-request policy and the layer that set it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrPolicyReceipt {
     #[serde(default)]
     pub value: String,
     #[serde(default)]
@@ -1455,6 +1507,11 @@ pub enum TerminalCause {
     WriteGrantsRefused,
     WorktreeBusy,
     HandoffRefused,
+    /// A local launch preparation step refused the attempt before custody.
+    /// The attempt's `preparation_failure` names the step; its note carries the
+    /// host's bounded reason and the correction that reason implies. A real
+    /// host handoff refusal keeps [`Self::HandoffRefused`] and its reconcile remedy.
+    PreparationRefused,
     /// A retry's writer head does not match the graph's pinned source commit.
     /// It is a pin problem, not a failed launch handoff.
     WriterPinMismatch {
@@ -1471,6 +1528,12 @@ pub enum TerminalCause {
     TokenBudget,
     SettlementFailure,
     ProviderEarlyStop,
+    /// The opt-in stall policy stopped a live attempt that had been silent
+    /// past `providers.<id>.stall_after_seconds`. Detection itself only warns.
+    ProviderStalled,
+    /// The opt-in `retry` stall policy stopped a silent provider and asks the
+    /// graph to continue on its next route.
+    ProviderStalledRetry,
     FreePoolQuota,
     CommandUnavailable,
     HostNativeUnconfigured,
@@ -1516,6 +1579,7 @@ impl TerminalCause {
             Self::WriteGrantsRefused => "write grants refused; provenant output ID",
             Self::WorktreeBusy => "worktree busy; provenant output ID",
             Self::HandoffRefused => "launch handoff refused; provenant output ID",
+            Self::PreparationRefused => "launch preparation refused; provenant output ID",
             Self::WriterPinMismatch { .. } => "writer source pin mismatch; provenant output ID",
             Self::RetainedWriterImport => "writer import retained; provenant output ID",
             Self::UnsupportedPlatform => "sandbox unavailable; provenant output ID",
@@ -1529,6 +1593,8 @@ impl TerminalCause {
             Self::TokenBudget => "token budget exhausted; provenant output ID",
             Self::SettlementFailure => "settlement failed; provenant output ID",
             Self::ProviderEarlyStop => "provider stopped early; provenant output ID",
+            Self::ProviderStalled => "provider stalled (no output); provenant output ID",
+            Self::ProviderStalledRetry => "provider stalled (no output); retry next route",
             Self::FreePoolQuota => "free-pool quota exhausted; provenant output ID",
             Self::CommandUnavailable => "command unavailable; provenant output ID",
             Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",
@@ -1598,6 +1664,9 @@ impl TerminalCause {
             Self::HandoffRefused => {
                 "the host refused the launch handoff; run `provenant reconcile` before retrying"
             }
+            Self::PreparationRefused => {
+                "launch preparation refused; correct the named local setup before retrying"
+            }
             Self::WriterPinMismatch { .. } => {
                 "the writer worktree head does not match the commit pinned for this continuation; retry re-pins when the head descends from the pinned commit, otherwise restore that lineage"
             }
@@ -1626,6 +1695,12 @@ impl TerminalCause {
             Self::SettlementFailure => "lane settlement failed; inspect local recovery evidence",
             Self::ProviderEarlyStop => {
                 "provider stopped early; inspect the result and resume if needed"
+            }
+            Self::ProviderStalled => {
+                "the provider went silent past its stall_after_seconds threshold; inspect the last-event time in status, then retry or steer the attempt"
+            }
+            Self::ProviderStalledRetry => {
+                "the provider went silent past its stall_after_seconds threshold; the graph will try the next route"
             }
             Self::FreePoolQuota => {
                 crate::diagnostic::ProviderFailureFact::Quota { free_pool: true }.reason()
@@ -1664,6 +1739,21 @@ impl TerminalCause {
                 "the lane was refused and its record names no cause; inspect the attempt's local launch evidence and request before retrying"
             }
         }
+    }
+
+    /// The safe note for a preparation refusal: the correction implied by the
+    /// host's reason, followed by the reason's salient clause. Fixed text and
+    /// bounded host facts only; provider output never reaches a typed note.
+    pub fn preparation_note(reason: &str) -> String {
+        let salient = reason.split(';').next().unwrap_or(reason).trim();
+        let remedy = if salient.contains("no Git remote is declared") {
+            "declare `ports.git.remote` or set the branch's upstream, then retry"
+        } else if salient.contains("writer lineage") {
+            "check the retained writer worktree's owner, source and head against its sealed predecessor, then retry"
+        } else {
+            "correct the local launch preparation failure and retry"
+        };
+        crate::diagnostic::safe_text(&format!("{remedy}; {salient}"))
     }
 }
 
@@ -1744,6 +1834,9 @@ pub enum PreparationFailure {
     AuthRequired,
     UsageLimited,
     AdapterUnavailable,
+    /// Local Git setup refused before custody. Not an adapter failure: route
+    /// fallback cannot declare a remote or set an upstream.
+    GitSetup,
 }
 
 /// Why a fallback candidate did not launch. Typed so `lanes` and `output` can
@@ -1795,6 +1888,41 @@ impl SkipKind {
     }
 }
 
+/// A pinned account's recorded offer list excludes the requested model. The
+/// account, model, offers and observation age are safe owner-facing facts;
+/// provider output and paths never enter this projection.
+/// Spec: docs/specs/routing.md#provider-model-discovery
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountOfferMismatch {
+    pub account: String,
+    pub model: String,
+    pub offered_models: Vec<String>,
+    /// Whole seconds between the recorded observation and the refusal.
+    pub age_seconds: u64,
+}
+impl AccountOfferMismatch {
+    /// The one safe rendering of the fact, used by both resolve and launch.
+    pub fn detail(&self) -> String {
+        use crate::diagnostic::safe_text;
+        let offers = self
+            .offered_models
+            .iter()
+            .map(|model| safe_text(model))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "account {} does not offer {} (recorded offers: {}; recorded {}s ago)",
+            safe_text(&self.account),
+            safe_text(&self.model),
+            offers,
+            self.age_seconds
+        )
+    }
+    /// The repair shared by resolve and preparation.
+    pub const NEXT: &'static str =
+        "select an account that offers the model, or refresh discovery with `provenant quota tick`";
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedRoute {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1817,6 +1945,9 @@ pub struct SkippedRoute {
     /// Typed readiness cause, when the router supplied one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<crate::RouteExclusionReason>,
+    /// Typed offer mismatch, when a pinned account does not offer the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer_mismatch: Option<AccountOfferMismatch>,
     pub detail: String,
 }
 impl SkippedRoute {
@@ -1833,6 +1964,18 @@ impl SkippedRoute {
     /// Attach a typed cause and persist only its bounded safe projection.
     pub fn set_cause(&mut self, cause: crate::RouteExclusionReason) {
         self.cause = Some(cause);
+        let diagnostic = self.diagnostic();
+        self.detail = format!(
+            "{}; {}",
+            diagnostic.detail.unwrap_or_default(),
+            diagnostic.next.unwrap_or_default()
+        );
+    }
+
+    /// Attach a typed offer mismatch and persist its safe projection. The
+    /// account, model, recorded offers and age replace the generic refusal.
+    pub fn set_offer_mismatch(&mut self, mismatch: AccountOfferMismatch) {
+        self.offer_mismatch = Some(mismatch);
         let diagnostic = self.diagnostic();
         self.detail = format!(
             "{}; {}",
@@ -1923,6 +2066,10 @@ impl SkippedRoute {
             .as_ref()
             .map(|cause| cause.diagnostic("REFUSED"))
             .unwrap_or_else(|| self.kind.diagnostic());
+        if let Some(mismatch) = &self.offer_mismatch {
+            diagnostic.detail = Some(mismatch.detail());
+            diagnostic.next = Some(AccountOfferMismatch::NEXT.into());
+        }
         if self.cause == Some(crate::RouteExclusionReason::ConfinementUnavailable)
             && let Some(guard) = self.confinement_guard
         {
@@ -1957,6 +2104,7 @@ impl Default for SkippedRoute {
             confinement_guard: None,
             continuation_guard: None,
             cause: None,
+            offer_mismatch: None,
             detail: String::new(),
         }
     }
@@ -2176,8 +2324,8 @@ settlement_reasons! {
     ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
     /// A writer left edits it did not commit.
     UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
-    /// The bound branch gained no commits while the primary checkout moved: the
-    /// lane's work went to the wrong checkout (#3611).
+    /// The bound branch stayed at base while the primary checkout moved with
+    /// unaccounted work: the lane's work went to the wrong checkout (#3611).
     StrayWork { source: Host, node: Failed, outcome: ReviewRequired, stop: None },
     /// Refused before any process started.
     PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
@@ -2216,7 +2364,11 @@ impl SettlementReason {
             _ => match terminal_cause {
                 Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
                 Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
-                Some(TerminalCause::ProviderEarlyStop) => Self::ProviderStop,
+                Some(
+                    TerminalCause::ProviderEarlyStop
+                    | TerminalCause::ProviderStalled
+                    | TerminalCause::ProviderStalledRetry,
+                ) => Self::ProviderStop,
                 _ if partial.contains(&PartialSignal::StrayWork) => Self::StrayWork,
                 _ if handoff
                     .is_ok_and(|handoff| handoff.is_some_and(|handoff| handoff.unfinished())) =>
@@ -2890,7 +3042,8 @@ pub enum PartialSignal {
     /// A writer left edits it did not commit.
     UncommittedWork,
     /// The primary checkout moved during the attempt while the bound branch
-    /// gained no commits: the work was made outside the bound worktree.
+    /// stayed at base with unaccounted work: the work was made outside the
+    /// bound worktree.
     StrayWork,
 }
 impl PartialSignal {
@@ -3139,6 +3292,42 @@ mod tests {
         assert!(text.contains("window=thirty_day"), "{text}");
         assert!(text.contains("domains.routing.pacing.monthly"), "{text}");
         assert!(text.contains("source=configuration"), "{text}");
+    }
+
+    #[test]
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    fn account_offer_mismatch_refusal_names_account_model_offers_age_and_repair() {
+        let mut skipped = SkippedRoute {
+            route: "agy/gemini-4-hydrogen".into(),
+            kind: SkipKind::Refused,
+            ..Default::default()
+        };
+        skipped.set_offer_mismatch(AccountOfferMismatch {
+            account: "agy-google-896bb719dc34".into(),
+            model: "agy/gemini-4-hydrogen".into(),
+            offered_models: vec!["Gemini 3.8 Flash".into(), "Claude Sonnet 4.6".into()],
+            age_seconds: 1800,
+        });
+
+        let text = skipped.describe();
+        assert!(
+            text.contains("account agy-google-896bb719dc34 does not offer agy/gemini-4-hydrogen"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Gemini 3.8 Flash, Claude Sonnet 4.6"),
+            "{text}"
+        );
+        assert!(text.contains("1800s ago"), "{text}");
+        assert!(
+            text.contains("select an account that offers the model"),
+            "{text}"
+        );
+        assert!(text.contains("provenant quota tick"), "{text}");
+        assert!(
+            !text.contains("inspect the request and access policy"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -3593,6 +3782,12 @@ mod tests {
             serde_json::from_value::<WorkContext>(serde_json::to_value(&context)?)?,
             context
         );
+        context.delivery_queue_writer_adoption = true;
+        assert!(context.accepted());
+        assert_eq!(
+            serde_json::to_value(&context)?["delivery_queue_writer_adoption"],
+            true
+        );
         for missing in ["graph_id", "node_id"] {
             let mut value = serde_json::to_value(&context)?;
             value
@@ -3696,6 +3891,7 @@ mod tests {
             head: None,
             source_head: None,
             base: None,
+            fixture: None,
             base_ref: None,
             route: RequestedRoute::Named {
                 extra: Default::default(),

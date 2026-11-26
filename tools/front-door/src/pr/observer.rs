@@ -47,6 +47,8 @@ pub(crate) struct Check {
     /// Exact commit SHA returned by GitHub for this check.
     pub head: String,
     pub name: String,
+    /// GitHub's check-run ID, which lets a repair identify the exact failed job.
+    pub job_id: Option<String>,
     /// `pass`, `fail`, `cancel`, `pending` or `skipping`.
     pub bucket: String,
     /// The GitHub App that reported a check run; legacy statuses have none.
@@ -1041,7 +1043,7 @@ fn valid_resource_path(path: &str) -> bool {
                 && part != ".."
                 && part.bytes().all(|byte| {
                     byte.is_ascii_alphanumeric()
-                        || matches!(byte, b'-' | b'_' | b'.' | b'?' | b'=' | b'&')
+                        || matches!(byte, b'-' | b'_' | b'.' | b'?' | b'=' | b'&' | b'%')
                 })
         })
 }
@@ -1217,6 +1219,10 @@ fn parse_bodies<'a>(
             checks.push(Check {
                 head: commit.into(),
                 name: run.get("name")?.as_str()?.into(),
+                job_id: run
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .map(|id| id.to_string()),
                 bucket: bucket.into(),
                 app: run["app"]["id"].as_u64(),
                 app_slug: run["app"]["slug"].as_str().map(str::to_owned),
@@ -1258,6 +1264,7 @@ fn parse_bodies<'a>(
             checks.push(Check {
                 head: commit.into(),
                 name: name.into(),
+                job_id: None,
                 bucket: bucket.into(),
                 app: None,
                 app_slug: None,
@@ -1793,14 +1800,73 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         }
     }
 
+    // Spec: docs/specs/cli.md#waitpr-causes
+    #[test]
+    fn a_wait_reads_the_ruleset_required_check_instead_of_the_observed_set() {
+        let read_line = |selector: Value, aggregate: Option<Value>| {
+            let shared = Shared::new();
+            shared.with(|world| {
+                world.resources.insert(
+                    "repos/Owner/Repo/pulls/7".into(),
+                    pull_resource("MERGEABLE", "CLEAN", "main"),
+                );
+                // The shape GitHub returns for a branch protected only by a
+                // ruleset: protected, classic protection disabled (its own
+                // endpoint answers 404), the required check in the ruleset.
+                world.resources.insert(
+                    "repos/Owner/Repo/branches/main".into(),
+                    json!({"protected":true,"protection":{"enabled":false,
+                        "required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}}),
+                );
+                world.resources.insert(
+                    "repos/Owner/Repo/rules/branches/main?per_page=100".into(),
+                    json!([{"type":"required_status_checks","parameters":{
+                        "required_status_checks":[{"context":"ci-status","integration_id":null}]
+                    }}]),
+                );
+                let mut runs = vec![selector];
+                runs.extend(aggregate);
+                world.runs.insert(HEAD.into(), page(runs));
+            });
+            let dir = state();
+            let mut observer = shared.observer(dir.path());
+            let request = Request::within(Duration::from_secs(60));
+            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO)
+                .unwrap()
+                .0
+        };
+
+        let pending = read_line(run("Select CI suites", "in_progress", None), None);
+        assert_eq!(pending.class(), "pending");
+        assert_eq!(pending.verdict(), None);
+        assert!(pending.text().contains("required_pending=ci-status"));
+
+        let green = read_line(
+            run("Select CI suites", "completed", Some("success")),
+            Some(run("ci-status", "completed", Some("success"))),
+        );
+        assert_eq!(green.verdict(), Some(true));
+        assert!(!green.text().contains("required_pending="));
+    }
+
     // Spec: docs/specs/lane-contracts.md#observation-events
     #[test]
     fn host_poller_revalidates_metadata_and_checks_with_304() {
         let shared = Shared::new();
         shared.with(|world| {
             world.resources.insert("repos/Owner/Repo/pulls/7".into(), json!({
-                "state":"open", "head":{"sha":HEAD}, "mergeable":true, "html_url":"https://github.com/Owner/Repo/pull/7"
+                "state":"open", "head":{"sha":HEAD}, "base":{"ref":"main"}, "mergeable":true, "html_url":"https://github.com/Owner/Repo/pull/7"
             }));
+            world.resources.insert(
+                "repos/Owner/Repo/branches/main".into(),
+                json!({"protected":false}),
+            );
+            world.resources.insert(
+                "repos/Owner/Repo/rules/branches/main?per_page=100".into(),
+                json!([{"type":"required_status_checks","parameters":{
+                    "required_status_checks":[{"context":"build","integration_id":null}]
+                }}]),
+            );
             world.runs.insert(HEAD.into(), page(vec![run("build", "completed", Some("success"))]));
         });
         let dir = state();
@@ -1815,8 +1881,12 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO)
                 .unwrap();
         assert_eq!(first, again);
-        assert_eq!(calls, 3, "PR metadata, check runs, legacy statuses");
+        assert_eq!(
+            calls, 5,
+            "PR metadata, branch policy, ruleset, check runs, legacy statuses"
+        );
         assert_eq!(shared.requests(), 2 * calls);
+        assert_eq!(first.0.verdict(), Some(true));
         assert_eq!(
             shared.with(|world| world.full_reads),
             full,

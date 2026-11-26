@@ -76,6 +76,9 @@ pub const FORGE_CONTEXT_UNRESOLVED: WarningCode = WarningCode("FORGE_CONTEXT_UNR
 pub const RESULT_TOO_LARGE: WarningCode = WarningCode("RESULT_TOO_LARGE");
 /// A lane's unfinished Git operation is retained while its committed tip settles.
 pub const GIT_OPERATION_RETAINED: WarningCode = WarningCode("GIT_OPERATION_RETAINED");
+/// A live provider emitted no output past its configured stall threshold.
+/// Reporting is read-only; an opt-in policy may act after this warning.
+pub const PROVIDER_STALLED: WarningCode = WarningCode("PROVIDER_STALLED");
 /// An invalid stored answer was skipped during local delivery.
 pub const ANSWER_DELIVERY_SKIPPED: WarningCode = WarningCode("ANSWER_DELIVERY_SKIPPED");
 /// An oversized stored answer was retained for Fabric mail during local delivery.
@@ -159,6 +162,9 @@ pub const PRIVATE_GIT_RETAINED: WarningCode = WarningCode("PRIVATE_GIT_RETAINED"
 pub const STRAY_WORK_CHECK_FAILED: WarningCode = WarningCode("STRAY_WORK_CHECK_FAILED");
 /// Stray lane work was observed in the primary checkout.
 pub const STRAY_LANE_WORK: WarningCode = WarningCode("STRAY_LANE_WORK");
+/// The primary checkout moved while the bound branch advanced; the move is not
+/// attributed to the lane and is left intact.
+pub const PRIMARY_MOVED_UNATTRIBUTED: WarningCode = WarningCode("PRIMARY_MOVED_UNATTRIBUTED");
 /// The sandbox was unavailable; the environment fallback was used.
 pub const SANDBOX_UNAVAILABLE: WarningCode = WarningCode("SANDBOX_UNAVAILABLE");
 /// Lane priority was unavailable; the compiled default was used.
@@ -170,6 +176,12 @@ pub const PR_CONTRIBUTION_BINDING_FAILED: WarningCode =
     WarningCode("PR_CONTRIBUTION_BINDING_FAILED");
 /// Writer fence listing failed; the settlement outcome is unchanged.
 pub const WRITER_FENCE_LIST_FAILED: WarningCode = WarningCode("WRITER_FENCE_LIST_FAILED");
+/// A settled writer attempt named a retained fence that is missing; abandon proceeds.
+pub const ABANDON_RETAINED_FENCE_MISSING: WarningCode =
+    WarningCode("ABANDON_RETAINED_FENCE_MISSING");
+/// An abandoned lane left a stale Git worktree registration; the lane settled.
+pub const ABANDON_STALE_WORKTREE_REGISTRATION: WarningCode =
+    WarningCode("ABANDON_STALE_WORKTREE_REGISTRATION");
 /// A lane tool-state commit was refused by policy; settlement continues.
 pub const TOOL_STATE_COMMIT_FAILED: WarningCode = WarningCode("TOOL_STATE_COMMIT_FAILED");
 /// An admission receipt is visible but its durability is unconfirmed.
@@ -189,6 +201,9 @@ pub const LANE_GIT_IMPORT_STDERR: WarningCode = WarningCode("LANE_GIT_IMPORT_STD
 pub const NATIVE_INDEX_SYNC_FAILED: WarningCode = WarningCode("NATIVE_INDEX_SYNC_FAILED");
 /// A lane handoff was accepted with an advisory parse notice.
 pub const HANDOFF_PARSE_NOTICE: WarningCode = WarningCode("HANDOFF_PARSE_NOTICE");
+/// A terminal read-only review's reservation was retained without Git work; it no longer fences custody.
+pub const READ_ONLY_RESERVATION_RETAINED: WarningCode =
+    WarningCode("READ_ONLY_RESERVATION_RETAINED");
 /// A build slot custody publication failed before spawn.
 pub const BUILD_SLOT_CUSTODY_UNPUBLISHED: WarningCode =
     WarningCode("BUILD_SLOT_CUSTODY_UNPUBLISHED");
@@ -301,6 +316,8 @@ pub const ARGUMENT_VALUE_SUSPECT: WarningCode = WarningCode("ARGUMENT_VALUE_SUSP
 pub const PRIVATE_CHECK_DIR_UNCLEAN: WarningCode = WarningCode("PRIVATE_CHECK_DIR_UNCLEAN");
 /// A project or its roots could not be resolved for a hook.
 pub const PROJECT_UNAVAILABLE: WarningCode = WarningCode("PROJECT_UNAVAILABLE");
+/// A hook ran past its local budget and was cut short before the host timeout.
+pub const HOOK_BUDGET_OVERRUN: WarningCode = WarningCode("HOOK_BUDGET_OVERRUN");
 /// A check or local gate could not be run.
 pub const CHECK_UNAVAILABLE: WarningCode = WarningCode("CHECK_UNAVAILABLE");
 /// Import pins could not be collected for a project.

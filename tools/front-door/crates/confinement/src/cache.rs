@@ -177,6 +177,24 @@ pub enum CacheGcReason {
     Unobservable,
 }
 
+impl CacheGcReason {
+    /// Stable, human- and JSON-facing reason text.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Busy => "writer lock busy",
+            Self::Orphaned => "owner path gone",
+            Self::Idle => "idle",
+            Self::Tombstone => "detached tombstone",
+            Self::Foreign => "foreign owner",
+            Self::ForeignIdle => "foreign owner idle",
+            Self::Replaced => "owner path replaced",
+            Self::Vacant => "vacant lane cache",
+            Self::Live => "live holder",
+            Self::Unobservable => "uncertain custody",
+        }
+    }
+}
+
 /// Which lane caches a sweep may remove.
 #[derive(Clone, Debug, Default)]
 pub struct CacheGcPolicy {

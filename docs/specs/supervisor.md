@@ -18,10 +18,11 @@ relative to `tools/front-door/`.
 The guardian does only what a provider cannot do for itself: start it with its
 environment, wait for its exit on events, end the lane's own process tree,
 record exit and settlement durably, and hold the writer, credential and
-authority boundaries. It never judges activity (CPU, output silence, progress),
-samples disk or matches command names.
-- Why: one guardian runs per lane, so every periodic read multiplies across
-  parallel lanes.
+authority boundaries. It does not judge CPU activity or progress, sample disk,
+or match command names. It supplies captured output activity to Run's holder,
+which applies the configured silence policy described below.
+- Why: the live guardian observes output and can give Run a bounded policy tick
+  without a separate host daemon.
 - Owner: `crates/supervisor/src/guardian.rs`
 
 ### Closed stop reasons; natural exit wins
@@ -73,6 +74,39 @@ attempt state.
   and uncertainty must not become a running writer or an unsafe retry.
 - Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/controls.rs`
 
+### Attempt silence is reported; action is opt-in
+
+`providers.<id>.stall_after_seconds` (compiled default 1800, `0` disables) is
+the silence threshold for a running attempt on that route. The threshold counts
+from the last output, or from the provider start when it has emitted nothing.
+Queued time is never used to measure silence. A live attempt past the threshold
+is reported as
+stalled with its last-event time in `status --json`, in `wait` and in the chair's
+digest. The effective threshold and its source appear in `run --explain` and on
+the lane's recorded limits.
+
+Detection is read-only and warns with `PROVIDER_STALLED`; it never signals a
+provider. `providers.<id>.stall_policy` defaults to `report`. Only an explicit
+`steer`, `retry` or `fail` acts, and every action warns first: `steer` queues one
+steering turn for that attempt; `retry` and `fail` stop the provider through
+run-side custody. The guardian periodically supplies live activity to Run's
+holder, which applies the policy; recovery may repeat an interrupted action.
+`retry` seals a
+typed `provider_stalled_retry` intent that advances the graph to the next route
+within its retry budget; `fail` settles with the typed `provider_stalled` cause
+and stays terminal.
+The warning is recorded on the attempt before any stop or steer request, so it
+remains visible in status after the detached guardian has acted. A stop intent is
+sealed before requesting custody, and reconciliation retries
+an interrupted request. Settlement attributes a stall stop only when custody
+observed the supervisor signal; a natural exit or cancellation keeps its cause.
+Steering uses an idempotent operation and records completion after queueing.
+Silence remains distinct from the guardian's existing supervisor-signal stop reason.
+- Why: a quiet provider must be visible to a chair within a bounded time, but a
+  slow or thinking provider must not be killed on a guess.
+- Owner: `crates/run/src/controls.rs`, `crates/run/src/limits.rs`,
+  `crates/cli/src/run/status.rs`, `src/status_wait.rs`
+
 ### Tick-driven settlement
 
 `provenant tick` queues recovery for settling and unattended attempts in every
@@ -105,10 +139,23 @@ The loss intent is durable before the attempt is committed `lost`; repeating an
 interrupted abandonment with the same reason finishes it, and an incomplete
 intent stays visibly settling. Abandonment warns and retains all attempt
 evidence, scratch, worktree contents and private Git. A never-dispatched queued
-attempt keeps its evidence-preserving cancellation.
+attempt keeps its evidence-preserving cancellation. A settled writer attempt whose
+retained fence is missing is not corrupt: abandon completes it, leaves the worktree
+and its uncommitted files untouched, and warns (`ABANDON_RETAINED_FENCE_MISSING`)
+with the custody slot that was to hold the fence.
+After settlement, a removed
+checkout whose Git registration proves this lane's ownership is pruned: only
+that one admin directory is removed, so its branch is no longer reported
+checked out at a missing path and no other registration is touched. A
+registration that is locked, ambiguous, unreadable or owned by another attempt
+is never pruned here; abandonment still settles and warns with the exact
+`git -C <common> worktree prune` remedy. A prune failure cannot undo the loss
+outcome.
 - Why: an incomplete process census must not become permission to reuse a
-  worktree.
-- Owner: `crates/run/src/settlement.rs`, `crates/cli/src/run/reconcile.rs`
+  worktree; a missing fence must remain releasable, and a settled lane must not leave a stale registration that blocks
+  creating a worktree for its branch.
+- Owner: `crates/run/src/settlement.rs`, `crates/cli/src/run/reconcile.rs`,
+  `crates/confinement/src/worktrees/owner.rs`
 
 ### Guardian holds custody past its owner
 
@@ -132,10 +179,29 @@ every new attempt even when the kernel lease is free.
 
 At the first cleanup deadline one diagnostic census per guardian names
 observable PIDs, command names and open writer-lock paths with a reconcile
-action. An open path is not proof of lock ownership; unknown holders stay
-explicit uncertainty; a timeout alone never authorises settlement or an
-unrelated signal.
-- Why: a leftover descendant could still write the worktree.
+action. The bounded observation is persisted in the process exit so status can
+still name survivors after the guardian is gone; an owner found only by its
+open descriptor is reported as ownership unproven. An open path is not proof of
+lock ownership; unknown holders stay explicit uncertainty; a timeout alone
+never authorises settlement or an unrelated signal. This observation covers the
+custody writer-lock path, not arbitrary repository locks, and cannot be persisted
+when the guardian dies before publishing an exit. An unrecorded, unsandboxed
+detached process may therefore be neither reaped nor reported.
+- Why: a leftover descendant could still write the worktree, and a chair
+  cannot clean up what status no longer names.
+
+When a lane is killed before its guardian can publish an exit, `reconcile` ends
+its recorded process tree under writer exclusion once the guardian's published
+identity is proven absent. Candidates are the provider and descendant
+identities the reservation recorded and live processes carrying the attempt's
+sandbox mark; each identity is revalidated before TERM and again before KILL. A live guardian fences the
+reap, a survivor keeps the attempt fenced and is reported with its PID, and no
+exit is invented. Bare PIDs, process groups, sessions and descriptor paths grant
+no signal authority.
+- Why: an account-limit kill must not leave a detached service holding the
+  repository's heavy lock, but a recycled PID or a sibling's process must never
+  be signalled to clear it.
+- Owner: `crates/supervisor/src/custody/orphans.rs`, `crates/run/src/controls.rs`
 
 ### Retention is bounded and event-driven
 
@@ -183,8 +249,20 @@ flock stays held through import and [publication](run.md#publication-order). A
 missing or malformed reservation refuses automatic recovery of that attempt;
 [explicit abandonment](#explicit-abandonment) instead requires native exclusion
 and positive worktree non-occupancy. Scratch deletion needs a verified
-settlement commit.
-- Why: a writer must never be freed on a partial or forged settlement.
+settlement commit. A pre-lease reservation whose launch never produced a holder
+remains fenced until reconcile or applied GC obtains writer and holder exclusion.
+They discover reservations even without an indexed attempt. Reconcile recovers
+proven orphans before scanning indexed runs, so a recovered reservation is not
+reported as a missing run. Host-wide GC scans project directories in the shared
+worktree registry alongside its other entries. For an orphan, they withdraw an
+unbound preparation or a bound never-spawned reservation only after proving the
+attempt row absent; a bound record must match its private attempt directory and
+hold its custody lock. An unbound record cannot identify its store, so another
+possible nested store keeps it fenced. Attempt evidence is retained. Any
+unproven case stays fenced, and a holderless legacy reservation is never
+presented as work for a previous version.
+- Why: a writer must never be freed on a partial or forged settlement, and a
+  holderless legacy reservation must not stay fenced with an unreachable remedy.
 
 ### Stable locks and atomic writes
 
@@ -421,7 +499,9 @@ any number of lanes may hold one worktree, path claims are advisory, and a live
 conflicting writer is not excluded by Provenant. Attempts own separate Git refs,
 indexes and object stores, so a commit cannot take a sibling's staged snapshot.
 Host publication uses expected-old-tip compare-and-swap after verification. A
-diverged lane tip is merged and published when the merge is clean; a conflict,
+diverged lane tip is merged and published when the merge is clean. A lane rewrite
+replaces the unchanged custody-pinned launch tip with a warning and a recovery ref; a later host
+tip takes the merge path regardless of remote-tracking refs. A conflict,
 unrelated histories, a configured merge driver or
 `lanes.history.rebase = "refuse"` retains the lane's private commits and names
 the cause. Each attempt holds its own holder lease;
@@ -449,7 +529,13 @@ observation, never missing landing proof.
 
 A root is `Free` only when every possible writer was observed completely with
 stable identity; a placed occupant makes it `Live`, and a failed or partial
-query leaves it `Unknown`, never empty. For each unreadable process the census
+query leaves it `Unknown`, never empty. A process that exited during the census
+is not a possible writer: an `ESRCH` (or equivalent vanished) result from an
+executable or descriptor query followed by a recheck finding the process gone
+is absence, not incomplete evidence; a same-identity zombie is also absent. A
+conflicting or reused PID remains uncertain. Every census excludes the calling
+process and its verified descendants, including short-lived children spawned
+for its own work. For each unreadable process the census
 first computes placement evidence for *every* root from its readable cwd and its
 descriptor paths by directory identity, the same `(dev, ino)` ancestor test used
 to place a live path. A cwd equal to or beneath a root is inside it; a cwd of
@@ -469,8 +555,18 @@ executable under `/usr/libexec/`, `/System/Library/` or `/usr/sbin/`, and
 readable cwd outside every root all agree — all three credentials must be owner
 uids, so a setuid binary launched by the owner is not excused, and shells under
 `/bin` or `/usr/bin` are not; and a configured `census_ignore_unreadable` entry
-matched on the canonical executable path and team id extends the defaults to
-every failure class. Each excusal raises a typed warning naming the pid and path.
+matched on canonical executable path and team id (with bundled default
+`[{path = "/usr/bin/login", team_id = "platform", started_before = "root"}]`,
+overridable, never listing shells or interpreters) extends these defaults to
+every failure class. When an entry sets `started_before`, the process's kernel
+start time (`CwdObserver::process_start_time`) must be readable, unchanged across
+signing checks, and at least two seconds before the root floor: `"root"` takes
+the earliest `Metadata::created()` across all present scoped roots (any absent or
+unreadable root fails closed), while an `At` floor supplied through
+`CensusPolicyWorkers::with_creation_floor` allows explicit abandonment to use
+the removed checkout's registration floor (see run-settlement). `started_before`
+gates only the configured entry; it does not tighten the built-in system-image
+policy above. Each excusal raises a typed warning naming the pid and path.
 Unreadable root identity fails closed: a listed uid cannot be proven foreign to
 it, so the root stays `Unknown`. A listed uid the kernel will not reveal, such as
 `launchd` (pid 1), cannot be evaluated and is excused only by a configured entry
@@ -482,7 +578,8 @@ configured entries to the matcher it calls.
 Landing and collection require `Free`; the census grants no signal authority.
 - Why: a retained cwd or descriptor survives permission changes, so current
   permissions cannot prove absence, and an excusal must not free a root a
-  process could still hold.
+  process could still hold. Only an explicit exit signal — never a permission
+  denial or a generic read failure — may drop a process from the census.
 - Owner: `crates/confinement/src/worktrees/census.rs`,
   `crates/confinement/src/worktrees/census_excusal.rs`, `crates/os/src/sys/pid.rs`
 

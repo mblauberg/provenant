@@ -947,13 +947,21 @@ pub(crate) fn publish_branch(
             }
         }
     }
-    let (target, merged) = if contains_head {
+    let (target, merged, rewritten) = if contains_head {
         // The branch already contains the lane head, so publishing changes
         // nothing.
-        (current, false)
-    } else if current == base || advances_current {
-        // Fast-forward from the launch base or from later lane commits.
-        (head, false)
+        (current, false, false)
+    } else if advances_current {
+        (head, false, false)
+    } else if current == base {
+        // Custody pins the branch tip before launch. Only that unchanged tip is
+        // proven to be superseded by this lane; a remote ref cannot prove it.
+        if history.rebase.value == Rebase::Refuse {
+            return Err(RunError::PublicationDiverged {
+                setting: history.rebase.setting(REBASE),
+            });
+        }
+        (head, false, true)
     } else {
         match history.rebase.value {
             Rebase::Refuse => {
@@ -962,7 +970,7 @@ pub(crate) fn publish_branch(
                 });
             }
             Rebase::Allow => match host_merge(git, repo, current, head)? {
-                HostMerge::Merged(target) => (target, true),
+                HostMerge::Merged(target) => (target, true, false),
                 HostMerge::Conflict(conflicting_files) => {
                     return Err(RunError::PublicationConflict {
                         conflicting_files,
@@ -982,19 +990,21 @@ pub(crate) fn publish_branch(
             },
         }
     };
-    if merged {
+    if merged || rewritten {
         use provenant_records::warning::{LANE_HISTORY_PUBLICATION_ADJUSTED, Warning, warn};
         // Spec: docs/specs/cli.md#warnings-are-typed-values
-        warn(
-            Warning::new(
-                LANE_HISTORY_PUBLICATION_ADJUSTED,
-                format!(
-                    "lane history on {branch} diverged from the host branch; published a host merge of {head} and {current} as {target}; {}; set {REBASE} to refuse to retain the lane's private history instead",
-                    history.rebase.setting(REBASE),
-                ),
+        let message = if rewritten {
+            format!(
+                "lane history on {branch} was rewritten; published tip {head} over the unchanged launch tip {current}; {}; set {REBASE} to refuse to retain the lane's private history instead",
+                history.rebase.setting(REBASE),
             )
-            .subject(branch.to_owned()),
-        );
+        } else {
+            format!(
+                "lane history on {branch} diverged from the host branch; published a host merge of {head} and {current} as {target}; {}; set {REBASE} to refuse to retain the lane's private history instead",
+                history.rebase.setting(REBASE),
+            )
+        };
+        warn(Warning::new(LANE_HISTORY_PUBLICATION_ADJUSTED, message).subject(branch.to_owned()));
     }
     // The ancestor the publication established is the one judged on the lane
     // head before any host merge. A merge adds the host branch as a parent, so

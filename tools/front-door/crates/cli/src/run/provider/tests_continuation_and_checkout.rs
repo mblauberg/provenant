@@ -121,6 +121,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         build_heavy: false,
         title: None,
         base: Some(source_head.clone()),
+        fixture: None,
         head: Some(predecessor_head.clone()),
         source_head: Some(source_head.clone()),
         base_ref: None,

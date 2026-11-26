@@ -290,6 +290,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch",
             "graph_run_refuses_unavailable_reader_route",
             "gc_reports_terminal_tmp_details_and_compact_text_count",
+            "gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody",
             "lane_prepare_isolates_nested_state",
             "lane_prepare_isolates_nested_claude_state",
             "lane_prepare_isolates_nested_writer_state",
@@ -305,11 +306,15 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_reconcile_keeps_unfinished_cherry_pick_and_releases",
             "recreated_worktree_accepts_writer_after_settlement",
             "existing_branch_behind_base_warns_and_keeps_its_tip",
-            "existing_branch_with_base_names_the_repair_in_json_and_human_output",
+            "existing_branch_containing_base_launches_without_a_behind_warning",
+            "unrelated_base_refuses_and_names_worktree",
             "create_reuses_a_clean_worktree_and_names_an_existing_conflict",
             "create_from_remote_base_reports_ok_and_exists",
             "create_list_and_remove_a_managed_worktree",
             "naming_and_post_create_ports_are_advisory_and_evidenced",
+            "gc_floor_checkpoint_fires_below_floor_only",
+            "gc_free_floor_bounded_join_fails_when_sweep_is_held",
+            "gc_cleanup_below_floor_starts_a_sweep",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks",
             "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks",
@@ -383,6 +388,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                     graph_run_refuses_unavailable_reader_route()
                 }
                 "gc_reports_terminal_tmp_details_and_compact_text_count" => gc_reports_terminal_tmp_details_and_compact_text_count(),
+                "gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody" => gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
                 "lane_prepare_isolates_nested_claude_state" => lane_prepare_isolates_nested_claude_state(),
                 "lane_prepare_isolates_nested_writer_state" => {
@@ -425,6 +431,12 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "existing_branch_behind_base_warns_and_keeps_its_tip" => {
                     existing_branch_behind_base_warns_and_keeps_its_tip()
                 }
+                "existing_branch_containing_base_launches_without_a_behind_warning" => {
+                    existing_branch_containing_base_launches_without_a_behind_warning()
+                }
+                "unrelated_base_refuses_and_names_worktree" => {
+                    unrelated_base_refuses_and_names_worktree()
+                }
                 "create_reuses_a_clean_worktree_and_names_an_existing_conflict" => {
                     create_reuses_a_clean_worktree_and_names_an_existing_conflict()
                 }
@@ -435,6 +447,13 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "naming_and_post_create_ports_are_advisory_and_evidenced" => {
                     naming_and_post_create_ports_are_advisory_and_evidenced()
                 }
+                "gc_floor_checkpoint_fires_below_floor_only" => {
+                    gc_floor_checkpoint_fires_below_floor_only()
+                }
+                "gc_free_floor_bounded_join_fails_when_sweep_is_held" => {
+                    gc_free_floor_bounded_join_fails_when_sweep_is_held()
+                }
+                "gc_cleanup_below_floor_starts_a_sweep" => gc_cleanup_below_floor_starts_a_sweep(),
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
                 }
@@ -638,12 +657,8 @@ fn lane_git(
 ) -> Result<String> {
     let git =
         provenant_os::git::resolve_git_executable(None).ok_or("Git executable unavailable")?;
-    let candidate = context
-        .state_root
-        .as_path()
-        .join("attempts")
-        .join(attempt.to_string())
-        .join("tmp/candidate-0");
+    let candidate =
+        provenant_run::scratch_root(context.state_root.as_path(), attempt).join("tmp/candidate-0");
     let common = candidate.join("git-common");
     let binding = [
         format!("GIT_DIR={}", common.display()),
@@ -774,7 +789,7 @@ pub(super) fn start_writer(
                 directory,
                 scope,
                 binding,
-                provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                call.lock_budget(),
                 call.cancel,
                 call.clock,
             )
@@ -928,6 +943,7 @@ pub(super) fn writer_run(
                 build_heavy: false,
                 title: None,
                 base: None,
+                fixture: None,
                 head: None,
                 source_head: None,
                 base_ref: None,

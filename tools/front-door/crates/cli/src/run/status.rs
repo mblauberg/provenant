@@ -322,6 +322,22 @@ pub fn admission_actor_description(
     }
 }
 
+/// Stall age starts at the last output or provider start, and only a live
+/// writer can be silent rather than lost.
+fn stalled_projection(
+    lane: &run::AttemptRecord,
+    now: Option<WallTime>,
+    source: provenant_records::wire::LastEventSource,
+    presence: Option<provenant_records::wire::LanePresence>,
+) -> Option<bool> {
+    if source == provenant_records::wire::LastEventSource::Queued
+        || presence != Some(provenant_records::wire::LanePresence::Live)
+    {
+        return None;
+    }
+    now.map(|now| run::stalled_at(lane, now, true))
+}
+
 fn project_lane_inner(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
@@ -502,6 +518,7 @@ fn project_lane_inner(
             lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
             last_event_at: Some(last_event_at),
             last_event_source: Some(last_event_source),
+            stalled: stalled_projection(lane, now_wall, last_event_source, presence),
             attempt_directory,
             child_command,
             overdue: now_wall.map(|now| run::overdue_at(lane, now)),
@@ -965,6 +982,44 @@ mod tests {
         lane.started_at = None;
         let queued = project_lane(&lane, &[], temp.path(), None, false);
         assert_eq!(queued.last_event_source, Some(LastEventSource::Queued));
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#status-selection
+    fn status_stall_requires_output_age_and_live_presence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut lane = running_lane(&temp.path().join("scratch"));
+        lane.last_output_at = Some(WallTime::from_micros(1_000_000).expect("output time"));
+        lane.limits = Some(provenant_records::LaneLimits {
+            stall_after_seconds: Some(provenant_records::Limit::new(
+                30,
+                provenant_records::Layer::Host,
+                provenant_records::LimitStrength::Default,
+            )),
+            ..Default::default()
+        });
+        let now = WallTime::from_micros(32_000_000).expect("now");
+        let live = Some(provenant_records::wire::LanePresence::Live);
+        assert_eq!(
+            super::stalled_projection(&lane, Some(now), LastEventSource::Output, live),
+            Some(true)
+        );
+        // A provider that has never emitted output is measured from start.
+        lane.last_output_at = None;
+        lane.started_at = Some(WallTime::from_micros(1_000_000).expect("start time"));
+        assert_eq!(
+            super::stalled_projection(&lane, Some(now), LastEventSource::Started, live),
+            Some(true)
+        );
+        assert_eq!(
+            super::stalled_projection(&lane, Some(now), LastEventSource::Queued, live),
+            None
+        );
+        // A writer whose presence is unknown is not called silent.
+        assert_eq!(
+            super::stalled_projection(&lane, Some(now), LastEventSource::Output, None),
+            None
+        );
     }
 
     // Spec: docs/specs/lane-contracts.md#result-projection

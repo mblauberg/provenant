@@ -525,13 +525,36 @@ mod provisioning_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn registry_lock_refusal_forwards_the_recorded_holder() {
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
+        let holder = provenant_core::AttemptId::from_bytes([31; 16]);
+        let error = provisioning_refusal(
+            provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout {
+                holder: Some(holder),
+            },
+        );
+        assert!(
+            matches!(
+                &error,
+                provenant_fabric_runtime::relay::ServiceError::Facade(
+                    FacadeError::WriterLockBusy {
+                        holder: Some(recorded)
+                    }
+                ) if *recorded == holder
+            ),
+            "{error:?}"
+        );
+    }
+
     // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
-    fn writer_provisioning_contention_keeps_its_fence_until_the_same_checkout_is_free()
+    #[allow(clippy::disallowed_methods)] // Real-time boundary: hold the guard past the 1 s bound.
+    fn concurrent_launch_waits_out_writer_lock_contention_past_the_reader_bound()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{
-            GraphCheckpoint, GraphDocument, GraphExecution, LaunchRetry, LaunchRetryPolicy,
-            NodeState,
+            GraphCheckpoint, GraphDocument, GraphExecution, NodeState,
         };
         use provenant_os::fs::{Directory, LockMode};
         let root = tempfile::tempdir()?;
@@ -555,14 +578,24 @@ mod provisioning_tests {
         let source = git(&["rev-parse", "HEAD"])?;
         let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
         inputs.state_dir = Some(root.path().join("state"));
-        let context = Context::open(
+        let mut context = Context::open(
             inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
             &home,
             &project,
         )?;
+        // The reader's launch allowance is the old, shorter bound. A launch
+        // that contends for a writer must wait on the provisioning allowance.
+        context.config.graph.launch_wait_seconds = 1;
+        context.config.graph.writer_provision_seconds = 6;
         let clock = provenant_os::clock::SystemClock;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+        let reader = WaitBudget::cli(clock.mono_now(), context.config.graph.launch_wait_seconds)?;
+        let writer_budget = writer_launch_budget(&context, &clock, reader);
+        assert!(
+            writer_budget.remaining(clock.mono_now()).as_micros() > 5_000_000,
+            "the writer budget must outlast the reader launch bound"
+        );
         let path = ".worktrees/waiting-writer";
         provision_writer(&context, path, "waiting-writer", &source, budget, &cancel)?;
         let slot = context
@@ -588,22 +621,6 @@ mod provisioning_tests {
                 "id":"writer","state":"pending","worktree":path,"attempts":[]
             }]
         }))?;
-        let deadline = clock
-            .wall_now()?
-            .checked_add(provenant_core::DurationMicros::from_seconds(60)?)?;
-        checkpoint.nodes[0].launch_retry = Some(LaunchRetry {
-            extra: Default::default(),
-            policy: LaunchRetryPolicy {
-                limit: 0,
-                first_seconds: 0,
-                max_seconds: 0,
-                ..Default::default()
-            },
-            failures: 0,
-            deadline: Some(deadline),
-            wake_at: None,
-            reason: None,
-        });
         relay::fence_provisioning(&mut checkpoint, "writer", path, &source);
         let mut journal = FileJournal::open(
             &context.roots.state,
@@ -629,19 +646,32 @@ mod provisioning_tests {
             &mut journal,
             &mut checkpoint,
             &["writer".into()],
-            budget,
+            writer_budget,
             &cancel,
         )?
         .ok_or("contention diagnostic")?;
+        // Contending for a held writer wait does not block the launch: the
+        // node keeps running with a wait sized by the provisioning allowance,
+        // not by the reader's shorter launch allowance.
         assert_eq!(error.code(), "writer_busy");
         assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
         assert!(checkpoint.nodes[0].attempts.is_empty());
-        assert_eq!(
-            checkpoint.nodes[0]
-                .launch_retry
-                .as_ref()
-                .and_then(|retry| retry.deadline),
-            Some(deadline)
+        let retry = checkpoint.nodes[0]
+            .launch_retry
+            .as_ref()
+            .ok_or("contention wait")?;
+        let deadline = retry.deadline.ok_or("contention deadline")?;
+        assert!(retry.wake_at.is_some(), "contention schedules a wake");
+        let remaining = deadline
+            .as_micros()
+            .saturating_sub(clock.wall_now()?.as_micros());
+        assert!(
+            remaining > 2_000_000,
+            "waits past the reader launch bound: {remaining}us of {deadline}"
+        );
+        assert!(
+            remaining <= 7_000_000,
+            "bounded by the provisioning allowance: {remaining}us of {deadline}"
         );
         assert_eq!(
             relay::pending_provisioning(&checkpoint),
@@ -651,14 +681,21 @@ mod provisioning_tests {
             journal.load("provision-contention")?,
             Some(checkpoint.clone())
         );
+        // Hold the writer guard past the reader bound, then release it. The
+        // waiting launch must still be running and provision on its next wake.
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
         drop(held);
+        if let Some(retry) = checkpoint.nodes[0].launch_retry.as_mut() {
+            retry.wake_at = None;
+        }
         assert!(
             recover_provisioning(
                 &context,
                 &mut journal,
                 &mut checkpoint,
                 &[],
-                WaitBudget::cli(clock.mono_now(), 5)?,
+                writer_budget,
                 &cancel
             )?
             .is_none()
@@ -1106,6 +1143,39 @@ mod provisioning_tests {
             "preserve"
         );
         Ok(())
+    }
+
+    // Spec: docs/specs/run.md#writer-pin-and-re-pin
+    #[test]
+    fn dirty_launch_refusal_names_the_counted_paths() {
+        use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+        // This is the narrowest production function that turns a launch
+        // worktree error into the typed refusal the lane receives.
+        let error = provisioning_refusal(provenant_confinement::worktrees::WorktreeError::Dirty(
+            "src/first.rs, src/second.rs and 9 more\u{1b}".into(),
+        ));
+        let ServiceError::Facade(FacadeError::DispatchRefused {
+            fact: Some(DispatchRefusalFact::DirtyWriter { paths }),
+            reason,
+            ..
+        }) = &error
+        else {
+            panic!("expected a typed dirty-writer refusal: {error:?}");
+        };
+        assert!(reason.is_empty(), "untrusted reason must stay suppressed");
+        assert!(paths.contains("src/first.rs"), "{paths}");
+        assert!(paths.contains("src/second.rs"), "{paths}");
+        assert!(paths.contains("9 more"), "{paths}");
+        assert!(!paths.contains('\u{1b}'), "{paths}");
+        let ServiceError::Facade(facade) = &error else {
+            unreachable!()
+        };
+        let diagnostic = facade.diagnostic();
+        let detail = diagnostic.detail.as_deref().unwrap();
+        assert!(detail.contains("src/first.rs"), "{detail}");
+        assert!(detail.contains("9 more"), "{detail}");
+        assert!(!detail.contains('\u{1b}'), "{detail}");
+        assert!(diagnostic.next.as_deref().unwrap().contains("commit"));
     }
 
     // Spec: docs/specs/fabric.md#cli-and-relay-surfaces

@@ -51,6 +51,8 @@ pub(super) fn override_tier(
             provenant_fabric_runtime::graph::NodeKind::Gate
                 | provenant_fabric_runtime::graph::NodeKind::Decide
                 | provenant_fabric_runtime::graph::NodeKind::Land
+                | provenant_fabric_runtime::graph::NodeKind::Hygiene
+                | provenant_fabric_runtime::graph::NodeKind::Publish
         )
     ) && let Some(alias) = choice.tier_for(route_role(node))
     {

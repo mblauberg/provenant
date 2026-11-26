@@ -672,9 +672,27 @@ fn fixture() -> Result {
                 .map(PathBuf::from)
                 .ok_or("steer fixture readiness file")?;
             fs::write(ready, b"ready")?;
-            // The graph steer must stop this fresh Codex process and resume
-            // the same thread after settlement.
-            std::thread::park_timeout(std::time::Duration::from_secs(120));
+            let go = prompt
+                .lines()
+                .find_map(|line| line.strip_prefix("STEER_GO_FILE: "))
+                .map(PathBuf::from)
+                .ok_or("steer fixture go file")?;
+            // Wait until the test has queued its steer. A steer never
+            // interrupts this process; finish the turn naturally so settlement
+            // delivers the queued text as the next turn on the retained thread.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !go.exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Err("steer fixture go file never written".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            for frame in [
+                json!({"type":"item.completed","item":{"type":"agent_message","text":format!("finished in the first turn{DONE_FENCE}")}}),
+                json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
+            ] {
+                writeln!(io::stdout(), "{frame}")?;
+            }
         }
         return Ok(());
     }
@@ -1014,9 +1032,11 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
     assert_eq!(code(&base), 0, "{base:?}");
     let base = std::str::from_utf8(&base.stdout.bytes)?.trim().to_owned();
     let ready = rig.root.join("steer-session-ready");
+    let go = rig.root.join("steer-session-go");
     let brief = format!(
-        "fixture public steer continuation\nSTEER_READY_FILE: {}\n",
-        ready.display()
+        "fixture public steer continuation\nSTEER_READY_FILE: {}\nSTEER_GO_FILE: {}\n",
+        ready.display(),
+        go.display()
     );
     let (launch, value) = rig.launch(&[
         "implement",
@@ -1097,6 +1117,10 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
     );
     assert!(!receipt.to_string().contains("STEER_NOTE"), "{receipt}");
 
+    // The steer is queued and the first attempt is still running. Let it finish
+    // its turn naturally; the queued text reaches the successor at settlement.
+    fs::write(&go, b"go")?;
+
     let waited = rig.command(&["wait", &graph, "--timeout", "60s", "--json"])?;
     let wait_result = support::last_json_record(&waited.stdout.bytes)?;
     assert_eq!(code(&waited), 0, "{wait_result}");
@@ -1164,6 +1188,19 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
             .parse()?;
         let request = store.request(id, &call)?;
         let record = store.record(id, &call)?;
+        if ordinal == 0 {
+            assert!(
+                matches!(
+                    &record.state,
+                    provenant_run::AttemptState::Terminal {
+                        outcome: provenant_run::Outcome::Uncommitted,
+                        terminal_cause: None,
+                        ..
+                    }
+                ),
+                "the natural first turn must retain its uncommitted work: {record:?}"
+            );
+        }
         let context = request.task.context.as_ref().ok_or("graph context")?;
         assert!(context.graph_template_launch, "{request:?}");
         assert_eq!(
@@ -3664,6 +3701,7 @@ fn persisted_attempt_with(
                 build_heavy: false,
                 title: None,
                 base: None,
+                fixture: None,
                 head: None,
                 source_head: None,
                 base_ref: None,
@@ -4017,6 +4055,97 @@ fn receipt_output_resolves_the_work_key() -> Result {
     Ok(())
 }
 
+fn receipt_output_carries_catalogue_family_and_role_for_opencode_lane() -> Result {
+    let stream = [
+        r#"{"type":"text","sessionID":"ses_a","part":{"text":"OK"}}"#,
+        r#"{"type":"step_finish","sessionID":"ses_a","part":{"reason":"stop"}}"#,
+    ]
+    .map(|line| format!("{line}\n"))
+    .concat();
+    let (rig, record) = persisted_attempt(
+        "opencode",
+        "opencode/opencode-go/hy4-flash-free",
+        ("work", "fixture"),
+        stream.as_bytes(),
+        b"",
+        0,
+    )?;
+    let target = record.key.to_string();
+    let output = rig.command(&["output", &target, "--part", "receipt", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let data = &data["data"];
+    assert_eq!(data["adapter"], "opencode");
+    assert_eq!(data["model"], "opencode/opencode-go/hy4-flash-free");
+    assert_eq!(data["family"], "tencent");
+    assert_eq!(data["effort"], "unknown");
+    assert_eq!(data["effort_source"], "unknown");
+    assert_eq!(data["resolved_from"], "explicit");
+    assert_eq!(data["role"], "reviewer");
+    let receipt = data["receipt"].as_str().ok_or("receipt line")?;
+    for part in [
+        "opencode/opencode-go/hy4-flash-free@unknown",
+        "tencent",
+        "resolved from explicit",
+    ] {
+        assert!(receipt.contains(part), "{part}: {receipt}");
+    }
+    Ok(())
+}
+
+fn receipt_families_follow_effective_catalogue_overrides() -> Result {
+    let (rig, record) = persisted_attempt_with(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "fixture"),
+        b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n",
+        b"",
+        0,
+        PersistedAttemptOptions {
+            writer: true,
+            ..Default::default()
+        },
+    )?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[gc]\nfree_floor = '1B'\n[[catalogue.models]]\nmodel = 'codex/gpt-6.1-sol'\nfamily = 'owner-family'\nevidence_ref = 'owner fact'\nefforts = ['low', 'medium', 'high', 'xhigh', 'max']\n",
+    )?;
+    let output = rig.command(&[
+        "output",
+        &record.key.to_string(),
+        "--part",
+        "receipt",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(data["data"]["family"], "owner-family");
+    assert_eq!(data["data"]["reviewer"]["family"], "owner-family");
+    assert!(
+        data["data"]["receipt"]
+            .as_str()
+            .ok_or("receipt")?
+            .contains("owner-family")
+    );
+    assert!(
+        data["data"]["reviewer_provenance"]
+            .as_str()
+            .ok_or("provenance")?
+            .contains("owner-family")
+    );
+    Ok(())
+}
+
 fn receipt_output_classifies_writers_and_refuses_running_attempts() -> Result {
     for options in [
         PersistedAttemptOptions {
@@ -4199,6 +4328,14 @@ fn composite_graph_output_uses_declared_roots_and_exports() -> Result {
         human_output.contains("findings: 1 (available)"),
         "{human_output}"
     );
+    let full_output = rig.command(&["output", "composite-output", "--full"])?;
+    let full_output = String::from_utf8_lossy(&full_output.stdout.bytes);
+    assert!(
+        full_output.contains(
+            "finding: [high] src/lib.rs:1 — The failing path is reachable (fix: Handle x)"
+        ),
+        "{full_output}"
+    );
 
     let status_output = rig.command(&["status", "composite-output/panel", "--json"])?;
     assert_eq!(code(&status_output), 0, "{status_output:?}");
@@ -4278,7 +4415,14 @@ fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
     let output = rig.command(&["output", &target, "--part", "receipt", "--json"])?;
     let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(code(&output), 0, "{data}");
-    for field in ["adapter", "model", "effort", "family", "resolved_from"] {
+    for field in [
+        "adapter",
+        "model",
+        "effort",
+        "effort_source",
+        "family",
+        "resolved_from",
+    ] {
         assert_eq!(data["data"][field], "unknown", "{field}: {data}");
     }
     assert_eq!(data["data"]["reviewer"]["provenance"], "unknown");
@@ -6577,6 +6721,14 @@ fn main() -> ExitCode {
             (
                 "receipt_output_resolves_the_work_key",
                 receipt_output_resolves_the_work_key,
+            ),
+            (
+                "receipt_output_carries_catalogue_family_and_role_for_opencode_lane",
+                receipt_output_carries_catalogue_family_and_role_for_opencode_lane,
+            ),
+            (
+                "receipt_families_follow_effective_catalogue_overrides",
+                receipt_families_follow_effective_catalogue_overrides,
             ),
             (
                 "receipt_output_classifies_writers_and_refuses_running_attempts",

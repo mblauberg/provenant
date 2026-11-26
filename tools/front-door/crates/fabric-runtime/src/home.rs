@@ -304,6 +304,11 @@ fn is_retryable_refusal(error: &facade::FacadeError) -> bool {
         facade::FacadeError::Busy => RetryCause::Contention,
         facade::FacadeError::Timeout => RetryCause::Timeout,
         facade::FacadeError::Cancelled => RetryCause::Cancelled,
+        // A spent forge allowance clears with time, like contention; its typed
+        // refusal must be retried instead of treated as a permanent verdict.
+        facade::FacadeError::RunKind { run_code, .. } if run_code == "FORGE_QUOTA" => {
+            RetryCause::Contention
+        }
         _ => RetryCause::Permanent,
     })
 }
@@ -1053,5 +1058,25 @@ mod tests {
                 PeerAction::Coordination { operation_id: Some(id), .. } if id == &operation
             ));
         }
+    }
+
+    /// Issue #3986: a spent forge allowance is a wait, not a permanent verdict,
+    /// so a peer refusing with FORGE_QUOTA is resent like other transient causes.
+    #[test]
+    fn forge_quota_refusal_is_retryable() {
+        let quota = facade::FacadeError::RunKind {
+            run_code: "FORGE_QUOTA".into(),
+            next: "retry after 2026-11-26T12:00:00Z".into(),
+            detail: None,
+            resource: None,
+        };
+        assert!(super::is_retryable_refusal(&quota));
+        let permanent = facade::FacadeError::RunKind {
+            run_code: "DISK_FLOOR".into(),
+            next: "run provenant gc --apply".into(),
+            detail: None,
+            resource: None,
+        };
+        assert!(!super::is_retryable_refusal(&permanent));
     }
 }

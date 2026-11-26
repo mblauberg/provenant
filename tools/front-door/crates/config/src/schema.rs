@@ -100,6 +100,11 @@ const PROVIDER_FIELDS: &[FieldMetadata] = &[
         1,
         provenant_core::MAX_LANE_RUNTIME_SECONDS as i64,
     ),
+    FieldMetadata::int("{provider}.stall_after_seconds", 0, i64::MAX),
+    FieldMetadata::enumeration(
+        "{provider}.stall_policy",
+        &["report", "steer", "retry", "fail"],
+    ),
 ];
 
 /// The config-owned sections and their field metadata, by table prefix. The

@@ -57,6 +57,36 @@ fn writer_busy_preserves_holder_and_reads_prior_frames() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn writer_lock_busy_names_the_holder_in_its_diagnostic() -> Result<(), Box<dyn std::error::Error>> {
+    let old: FacadeError = serde_json::from_value(serde_json::json!({"code":"writer_lock_busy"}))?;
+    assert_eq!(old, FacadeError::WriterLockBusy { holder: None });
+    assert!(
+        old.diagnostic()
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("holder unknown"))
+    );
+    let holder = provenant_core::AttemptId::from_bytes([24; 16]);
+    let current = FacadeError::WriterLockBusy {
+        holder: Some(holder),
+    };
+    assert!(current.to_string().contains(&holder.to_string()));
+    assert!(
+        current
+            .diagnostic()
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains(&holder.to_string()))
+    );
+    assert_eq!(current.code(), "writer_lock_busy");
+    assert_eq!(
+        serde_json::from_value::<FacadeError>(serde_json::to_value(&current)?)?,
+        current
+    );
+    Ok(())
+}
+
+#[test]
 fn corrupt_store_diagnostic_exposes_safe_decode_kind() {
     let error = provenant_fabric_store::Error::Decode(provenant_records::DecodeError::Typed {
         line: 2,
@@ -194,11 +224,12 @@ fn generic_io_has_safe_action_without_source_detail() {
 #[test]
 fn generic_io_discloses_its_fixed_cause_only_in_process() {
     let cause = "verified repository path or Git metadata changed";
-    let error = FacadeError::io_caused("locate writer project", Some(cause));
-    assert_eq!(error.cause(), Some(cause));
+    let error = FacadeError::io_failure("locate writer project", None, Some(&cause));
+    let expected = format!("locate writer project: {cause}");
+    assert_eq!(error.cause(), Some(expected.as_str()));
     let diagnostic = error.diagnostic();
     assert_eq!(diagnostic.code, "io");
-    assert_eq!(diagnostic.detail.as_deref(), Some(cause));
+    assert_eq!(diagnostic.detail.as_deref(), Some(expected.as_str()));
     let wire = serde_json::to_value(&error).unwrap();
     assert!(!wire.to_string().contains(cause), "{wire}");
     let received: FacadeError = serde_json::from_value(wire).unwrap();
@@ -291,6 +322,8 @@ fn filesystem_diagnostic_omits_paths_with_unknown_anchors() {
         path: "HEAD".into(),
         source: std::io::ErrorKind::NotFound.into(),
     };
+    // The unanchored relative path is never disclosed; the operation and
+    // source still reach the local detail through the one Io carrier.
     assert_eq!(
         FacadeError::filesystem(&error),
         FacadeError::Io {
@@ -298,11 +331,13 @@ fn filesystem_diagnostic_omits_paths_with_unknown_anchors() {
             delivery_stage: None,
             resource: None,
             input_failure: None,
-            cause: None,
+            cause: Some("openat read: entity not found".into()),
             operation: "openat read".into(),
             path: None,
         }
     );
+    let wire = serde_json::to_string(&FacadeError::filesystem(&error)).unwrap();
+    assert!(!wire.contains("HEAD"), "{wire}");
 }
 
 #[test]

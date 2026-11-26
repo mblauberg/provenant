@@ -829,6 +829,46 @@ pub(super) fn snapshot_source(
                 PublishMode::NoReplace,
             )
             .map_err(SourceViewError::filesystem)?;
+        // A review lane cannot fetch and this view carries no remote default
+        // ref, so ship a named ref at the host-supplied base. It keeps the base
+        // readable even when the source checkout has no `origin/<default>`
+        // (#3977). An unparseable base is advisory: the view still launches.
+        if let Some(base) = task
+            .base
+            .as_deref()
+            .and_then(|text| GitOid::parse(text).ok())
+        {
+            let relative = provenant_run::REVIEW_BASE_REF
+                .strip_prefix("refs/")
+                .ok_or_else(|| {
+                    SourceViewError::failed(
+                        Step::TemporaryDirectory,
+                        "review base ref is not under refs/",
+                    )
+                })?;
+            let (parent, leaf) = relative.rsplit_once('/').ok_or_else(|| {
+                SourceViewError::failed(Step::TemporaryDirectory, "review base ref has no parent")
+            })?;
+            let mut directory = git_dir
+                .open_verified_directory(OsStr::new("refs"))
+                .map_err(SourceViewError::filesystem)?;
+            for component in parent.split('/') {
+                directory
+                    .mkdir(OsStr::new(component), 0o700)
+                    .map_err(SourceViewError::filesystem)?;
+                directory = directory
+                    .open_verified_directory(OsStr::new(component))
+                    .map_err(SourceViewError::filesystem)?;
+            }
+            directory
+                .atomic_write(
+                    OsStr::new(leaf),
+                    ".review-base-",
+                    format!("{base}\n").as_bytes(),
+                    PublishMode::NoReplace,
+                )
+                .map_err(SourceViewError::filesystem)?;
+        }
         Ok(())
     };
     layout()?;

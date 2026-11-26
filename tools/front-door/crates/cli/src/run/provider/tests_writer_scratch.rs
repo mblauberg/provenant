@@ -18,6 +18,11 @@ fn writer_access_receipt_for_plan(
 }
 
 #[test]
+fn pr_policy_mediates_gh_when_publishing_is_disabled() -> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(false, "pr-policy")
+}
+
+#[test]
 fn writer_plan_stages_scratch_missing_auth() -> Result<(), Box<dyn std::error::Error>> {
     writer_preparation_fixture(false, "missing")
 }
@@ -106,6 +111,7 @@ fn writer_preparation_steps(
         } else {
             match auth_layout {
                 "missing" => "writer_plan_stages_scratch_missing_auth",
+                "pr-policy" => "pr_policy_mediates_gh_when_publishing_is_disabled",
                 "symlink" => "writer_plan_stages_scratch_symlink_auth",
                 "symlink-xdg" => "writer_plan_stages_scratch_symlink_xdg_auth",
                 other => return Err(format!("unknown writer scratch layout {other}").into()),
@@ -252,6 +258,7 @@ fn writer_preparation_steps(
         build_heavy: false,
         title: None,
         base: Some(review_oid.clone()),
+        fixture: None,
         head: Some(review_oid.clone()),
         source_head: None,
         base_ref: None,
@@ -323,7 +330,13 @@ fn writer_preparation_steps(
             "provider fence fixture",
             &paths,
             None,
-            |_| panic!("an updating provider must not be probed"),
+            |name| {
+                if name == "gh" {
+                    Err("fixture gh unavailable".into())
+                } else {
+                    panic!("an updating provider must not be probed: {name}")
+                }
+            },
             None,
             Some(0),
         )
@@ -391,6 +404,9 @@ fn writer_preparation_steps(
             &pool_paths,
             None,
             |adapter| {
+                if adapter == "gh" {
+                    return Err("fixture gh unavailable".into());
+                }
                 assert_eq!(adapter, "cursor", "updating provider was probed");
                 Ok(executable.clone())
             },
@@ -787,6 +803,7 @@ fn writer_preparation_steps(
                 fresh_continuation: None,
                 schema_version: 1,
                 task: run::TaskRequest {
+            fixture: None,
                     context: Some(provenant_records::run::WorkContext {
                         graph_id: Some(format!("lane-{attempt_id}")),
                         node_id: Some("node".into()),
@@ -868,7 +885,7 @@ printf 'agy 1.0.0\n'
                 temporary_alias: None,
             };
             for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
-                std::fs::create_dir_all(path)?;
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
             }
             let linked_cwd = project.join(".worktrees/writer");
             let selected_registry = Registry {
@@ -1124,6 +1141,9 @@ printf 'agy 1.0.0\n'
         &paths,
         None,
         |adapter| {
+            if adapter == "gh" {
+                return Err("fixture gh unavailable".into());
+            }
             assert_eq!(adapter, "cursor", "unrelated adapter was probed");
             Ok(executable.clone())
         },
@@ -1274,7 +1294,7 @@ printf 'agy 1.0.0\n'
     // Exercise the host project policy through preparation and the actual
     // generated shim, with a fake gh so no GitHub access is needed.
     std::fs::create_dir_all(home.join(".config"))?;
-    if auth_layout != "missing" {
+    if auth_layout != "missing" && auth_layout != "pr-policy" {
         let gh_config = base.join("host-gh-config");
         std::fs::create_dir(&gh_config)?;
         // Token launches must not consult even a malformed host configuration.
@@ -1343,6 +1363,19 @@ printf 'agy 1.0.0\n'
         .profile
         .knobs
         .insert("lanes.publish".into(), serde_json::json!(true));
+    // This fixture pins the advisory project github.json label policy, which
+    // the gh shim only reaches when the lane's own PR policy forwards writes.
+    // Leaf implement lanes default to lanes.pr=never and are refused by the
+    // wrapper (pinned in the_gh_wrapper_enforces_the_lane_pull_request_policy);
+    // opt this lane in so the advisory warning stays under test.
+    publishing_task
+        .profile
+        .knobs
+        .insert("lanes.pr".into(), serde_json::json!("allowed"));
+    publishing_task
+        .profile
+        .knob_sources
+        .insert("lanes.pr".into(), provenant_records::Layer::Launch);
     // The host's Git configuration selection comes from the host context, so
     // the runner's own system file and environment cannot reach this check.
     let mut git_host = run::HostLaunchContext::from_environment(&state, &project, git.clone());
@@ -1357,6 +1390,55 @@ printf 'agy 1.0.0\n'
         repo_facts: registry.repo_facts.clone(),
         ..registry
     };
+    if auth_layout == "pr-policy" {
+        phase("PR policy without publishing");
+        let mut policy_task = publishing_task.clone();
+        policy_task
+            .profile
+            .knobs
+            .insert("lanes.access".into(), serde_json::json!("host"));
+        policy_task
+            .profile
+            .knobs
+            .insert("lanes.sandbox".into(), serde_json::json!("off"));
+        policy_task
+            .profile
+            .knobs
+            .insert("lanes.publish".into(), serde_json::json!(false));
+        policy_task
+            .profile
+            .knobs
+            .insert("lanes.pr".into(), serde_json::json!("never"));
+        let policy_launch = prepare_with(
+            &publishing_registry,
+            &policy_task,
+            "PR policy fixture",
+            &publishing_paths,
+            None,
+            |name| {
+                Ok(if name == "gh" {
+                    gh.clone()
+                } else {
+                    executable.clone()
+                })
+            },
+            None,
+        )?;
+        assert!(
+            !policy_launch
+                .confinement
+                .as_ref()
+                .is_some_and(|confinement| confinement.sandbox.effective)
+        );
+        let argv = ["/bin/sh".into(), "-c".into(), "gh pr create".into()];
+        let mut options = ExecOptions::new(&argv, &attempt, Duration::from_secs(5));
+        options.env = Some(&policy_launch.environment);
+        let result = executor.execute(options)?;
+        assert_eq!(result.termination, Termination::Exit(2));
+        assert!(String::from_utf8_lossy(&result.stderr.bytes).contains("lanes.pr=never"));
+        assert!(!String::from_utf8_lossy(&result.stdout.bytes).contains("forwarded"));
+        return Ok(());
+    }
     let publishing = prepare_with(
         &publishing_registry,
         &publishing_task,
@@ -1402,6 +1484,15 @@ printf 'agy 1.0.0\n'
     );
     assert_eq!(credential.mediation, "gh wrapper (advisory)");
     assert!(!serde_json::to_string(credential)?.contains("fixture-host-token"));
+    // The opt-in above must reach the prepared lane as a sourced receipt; the
+    // default would be never and the gh shim would refuse the advisory check.
+    let lane_pr = publishing
+        .route
+        .pr_policy
+        .as_ref()
+        .ok_or("lane PR policy receipt")?;
+    assert_eq!(lane_pr.value, "allowed");
+    assert_eq!(lane_pr.source, provenant_records::Layer::Launch);
     let gh_config = publishing_paths.temporary.join("candidate-0/gh-config");
     let gh_shim = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/bin/gh"))?;
     assert!(gh_shim.contains(provenant_config::GH_INVOCATIONS_FILE));
@@ -1711,8 +1802,10 @@ printf 'agy 1.0.0\n'
         executor.execute(options)
     };
     phase("gh shim policy");
-    // Project github.json denials are advisory: the shim forwards the call and
-    // warns with its source; it does not refuse the invocation.
+    // With lanes.pr=allowed (set on this fixture above), project github.json
+    // denials are advisory: the shim forwards the call and warns with its
+    // source; it does not refuse the invocation. Under the default never
+    // policy the wrapper would exit 2 instead.
     let warned = run_shim("ci")?;
     assert_eq!(warned.termination, provenant_os::exec::Termination::Exit(0));
     assert_eq!(warned.stdout.bytes, b"forwarded\n");
@@ -1768,6 +1861,9 @@ printf 'agy 1.0.0\n'
         &redraw_paths,
         None,
         |adapter| {
+            if adapter == "gh" {
+                return Err("fixture gh unavailable".into());
+            }
             assert_eq!(adapter, "cursor");
             let count = lookup_count.get() + 1;
             lookup_count.set(count);
@@ -1827,7 +1923,11 @@ printf 'agy 1.0.0\n'
         redraw_prompt,
         &no_retry_paths,
         None,
-        |_| {
+        |adapter| {
+            if adapter == "gh" {
+                return Err("fixture gh unavailable".into());
+            }
+            assert_eq!(adapter, "cursor");
             let count = calls.get() + 1;
             calls.set(count);
             if count == 3 {
@@ -2005,6 +2105,9 @@ printf 'agy 1.0.0\n'
         &continued_paths,
         Some(&prior),
         |adapter| {
+            if adapter == "gh" {
+                return Err("fixture gh unavailable".into());
+            }
             assert_eq!(adapter, "cursor", "resume probed a different provider");
             Ok(executable.clone())
         },

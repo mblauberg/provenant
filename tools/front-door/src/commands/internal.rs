@@ -97,7 +97,11 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
             }
         }
         Command::Internal(provenant_cli::Internal::LaneCleanup { request }) => {
-            match crate::fabric::gc_cleanup::run(&request, process.workers()) {
+            match crate::fabric::gc_cleanup::run(
+                &request,
+                process.workers(),
+                crate::gc_support::state_volume_free_bytes,
+            ) {
                 Ok(()) => 0,
                 Err(error) => crate::fail(
                     inv.leaf,

@@ -45,7 +45,9 @@ and report the ownership and dependency delta.
 
 Give the repair writer the output of `provenant ci failures pr N` (several
 numbers at once for several PRs) and `provenant pr status N`. Raw job-log reads
-spend the forge quota and miss the failure summary.
+spend the forge quota and miss the failure summary. When the REST quota is
+exhausted, read checks and releases through `gh api graphql`, which has a
+separate quota.
 
 ## Judging review findings
 

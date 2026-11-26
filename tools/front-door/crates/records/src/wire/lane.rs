@@ -133,6 +133,11 @@ lane_row! {
         attempt_directory: crate::StructuredPathWire => nullable(super::schema::worktree_path());
         child_command: String => nullable(string());
         last_event_source: LastEventSource => nullable(choices(&["output", "started", "queued"]));
+        // The macro grammar matches field declarations only, not outer doc
+        // comments; `stalled` is documented on `LaneProjectionFacts` below.
+        // True when a live running attempt has exceeded its
+        // silence threshold. Never set from the queued fallback.
+        stalled: bool => boolean();
     }
 }
 
@@ -236,6 +241,8 @@ pub struct LaneProjectionFacts {
     /// Which observation supplied `last_event_at`, so a quiet writer's stale
     /// timestamp is not mistaken for a fresh heartbeat.
     pub last_event_source: Option<LastEventSource>,
+    /// Silence since last output or provider start past the configured threshold.
+    pub stalled: Option<bool>,
     /// Host-local attempt directory; never projected across a peer boundary.
     pub attempt_directory: Option<crate::StructuredPathWire>,
     /// Masked, bounded argv of the writer's current child command.
@@ -376,7 +383,7 @@ impl LaneRow {
                     Some("the writer has uncommitted changes; preserve or commit the edits")
                 }
                 SettlementReason::StrayWork => Some(
-                    "the primary checkout moved and the bound branch gained no commits; the work may be in the primary checkout",
+                    "the primary checkout moved with work no launch ref or other worktree reaches; the lane's work may be in the primary checkout",
                 ),
                 _ => None,
             };
@@ -576,6 +583,7 @@ impl LaneRow {
             last_output_at: json!(lane.last_output_at),
             last_event_at: json!(facts.last_event_at),
             last_event_source: facts.last_event_source,
+            stalled: facts.stalled,
             runtime_deadline: json!(lane.runtime_deadline),
             overdue: facts.overdue,
             stale: facts.stale,
@@ -705,6 +713,7 @@ impl crate::run::TerminalCause {
         Self::WriteGrantsRefused,
         Self::WorktreeBusy,
         Self::HandoffRefused,
+        Self::PreparationRefused,
         Self::WriterPinMismatch {
             pinned: provenant_core::GitOid::Sha1([0; 20]),
             head: provenant_core::GitOid::Sha1([1; 20]),
@@ -719,6 +728,8 @@ impl crate::run::TerminalCause {
         Self::TokenBudget,
         Self::SettlementFailure,
         Self::ProviderEarlyStop,
+        Self::ProviderStalled,
+        Self::ProviderStalledRetry,
         Self::FreePoolQuota,
         Self::CommandUnavailable,
         Self::HostNativeUnconfigured,
@@ -753,6 +764,7 @@ mod terminal_cause_tests {
             | TerminalCause::WriteGrantsRefused
             | TerminalCause::WorktreeBusy
             | TerminalCause::HandoffRefused
+            | TerminalCause::PreparationRefused
             | TerminalCause::WriterPinMismatch { .. }
             | TerminalCause::RetainedWriterImport
             | TerminalCause::UnsupportedPlatform
@@ -764,6 +776,8 @@ mod terminal_cause_tests {
             | TerminalCause::TokenBudget
             | TerminalCause::SettlementFailure
             | TerminalCause::ProviderEarlyStop
+            | TerminalCause::ProviderStalled
+            | TerminalCause::ProviderStalledRetry
             | TerminalCause::FreePoolQuota
             | TerminalCause::CommandUnavailable
             | TerminalCause::HostNativeUnconfigured

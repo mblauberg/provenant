@@ -241,6 +241,7 @@ fn offer_until_ack_byte_budget_counts_serialised_envelope_and_leaves_answer_queu
     let created = receipt(f.call(ask(RequestKind::Question, "ask")).unwrap());
     f.call(InboxInput::Answer {
         extra: Default::default(),
+        queue_control: None,
         id: created.request_id,
         action: AnswerAction::Reply,
         option_id: None,
@@ -278,6 +279,7 @@ fn oversized_answer_is_refused_and_small_budget_skips_large_answers() {
     let large = receipt(f.call(ask(RequestKind::Question, "large")).unwrap());
     let make_answer = |text: String, operation: &str| InboxInput::Answer {
         extra: Default::default(),
+        queue_control: None,
         id: large.request_id,
         action: AnswerAction::Reply,
         option_id: None,
@@ -439,13 +441,14 @@ fn ask(kind: RequestKind, id: &str) -> InboxInput {
 }
 fn receipt(result: InboxResult) -> InboxReceipt {
     match result {
-        InboxResult::Saved { receipt } => receipt,
+        InboxResult::Saved { receipt } => *receipt,
         _ => panic!("expected receipt"),
     }
 }
 fn answer(id: HumanRequestId, operation: &str) -> InboxInput {
     InboxInput::Answer {
         extra: Default::default(),
+        queue_control: None,
         id,
         action: AnswerAction::Choose,
         option_id: Some("repair".into()),
@@ -535,6 +538,7 @@ fn inbox_all_kinds_preserve_text_and_reject_stale_or_invalid_answers() {
         let created = receipt(f.call(ask(kind, &format!("create-{action:?}"))).unwrap());
         let mut input = InboxInput::Answer {
             extra: Default::default(),
+            queue_control: None,
             id: created.request_id,
             action,
             option_id: None,
@@ -1679,6 +1683,40 @@ fn unsupported_steer_refuses_before_any_side_effect() {
     assert!(mailbox(&f, f.identity.inbox.actor).is_empty());
 }
 
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn unsupported_route_obeys_owner_fallback_before_delivery() {
+    let f = Fixture::new();
+    let route = control_route(Some(Harness::Command), LaunchKind::Lane);
+    let lookup = move |_: &InboxInput, _: &Request<'_>| Ok(route.clone());
+    let deliveries = std::cell::Cell::new(0);
+    let delivery = |_, _: &OperationId, _: &str, _: &Request<'_>| {
+        deliveries.set(deliveries.get() + 1);
+        Ok(MessageId::from_bytes([8; 16]))
+    };
+    let execute = |fallback| {
+        f.service()
+            .with_control_lookup(&lookup)
+            .with_steer_delivery(&delivery)
+            .with_steer_fallback(fallback)
+            .execute(steer("continue", "fallback-choice"), &f.cancel)
+            .unwrap()
+    };
+    let InboxResult::Control { receipt } = execute(crate::config::SteerFallback::Refuse) else {
+        panic!("expected control receipt");
+    };
+    assert_eq!(receipt.state, ControlState::Unsupported);
+    assert_eq!(receipt.support, ControlSupport::Unsupported);
+    assert!(receipt.reason.contains("fallback is refuse"));
+    assert_eq!(deliveries.get(), 0);
+    let InboxResult::Control { receipt } = execute(crate::config::SteerFallback::FreshWithHandoff)
+    else {
+        panic!("expected control receipt");
+    };
+    assert_eq!(receipt.state, ControlState::Queued);
+    assert_eq!(deliveries.get(), 1);
+}
+
 #[test]
 fn control_text_is_bounded_and_nonblank() {
     let f = Fixture::new();
@@ -1805,4 +1843,247 @@ fn saved_receipt_keeps_unknown_fields_without_a_flatten_chain() {
     });
     let result: InboxResult = serde_json::from_value(wire.clone()).unwrap();
     assert_eq!(serde_json::to_value(&result).unwrap(), wire);
+}
+
+#[test]
+fn delivery_park_replays_one_request_and_binds_its_transition() {
+    let f = Fixture::new();
+    let work = RequestWork {
+        extra: Default::default(),
+        graph: "graph-1".into(),
+        node: Some("review".into()),
+        attempt_id: Some(AttemptId::from_bytes([7; 16])),
+        repository: None,
+        head: None,
+    };
+    let input = delivery_park(
+        "session-a".into(),
+        OperationId::parse("park-transition-1").unwrap(),
+        work,
+        Some("issue-42"),
+        None,
+        provenant_records::graph::ParkReason::ReviewEvidence,
+        &"x".repeat(2000),
+        &["evidence-1".into()],
+    )
+    .unwrap();
+    let lookup = |_: &RequestWork, _: &Request<'_>| Ok(WorkCoverage::Verified);
+    let service = f.service().with_work_lookup(&lookup);
+    let first = receipt(service.execute(input.clone(), &f.cancel).unwrap());
+    assert_eq!(
+        receipt(service.execute(input.clone(), &f.cancel).unwrap()),
+        first
+    );
+    let stored = item(&f, first.request_id);
+    let body: serde_json::Value = serde_json::from_str(&stored.request.request.body).unwrap();
+    assert_eq!(body["reason"], "review_evidence");
+    assert_eq!(body["item"], "issue-42");
+    assert_eq!(body["handoff_truncated"], true);
+    assert_eq!(body["handoff"].as_str().unwrap().len(), 1024);
+    let mut changed = input;
+    if let InboxInput::Ask { request, .. } = &mut changed {
+        request.body.push(' ');
+    }
+    assert_eq!(
+        service.execute(changed, &f.cancel).unwrap_err().code(),
+        "operation_conflict"
+    );
+}
+
+#[test]
+fn delivery_park_binds_the_attempt_to_the_graph() {
+    let work = RequestWork {
+        extra: Default::default(),
+        graph: "graph-1".into(),
+        node: Some("writer".into()),
+        attempt_id: None,
+        repository: None,
+        head: None,
+    };
+    let key = provenant_records::graph::AttemptKey {
+        extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
+        graph_id: "graph-1".into(),
+        node_id: "writer".into(),
+        attempt: 1,
+        route_index: 0,
+    };
+    // A publication or loop can park on its own node for a writer's attempt.
+    let writer = provenant_records::graph::AttemptKey {
+        node_id: "writer-child".into(),
+        ..key.clone()
+    };
+    assert!(
+        delivery_park(
+            "session-a".into(),
+            OperationId::parse("park-child").unwrap(),
+            work.clone(),
+            Some("issue-42"),
+            Some(&writer),
+            provenant_records::graph::ParkReason::OperationError,
+            "inspect",
+            &[],
+        )
+        .is_ok()
+    );
+    for key in [
+        provenant_records::graph::AttemptKey {
+            graph_id: "other".into(),
+            ..key.clone()
+        },
+        provenant_records::graph::AttemptKey {
+            node_id: "".into(),
+            ..key.clone()
+        },
+        provenant_records::graph::AttemptKey {
+            attempt: 0,
+            ..key.clone()
+        },
+    ] {
+        assert!(
+            delivery_park(
+                "session-a".into(),
+                OperationId::parse("park-1").unwrap(),
+                work.clone(),
+                Some("issue-42"),
+                Some(&key),
+                provenant_records::graph::ParkReason::OperationError,
+                "inspect",
+                &[],
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn delivery_park_replays_a_prelaunch_refusal_with_its_graph_attempt_key() {
+    let f = Fixture::new();
+    let key = provenant_records::graph::AttemptKey {
+        extra: Default::default(),
+        retry_generation: Some(2),
+        previous_attempt_ref: None,
+        graph_id: "graph-preparation".into(),
+        node_id: "writer".into(),
+        attempt: 3,
+        route_index: 0,
+    };
+    let input = delivery_park(
+        "session-a".into(),
+        OperationId::parse("park-preparation-1").unwrap(),
+        RequestWork {
+            extra: Default::default(),
+            graph: key.graph_id.clone(),
+            node: Some(key.node_id.clone()),
+            attempt_id: None,
+            repository: None,
+            head: None,
+        },
+        None,
+        Some(&key),
+        provenant_records::graph::ParkReason::OperationError,
+        "preparation was refused before provider acceptance",
+        &["retained writer reconciliation failed".into()],
+    )
+    .unwrap();
+    let lookup = |_: &RequestWork, _: &Request<'_>| Ok(WorkCoverage::Verified);
+    let service = f.service().with_work_lookup(&lookup);
+    let first = receipt(service.execute(input.clone(), &f.cancel).unwrap());
+    assert_eq!(
+        receipt(service.execute(input.clone(), &f.cancel).unwrap()),
+        first
+    );
+    let stored = item(&f, first.request_id);
+    let body: serde_json::Value = serde_json::from_str(&stored.request.request.body).unwrap();
+    assert_eq!(body["item_pending"], true);
+    assert_eq!(body["attempt_key"]["graph_id"], "graph-preparation");
+    assert_eq!(body["attempt_key"]["attempt"], 3);
+    assert_eq!(body["reason"], "operation_error");
+}
+
+#[test]
+fn queue_control_metadata_and_receipt_use_declared_inbox_fields() {
+    let metadata = crate::graph::queue_control::Metadata {
+        action: crate::graph::queue_control::Action::Accept,
+        expected_revision: 4,
+        operation_id: OperationId::parse("queue-control-op").unwrap(),
+        review_node: Some("review".into()),
+        review_head: None,
+        graph_id: Some("g-queue".into()),
+    };
+    let input = InboxInput::Answer {
+        extra: Default::default(),
+        queue_control: Some(metadata.clone()),
+        id: HumanRequestId::from_bytes([3; 16]),
+        action: AnswerAction::Choose,
+        option_id: Some("accept".into()),
+        text: None,
+        expect_revision: 2,
+        channel: InteractionChannel::Cli,
+        operation_id: op("answer-op"),
+    };
+    let input_value = serde_json::to_value(&input).unwrap();
+    assert_eq!(
+        input_value["queue_control"],
+        serde_json::to_value(&metadata).unwrap()
+    );
+    let decoded: InboxInput = serde_json::from_value(input_value).unwrap();
+    let InboxInput::Answer {
+        queue_control,
+        extra,
+        ..
+    } = decoded
+    else {
+        panic!("answer input")
+    };
+    assert_eq!(queue_control, Some(metadata));
+    assert!(extra.is_empty());
+
+    let receipt_control = QueueControlReceipt {
+        action: crate::graph::queue_control::Action::Accept,
+        operation_id: OperationId::parse("queue-control-op").unwrap(),
+        graph_id: "g-queue".into(),
+        target_node: Some("repair".into()),
+        expected_revision: 4,
+        applied_revision: Some(5),
+        state: crate::graph::queue_control::Phase::Applied,
+        replayed: false,
+        request_id: Some(HumanRequestId::from_bytes([3; 16])),
+        answer_id: Some(HumanAnswerId::from_bytes([4; 16])),
+    };
+    let receipt = InboxReceipt {
+        extra: Default::default(),
+        queue_control: Some(receipt_control.clone()),
+        operation_id: OperationId::parse("answer-op").unwrap(),
+        request_id: HumanRequestId::from_bytes([3; 16]),
+        revision: 2,
+        state: RequestState::Answered,
+        answer_id: Some(HumanAnswerId::from_bytes([4; 16])),
+        delivery: None,
+        work_coverage: None,
+    };
+    let receipt_value = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(
+        receipt_value["queue_control"],
+        serde_json::to_value(&receipt_control).unwrap()
+    );
+    let decoded: InboxReceipt = serde_json::from_value(receipt_value).unwrap();
+    assert_eq!(decoded.queue_control, Some(receipt_control));
+    assert!(decoded.extra.is_empty());
+}
+
+#[test]
+fn saved_receipt_preserves_flattened_wire_fields() {
+    let fixture = Fixture::new();
+    let saved = fixture
+        .call(ask(RequestKind::Decision, "receipt-wire"))
+        .unwrap();
+    let mut wire = serde_json::to_value(saved).unwrap();
+    assert_eq!(wire["result"], "saved");
+    assert!(wire.get("request_id").is_some());
+    assert!(wire.get("receipt").is_none());
+    wire["future_field"] = serde_json::json!("retained");
+    let decoded: InboxResult = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
 }

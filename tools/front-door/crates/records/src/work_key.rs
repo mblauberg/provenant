@@ -1,6 +1,6 @@
 //! The format-2 work identity: project, graph, node and attempt number.
 //! A plain lane is a one-node graph, so every attempt has exactly one key.
-use provenant_core::ProjectId;
+use provenant_core::{AttemptId, ProjectId};
 use serde::{Deserialize, Serialize};
 
 /// Longest graph identifier, as the graph document validates it.
@@ -116,5 +116,26 @@ impl TryFrom<WorkKeyWire> for WorkKey {
 impl std::fmt::Display for WorkKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}#{}", self.graph, self.node, self.attempt)
+    }
+}
+
+/// The one operator remedy for a worktree another attempt holds or leaves
+/// unsettled. `WorkKey` renders as the CLI target `GRAPH/NODE#N`, which
+/// `reconcile` resolves; a raw 32-hex `AttemptId` is not a target and never
+/// works. When the key cannot be resolved, the bare sweep command is advised
+/// and the holder is named separately. Owned here so every adapter that
+/// reports a held writer formats the same runnable command.
+/// Spec: docs/specs/run-launch.md#writer-binding
+pub fn held_writer_next(holder: Option<AttemptId>, key: Option<&WorkKey>) -> String {
+    match holder {
+        Some(holder) => match key {
+            Some(key) => format!(
+                "reconcile the holding attempt {holder} with `provenant reconcile {key}` before retrying writer binding"
+            ),
+            None => format!(
+                "reconcile the holding attempt {holder} with `provenant reconcile` before retrying writer binding"
+            ),
+        },
+        None => "wait for the current writer to finish, or reconcile the holding attempt with `provenant reconcile` before retrying writer binding".to_owned(),
     }
 }

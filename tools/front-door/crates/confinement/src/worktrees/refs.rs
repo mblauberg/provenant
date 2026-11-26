@@ -455,7 +455,9 @@ impl RefLedger {
                 clock,
             )
             .map_err(|error| match error {
-                FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+                // The ref ledger lock is project-wide and carries no attempt
+                // identity; a waiter cannot name its holder.
+                FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout { holder: None },
                 other => other.into(),
             })
     }

@@ -692,6 +692,80 @@ mod tests {
         assert_eq!(target("fix", None, Some(2)).to_string(), "fix");
     }
 
+    // Every held-writer remedy must print a command this grammar accepts. A
+    // resolved holder names a `GRAPH/NODE#N` target; the bare sweep fallback
+    // names the attempt without pretending a 32-hex id is a target.
+    // Spec: docs/specs/run-launch.md#writer-binding
+    #[test]
+    fn held_writer_remedies_print_parseable_targets() {
+        use provenant_records::work_key::{WorkKey, held_writer_next};
+
+        let holder = provenant_core::AttemptId::from_bytes([53; 16]);
+        let key = WorkKey::new(
+            provenant_core::ProjectId::from_bytes([1; 16]),
+            "held-reuse",
+            "writer",
+            1,
+        )
+        .unwrap();
+        let parse_target = |next: &str| -> String {
+            let (_, tail) = next
+                .split_once("`provenant reconcile ")
+                .expect("reconcile command");
+            let (target, _) = tail.split_once('`').expect("command close");
+            target.to_owned()
+        };
+
+        // The submission preflight resolves the holder to its work key.
+        let resolved = held_writer_next(Some(holder), Some(&key));
+        let target = parse_target(&resolved);
+        assert_eq!(
+            Target::parse(&target).expect("resolved target").to_string(),
+            key.to_string()
+        );
+        assert!(resolved.contains(&holder.to_string()), "{resolved}");
+        assert!(!target.contains(&holder.to_string()), "{target}");
+
+        // Pure diagnostics have no store: they advise the bare sweep and name
+        // the attempt separately. Each of these is a real emission site.
+        let bare = [
+            held_writer_next(Some(holder), None),
+            provenant_fabric_runtime::coordination::facade::FacadeError::WriterBusy {
+                holder: Some(holder),
+            }
+            .diagnostic()
+            .next
+            .expect("busy remedy"),
+            provenant_fabric_runtime::coordination::facade::FacadeError::WriterLeaseHeld {
+                holder: Some(holder),
+                branch: None,
+                worktree: None,
+                age: None,
+                live: None,
+            }
+            .diagnostic()
+            .next
+            .expect("lease remedy"),
+            provenant_run::RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::WriterLeaseHeld {
+                    holder,
+                    branch: "holder".to_owned(),
+                    worktree: std::path::PathBuf::from("/fixture/holder"),
+                    age: "1h".to_owned(),
+                    live: None,
+                },
+            )
+            .diagnostic(provenant_records::diagnostic::Destination::Local)
+            .next
+            .expect("run diagnostic remedy"),
+        ];
+        for next in bare {
+            assert!(next.contains(&holder.to_string()), "{next}");
+            assert!(next.contains("`provenant reconcile`"), "{next}");
+            assert!(!next.contains(&format!("reconcile {holder}`")), "{next}");
+        }
+    }
+
     fn checkpoint(
         name: &str,
         nodes: &[(&str, &[&str])],

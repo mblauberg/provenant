@@ -29,6 +29,9 @@ pub struct FabricConfig {
     pub implement: ImplementConfig,
     #[serde(default)]
     pub batch: BatchConfig,
+    /// Defaults for durable delivery queues.
+    #[serde(default)]
+    pub queue: QueueConfig,
     /// The planner front-end: whether `provenant run --preset` runs a planner.
     #[serde(default)]
     pub plan: PlanConfig,
@@ -54,6 +57,26 @@ pub struct BatchConfig {
 impl Default for BatchConfig {
     fn default() -> Self {
         Self { max_parallel: 4 }
+    }
+}
+
+/// Defaults for the durable delivery queue. Zero CI slots disables its
+/// advisory admission cap; queue item concurrency must remain positive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QueueConfig {
+    pub max_parallel: usize,
+    pub ci_slots: usize,
+    pub prep_retries: usize,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            max_parallel: 4,
+            ci_slots: 1,
+            prep_retries: 2,
+        }
     }
 }
 
@@ -195,6 +218,9 @@ pub struct GraphConfig {
     /// General command launch and read/wait allowance.
     pub launch_wait_seconds: u64,
     /// Allowance for one writer provisioning, independent of a reader wait.
+    /// This also bounds launch contention: a concurrent launch holds writer
+    /// custody across its whole worktree setup, so the wait must cover a full
+    /// provisioning rather than only the reader's shorter launch allowance.
     pub writer_provision_seconds: u64,
     pub limits: GraphLimits,
     pub budget: GraphBudget,
@@ -217,7 +243,7 @@ impl Default for GraphConfig {
         Self {
             decide_timeout_seconds: DEFAULT_DECIDE_TIMEOUT_SECONDS,
             launch_wait_seconds: 55,
-            writer_provision_seconds: 55,
+            writer_provision_seconds: 120,
             limits: Default::default(),
             budget: Default::default(),
             ci_poll_backoff: Default::default(),
@@ -806,6 +832,9 @@ impl DomainConfig for FabricConfig {
         {
             reject("ssh_executable".into());
         }
+        if self.queue.max_parallel == 0 {
+            reject("queue.max_parallel".into());
+        }
         for key in self.home_hosts.keys() {
             if key.len() != 64
                 || !key
@@ -963,6 +992,9 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
     FieldMetadata::int("batch.max_parallel", 1, 64),
+    FieldMetadata::int("queue.max_parallel", 1, 64),
+    FieldMetadata::int("queue.ci_slots", 0, 64),
+    FieldMetadata::int("queue.prep_retries", 0, 64),
     FieldMetadata::enumeration("steer.fallback", &["fresh_with_handoff", "refuse"]),
     FieldMetadata::int("steer.restart_spacing_ms", 0, 600_000),
     FieldMetadata::enumeration(
@@ -1270,6 +1302,7 @@ mod tests {
             plan: Default::default(),
             implement: Default::default(),
             batch: Default::default(),
+            queue: Default::default(),
             steer: Default::default(),
             limits: Limits {
                 body_bytes: 65536,
@@ -1284,6 +1317,77 @@ mod tests {
                 store_busy_timeout_ms: 30_000,
             },
         }
+    }
+
+    #[test]
+    fn queue_defaults_and_host_values_are_loaded_with_their_origins() {
+        #[derive(Serialize, Deserialize)]
+        struct Domains {
+            fabric: FabricConfig,
+        }
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<PathBuf> {
+                Ok(path.to_owned())
+            }
+        }
+
+        let mut inputs =
+            provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
+        inputs.state_dir = Some("/fixture/state".into());
+        let roots = inputs.resolve(&Resolver).unwrap();
+        let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
+        let configured = provenant_config::load_with_domains(
+            &roots,
+            Some(
+                &b"schema_version = 1\n[domains.fabric.queue]\nmax_parallel = 7\nci_slots = 0\nprep_retries = 3\n"[..],
+            ),
+            &sections,
+        )
+        .unwrap();
+        assert_eq!(configured.domains.fabric.queue.max_parallel, 7);
+        assert_eq!(configured.domains.fabric.queue.ci_slots, 0);
+        assert_eq!(configured.domains.fabric.queue.prep_retries, 3);
+        for key in [
+            "domains.fabric.queue.max_parallel",
+            "domains.fabric.queue.ci_slots",
+            "domains.fabric.queue.prep_retries",
+        ] {
+            assert!(matches!(
+                configured.origins.get(key),
+                Some(provenant_config::Origin::User { .. })
+            ));
+        }
+
+        let defaults =
+            provenant_config::load_with_domains(&roots, None::<&[u8]>, &sections).unwrap();
+        assert_eq!(defaults.domains.fabric.queue, QueueConfig::default());
+        for key in [
+            "domains.fabric.queue.max_parallel",
+            "domains.fabric.queue.ci_slots",
+            "domains.fabric.queue.prep_retries",
+        ] {
+            assert!(matches!(
+                defaults.origins.get(key),
+                Some(provenant_config::Origin::Compiled { .. })
+            ));
+        }
+
+        let mut invalid = config();
+        invalid.queue.max_parallel = 0;
+        assert!(
+            invalid
+                .validate()
+                .iter()
+                .any(|error| error.field == "queue.max_parallel")
+        );
+        invalid.queue.max_parallel = 64;
+        invalid.queue.ci_slots = 0;
+        invalid.queue.prep_retries = 0;
+        assert!(invalid.validate().is_empty());
     }
 
     // Spec: docs/specs/fabric.md#session-ready-steering

@@ -974,13 +974,8 @@ pub(super) fn execute_in(
                         )
                     },
                 );
-                let (mut recorded_readiness, offered_exclusions) = filter_unoffered_readiness(
-                    recorded,
-                    &model,
-                    context.catalogue,
-                    records,
-                    query.account.as_deref(),
-                );
+                let (mut recorded_readiness, offered_exclusions) =
+                    filter_unoffered_readiness(recorded, &model, context.catalogue, records);
                 let pools = context.catalogue.admission_pools(&model);
                 let quota_evidence = quota_observations(
                     context.catalogue,

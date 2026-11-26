@@ -491,7 +491,9 @@ pub(super) fn existing_branch_behind_base_warns_and_keeps_its_tip() -> Result {
             warning.as_str().is_some_and(|text| {
                 text.contains("branch existing at")
                     && text.contains("does not contain base")
+                    && text.contains("1 commits behind")
                     && text.contains("merge target")
+                    && text.contains("the lane may merge it")
             })
         }),
         "{json_output}"
@@ -503,6 +505,69 @@ pub(super) fn existing_branch_behind_base_warns_and_keeps_its_tip() -> Result {
     );
     let head = git(&rig, &["rev-parse", "HEAD"])?;
     assert_eq!(json_output["data"]["base"].as_str(), Some(head.as_str()));
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+pub(super) fn existing_branch_containing_base_launches_without_a_behind_warning() -> Result {
+    let rig = repository()?;
+    let base = git(&rig, &["rev-parse", "HEAD"])?;
+    git(&rig, &["branch", "ahead"])?;
+    git(&rig, &["checkout", "-q", "ahead"])?;
+    git(&rig, &["commit", "--allow-empty", "-qm", "branch advance"])?;
+    let tip = git(&rig, &["rev-parse", "ahead"])?;
+    git(&rig, &["checkout", "-q", "main"])?;
+    let created = ok(
+        &rig,
+        &["worktree", "create", "ahead", "--base", &base, "--json"],
+    )?;
+    assert_eq!(created["data"]["head"], tip);
+    assert!(
+        created["data"]["warnings"]
+            .as_array()
+            .is_none_or(|warnings| warnings.iter().all(|warning| {
+                warning
+                    .as_str()
+                    .is_none_or(|text| !text.contains("merge target") && !text.contains("behind"))
+            })),
+        "{created}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/run.md#lane-git-and-import
+pub(super) fn unrelated_base_refuses_and_names_worktree() -> Result {
+    let rig = repository()?;
+    git(&rig, &["checkout", "-q", "--orphan", "unrelated"])?;
+    git(
+        &rig,
+        &["commit", "-q", "--allow-empty", "-m", "unrelated root"],
+    )?;
+    let unrelated = git(&rig, &["rev-parse", "HEAD"])?;
+    git(&rig, &["checkout", "-q", "-f", "main"])?;
+    git(&rig, &["branch", "topic"])?;
+
+    let json_output = command(
+        &rig,
+        &[
+            "worktree", "create", "topic", "--base", &unrelated, "--json",
+        ],
+    )?;
+    assert_ne!(code(&json_output), 0);
+    let value = json(&json_output)?;
+    let message = value["error"]["message"].as_str().ok_or("error message")?;
+    assert!(message.contains("--worktree"), "{value}");
+    let repair = value["error"]["repair"].as_str().ok_or("repair")?;
+    assert!(
+        repair.contains("--worktree") && (repair.contains("merge") || repair.contains("rebase")),
+        "{value}"
+    );
+    assert_eq!(value["status"], "refused", "{value}");
+
+    let human = command(&rig, &["worktree", "create", "topic", "--base", &unrelated])?;
+    assert_ne!(code(&human), 0);
+    let stderr = String::from_utf8_lossy(&human.stderr.bytes);
+    assert!(stderr.contains("--worktree"), "{stderr}");
     Ok(())
 }
 
@@ -582,11 +647,11 @@ pub(super) fn create_reuses_a_clean_worktree_and_names_an_existing_conflict() ->
     assert_eq!(advanced["data"]["head"], tip);
     assert_eq!(advanced["data"]["reused"], true);
 
-    // A base that is not an ancestor of the checkout HEAD stays refused and
-    // names both the path and the repair.
+    // A checkout behind its base is reused at its own tip on the occupied path
+    // just as on a free path: the base is the merge target, never a reset.
     git(&rig, &["commit", "--allow-empty", "-qm", "sibling"])?;
     let sibling = git(&rig, &["rev-parse", "HEAD"])?;
-    let conflict = command(
+    let behind = ok(
         &rig,
         &[
             "worktree",
@@ -597,15 +662,19 @@ pub(super) fn create_reuses_a_clean_worktree_and_names_an_existing_conflict() ->
             "--json",
         ],
     )?;
-    assert_ne!(code(&conflict), 0);
-    let value = json(&conflict)?;
-    let message = value["error"]["message"].as_str().ok_or("error message")?;
-    assert!(message.contains("feature/reuse"), "{value}");
-    assert!(message.contains(path_text.as_str()), "{value}");
-    let cause = value["error"]["cause"].as_str().ok_or("named cause")?;
-    assert!(cause.contains("omit --base"), "{value}");
-    let repair = value["error"]["repair"].as_str().ok_or("repair")?;
-    assert!(repair.contains("matching base"), "{value}");
+    assert_eq!(behind["data"]["path"], created["data"]["path"]);
+    assert_eq!(behind["data"]["head"], tip);
+    assert_eq!(behind["data"]["reused"], true);
+    assert!(
+        behind["data"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning.as_str().is_some_and(|text| {
+                    text.contains("commits behind") && text.contains("merge target")
+                })
+            })),
+        "{behind}"
+    );
 
     fs::write(path.join("uncommitted"), "work in progress")?;
     let dirty = command(

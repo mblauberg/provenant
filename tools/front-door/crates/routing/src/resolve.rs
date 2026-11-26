@@ -556,10 +556,9 @@ pub fn offered_models_serve(offered: &[String], model: &ModelId, catalogue: &Cat
     offered_list_serves_model(offered, model, catalogue, false)
 }
 
-/// An account's known offer list. The keychain-stamped usage probe is the first
-/// source; the quota snapshot records the same offer list for an account whose
-/// probe has not run yet. An empty list means the offers are unknown, never that
-/// the account serves every model.
+/// An account's offer list as recorded in its quota snapshot: the fallback for
+/// an account whose keychain-stamped usage probe has not run. An empty list
+/// means the offers are unknown, never that the account serves every model.
 fn snapshot_offered_models<'a>(
     accounts: &'a [provenant_quota::AccountRecord],
     adapter: &str,
@@ -577,29 +576,71 @@ fn snapshot_offered_models<'a>(
         .map(|details| details.models.as_slice())
 }
 
-/// Give an unpinned selection the account's recorded offer list when its usage
-/// probe has not run. A pin keeps its original availability: an explicitly
-/// chosen account is attempted even when its recorded offers lack the model.
+/// The one rule that decides offer evidence for selection, resolve and launch
+/// preparation. A fresh keychain-stamped usage probe is the first source; a
+/// fresh quota snapshot serves only when the probe has not run. Stale, expired,
+/// unknown or unaccounted availability is never offer evidence: it keeps its
+/// re-probe path instead of refusing the account. An empty list means the
+/// offers are unknown, never that the account serves every model.
+fn recorded_offer_models(
+    availability: &AvailabilityRecord,
+    context: &RoutingContext<'_>,
+) -> Option<(Vec<String>, i64)> {
+    if !provenant_records::AdapterSpec::get(&availability.adapter)
+        .is_some_and(|spec| spec.offered_models)
+    {
+        return None;
+    }
+    // A stale observation must not preempt the documented StaleAvailability
+    // re-probe, whether it is judging a refusal or shaping selection.
+    if availability_reason(Some(availability), context).is_some() {
+        return None;
+    }
+    let key = availability.account_key.as_deref()?;
+    if !availability.observed_models.is_empty() {
+        return Some((
+            availability.observed_models.clone(),
+            availability.observed_unix_seconds,
+        ));
+    }
+    let snapshot = context
+        .accounts
+        .iter()
+        .find(|record| {
+            record.account.adapter == availability.adapter && record.account.account_key == key
+        })?
+        .snapshot
+        .as_ref()?;
+    if !context.config.freshness.snapshot_fresh(
+        snapshot,
+        context.now_seconds(),
+        context.quota_policies,
+    ) {
+        return None;
+    }
+    let offered = snapshot_offered_models(context.accounts, &availability.adapter, Some(key))?;
+    Some((offered.to_vec(), snapshot.observed_unix_seconds))
+}
+
+/// Give every selection the account's recorded offer list under the same rule
+/// [`recorded_offer_models`] uses to judge a refusal. Stale availability keeps
+/// its own (empty) probe list rather than being judged by an unrelated snapshot.
 fn availability_with_known_offers(
     availability: &[AvailabilityRecord],
-    accounts: &[provenant_quota::AccountRecord],
+    context: &RoutingContext<'_>,
 ) -> Vec<AvailabilityRecord> {
     availability
         .iter()
         .map(|record| {
-            if !record.observed_models.is_empty()
-                || !provenant_records::AdapterSpec::get(&record.adapter)
-                    .is_some_and(|spec| spec.offered_models)
-            {
+            if !record.observed_models.is_empty() {
                 return record.clone();
             }
-            match snapshot_offered_models(accounts, &record.adapter, record.account_key.as_deref())
-            {
-                Some(models) => AvailabilityRecord {
-                    observed_models: models.to_vec(),
-                    ..record.clone()
-                },
-                None => record.clone(),
+            let Some((offered, _)) = recorded_offer_models(record, context) else {
+                return record.clone();
+            };
+            AvailabilityRecord {
+                observed_models: offered,
+                ..record.clone()
             }
         })
         .collect()
@@ -628,6 +669,27 @@ fn account_serves_model(
     }
     true
 }
+/// Resolve an `--account` pin written as a label, an account key, or
+/// `adapter/key` to the registered account key. A bare pinned label must be
+/// judged by that account's own offer list, not by another account of the same
+/// provider.
+fn pinned_account_key<'a>(
+    hint: &str,
+    accounts: &'a [provenant_quota::AccountRecord],
+) -> Option<&'a str> {
+    let (hint_adapter, hint_id) = match hint.split_once('/') {
+        Some((adapter, id)) => (Some(adapter), id),
+        None => (None, hint),
+    };
+    accounts
+        .iter()
+        .find(|record| {
+            hint_adapter.is_none_or(|adapter| adapter == record.account.adapter)
+                && (hint_id == record.account.account_key || hint_id == record.account.label)
+        })
+        .map(|record| record.account.account_key.as_str())
+}
+
 fn account_hint_matches(hint: &str, adapter: &str, account_key: Option<&str>) -> bool {
     match hint.split_once('/') {
         Some((hint_adapter, hint_key)) => hint_adapter == adapter && account_key == Some(hint_key),
@@ -1392,6 +1454,10 @@ pub struct PacingPreview {
 }
 /// Explain cached account profiles without probing or granting dispatch readiness.
 pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<PacingPreview> {
+    let pinned = context
+        .policy_account_hint
+        .and_then(|hint| pinned_account_key(hint, context.accounts))
+        .map(str::to_owned);
     let mut accounts: BTreeSet<_> = context
         .quota
         .iter()
@@ -1418,6 +1484,13 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
             })
             .map(|a| a.account_key.clone()),
     );
+    // A pinned account is the account the selection line must name, even when
+    // its recorded offers exclude the model and it is therefore not a quota
+    // candidate. Keep its row so the preview cannot silently show another
+    // account of the same provider instead of the one that was pinned.
+    if let Some(key) = &pinned {
+        accounts.insert(Some(key.clone()));
+    }
     // An adapter with registered accounts does not launch through its
     // synthetic local login. Its cached quota row is not a route candidate.
     if let Some(spec) = provenant_records::AdapterSpec::get(model.adapter())
@@ -1439,13 +1512,15 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
             .is_some()
     }) {
         accounts.retain(|key| {
-            key.as_deref()
-                .and_then(|key| {
-                    snapshot_offered_models(context.accounts, model.adapter(), Some(key))
-                })
-                .is_none_or(|offered| {
-                    offered_list_serves_model(offered, model, context.catalogue, false)
-                })
+            key.as_deref() == pinned.as_deref()
+                || key
+                    .as_deref()
+                    .and_then(|key| {
+                        snapshot_offered_models(context.accounts, model.adapter(), Some(key))
+                    })
+                    .is_none_or(|offered| {
+                        offered_list_serves_model(offered, model, context.catalogue, false)
+                    })
         });
     }
     if accounts.is_empty() {
@@ -1655,6 +1730,18 @@ fn account_reason<'q>(
     if reason.is_none() {
         reason = readiness_reason(model, availability, context);
     }
+    // A recorded offer list that excludes the model refuses the account,
+    // pinned or not. Judge the availability probe first and fall back to a
+    // fresh snapshot only when the probe has not run, so the refusal is the
+    // same typed fact launch preparation reports. `recorded_offers` declines
+    // stale evidence, leaving the StaleAvailability re-probe path intact.
+    if reason.is_none()
+        && let Some(mismatch) = recorded_offers(model, availability, context)
+        // Supersedence orders candidates; it never makes a listed model unoffered.
+        && !offered_list_serves_model(&mismatch.offered_models, model, context.catalogue, true)
+    {
+        reason = Some(RouteExclusionReason::AccountDoesNotOffer);
+    }
     if reason.is_none()
         && latest_reading(model, availability, context, true)
             .is_some_and(|q| q.snapshot.status == QuotaStatus::AuthRequired)
@@ -1778,6 +1865,28 @@ pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
         diagnostic.detail.unwrap_or_default(),
         diagnostic.next.unwrap_or_default()
     )
+}
+/// The account's recorded offers and the age of that record, as one typed
+/// fact shared by resolve and launch preparation. It reads the single offer
+/// evidence rule in [`recorded_offer_models`], so selection and refusal cannot
+/// disagree about whether a probe, a snapshot or neither decides the account.
+fn recorded_offers(
+    model: &ModelId,
+    availability: &AvailabilityRecord,
+    context: &RoutingContext<'_>,
+) -> Option<provenant_records::run::AccountOfferMismatch> {
+    if !provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|spec| spec.offered_models)
+    {
+        return None;
+    }
+    let (offered, observed_at) = recorded_offer_models(availability, context)?;
+    let key = availability.account_key.as_deref()?;
+    Some(provenant_records::run::AccountOfferMismatch {
+        account: key.to_owned(),
+        model: model.as_str().to_owned(),
+        offered_models: offered,
+        age_seconds: context.now_seconds().saturating_sub(observed_at) as u64,
+    })
 }
 /// Persisted mismatch or refusal evidence, assessed by the same quota function
 /// that admission rechecks before launch. Invalid evidence excludes only the
@@ -2568,6 +2677,7 @@ fn candidate(
             })
             .collect();
     }
+    let offer_refused = reason == Some(RouteExclusionReason::AccountDoesNotOffer);
     let readiness = match (reason, availability) {
         (Some(reason), _) => RouteReadiness::Unavailable {
             skipped_accounts: skipped,
@@ -2596,6 +2706,13 @@ fn candidate(
         },
     };
     let mut diagnostics = RouteDiagnostics::default();
+    // Carry the fact resolve actually judged onto the route. Preparation must
+    // not re-read a different availability list and lose the recorded offers.
+    if let Some(a) = availability
+        && offer_refused
+    {
+        diagnostics.offer_mismatch = recorded_offers(model, a, context);
+    }
     if context.catalogue.model(model).is_none() {
         diagnostics.launch_warnings.push(format!("model {} is absent from the bundled and discovered catalogue; source=user, provider availability is unverified", model.as_str()));
     }
@@ -2731,10 +2848,24 @@ fn candidate(
                         latest_reading(model, account, context, false),
                     )
                     .filter(|assessment| assessment.constrained);
+                    let mismatch = if *reason == RouteExclusionReason::AccountDoesNotOffer {
+                        recorded_offers(model, account, context)
+                            .map(|fact| {
+                                format!(
+                                    "; {}; {}",
+                                    fact.detail(),
+                                    provenant_records::run::AccountOfferMismatch::NEXT
+                                )
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        "{}: {}; inspect `provenant quota --full`{}",
+                        "{}: {}; inspect `provenant quota --full`{}{}",
                         account.account_key.as_deref().unwrap_or("unknown account"),
                         exclusion_detail(reason),
+                        mismatch,
                         monthly
                             .map(|assessment| format!("; {}", assessment.detail))
                             .unwrap_or_default(),
@@ -2871,11 +3002,7 @@ pub fn resolve_for_account_with_seed_excluding_family(
         })
         .cloned()
         .collect();
-    let availability = if matches!(account, AccountSelection::Any) {
-        availability_with_known_offers(&availability, context.accounts)
-    } else {
-        availability
-    };
+    let availability = availability_with_known_offers(&availability, &context.0);
     let kept = ValidatedContext(RoutingContext {
         availability: &availability,
         ..context.0
@@ -2886,7 +3013,8 @@ pub fn resolve_for_account_with_seed_excluding_family(
         rules,
         required_family,
     };
-    if let AccountSelection::Known(account) = account {
+    if let AccountSelection::Known(pin) = account {
+        let account = pinned_account_key(pin, context.accounts).unwrap_or(pin);
         let mut adapters: BTreeSet<&str> = match &request.choice {
             RouteChoice::Model(model) => [model.adapter()].into_iter().collect(),
             RouteChoice::NamedRoute(name) => {

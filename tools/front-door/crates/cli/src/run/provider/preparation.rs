@@ -2235,6 +2235,34 @@ pub(super) fn login_check_can_clear(adapter: &str, mismatch: bool) -> bool {
     !mismatch || AdapterSpec::get(adapter).is_some_and(|spec| spec.login_check_names_account)
 }
 
+/// Spec: docs/specs/routing.md#launch-login-recovery
+///
+/// Whether a fresh observation may clear a login failure recorded for an
+/// account at launch. Naming the account is necessary but not sufficient: a
+/// CLI `auth status --json` answer reports the CLI's local login bit, which
+/// can still name the original account after its credentials were replaced.
+/// Only probes that inspect the credential the lane will use may clear a
+/// recorded failure; otherwise the launch selects a logged-in account or
+/// refuses with the account and its sign-in remedy. The rule comes from the
+/// adapter registry, so no adapter is special-cased here.
+fn login_recovery_can_clear(
+    adapter: &str,
+    mismatch: bool,
+    strategy: provenant_records::LoginReprobe,
+) -> bool {
+    if strategy == provenant_records::LoginReprobe::None
+        || strategy == provenant_records::LoginReprobe::ExecutableOnly
+    {
+        return false;
+    }
+    if !login_check_can_clear(adapter, mismatch) {
+        return false;
+    }
+    AdapterSpec::get(adapter).is_none_or(|spec| {
+        spec.account_identity_probe != provenant_records::AccountIdentityProbe::CliAuthStatus
+    })
+}
+
 /// Only the already-selected account may be refreshed. A replacement cannot
 /// grant another account's identity or revive a different catalogue revision.
 fn stale_observation_index(
@@ -2263,12 +2291,13 @@ fn stale_observation_index(
 }
 
 /// The models a route's account reports when the requested model is not among
-/// them. Accounts that report no models place no restriction.
+/// them, with the age of that recorded offer list. Accounts that report no
+/// models place no restriction.
 fn unoffered_model(
     availability: &[provenant_providers::AvailabilityRecord],
     route: &ResolvedRoute,
     now: i64,
-) -> Option<Vec<String>> {
+) -> Option<(Vec<String>, u64)> {
     let key = route.account_key.as_deref()?;
     if !AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.offered_models) {
         return None;
@@ -2279,8 +2308,34 @@ fn unoffered_model(
             && record.expires_unix_seconds > now
             && !record.observed_models.is_empty()
     })?;
-    (!provenant_providers::model_matches_offered(&route.model, &record.observed_models))
-        .then(|| record.observed_models.clone())
+    (!provenant_providers::model_matches_offered(&route.model, &record.observed_models)).then(
+        || {
+            let age_seconds = now.saturating_sub(record.observed_unix_seconds) as u64;
+            (record.observed_models.clone(), age_seconds)
+        },
+    )
+}
+
+/// The typed lane refusal for an account whose recorded offers exclude the
+/// route's model. The fact comes from resolve's own offer evidence, so resolve
+/// and preparation name the same account, offers and age.
+fn offer_mismatch_skip(
+    route: &ResolvedRoute,
+    mismatch: provenant_records::run::AccountOfferMismatch,
+) -> SkippedRoute {
+    let label = format!("{}/{}", route.adapter, route.model);
+    let mut skipped = skip(&label, SkipKind::Refused, "");
+    skipped.set_cause(provenant_records::RouteExclusionReason::AccountDoesNotOffer);
+    skipped.set_offer_mismatch(provenant_records::run::AccountOfferMismatch {
+        account: route
+            .account_key
+            .clone()
+            .unwrap_or_else(|| mismatch.account.clone()),
+        model: label,
+        offered_models: mismatch.offered_models,
+        age_seconds: mismatch.age_seconds,
+    });
+    skipped
 }
 
 fn retry_stale_selected(
@@ -2370,7 +2425,7 @@ mod stale_readiness_tests {
         };
         assert_eq!(
             unoffered_model(std::slice::from_ref(&record), &route, 20),
-            Some(record.observed_models.clone())
+            Some((record.observed_models.clone(), 10))
         );
         let mut flash = route.clone();
         flash.model = "gemini-9-flash".into();
@@ -2384,6 +2439,50 @@ mod stale_readiness_tests {
             ..record
         };
         assert_eq!(unoffered_model(&[unknown], &route, 20), None);
+    }
+
+    #[test]
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    fn offer_mismatch_refusal_carries_the_typed_reason() {
+        let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "selection_context":{"workload":"general","writes":false},
+            "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
+            "adapter":"agy", "model":"gemini-4-hydrogen", "effort":null,
+            "catalogue_revision":"revision", "account_key":"agy-google-896bb719dc34", "host":"local",
+            "alternatives":[], "exclusions":[], "eligibility":"eligible",
+            "readiness":{"status":"unavailable","reason":"stale_availability"},
+            "confidentiality":{"evidence_ref":"evidence"}
+        }))
+        .unwrap();
+        let skipped = offer_mismatch_skip(
+            &route,
+            provenant_records::run::AccountOfferMismatch {
+                account: route.account_key.clone().unwrap_or_default(),
+                model: "agy/gemini-4-hydrogen".into(),
+                offered_models: vec!["Gemini 3.8 Flash".into(), "Claude Sonnet 4.6".into()],
+                age_seconds: 1800,
+            },
+        );
+        assert_eq!(skipped.kind, SkipKind::Refused);
+        assert_eq!(
+            skipped.cause,
+            Some(provenant_records::RouteExclusionReason::AccountDoesNotOffer)
+        );
+        let text = skipped.describe();
+        assert!(
+            text.contains("account agy-google-896bb719dc34 does not offer agy/gemini-4-hydrogen"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Gemini 3.8 Flash, Claude Sonnet 4.6"),
+            "{text}"
+        );
+        assert!(text.contains("1800s ago"), "{text}");
+        assert!(text.contains("provenant quota tick"), "{text}");
+        assert!(
+            !text.contains("inspect the request and access policy"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -2827,6 +2926,100 @@ mod stale_readiness_tests {
         assert_eq!(std::fs::read(&token_path)?, token_before);
         Ok(())
     }
+
+    #[test]
+    // Spec: docs/specs/routing.md#launch-login-recovery
+    fn claude_auth_status_cannot_clear_a_login_failure_after_credentials_change()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{
+            CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+        };
+
+        struct StaleStatus {
+            directory: std::path::PathBuf,
+        }
+        impl Executor for StaleStatus {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                assert_eq!(options.argv[1..], ["auth", "status", "--json"]);
+                assert!(options.env.unwrap().iter().any(|(key, value)| {
+                    key == "CLAUDE_CONFIG_DIR" && value == self.directory.as_os_str()
+                }));
+                let bytes = br#"{"loggedIn":true,"email":"account@example.test"}"#.to_vec();
+                let total_bytes = bytes.len() as u64;
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: CapturedStream {
+                        bytes,
+                        total_bytes,
+                        ..Default::default()
+                    },
+                    stderr: CapturedStream::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let state = root.join("state");
+        let directory = home.join(".claude-work");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::create_dir_all(&state)?;
+        let key = provenant_providers::identity::fingerprint("account@example.test")
+            .ok_or("account fingerprint")?;
+        let stale_status = StaleStatus {
+            directory: directory.clone(),
+        };
+        let executor = provenant_providers::host::HostProbeExecutor::new(&stale_status, &state)?;
+
+        // The account's credentials were replaced, but Claude's local status bit
+        // still names the original account: an identity-only probe cannot tell a
+        // stale login from a healthy one and must not clear a recorded failure.
+        let (detected, _) = provenant_providers::accounts::detect_for_registration(
+            &executor,
+            "claude",
+            Path::new("/fixture/claude"),
+            &home,
+            std::ffi::OsStr::new("fixture"),
+            &directory,
+            executor.root(),
+        )?;
+        assert_eq!(detected, key);
+        for mismatch in [false, true] {
+            assert!(!login_recovery_can_clear(
+                "claude",
+                mismatch,
+                provenant_records::LoginReprobe::AccountIdentity
+            ));
+        }
+        // Probes that inspect the credential the lane will use may still clear.
+        assert!(login_recovery_can_clear(
+            "agy",
+            true,
+            provenant_records::LoginReprobe::AccountIdentity
+        ));
+        assert!(login_recovery_can_clear(
+            "codex",
+            false,
+            provenant_records::LoginReprobe::Codex
+        ));
+        assert!(login_recovery_can_clear(
+            "cursor",
+            false,
+            provenant_records::LoginReprobe::Cursor
+        ));
+        assert!(!login_recovery_can_clear(
+            "opencode",
+            false,
+            provenant_records::LoginReprobe::ExecutableOnly
+        ));
+        Ok(())
+    }
 }
 
 /// Name, by registered label only, each account an unpinned route passed over
@@ -3157,24 +3350,25 @@ pub(super) fn prepare_candidates_inner(
         .flatten();
     // Let the host login lookup diagnose missing credentials, including relocated
     // stores and keychain logins, rather than guessing from the ambient home.
+    let pr_policy = run::ResolvedPrPolicy::resolve(&task.profile);
     let publishing = publishing_requested(
         task.access.network(true) == NetworkAccess::Open,
         &task.profile.knobs,
     );
-    let publishing_gh = if publishing {
-        match publishing_executable(&locate) {
-            Ok(gh) => Some(gh),
-            Err(cause) => {
+    // The PR policy mediates gh independently of whether credentials are published.
+    let policy_gh = match publishing_executable(&locate) {
+        Ok(gh) => Some(gh),
+        Err(cause) => {
+            if publishing {
                 warn(Warning::new(
                     provenant_records::warning::GH_PUBLISHING_UNAVAILABLE,
                     format!("GitHub publishing unavailable: {cause}"),
                 ));
-                None
             }
+            None
         }
-    } else {
-        None
     };
+    let publishing_gh = policy_gh.as_ref().filter(|_| publishing);
     let git_context = task
         .base
         .as_deref()
@@ -3489,10 +3683,10 @@ pub(super) fn prepare_candidates_inner(
                                     | provenant_quota::ReadinessReason::LoginExpired
                             )
                         );
-                    // A version-only probe cannot clear an authentication refusal.
-                    if auth_failure
-                        && login_check_can_clear(&entry.adapter, mismatch)
-                        && strategy != provenant_records::LoginReprobe::ExecutableOnly
+                    // A version-only probe cannot clear an authentication refusal,
+                    // and neither can a CLI status bit that still names the account
+                    // after its credentials were replaced (#3974).
+                    if auth_failure && login_recovery_can_clear(&entry.adapter, mismatch, strategy)
                     {
                         let executable = Path::new(&record.executable);
                         // Date recovery before I/O: late publication of an older
@@ -3578,9 +3772,13 @@ pub(super) fn prepare_candidates_inner(
     // A failed publication must not prevent a correctly prepared lane launching.
     let publish_availability =
         |records: &[provenant_providers::AvailabilityRecord]| -> Result<(), String> {
-            let attempt_dir =
-                Directory::open_anchor(paths.scratch.parent().ok_or("attempt path unavailable")?)
-                    .map_err(|e| e.to_string())?;
+            let attempt_dir = Directory::open_anchor(
+                paths
+                    .provider_state
+                    .parent()
+                    .ok_or("attempt path unavailable")?,
+            )
+            .map_err(|e| e.to_string())?;
             attempt_dir
                 .atomic_write(
                     std::ffi::OsStr::new("availability.json"),
@@ -3753,8 +3951,7 @@ pub(super) fn prepare_candidates_inner(
     let mut gh_login: super::gh_auth::LoginCache = None;
     // Whether a workflow in this checkout runs on pull request label events;
     // the gh wrapper then says a label change starts CI (#3270).
-    let label_ci_warning =
-        publishing_gh.is_some() && provenant_config::label_events_trigger_ci(&cwd);
+    let label_ci_warning = policy_gh.is_some() && provenant_config::label_events_trigger_ci(&cwd);
     loop {
         if queue.is_empty() {
             let next = if named_pool {
@@ -3877,19 +4074,38 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
             continue;
         }
-        if let Some(offered) = unoffered_model(&availability, &route, clock.unix_seconds()) {
+        // Resolve's own typed fact wins here: it names the offers and age from
+        // the source resolve judged, which may be a fresh snapshot when the
+        // availability probe has not run. The availability-only check below is
+        // for a route resolve did not classify as an offer mismatch.
+        if let provenant_records::RouteReadiness::Unavailable {
+            reason: provenant_records::RouteExclusionReason::AccountDoesNotOffer,
+            ..
+        } = &route.readiness
+            && let Some(mismatch) = route.diagnostics.offer_mismatch.clone()
+        {
             reason_boundaries.insert(
                 reasons.len(),
                 provenant_records::diagnostic::BoundaryClass::Authority,
             );
-            reasons.push(skip(
-                &label,
-                SkipKind::Refused,
-                format!(
-                    "model `{}` is not offered by this account; offered models: {}",
-                    route.model,
-                    offered.join(", ")
-                ),
+            reasons.push(offer_mismatch_skip(&route, mismatch));
+            continue;
+        }
+        if let Some((offered, age_seconds)) =
+            unoffered_model(&availability, &route, clock.unix_seconds())
+        {
+            reason_boundaries.insert(
+                reasons.len(),
+                provenant_records::diagnostic::BoundaryClass::Authority,
+            );
+            reasons.push(offer_mismatch_skip(
+                &route,
+                provenant_records::run::AccountOfferMismatch {
+                    account: route.account_key.clone().unwrap_or_default(),
+                    model: format!("{}/{}", route.adapter, route.model),
+                    offered_models: offered,
+                    age_seconds,
+                },
             ));
             continue;
         }
@@ -4493,6 +4709,20 @@ pub(super) fn prepare_candidates_inner(
                 )
             })
             .map_err(|error| error.to_string())?;
+        // A portable fixture is staged from bytes carried with the task, so a
+        // peer places exactly the same file as the host without ever seeing a
+        // caller path. Its location is named in the brief below.
+        let fixture_location = match task.fixture.as_ref().filter(|f| f.is_valid()) {
+            Some(fixture) => {
+                let name = std::ffi::OsStr::new(&fixture.name);
+                scratch_directory
+                    .atomic_write(name, ".fixture-", &fixture.content, PublishMode::Replace)
+                    .and_then(|publication| publication.require_durable())
+                    .map_err(|error| error.to_string())?;
+                Some(scratch.join(&fixture.name))
+            }
+            None => None,
+        };
         let text = match &git_context {
             Some(context) => {
                 let location = context
@@ -4501,6 +4731,13 @@ pub(super) fn prepare_candidates_inner(
                 format!("{location}\n{prompt_text}")
             }
             None => prompt_text.to_owned(),
+        };
+        let text = match &fixture_location {
+            Some(path) => format!(
+                "Supplied fixture for this lane: {}. Read it to answer the brief.\n{text}",
+                path.display()
+            ),
+            None => text,
         };
         let text = match &writer_context {
             Some(context) => format!("{context}\n\n{text}"),
@@ -4611,16 +4848,32 @@ pub(super) fn prepare_candidates_inner(
         }
         let handoff = private_state.join("handoff.json");
         let writable_handoff = handoff_writable(&request.permissions);
+        let provider_settings = config.providers.get(adapter.id());
+        let stall_key = format!("providers.{}.stall_after_seconds", adapter.id());
+        let stall_source = if matches!(
+            config.origins.get(&stall_key),
+            Some(provenant_config::Origin::User { .. })
+        ) {
+            provenant_records::Layer::Host
+        } else {
+            provenant_records::Layer::Default
+        };
         let limits = run::lane_limits(
             task,
             state_root,
             &project_id.to_string(),
             adapter.id(),
             run::HostCaps {
-                runtime_seconds: config
-                    .providers
-                    .get(adapter.id())
+                runtime_seconds: provider_settings
                     .and_then(|provider| provider.runtime_deadline_seconds),
+                stall_after_seconds: provider_settings.map_or_else(
+                    || provenant_records::DEFAULT_STALL_AFTER_SECONDS,
+                    |provider| provider.stall_after_seconds,
+                ),
+                stall_source,
+                stall_policy: provider_settings
+                    .map(|provider| provider.stall_policy)
+                    .unwrap_or_default(),
             },
         );
         let build_class =
@@ -4683,9 +4936,14 @@ pub(super) fn prepare_candidates_inner(
                 base: writer.source_commit().to_string(),
                 primary_checkout: writer.project_root().map(ToOwned::to_owned),
             }),
+            verification: Some(run::VerificationResolution::resolve(
+                &task.profile,
+                prompt_text,
+            )),
             build_cap: Some(run::BuildCap::from(&build_class)),
             brief: Some(brief),
             role,
+            pr_policy: Some(pr_policy),
         };
         let text = format!(
             "{}\n{text}",
@@ -4955,7 +5213,9 @@ pub(super) fn prepare_candidates_inner(
                 account: account.as_ref(),
                 token,
                 cwd: &cwd,
-                git_context: git_context.is_some(),
+                // Staging any file in scratch, including a portable fixture,
+                // needs the same read grant the Git context files use.
+                git_context: git_context.is_some() || fixture_location.is_some(),
                 nonce,
                 provenant: LaneRuntime {
                     executable: &provenant_executable,
@@ -5202,7 +5462,7 @@ pub(super) fn prepare_candidates_inner(
                 false,
             );
         }
-        let gh_policy = match publishing_gh
+        let gh_policy = match policy_gh
             .as_ref()
             .map(|_| provenant_config::GithubPolicy::read(&roots.state, project_id))
         {
@@ -5210,7 +5470,7 @@ pub(super) fn prepare_candidates_inner(
             Some(Ok(policy)) => policy,
             // Sandboxed publishing refuses an unreadable policy: its selected
             // credential restrictions cannot be applied.
-            Some(Err(error)) if sandbox.effective => {
+            Some(Err(error)) if sandbox.effective && publishing => {
                 return Err(launch_policy.boundary_error(
                     "PREPARATION_PREPARE_WITH_CREDENTIALS",
                     provenant_records::policy::Facts::violation(error.to_string()),
@@ -5235,11 +5495,10 @@ pub(super) fn prepare_candidates_inner(
             budget: gh_budget.map_or(0, |limit| limit.value),
             budget_source: gh_budget.map_or("default", |limit| limit.source.as_str()),
             label_ci_warning,
+            pr_policy: pr_policy.value,
+            pr_source: pr_policy.source.as_str(),
         };
-        if let Some(gh) = publishing_gh
-            .as_ref()
-            .filter(|_| sandbox.effective && gh_permitted)
-        {
+        if let Some(gh) = publishing_gh.filter(|_| sandbox.effective && gh_permitted) {
             // Resolve the login before composing gh's wrapper: token launches
             // use a private empty config directory, independent of host links.
             gh_attempted = true;
@@ -5271,23 +5530,28 @@ pub(super) fn prepare_candidates_inner(
                 continue;
             }
             gh_selection = super::gh_auth::Selection::new(delivery, true);
-        } else if let Some(gh) = publishing_gh.as_ref().filter(|_| !sandbox.effective) {
-            // An unsandboxed lane keeps the user's own gh login; the counting
-            // wrapper still fronts gh on its PATH. A wrapper that cannot be
-            // installed leaves gh unmediated, which the receipt says. Adapters
-            // may re-point XDG_CONFIG_HOME at private state, so gh is pinned to
-            // the host's own configuration directory in the lane environment
-            // (surviving a PATH that a shell profile reorders) and in the shim.
+        } else if let Some(gh) = policy_gh.as_ref() {
+            // Native lanes retain their ambient login. Sandboxed lanes use
+            // their existing config without receiving a host login here.
             let host_config =
                 super::gh_auth::HostConfig::resolve(&home, &|key| host_provider_var(registry, key));
-            host_config.pin(&mut spec.env);
-            let mediated = match spec.configure_gh_shim(scratch, gh, &host_config.path, &gh_shim) {
+            let gh_config = if sandbox.effective {
+                spec.env
+                    .iter()
+                    .find(|(key, _)| key == "GH_CONFIG_DIR")
+                    .map(|(_, value)| PathBuf::from(value))
+                    .unwrap_or_else(|| home.join(".config/gh"))
+            } else {
+                host_config.pin(&mut spec.env);
+                host_config.path.clone()
+            };
+            let mediated = match spec.configure_gh_shim(scratch, gh, &gh_config, &gh_shim) {
                 Ok(()) => true,
                 Err(error) => {
                     if let provenant_records::policy::Effect::Warn(warning) = launch_policy.check(
                         "PREPARATION_GH_SHIM_NONE",
                         provenant_records::policy::Facts::violation(format!(
-                            "{label}: gh wrapper unavailable, gh runs uncounted: {error}"
+                            "{label}: gh wrapper unavailable, gh runs unmediated: {error}"
                         )),
                     ) {
                         warn(warning);
@@ -5295,10 +5559,14 @@ pub(super) fn prepare_candidates_inner(
                     false
                 }
             };
-            gh_selection = super::gh_auth::Selection::new(
-                super::gh_auth::Delivery::Ambient(host_config),
-                mediated,
-            );
+            if sandbox.effective {
+                gh_selection.mediated = mediated;
+            } else {
+                gh_selection = super::gh_auth::Selection::new(
+                    super::gh_auth::Delivery::Ambient(host_config),
+                    mediated,
+                );
+            }
         }
         if git_context.is_some()
             && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)
@@ -5376,8 +5644,8 @@ pub(super) fn prepare_candidates_inner(
             push_launch_warning(&mut route, warning);
         }
         // A read-only lane builds in its scratch by design. No writer launch
-        // exports a target; warn if an adapter still points one into attempt tmp,
-        // where nothing preserves or reuses the output.
+        // exports a target; warn if an adapter still points one into the lane's
+        // temporary scratch, where nothing preserves or reuses the output.
         if let Some((_, target_val)) = spec
             .env
             .iter()
@@ -5578,18 +5846,17 @@ pub(super) fn prepare_candidates_inner(
         };
         // Resolve gh credentials on the host, where a keychain login is
         // available. The token travels only in the live launch environment.
-        let reader_gh = sandbox.effective
+        let reader_gh = publishing
+            && sandbox.effective
             && github_auth_permitted(&plan, &spec.profile.spec)
             && adapter_spec.is_some_and(|spec| spec.github_auth.is_some());
-        if let Some(gh) = publishing_gh
-            .clone()
-            .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
+        if let Some(gh) = policy_gh.as_ref()
             && reader_gh
             && !gh_attempted
         {
             let delivery = match super::gh_auth::inject(
                 &executor,
-                &gh,
+                gh,
                 &home,
                 &|key| host_provider_var(registry, key),
                 cancel,
@@ -5605,9 +5872,15 @@ pub(super) fn prepare_candidates_inner(
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
             };
-            gh_selection = super::gh_auth::Selection::new(delivery, false);
+            gh_selection = super::gh_auth::Selection::new(delivery, gh_selection.mediated);
         }
         provider.github_credential = Some(serde_json::from_value(gh_selection.receipt())?);
+        provider.pr_policy = Some(provenant_records::run::PrPolicyReceipt {
+            value: pr_policy.value.as_str().into(),
+            source: pr_policy.source,
+            key: "lanes.pr".into(),
+            extra: Default::default(),
+        });
         if writer.is_some() {
             let scope = run::ResolvedCiScope::resolve(&task.profile);
             provider.ci_scope = Some(provenant_records::run::CiScopeReceipt {
@@ -5924,6 +6197,7 @@ mod lane_access_tests {
             build_heavy: false,
             title: None,
             base: None,
+            fixture: None,
             head: None,
             source_head: None,
             base_ref: None,

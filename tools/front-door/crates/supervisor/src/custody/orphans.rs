@@ -2,9 +2,9 @@
 //! names unresolved descendants.
 //!
 //! Nothing here signals by bare PID. Candidates are only what the attempt
-//! recorded or marked: the PIDs and identities its exit named, the descendants
-//! its reservation recorded, and live processes carrying the attempt's own
-//! sandbox mark. A candidate is ended only when it is proven to belong to the
+//! recorded or marked: the PIDs and identities its exit named, the provider and
+//! descendants its reservation recorded, and live processes carrying the
+//! attempt's own sandbox mark. A candidate is ended only when it is proven to belong to the
 //! attempt: its recorded identity (boot, PID and native start time) still
 //! matches the live process, or the platform reports it inside the attempt's
 //! sandbox. Process group, session, ancestry and working directory grant
@@ -104,12 +104,6 @@ impl Recovery {
         probe: &dyn OrphanProbe,
         patience: Duration,
     ) -> Result<OrphanReport> {
-        self.reservation.validate()?;
-        let same_boot =
-            observer.boot_identity().map_err(|_| CustodyError::Fenced)? == self.reservation.boot;
-        if same_boot && self.guardian_present(observer)? {
-            return Err(CustodyError::Fenced);
-        }
         let bytes = attempt.read_bounded(OsStr::new("process-exit.json"), EXIT_LIMIT)?;
         let mut document: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| CustodyError::InvalidRecord)?;
@@ -118,35 +112,7 @@ impl Recovery {
         if exit.scope != self.reservation.scope || !exit.unresolved_cleanup {
             return Err(CustodyError::Fenced);
         }
-
-        let mut report = OrphanReport::default();
-        // A new boot ended every process of the old one.
-        let mut proven = if same_boot {
-            self.candidates(&exit, observer, probe, &mut report.unproven)
-        } else {
-            Vec::new()
-        };
-        let mut live = proven.clone();
-        for escalation in [false, true] {
-            live.retain(|identity| alive(observer, identity));
-            if live.is_empty() {
-                break;
-            }
-            for identity in &live {
-                probe.signal(identity, escalation);
-            }
-            let deadline = Instant::now() + patience;
-            loop {
-                live.retain(|identity| alive(observer, identity));
-                if live.is_empty() || Instant::now() >= deadline {
-                    break;
-                }
-                provenant_os::sys::wait_pause(Duration::from_millis(20));
-            }
-        }
-        proven.retain(|identity| !live.contains(identity));
-        report.stopped = proven;
-        report.survivors = live;
+        let report = self.end_candidates(&exit, observer, probe, patience)?;
         if !report.survivors.is_empty() {
             return Ok(report);
         }
@@ -192,6 +158,87 @@ impl Recovery {
         Ok(report)
     }
 
+    /// End a dead lane's recorded process tree when the guardian was killed
+    /// before it could publish a process exit. Without the published identity
+    /// its absence cannot be proven, so this is fenced in that case. Writer
+    /// exclusion and guardian absence are rechecked before any signal, and
+    /// only recorded identities or sandbox-marked escapees are candidates.
+    /// No exit is invented: the caller settles the attempt through its normal
+    /// loss proof once the tree is gone.
+    pub fn end_recorded_orphans(
+        &mut self,
+        observer: &dyn ProcessObserver,
+        patience: Duration,
+    ) -> Result<OrphanReport> {
+        self.end_recorded_orphans_with(observer, &SystemProbe, patience)
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    pub(crate) fn end_recorded_orphans_with(
+        &mut self,
+        observer: &dyn ProcessObserver,
+        probe: &dyn OrphanProbe,
+        patience: Duration,
+    ) -> Result<OrphanReport> {
+        if self.reservation.guardian.is_none() {
+            return Err(CustodyError::Fenced);
+        }
+        let exit = UnresolvedExit {
+            scope: self.reservation.scope,
+            unresolved_cleanup: false,
+            unresolved_pids: Vec::new(),
+            unresolved_identities: Vec::new(),
+        };
+        self.end_candidates(&exit, observer, probe, patience)
+    }
+
+    /// The proof-gated signal loop shared by an unresolved exit and a dead
+    /// lane whose guardian never published one.
+    #[allow(clippy::disallowed_methods)]
+    fn end_candidates(
+        &self,
+        exit: &UnresolvedExit,
+        observer: &dyn ProcessObserver,
+        probe: &dyn OrphanProbe,
+        patience: Duration,
+    ) -> Result<OrphanReport> {
+        self.reservation.validate()?;
+        let same_boot =
+            observer.boot_identity().map_err(|_| CustodyError::Fenced)? == self.reservation.boot;
+        if same_boot && self.guardian_present(observer)? {
+            return Err(CustodyError::Fenced);
+        }
+        let mut report = OrphanReport::default();
+        // A new boot ended every process of the old one.
+        let mut proven = if same_boot {
+            self.candidates(exit, observer, probe, &mut report.unproven)
+        } else {
+            Vec::new()
+        };
+        let mut live = proven.clone();
+        for escalation in [false, true] {
+            live.retain(|identity| alive(observer, identity));
+            if live.is_empty() {
+                break;
+            }
+            for identity in &live {
+                probe.signal(identity, escalation);
+            }
+            let deadline = Instant::now() + patience;
+            loop {
+                live.retain(|identity| alive(observer, identity));
+                if live.is_empty() || Instant::now() >= deadline {
+                    break;
+                }
+                provenant_os::sys::wait_pause(Duration::from_millis(20));
+            }
+        }
+        proven.retain(|identity| !live.contains(identity));
+        report.stopped = proven;
+        report.survivors = live;
+        Ok(report)
+    }
+
     fn guardian_present(&self, observer: &dyn ProcessObserver) -> Result<bool> {
         let Some(guardian) = &self.reservation.guardian else {
             return Ok(false);
@@ -205,7 +252,7 @@ impl Recovery {
 
     /// Proven attempt processes among the recorded and sandbox-marked
     /// candidates. Named PIDs that cannot be proven go to `unproven`. The
-    /// census and sandbox probe run only here, so only for an unresolved exit.
+    /// census and sandbox probe run only during recovery.
     fn candidates(
         &self,
         exit: &UnresolvedExit,
@@ -218,6 +265,7 @@ impl Recovery {
         named.extend(
             exit.unresolved_identities
                 .iter()
+                .chain(self.reservation.provider.iter())
                 .chain(self.reservation.descendants.iter())
                 .filter(|identity| identity.boot == self.reservation.boot)
                 .map(|identity| identity.pid),
@@ -258,6 +306,7 @@ impl Recovery {
         let recorded = exit
             .unresolved_identities
             .iter()
+            .chain(self.reservation.provider.iter())
             .chain(self.reservation.descendants.iter())
             .find(|identity| identity.pid == pid && identity.boot == self.reservation.boot);
         match (observer.observe(pid), recorded) {
@@ -305,7 +354,7 @@ fn bounded_exit(mut document: serde_json::Value, stopped: usize) -> Result<Vec<u
             .as_array_mut()
             .ok_or(CustodyError::InvalidRecord)?;
         if warnings.len() < 24 {
-            warnings.push(format!("killed {stopped} surviving descendants").into());
+            warnings.push(format!("killed {stopped} surviving processes").into());
             added = true;
         } else {
             omit(fields);
@@ -489,6 +538,42 @@ mod tests {
         })
     }
 
+    /// A spawned attempt whose guardian was killed before it could publish an
+    /// exit. Only the durable reservation names the tree it started.
+    fn recorded_fixture(
+        recorded: &[ProcessIdentity],
+    ) -> std::result::Result<Fixture, Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let lease = crate::fixture::acquire_writer(
+            Directory::open_anchor(root.path())?,
+            scope(),
+            WaitBudget::cli(clock.mono_now(), 1).map_err(|_| CustodyError::InvalidRecord)?,
+            &CancelToken::new(),
+            &clock,
+        )?;
+        let mut recovery = lease.into_recovery()?;
+        let reservation = &mut recovery.reservation;
+        reservation.launch_state = LaunchState::Spawned;
+        reservation.attempt_device = Some(1);
+        reservation.attempt_inode = Some(1);
+        reservation.guardian = Some(identity(100, 1));
+        reservation.provider = Some(ProcessIdentity {
+            session_id: 100,
+            ..identity(101, 2)
+        });
+        reservation.census_incomplete = false;
+        reservation.descendants = recorded.to_vec();
+        let path = root.path().to_path_buf();
+        let attempt = Directory::open_anchor(root.path())?;
+        Ok(Fixture {
+            _root: root,
+            recovery,
+            attempt,
+            path,
+        })
+    }
+
     fn settled(f: &Fixture) -> std::result::Result<serde_json::Value, Box<dyn Error>> {
         Ok(serde_json::from_slice(&std::fs::read(
             f.path.join("process-exit.json"),
@@ -627,7 +712,7 @@ mod tests {
         assert_eq!(exit["settlement_evidence"], "orphans_ended");
         assert_eq!(
             exit["warnings"],
-            serde_json::json!(["kept", "killed 1 surviving descendants"])
+            serde_json::json!(["kept", "killed 1 surviving processes"])
         );
         Ok(())
     }
@@ -709,7 +794,7 @@ mod tests {
         let exit: serde_json::Value = serde_json::from_slice(&bytes)?;
         assert_eq!(
             exit["warnings"],
-            serde_json::json!(["kept", "killed 200 surviving descendants"])
+            serde_json::json!(["kept", "killed 200 surviving processes"])
         );
         Ok(())
     }
@@ -721,6 +806,102 @@ mod tests {
         world.live.borrow_mut().insert(100, identity(100, 1));
         assert!(matches!(run(&mut f, &world), Err(CustodyError::Fenced)));
         assert_eq!(settled(&f)?["unresolved_cleanup"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn a_dead_lane_without_an_exit_has_its_recorded_tree_reaped() -> TestResult {
+        let tail = identity(84322, 7);
+        let mut f = recorded_fixture(std::slice::from_ref(&tail))?;
+        let world = World::default();
+        world.live.borrow_mut().insert(84322, tail.clone());
+        let report = f
+            .recovery
+            .end_recorded_orphans_with(&world, &world, Duration::ZERO)?;
+        assert_eq!(report.stopped, vec![tail.clone()]);
+        assert!(report.unproven.is_empty() && report.survivors.is_empty());
+        assert_eq!(world.signals.borrow().as_slice(), [(84322, false)]);
+        // No exit is invented and the reservation stays for the normal proof.
+        assert!(!f.path.join("process-exit.json").exists());
+        assert_eq!(f.recovery.reservation.descendants, vec![tail]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_dead_lane_without_an_exit_reaps_its_recorded_provider() -> TestResult {
+        let mut f = recorded_fixture(&[])?;
+        let provider = f
+            .recovery
+            .reservation
+            .provider
+            .clone()
+            .ok_or("missing provider")?;
+        let world = World::default();
+        world
+            .live
+            .borrow_mut()
+            .insert(provider.pid, provider.clone());
+        let report = f
+            .recovery
+            .end_recorded_orphans_with(&world, &world, Duration::ZERO)?;
+        assert_eq!(report.stopped, vec![provider.clone()]);
+        assert!(report.unproven.is_empty() && report.survivors.is_empty());
+        assert_eq!(world.signals.borrow().as_slice(), [(provider.pid, false)]);
+        assert!(!f.path.join("process-exit.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_live_guardian_fences_reaping_without_an_exit() -> TestResult {
+        let tail = identity(9, 3);
+        let mut f = recorded_fixture(std::slice::from_ref(&tail))?;
+        let world = World::default();
+        world.live.borrow_mut().insert(9, tail);
+        world.live.borrow_mut().insert(100, identity(100, 1));
+        assert!(matches!(
+            f.recovery
+                .end_recorded_orphans_with(&world, &world, Duration::ZERO),
+            Err(CustodyError::Fenced)
+        ));
+        assert!(world.signals.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_survivor_without_an_exit_is_reported_and_the_fence_holds() -> TestResult {
+        let tail = identity(9, 3);
+        let mut f = recorded_fixture(std::slice::from_ref(&tail))?;
+        let world = World::default();
+        world.live.borrow_mut().insert(9, tail.clone());
+        // A process that outlives both TERM and KILL: no exit is written and
+        // the caller keeps the attempt fenced, reporting the surviving PID.
+        struct Survives(World);
+        impl ProcessObserver for Survives {
+            fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+                self.0.boot_identity()
+            }
+            fn observe(&self, pid: i64) -> ProcessObservation {
+                self.0.observe(pid)
+            }
+            fn census(&self, bound: usize) -> std::result::Result<Census, CensusError> {
+                self.0.census(bound)
+            }
+        }
+        impl OrphanProbe for Survives {
+            fn in_attempt_sandbox(&self, _: i64, _: &Scope) -> bool {
+                false
+            }
+            fn signal(&self, _: &ProcessIdentity, _: bool) -> bool {
+                true
+            }
+        }
+        let survives = Survives(world);
+        let report = f
+            .recovery
+            .end_recorded_orphans_with(&survives, &survives, Duration::ZERO)?;
+        assert_eq!(report.survivors, vec![tail]);
+        assert!(report.stopped.is_empty());
+        assert!(!f.path.join("process-exit.json").exists());
         Ok(())
     }
 }

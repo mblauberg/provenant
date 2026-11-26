@@ -84,6 +84,10 @@ struct ResumeOptions<'a> {
     budget_remaining: Option<u64>,
     graph_context: Option<&'a provenant_records::run::WorkContext>,
     parent_publication_locked: bool,
+    /// Re-pinned head for a retained-writer graph continuation whose worktree
+    /// advanced through its own commits after the predecessor was sealed. The
+    /// original source pin is kept; only the successor's predecessor head moves.
+    retained_head: Option<provenant_core::GitOid>,
 }
 
 /// Digest of the session identity only; route-selection history (source,
@@ -119,7 +123,7 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CancelReceipt {
-    /// Queued work ended without reaching a provider.
+    /// The stop ended the attempt without a live provider to act on it.
     Cancelled,
     AlreadyTerminal,
     Requested,
@@ -554,7 +558,18 @@ pub fn release_progress(
         #[serde(default)]
         unresolved_identities: Vec<provenant_supervisor::census::ProcessIdentity>,
         #[serde(default)]
+        observed_holders: Vec<ObservedHolder>,
+        #[serde(default)]
         retention: Option<custody::Retention>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ObservedHolder {
+        pid: i64,
+        #[serde(default)]
+        command: String,
+        resource: String,
+        #[serde(default)]
+        ownership_proven: bool,
     }
     let exit: Cleanup = crate::db::decode(&raw).ok()?;
     if exit.scope != RunStore::scope(record) {
@@ -584,19 +599,58 @@ pub fn release_progress(
             )
         })
         .collect::<Vec<_>>();
-    let holder = exit.retention.map(|retention| {
+    // Descriptor occupancy names a contended resource but never proves its
+    // owner. Say so explicitly; only recorded descendants may be signalled.
+    let holders = exit
+        .observed_holders
+        .iter()
+        .take(8)
+        .map(|observed| {
+            let command = if observed.command.is_empty() {
+                "unknown"
+            } else {
+                observed.command.as_str()
+            };
+            format!(
+                "pid {} ({command}) on {}{}",
+                observed.pid,
+                provenant_core::bounded_line(&observed.resource, 128),
+                if observed.ownership_proven {
+                    ""
+                } else {
+                    ", ownership unproven"
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let held = if holders.is_empty() {
+        String::new()
+    } else {
+        format!("; held resources: {holders}")
+    };
+    // One command ends every survivor this attempt proved; unproven holders
+    // stay named so the owner can close the service themselves.
+    let remedy = if exit.unresolved_pids.is_empty() && holders.is_empty() {
+        String::new()
+    } else {
+        "; run `provenant reconcile <lane>` to end proven survivors".to_owned()
+    };
+    let retention = exit.retention.map(|retention| {
         let guardian = custody::GuardianLiveness::observe(census, &retention.guardian);
         format!("; {}", retention.describe(guardian, now))
     });
     Some(format!(
-        "releasing ({} survivors: {}){}",
+        "releasing ({} survivors: {}){}{}{}",
         exit.unresolved_pids.len(),
         if names.is_empty() {
             "census pending".into()
         } else {
             names.join(", ")
         },
-        holder.unwrap_or_default(),
+        held,
+        remedy,
+        retention.unwrap_or_default(),
     ))
 }
 
@@ -609,6 +663,40 @@ pub fn overdue_at(record: &AttemptRecord, now: WallTime) -> bool {
     provenant_core::DurationMicros::from_seconds(DEADLINE_GRACE_SECONDS)
         .and_then(|grace| deadline.checked_add(grace))
         .is_ok_and(|limit| now >= limit)
+}
+
+/// The silence threshold recorded on this attempt, or the compiled default for
+/// records written before the limit existed. Zero disables the report.
+pub fn stall_after_seconds(record: &AttemptRecord) -> u64 {
+    record
+        .limits
+        .as_ref()
+        .and_then(|limits| limits.stall_after_seconds.as_ref())
+        .map_or(provenant_records::DEFAULT_STALL_AFTER_SECONDS, |limit| {
+            limit.value
+        })
+}
+
+/// Read-only stall fact for a running, live attempt: the threshold and the
+/// last output time, or the start time if the provider has emitted nothing.
+/// A queued attempt is never measured as a running provider.
+pub fn stall_fact(record: &AttemptRecord, now: WallTime) -> Option<(u64, WallTime)> {
+    if !matches!(record.state, AttemptState::Running { .. }) {
+        return None;
+    }
+    let last = record.last_output_at.or(record.started_at)?;
+    let threshold = stall_after_seconds(record);
+    // `as_micros` is i64; a clock that moved backwards has not gone silent, so
+    // clamp the age at zero before widening it for the u64 threshold.
+    let elapsed = now.as_micros().saturating_sub(last.as_micros()).max(0) as u128;
+    (threshold > 0 && elapsed >= u128::from(threshold) * 1_000_000).then_some((threshold, last))
+}
+
+/// Whether a live running attempt has exceeded its silence threshold. `live`
+/// is the host's presence observation: an unattended or unknown writer is a
+/// custody problem, not a silent provider.
+pub fn stalled_at(record: &AttemptRecord, now: WallTime, live: bool) -> bool {
+    live && stall_fact(record, now).is_some()
 }
 
 /// Whether a running attempt has reboot-confirmed guardian/provider absence
@@ -637,6 +725,11 @@ pub enum Reconciled {
     /// A live guardian outlived its attempt's runtime deadline, so a stop at
     /// the deadline was requested of it. It settles the attempt as a timeout.
     DeadlineStop,
+    /// A silent provider was stopped after the opt-in stall policy warned.
+    /// Settlement records the policy-specific typed provider-stall cause.
+    StallStop {
+        policy: provenant_records::StallPolicy,
+    },
     /// The supervisor is resuming durable settlement in the background.
     Settling {
         phase: String,
@@ -678,6 +771,7 @@ impl std::fmt::Display for Reconciled {
             Self::Queued => f.write_str("queued"),
             Self::Held => f.write_str("held"),
             Self::DeadlineStop => f.write_str("deadline_stop"),
+            Self::StallStop { policy } => write!(f, "stall_stop ({})", policy.as_str()),
             Self::Settling {
                 phase,
                 blocking_reason,
@@ -1090,9 +1184,127 @@ fn lock_timeout_reports_a_concurrently_settled_attempt() {
 }
 
 impl RunStore {
-    /// Persist one idempotent steer for an exact running attempt. A live
-    /// interrupt is requested only after the shared adapter stream has
-    /// validated a session identity for this exact route and provider process.
+    /// Apply Run's policy after warning. The guardian and recovery can retry
+    /// an interrupted action; steering and custody requests are idempotent.
+    pub(crate) fn apply_stall_policy(
+        &self,
+        record: &AttemptRecord,
+        handle: &provenant_supervisor::custody::CustodyHandle,
+        call: &Request<'_>,
+    ) -> Result<Option<Reconciled>> {
+        use provenant_records::StallPolicy;
+        use provenant_records::warning::{self, Warning};
+        let limit = record
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.stall_after_seconds.clone());
+        let policy = record
+            .limits
+            .as_ref()
+            .map_or(StallPolicy::Report, |limits| limits.stall_policy);
+        if limit.is_none() {
+            return Ok(None);
+        }
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
+        const MARKER: &str = "stall-action.json";
+        if let Some(raw) = read_sealed(&attempt, MARKER, RECORD_LIMIT)? {
+            let marker: serde_json::Value = serde_json::from_slice(&raw)
+                .map_err(|_| RunError::Validation("stall action marker"))?;
+            if matches!(marker["policy"].as_str(), Some("retry" | "fail")) {
+                warning::warn(
+                    Warning::new(
+                        warning::PROVIDER_STALLED,
+                        "retrying the recorded stall stop request",
+                    )
+                    .subject(record.attempt_id.to_string())
+                    .once_per_change(),
+                );
+                custody::stop_if_unrequested(handle, StopReason::SupervisorSignal)
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+                return Ok(Some(Reconciled::StallStop { policy }));
+            }
+            return Ok(None);
+        }
+        let now = call
+            .clock
+            .wall_now()
+            .map_err(|_| RunError::Validation("wall clock"))?;
+        let Some((threshold, last)) = stall_fact(record, now) else {
+            return Ok(None);
+        };
+        let marker = serde_json::json!({
+            "schema_version": 1,
+            "policy": policy.as_str(),
+            "threshold_seconds": threshold,
+            "last_event_at": last,
+            "source": limit.as_ref().map(|limit| limit.source),
+        });
+        let source = provenant_records::provenance::Source {
+            layer: limit
+                .as_ref()
+                .map_or(provenant_records::Layer::Default, |limit| limit.source),
+            origin: Some(format!(
+                "providers.{}.stall_after_seconds",
+                record
+                    .applied_route
+                    .as_ref()
+                    .and_then(|route| route.provider.as_deref())
+                    .unwrap_or("unknown")
+            )),
+        };
+        let message = format!(
+            "PROVIDER_STALLED: provider silent for at least {threshold}s since {last}; policy {}",
+            policy.as_str()
+        );
+        // Guardian stdio is detached. Publish the warning for status before
+        // requesting an action, rather than relying on its stderr sink.
+        if read_sealed(&attempt, "stall-warning.json", RECORD_LIMIT)?.is_none() {
+            crate::artifacts::seal(
+                &attempt,
+                "stall-warning.json",
+                &crate::db::bytes(&message)?,
+                RECORD_LIMIT,
+            )?;
+        }
+        warning::warn(
+            Warning::new(warning::PROVIDER_STALLED, message)
+                .subject(record.attempt_id.to_string())
+                .source(source)
+                .once_per_change(),
+        );
+        match policy {
+            StallPolicy::Report => Ok(None),
+            StallPolicy::Steer => {
+                // The operation must keep identical text across an interrupted
+                // reconcile, even if further provider output was observed.
+                let text = "The provider has gone silent. Continue the task now; if you cannot, report the blocker.";
+                let operation = OperationId::parse(&format!("stall-{}", record.attempt_id))
+                    .map_err(|_| RunError::Validation("stall steer operation"))?;
+                self.steer(record.attempt_id, operation, text, call)?;
+                crate::artifacts::seal(
+                    &attempt,
+                    MARKER,
+                    &crate::db::bytes(&marker)?,
+                    RECORD_LIMIT,
+                )?;
+                Ok(Some(Reconciled::Held))
+            }
+            StallPolicy::Retry | StallPolicy::Fail => {
+                crate::artifacts::seal(
+                    &attempt,
+                    MARKER,
+                    &crate::db::bytes(&marker)?,
+                    RECORD_LIMIT,
+                )?;
+                custody::stop_if_unrequested(handle, StopReason::SupervisorSignal)
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+                Ok(Some(Reconciled::StallStop { policy }))
+            }
+        }
+    }
+
+    /// Persist one idempotent steer for an exact running attempt. Settlement
+    /// delivers it at the next turn boundary without interrupting this attempt.
     pub fn steer(
         &self,
         id: AttemptId,
@@ -1224,11 +1436,10 @@ impl RunStore {
                 }
             });
         }
-        // The accepted text is durable before this best-effort wake. If the
-        // session is not ready yet, its decoder will perform the same check
-        // when it publishes readiness. If another stop already won, keep the
-        // earlier accepted text and let terminal settlement report that outcome.
-        let _ = self.request_steer_stop_if_ready(id, call);
+        // The accepted text is durable. A steer never interrupts the running
+        // attempt: settlement delivers the queued turn at the next turn
+        // boundary, continuing a retained session or using the configured
+        // fresh-with-handoff fallback. No stop intent is written here.
         Ok(if already_queued {
             SteerReceipt::AlreadyQueued {
                 message_id: intent.message_id,
@@ -1285,7 +1496,7 @@ impl RunStore {
         if !same_bound_process && !source_is_live(source) {
             return Ok(false);
         }
-        let (ready, pending) = self.write(call, |tx| {
+        let ready = self.write(call, |tx| {
             let raw: Vec<u8> = tx
                 .query_row(
                     "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
@@ -1304,7 +1515,7 @@ impl RunStore {
                         steer_route_digest(applied).ok().as_deref() != Some(route_digest.as_str())
                     })
             {
-                return Ok((false, false));
+                return Ok(false);
             }
             let scope = Self::scope(&record);
             let saved: Option<ProviderSessionReadyRow> = tx
@@ -1341,18 +1552,10 @@ impl RunStore {
                     ],
                 )?;
             }
-            let pending: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1 AND resolved=0)",
-                [id.to_string()],
-                |row| row.get(0),
-            )?;
-            Ok((true, pending))
+            Ok(true)
         })?;
         if ready {
             self.persist_live_steer_successor_evidence(id, call)?;
-        }
-        if ready && pending {
-            self.request_steer_stop_if_ready(id, call)?;
         }
         Ok(ready)
     }
@@ -1739,7 +1942,13 @@ impl RunStore {
         })
     }
 
-    fn request_steer_stop_if_ready(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
+    /// Whether this running attempt holds a validated, live provider session
+    /// bound to its exact route (provider, model, effort, account and
+    /// host-native lane). When it does, settlement can deliver a queued steer
+    /// by continuing that session; otherwise it uses the configured
+    /// fresh-with-handoff fallback. Either way a steer is queued without
+    /// interrupting the attempt, so this is evidence, not a delivery gate.
+    pub fn steer_session_available(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
         let record = self.record(id, call)?;
         if !matches!(record.state, AttemptState::Running { .. }) {
             return Ok(false);
@@ -1750,7 +1959,14 @@ impl RunStore {
         let Some(ready) = self.steer_session_ready(id, call)? else {
             return Ok(false);
         };
+        if ready.conflict || ready.session.is_none() {
+            return Ok(false);
+        }
         let route_digest = steer_route_digest(route)?;
+        if ready.generation != Self::scope(&record).generation || ready.route_digest != route_digest
+        {
+            return Ok(false);
+        }
         let source = provenant_os::capture::CaptureSourceIdentity {
             attempt: id.to_string(),
             generation: ready.generation,
@@ -1758,29 +1974,7 @@ impl RunStore {
             pid: ready.provider_pid,
             native_start: ready.provider_start,
         };
-        if ready.conflict
-            || ready.generation != Self::scope(&record).generation
-            || ready.route_digest != route_digest
-            || !source_is_live(&source)
-        {
-            return Ok(false);
-        }
-        let directory = self.attempt_dir(id, false)?;
-        let stopped = match custody::reattach(directory.try_clone()?, Self::scope(&record)) {
-            Ok(handle) => custody::stop(&handle, StopReason::Steered),
-            Err(CustodyError::Filesystem(error)) if error.is_not_found() => custody::request_stop(
-                directory,
-                Self::scope(&record),
-                record.verified_owner.unwrap_or(self.context.actor_id),
-                StopReason::Steered,
-            ),
-            Err(error) => Err(error),
-        };
-        match stopped {
-            Ok(StopReceipt::Requested | StopReceipt::AlreadyRequested)
-            | Err(CustodyError::StopConflict) => Ok(true),
-            Err(error) => Err(RunError::Io(std::io::Error::other(error.to_string()))),
-        }
+        Ok(source_is_live(&source))
     }
 
     /// Read and verify the complete private steering ledger. The caller may
@@ -2462,7 +2656,7 @@ impl RunStore {
                 hook();
             }
         });
-        let Ok(recovery) = custody::acquire_recovery(
+        let Ok(mut recovery) = custody::acquire_recovery(
             directory,
             scope,
             provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
@@ -2478,6 +2672,23 @@ impl RunStore {
             || read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
         {
             return Ok(None);
+        }
+        // A lane killed before its guardian could publish an exit can leave
+        // its recorded tree alive and holding the heavy lock. End only what
+        // the attempt recorded; a live guardian keeps the fence and falls
+        // through to the normal proof path.
+        match recovery.end_recorded_orphans(observer, ORPHAN_PATIENCE) {
+            Ok(report) if !report.survivors.is_empty() => {
+                return Ok(Some(Reconciled::Escaped {
+                    pids: report
+                        .survivors
+                        .iter()
+                        .map(|identity| identity.pid)
+                        .collect(),
+                }));
+            }
+            Ok(_) | Err(CustodyError::Fenced) => {}
+            Err(error) => return Ok(Some(Reconciled::custody_unavailable(&error))),
         }
         if custody::holder_gone(&attempt, scope, observer)
             && recovery.observe_with(observer) == RecoveryState::Absent
@@ -2617,6 +2828,67 @@ impl RunStore {
             generation: record.generation,
         }
     }
+    /// Settle a Running attempt whose sealed provider exit makes status report
+    /// settling. The provider is gone, so a stop request cannot reach it; when
+    /// no holder can act on the stop and no driver owns settlement, the stop
+    /// commits the attempt terminal from the provider's own captured exit. A
+    /// live holder keeps the ordinary stop path and settles the attempt itself.
+    fn cancel_vanished(
+        &self,
+        record: &AttemptRecord,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<Option<CancelReceipt>> {
+        let id = record.attempt_id;
+        if !matches!(&record.state, AttemptState::Running { .. }) {
+            return Ok(None);
+        }
+        let scope = Self::scope(record);
+        let attempt = self.attempt_dir(id, false)?;
+        let Ok(Some(raw)) = read_sealed(&attempt, "process-exit.json", RECORD_LIMIT) else {
+            return Ok(None);
+        };
+        // Only the exit sealed for this generation proves this provider is gone.
+        let Ok(exit) = crate::db::decode::<provenant_supervisor::custody::StoredExit>(&raw) else {
+            return Ok(None);
+        };
+        if exit.schema_version != 1
+            || exit.scope != scope
+            || (exit.termination.is_none() && !exit.never_spawned)
+        {
+            return Ok(None);
+        }
+        use provenant_supervisor::custody::HolderPresence;
+        if custody::observe_holder(&attempt, scope, &SystemProcessObserver) == HolderPresence::Live
+            || crate::settlement::settlement_owner_live(&attempt, scope, call.clock) == Some(true)
+        {
+            return Ok(None);
+        }
+        // Hold the same lease as settlement while publishing the decision.
+        // A pending terminal intent already belongs to recovery.
+        let Ok(_driver) = attempt.try_lock(
+            std::ffi::OsStr::new("settlement-driver.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        ) else {
+            return Ok(None);
+        };
+        if read_sealed(&attempt, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?.is_some() {
+            return Ok(None);
+        }
+        // The owner request is durable evidence, not proof of delivery.
+        if custody::request_stop(
+            attempt,
+            scope,
+            record.verified_owner.unwrap_or(self.context.actor_id),
+            StopReason::ExplicitCancellation,
+        )
+        .is_err()
+        {
+            return Ok(None);
+        }
+        self.commit_stopped_after_exit(scope, reason, &exit, call)?;
+        Ok(Some(CancelReceipt::Cancelled))
+    }
     /// Cancel one attempt. Queued work is withdrawn; started work gets a stop
     /// request. A handoff that has not yet published its launch summary is
     /// retried within the call budget.
@@ -2703,6 +2975,14 @@ impl RunStore {
                 drop(publication);
                 id = successor;
                 continue;
+            }
+            if follow_graph_successors
+                && let Some(receipt) = self.cancel_vanished(&current, reason, call)?
+            {
+                drop(publication);
+                let committed = self.record(id, call)?;
+                self.settle_cleanup(&committed, None, call);
+                return self.finish_graph_cancel(id, pending_steer_parent, receipt, call);
             }
             if matches!(&current.state, AttemptState::Terminal { .. }) {
                 // This is an owner intent only. It remains distinct from the
@@ -2974,6 +3254,30 @@ impl RunStore {
         )
         .map(|(run, _)| run)
     }
+    /// Retained-writer graph continuation whose predecessor head was re-pinned
+    /// to a descendant produced by the same writer. `fresh` carries the reason
+    /// when no provider session survives a steering turn.
+    pub(crate) fn resume_repinned_with_parent_publication_lock(
+        &self,
+        input: &Resume,
+        context: &provenant_records::run::WorkContext,
+        head: provenant_core::GitOid,
+        fresh: Option<&str>,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        self.resume_mode(
+            input,
+            call,
+            ResumeOptions {
+                fresh,
+                graph_context: Some(context),
+                parent_publication_locked: true,
+                retained_head: Some(head),
+                ..Default::default()
+            },
+        )
+        .map(|(run, _)| run)
+    }
     /// Same lineage, route, authority and writer, without provider continuation.
     pub fn resume_fresh(
         &self,
@@ -3115,6 +3419,32 @@ impl RunStore {
         )?;
         self.check_writer_lineage(&prior, &launch.worktree, call)
     }
+    /// Whether a successor head is the writer's own descendant of its pinned
+    /// head. Only a lane-owned writer may advance the pin this way; the git
+    /// probe is bounded to the verified worktree and reads no untrusted input.
+    fn repinned_head_descends(
+        tree: &provenant_confinement::VerifiedWorktree,
+        pinned: provenant_core::GitOid,
+        head: provenant_core::GitOid,
+    ) -> bool {
+        let Some(git) = provenant_os::git::git_executable() else {
+            return false;
+        };
+        let repo = tree.repo();
+        crate::objects::command(
+            &git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &[
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                pinned.to_string().into(),
+                head.to_string().into(),
+            ],
+            None,
+        )
+        .is_ok()
+    }
     /// Called after writer custody is acquired. Graph retries are separate runs,
     /// so their sealed predecessor must be checked independently of `retry_of`.
     pub(crate) fn check_launch_writer_lineage(
@@ -3124,9 +3454,16 @@ impl RunStore {
         tree: &provenant_confinement::VerifiedWorktree,
         call: &Request<'_>,
     ) -> Result<()> {
-        if record.retry_of.is_some() {
-            // A manual continuation follows its immediate run predecessor,
-            // whose launch already checked any older graph predecessor.
+        if record.retry_of.is_some()
+            && task
+                .context
+                .as_ref()
+                .and_then(|context| context.writer_predecessor)
+                != record.retry_of
+        {
+            // Manual continuations without a graph predecessor follow the
+            // immediate run's owner chain. Graph continuations also recheck
+            // their sealed source and head below.
             return self.check_writer_lineage(record, tree, call).map(|_| ());
         }
         let Some(context) = task.context.as_ref() else {
@@ -3141,12 +3478,26 @@ impl RunStore {
         {
             return Err(RunError::Nonterminal);
         }
-        if context.graph_id.is_none()
-            || context.node_id.is_none()
-            || previous.context.as_ref().is_none_or(|previous| {
-                previous.graph_id != context.graph_id || previous.node_id != context.node_id
-            })
-        {
+        let previous_context = previous.context.as_ref();
+        let same_node = context.graph_id.is_some()
+            && context.node_id.is_some()
+            && previous_context.is_some_and(|previous| {
+                previous.graph_id == context.graph_id && previous.node_id == context.node_id
+            });
+        // A new graph can adopt a retained writer worktree whose lane owner
+        // belongs to a finished attempt in an earlier graph. It inherits the
+        // worktree and the writer's own commits, not the earlier graph's source
+        // and head pins: those describe the old graph, not the adopted tree.
+        // Writer identity, terminal custody and the lane-owner chain below stay
+        // authoritative; ordinary same-node retries keep their pin check.
+        let adopted_prior_graph = context.graph_id.is_some()
+            && context.node_id.is_some()
+            && previous_context.is_some_and(|previous| {
+                previous.graph_id.is_some()
+                    && previous.node_id.is_some()
+                    && previous.graph_id != context.graph_id
+            });
+        if !same_node && !adopted_prior_graph {
             return Err(RunError::WriterLineage("graph predecessor context"));
         }
         let request = self.request(previous.attempt_id, call)?;
@@ -3159,21 +3510,46 @@ impl RunStore {
             .head
             .map(|head| head.to_string())
             .or_else(|| previous_task.head.clone());
+        let owner = self.check_writer_lineage(&previous, tree, call)?;
         if !task
             .writer
             .as_ref()
             .zip(previous_task.writer.as_ref())
             .is_some_and(|(writer, previous)| equivalent_writer(previous, writer))
-            || task.source_head.is_none()
-            || task.source_head.as_ref() != source
-            || task.head.is_none()
-            || task.head != head
+            || (!adopted_prior_graph
+                && (task.source_head.is_none()
+                    || task.source_head.as_ref() != source
+                    || task.head.is_none()))
         {
             return Err(RunError::WriterLineage(
                 "graph predecessor writer or source",
             ));
         }
-        self.check_writer_lineage(&previous, tree, call)?;
+        // A retained writer may commit after its predecessor was sealed. The
+        // continuation re-pins to that descendant under the verified custody of
+        // the same lane-owned writer; a moved head from anywhere else still
+        // fails this check. An adopted prior graph inherits the writer's own
+        // commits, not the earlier graph's pins, so it keeps its inherited head.
+        let head_matches = adopted_prior_graph
+            || task.head == head
+            || owner.is_some_and(|owner| {
+                owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
+            }) && head
+                .as_deref()
+                .and_then(|pinned| provenant_core::GitOid::parse(pinned).ok())
+                .zip(
+                    task.head
+                        .as_deref()
+                        .and_then(|current| provenant_core::GitOid::parse(current).ok()),
+                )
+                .is_some_and(|(pinned, current)| {
+                    Self::repinned_head_descends(tree, pinned, current)
+                });
+        if !head_matches {
+            return Err(RunError::WriterLineage(
+                "graph predecessor writer or source",
+            ));
+        }
         Ok(())
     }
     pub(crate) fn check_writer_lineage(
@@ -3275,6 +3651,7 @@ impl RunStore {
             budget_remaining,
             graph_context,
             parent_publication_locked,
+            retained_head,
         } = options;
         let prior = self.record(input.prior, call)?;
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
@@ -3340,7 +3717,12 @@ impl RunStore {
         // the original source pin separately so launch preparation can prove
         // that this exact head descends from the authorised source. A fresh
         // replacement worktree keeps the caller's source/head fields.
-        let (head, source_head) = if writer.is_none() && task.writer.is_some() {
+        let (head, source_head) = if let Some(head) = retained_head {
+            (
+                Some(head.to_string()),
+                task.source_head.clone().or_else(|| task.head.clone()),
+            )
+        } else if writer.is_none() && task.writer.is_some() {
             (
                 prior
                     .head
@@ -3367,6 +3749,7 @@ impl RunStore {
                     build_heavy: task.build_heavy,
                     title: None,
                     base: task.base.clone(),
+                    fixture: task.fixture.clone(),
                     head,
                     source_head,
                     base_ref: task.base_ref.clone(),
@@ -4216,11 +4599,7 @@ impl RunStore {
         }
         let id = record.attempt_id;
         let scope = Self::scope(record);
-        let path = self
-            .context
-            .state_root
-            .as_path()
-            .join(format!("attempts/{id}/tmp"));
+        let path = crate::plan::scratch_root(self.context.state_root.as_path(), id).join("tmp");
         let listing = match self.writer_fence_listing() {
             Ok(listing) => listing,
             Err(error) => {
@@ -4271,8 +4650,8 @@ impl RunStore {
             && crate::holder::object_import_refused(&directory, scope)?.is_none();
         // An unreadable reservation cannot establish absence of custody.
         if let Some(issue) = listing.issues.first() {
-            let temporary = self.attempt_dir(id, false).and_then(|attempt| {
-                attempt
+            let temporary = self.attempt_scratch_dir(id, false).and_then(|scratch| {
+                scratch
                     .metadata_at(std::ffi::OsStr::new("tmp"), false)
                     .map_err(Into::into)
             });
@@ -4349,9 +4728,16 @@ impl RunStore {
                 read_sealed(&evidence, "reservation.json", RECORD_LIMIT)
             }) {
                 Ok(Some(_)) => {
-                    return Ok(Some(Reconciled::uncertain(
-                        UncertainReason::GuardianNotObservable,
-                    )));
+                    // A read-only review holds no Git work: a reservation its
+                    // departed guardian left cannot fence anything, so it is
+                    // not uncertain custody (#3844).
+                    if !self.terminal_read_only_without_git_work(record, call, scope)
+                        || !self.custody_released(record, call)?
+                    {
+                        return Ok(Some(Reconciled::uncertain(
+                            UncertainReason::GuardianNotObservable,
+                        )));
+                    }
                 }
                 Ok(None) => {}
                 Err(RunError::Filesystem(error)) if error.is_not_found() => {}
@@ -4365,15 +4751,31 @@ impl RunStore {
             self.set_temporary_retained(id, false, call)?;
             return Ok(None);
         }
-        let attempt = match self.attempt_dir(id, false).and_then(|attempt| {
-            attempt.metadata_at(std::ffi::OsStr::new("tmp"), false)?;
-            Ok(attempt)
+        let scratch = match self.attempt_scratch_dir(id, false).and_then(|scratch| {
+            match scratch.metadata_at(std::ffi::OsStr::new("tmp"), false) {
+                // Already collected: prune the emptied per-attempt root too.
+                Err(error) if error.is_not_found() => {
+                    crate::retention::collect_empty_scratch_root(&scratch)?;
+                    Err(error.into())
+                }
+                Err(error) => Err(error.into()),
+                Ok(_) => Ok(scratch),
+            }
         }) {
-            Ok(attempt) => attempt,
+            Ok(scratch) => scratch,
             Err(RunError::Filesystem(error)) if error.is_not_found() => {
                 self.set_temporary_retained(id, false, call)?;
                 return Ok(None);
             }
+            Err(error) => {
+                return Ok(Some(Reconciled::TemporaryRetained {
+                    path,
+                    reason: error.to_string().into(),
+                }));
+            }
+        };
+        let attempt = match self.attempt_dir(id, false) {
+            Ok(attempt) => attempt,
             Err(error) => {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
@@ -4400,7 +4802,7 @@ impl RunStore {
             return Ok(None);
         }
         let remove = || -> Result<()> {
-            match attempt.metadata_at(std::ffi::OsStr::new("tmp"), false) {
+            match scratch.metadata_at(std::ffi::OsStr::new("tmp"), false) {
                 Err(error) if error.is_not_found() => return Ok(()),
                 Err(error) => return Err(error.into()),
                 Ok(_) => {}
@@ -4420,11 +4822,12 @@ impl RunStore {
                 Err(error) => return Err(error.into()),
             }
             artifacts::remove_unreserved_terminal_temporary(
-                &attempt,
+                &scratch,
+                &path,
                 &|| !call.cancel.is_cancelled(),
                 &mut 0,
             )?;
-            Ok(())
+            crate::retention::collect_empty_scratch_root(&scratch)
         };
         Ok(Some(match remove() {
             Ok(()) => {
@@ -4472,11 +4875,8 @@ impl RunStore {
             if !self.release_admission(&record, call) {
                 self.set_temporary_retained(id, true, call)?;
                 return Ok(Some(Reconciled::TemporaryRetained {
-                    path: self
-                        .context
-                        .state_root
-                        .as_path()
-                        .join(format!("attempts/{id}/tmp")),
+                    path: crate::plan::scratch_root(self.context.state_root.as_path(), id)
+                        .join("tmp"),
                     reason: TemporaryReason::new(
                         TemporaryReasonKind::Error,
                         "repository admission release remains pending",
@@ -4626,15 +5026,25 @@ impl RunStore {
                             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
                         Ok(Reconciled::Finished)
                     }
-                    Ok(Observation::Live) if past_runtime_deadline(record, call) => {
-                        // The guardian should have stopped the provider at the
-                        // deadline itself; ask again through its own channel.
-                        Ok(match custody::stop(&handle, StopReason::WallDeadline) {
-                            Ok(_) => Reconciled::DeadlineStop,
-                            Err(error) => Reconciled::custody_unavailable(&error),
-                        })
+                    Ok(Observation::Live) => {
+                        // Recovery may repeat the guardian holder's idempotent
+                        // policy action after warning.
+                        if let Some(state) = self.apply_stall_policy(record, &handle, call)? {
+                            return Ok(state);
+                        }
+                        if past_runtime_deadline(record, call) {
+                            // The guardian should have stopped the provider at
+                            // the deadline itself; ask again through its own
+                            // channel.
+                            Ok(match custody::stop(&handle, StopReason::WallDeadline) {
+                                Ok(_) => Reconciled::DeadlineStop,
+                                Err(error) => Reconciled::custody_unavailable(&error),
+                            })
+                        } else {
+                            Ok(Reconciled::Held)
+                        }
                     }
-                    Ok(Observation::Live | Observation::PublicationPending) => Ok(Reconciled::Held),
+                    Ok(Observation::PublicationPending) => Ok(Reconciled::Held),
                     Ok(Observation::Unknown) => {
                         let settled =
                             match self.settle_unreserved_loss(record, call, observer, false)? {

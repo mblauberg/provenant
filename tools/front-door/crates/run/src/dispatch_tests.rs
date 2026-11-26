@@ -419,7 +419,7 @@ fn settle_with_turns(
 }
 
 /// A final answer that closes with a done handoff, as a finished lane's does.
-const DONE_ANSWER: &str = "answer\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"finished\"}\n```";
+pub(super) const DONE_ANSWER: &str = "answer\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"finished\"}\n```";
 const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Parser done; renderer and tests remain.\"}\n```";
 
 pub(super) fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult {
@@ -1130,7 +1130,11 @@ impl provenant_supervisor::census::ProcessObserver for RebootObserver {
         provenant_supervisor::census::Census,
         provenant_supervisor::census::CensusError,
     > {
-        unreachable!("reboot proof needs only the boot identity")
+        // Reboot proof needs only the boot identity, but holderless settlement
+        // now also takes a bounded census to reap sandbox-marked escapees.
+        // This observer's world has no live processes, so the faithful answer
+        // is an empty census rather than a panic.
+        provenant_supervisor::census::Census::from_observations([], [], [], true, false, 16)
     }
 }
 

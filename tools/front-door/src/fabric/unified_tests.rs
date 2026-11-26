@@ -4,6 +4,38 @@ use provenant_fabric_runtime::graph::{
     GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
 };
 
+// Spec: docs/specs/delivery-queue.md#queue-and-controls
+#[test]
+fn status_projects_recorded_delivery_progress_into_the_digest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut value = serde_json::to_value(checkpoint("g"))?;
+    let node = &mut value["nodes"][0];
+    let key = json!({"graph_id":"g","node_id":"parent","attempt":1,"route_index":0});
+    node["delivery_loop"] = json!({"name":"repair","round":2,"last_attempt":key});
+    node["escalation"] = json!({"rung":1,"cause":"ci_red","transition_attempt":key});
+    node["delivery_park"] = json!({"transition_id":"p1","operation_id":"p1",
+        "item":"issue-42","attempt_key":key,"attempt_ref":null,"reason":"ci_unavailable",
+        "handoff":"inspect checks","head":"abc123","evidence":[],"request_id":null});
+    let checkpoint: GraphCheckpoint = serde_json::from_value(value)?;
+    let target = GraphTarget {
+        graph: "g".into(),
+        node: None,
+        attempt: None,
+    };
+    let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
+    super::status_keys(&mut rows, provenant_core::ProjectId::from_bytes([3; 16]))?;
+    let digests = super::super::graph_status::node_digests(&rows);
+    let digest = digests
+        .iter()
+        .find(|digest| digest.item.as_deref() == Some("issue-42"))
+        .expect("parked item is projected");
+    assert_eq!(digest.delivery_loop["round"], 2);
+    assert_eq!(digest.escalation["rung"], 1);
+    assert_eq!(digest.delivery_park["handoff"], "inspect checks");
+    assert!(digest.line.contains("head=abc123/recorded"));
+    Ok(())
+}
+
 // Spec: docs/specs/cli.md#status-selection
 #[test]
 fn full_status_liveness_detail_names_event_source_directory_command_and_wait() {
@@ -154,12 +186,14 @@ fn composite_output_preserves_every_public_typed_export() {
         target: "typed-output/panel".parse().unwrap(),
         part: provenant_cli::Part::Result,
         to: None,
+        final_result: false,
         path: false,
         offset: 0,
         tail: None,
+        tail_lines: None,
         max_bytes: 64,
     };
-    let reply = composite_graph_output(&command, "typed-output", &progress).unwrap();
+    let reply = composite_graph_output(&command, "typed-output", &progress, false).unwrap();
     assert_eq!(reply.result.data["selected"]["branch"], "feature/output");
     assert_eq!(reply.result.data["selected"]["commit"], commit);
     assert_eq!(
@@ -187,9 +221,11 @@ fn composite_output_command(offset: u64, max_bytes: u64) -> provenant_cli::Outpu
         target: "typed-output/panel".parse().unwrap(),
         part: provenant_cli::Part::Result,
         to: None,
+        final_result: false,
         path: false,
         offset,
         tail: None,
+        tail_lines: None,
         max_bytes,
     }
 }
@@ -206,6 +242,58 @@ fn output_chunk_bytes(data: &Value) -> Vec<u8> {
         )
         .expect("valid base64 chunk"),
         encoding => panic!("unexpected composite chunk encoding: {encoding:?}"),
+    }
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+#[test]
+fn output_tail_metadata_preserves_units_across_readers() {
+    let progress = composite_progress(json!({
+        "schema_version": 2,
+        "result": {"digest": "sha256:fixture", "excerpt": "one\ntwo\n", "truncated": false, "path": null},
+        "findings": [], "warnings": []
+    }));
+    let schema = provenant_records::wire::data_schema("output").unwrap();
+    for (bytes, lines, field, expected, clamped) in [
+        (None, Some(501), "tail_lines", 500, true),
+        (Some(3), None, "tail", 3, false),
+        (None, Some(0), "tail_lines", 0, false),
+    ] {
+        let mut command = composite_output_command(0, 64);
+        command.tail = bytes;
+        command.tail_lines = lines;
+        let composite = composite_graph_output(&command, "typed-output", &progress, false).unwrap();
+        let mut replies = vec![composite.result.data];
+        for part in [provenant_cli::Part::Result, provenant_cli::Part::Events] {
+            command.part = part;
+            // Both local and peer readers reach this same rendering boundary.
+            let data = json!({"attempt_id": "fixture", "events": []});
+            replies.push(
+                provenant_cli::run::render_output(
+                    command.clone(),
+                    Ok((data, String::new())),
+                    false,
+                )
+                .result
+                .data,
+            );
+        }
+        for data in &replies {
+            assert_eq!(data[field], expected);
+            assert_eq!(data["tail_clamped"], clamped);
+            assert!(
+                data.get(if field == "tail" {
+                    "tail_lines"
+                } else {
+                    "tail"
+                })
+                .is_none()
+            );
+        }
+        provenant_records::wire::schema::validate(&schema, &replies[0]).unwrap();
+        if lines == Some(0) {
+            assert!(output_chunk_bytes(&replies[0]).is_empty());
+        }
     }
 }
 
@@ -228,8 +316,13 @@ fn composite_output_paginates_multibyte_text_as_bounded_bytes() {
 
     // Starting inside the four-byte character returns its next raw byte,
     // losslessly, instead of slicing the Rust string at that offset.
-    let middle =
-        composite_graph_output(&composite_output_command(1, 1), "typed-output", &progress).unwrap();
+    let middle = composite_graph_output(
+        &composite_output_command(1, 1),
+        "typed-output",
+        &progress,
+        false,
+    )
+    .unwrap();
     assert_eq!(middle.result.status, provenant_records::Outcome::Ok);
     assert_eq!(middle.result.data["offset"], 1);
     assert_eq!(middle.result.data["next_offset"], 2);
@@ -243,6 +336,7 @@ fn composite_output_paginates_multibyte_text_as_bounded_bytes() {
             &composite_output_command(offset, 1),
             "typed-output",
             &progress,
+            false,
         )
         .unwrap();
         let data = &reply.result.data;
@@ -276,8 +370,13 @@ fn composite_output_returns_typed_exports_without_result_text() {
         "commit": commit,
         "remaining": ["finish the export test"]
     }));
-    let reply = composite_graph_output(&composite_output_command(0, 16), "typed-output", &progress)
-        .unwrap();
+    let reply = composite_graph_output(
+        &composite_output_command(0, 16),
+        "typed-output",
+        &progress,
+        false,
+    )
+    .unwrap();
 
     assert_eq!(reply.result.status, provenant_records::Outcome::Ok);
     let data = &reply.result.data;
@@ -508,6 +607,119 @@ fn listed(name: &str, settled: bool, changed_micros: i64) -> ListedGraph {
     }
 }
 
+// Spec: docs/specs/cli.md#status-selection
+#[test]
+fn full_listing_shares_host_scans_and_lazily_reads_local_census() {
+    use std::cell::{Cell, OnceCell};
+
+    struct Facts {
+        census: OnceCell<Result<(), ()>>,
+    }
+    for local in [false, true] {
+        let store = Cell::new(0);
+        let holders = Cell::new(0);
+        let worktrees = Cell::new(0);
+        let census = Cell::new(0);
+        let enriched = Cell::new(0);
+        let graphs = vec![
+            listed("active", false, 1),
+            listed("history", true, 1),
+            listed("active2", false, 1),
+        ];
+        let mut projections = std::collections::BTreeMap::new();
+        for name in ["active", "history", "active2"] {
+            projections.insert(
+                name.to_owned(),
+                vec![listing_attempt_row(if name == "history" {
+                    "terminal"
+                } else {
+                    "running"
+                })],
+            );
+        }
+        let (listing, facts) = super::listing_with_evidence(
+            graphs,
+            &mut projections,
+            (1, true, 10, None),
+            || {
+                store.set(store.get() + 1);
+                holders.set(holders.get() + 1);
+                worktrees.set(worktrees.get() + 1);
+                Ok(Facts {
+                    census: OnceCell::new(),
+                })
+            },
+            |_, facts| {
+                enriched.set(enriched.get() + 1);
+                if local {
+                    let _ = super::cached_census(&facts.census, || {
+                        census.set(census.get() + 1);
+                        Ok(())
+                    });
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(
+            listing.rows.len(),
+            3,
+            "both liveness and full-page passes ran"
+        );
+        let summary_holders = super::listing_holders(
+            facts,
+            |_| 42,
+            || {
+                holders.set(holders.get() + 1);
+                0
+            },
+        );
+        assert_eq!(summary_holders, 42, "the summary reuses the holder reading");
+        assert_eq!(
+            enriched.get(),
+            3,
+            "each graph was enriched across the two passes"
+        );
+        assert_eq!((store.get(), holders.get(), worktrees.get()), (1, 1, 1));
+        assert_eq!(
+            census.get(),
+            usize::from(local),
+            "the census is lazy and shared across graphs"
+        );
+    }
+}
+
+#[test]
+fn listing_shares_failed_host_scan_across_both_passes() {
+    let scans = std::cell::Cell::new(0);
+    let graphs = vec![listed("active", false, 1), listed("history", true, 1)];
+    let mut projections = std::collections::BTreeMap::new();
+    projections.insert("active".to_owned(), vec![listing_attempt_row("running")]);
+    projections.insert("history".to_owned(), vec![listing_attempt_row("terminal")]);
+
+    let (listing, facts) = super::listing_with_evidence(
+        graphs,
+        &mut projections,
+        (1, true, 10, None),
+        || {
+            scans.set(scans.get() + 1);
+            Err::<(), _>(FacadeError::Timeout)
+        },
+        |_, _| Ok(()),
+    );
+
+    assert_eq!(scans.get(), 1, "a failed scan is shared, not retried");
+    assert!(matches!(facts, Some(Err(FacadeError::Timeout))));
+    assert_eq!(listing.rows.len(), 2);
+    for graph in listing.rows {
+        assert!(
+            graph
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("status evidence unavailable"))
+        );
+    }
+}
+
 #[test]
 fn the_listing_never_hides_active_work_and_counts_what_it_omits() {
     let day = provenant_cli::limits::LISTING_SETTLED_SECONDS * 1_000_000;
@@ -557,33 +769,30 @@ fn the_listing_never_hides_active_work_and_counts_what_it_omits() {
 }
 
 fn digest(presence: Option<&str>) -> super::super::graph_status::NodeDigest {
-    super::super::graph_status::NodeDigest {
-        key: provenant_records::WorkKey::new(
-            provenant_core::ProjectId::from_bytes([7; 16]),
-            "g",
-            "n",
-            1,
-        )
-        .expect("valid work key"),
-        outcome: "running".into(),
-        cause: None,
-        branch: None,
-        pr: json!({"state":"unknown","reference":null}),
-        ci: json!({"state":"unavailable"}),
-        result_path: None,
-        provider_error: None,
-        review_verdict: None,
-        findings_count: None,
-        findings_available: None,
-        review_partial: None,
-        attempt_state: Some("running".into()),
-        attempt_presence: presence.map(str::to_owned),
-        line: "  n: running".into(),
-        state: "running".into(),
-        settled: false,
-        handoff_status: None,
-        open_asks: Vec::new(),
-        evidence_error: None,
+    let key = provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([7; 16]),
+        "g",
+        "n",
+        1,
+    )
+    .expect("valid work key");
+    let rows = vec![
+        json!({"kind":"node", "work_key":key, "state":"running"}),
+        json!({"kind":"attempt", "work_key":key, "state":"running", "presence":presence}),
+    ];
+    super::super::graph_status::node_digests(&rows)
+        .into_iter()
+        .next()
+        .expect("fixture projects a node digest")
+}
+
+#[test]
+fn listing_digest_fixture_projects_attempt_presence() {
+    for presence in ["live", "unattended"] {
+        let digest = digest(Some(presence));
+        assert_eq!(digest.attempt_presence.as_deref(), Some(presence));
+        assert!(digest.delivery_loop.is_null());
+        assert!(digest.delivery_park.is_null());
     }
 }
 
@@ -1027,13 +1236,57 @@ fn missing_project_target_error_has_one_code_and_a_repair() {
 }
 
 #[test]
-fn a_stop_cause_is_one_bounded_line_that_names_it() {
-    let row = json!({"state":"failed","cause_code":"budget_exhausted",
-            "reason":"x".repeat(4096),"waiting_for":null});
+fn a_stop_cause_is_kept_whole_in_the_row_and_bounded_in_the_summary() {
+    // A row builder must not clip before the render mode is known: --full prints
+    // this whole reason, while the compact summary applies SUMMARY_ROW_BYTES.
+    let reason = "x".repeat(4096);
+    let row = json!({"kind":"node","id":"fix-login/writer#2","state":"failed",
+            "cause_code":"budget_exhausted","reason":reason,"waiting_for":null});
     let line = status_line("fix-login/writer#2", &row, Some("codex/gpt"));
     assert_eq!(line.lines().count(), 1);
-    assert!(line.trim_end().len() <= provenant_cli::limits::SUMMARY_ROW_BYTES);
+    assert!(
+        line.contains(&reason),
+        "the row builder clipped the reason: {line}"
+    );
     assert!(line.contains("cause=budget_exhausted"), "{line}");
+
+    let summary = status_summary(&[row]);
+    let bounded = &summary.lines[1];
+    assert!(
+        bounded.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES,
+        "{bounded}"
+    );
+    assert!(bounded.ends_with("..."), "no clip marker: {bounded}");
+}
+
+#[test]
+fn a_long_result_excerpt_is_kept_whole_in_the_row() -> Result<(), Box<dyn std::error::Error>> {
+    // Past the old 200-byte projection cap: the row keeps the fact, and only
+    // the compact renderer clips it. --full must be able to print it whole.
+    let excerpt = "x".repeat(200 + 256);
+    let mut value = serde_json::to_value(checkpoint("g"))?;
+    value["nodes"][0]["outputs"] = json!({
+        "schema_version":1,
+        "result":{"digest":"sha256:test","excerpt":excerpt,"truncated":false,"path":"result.txt"},
+        "verdict":null,"findings":[],"findings_available":null,
+        "branch":"feat/work","commit":"abc123","warnings":[]
+    });
+    let checkpoint: GraphCheckpoint = serde_json::from_value(value)?;
+    let target = GraphTarget {
+        graph: "g".into(),
+        node: None,
+        attempt: None,
+    };
+    let rows = status_rows(&graph_snapshot(checkpoint), &target);
+    let node = rows
+        .iter()
+        .find(|row| row["kind"] == "node")
+        .expect("a node row");
+    assert_eq!(
+        node["result_summary"], excerpt,
+        "the row projection clipped the result summary before rendering"
+    );
+    Ok(())
 }
 
 // Spec: docs/specs/cli.md#status-selection
@@ -1157,6 +1410,17 @@ fn result_rows(reply: &provenant_cli::run::Reply) -> Vec<Value> {
         .clone()
 }
 
+fn render_result_full(reply: &provenant_cli::run::Reply) -> String {
+    let globals = provenant_cli::Globals {
+        full: true,
+        ..Default::default()
+    };
+    let mode = globals.render_mode(&reply.human, reply.read_only, reply.summary.as_ref());
+    let mut output = Vec::new();
+    provenant_cli::render(&reply.result, mode, &mut output).unwrap();
+    String::from_utf8(output).unwrap()
+}
+
 // Spec: docs/specs/cli.md#output-references-and-bounded-tails
 #[test]
 fn result_json_reports_accepted_and_findings_required_reviews() {
@@ -1234,6 +1498,68 @@ fn result_compact_shows_verdict_and_counts_findings_by_severity() {
     assert!(compact.contains("VERDICT: FAIL"), "{compact}");
     assert!(compact.contains("2 high"), "{compact}");
     assert!(compact.contains("1 low"), "{compact}");
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+#[test]
+fn result_full_shows_each_finding_summary_location_and_fix() {
+    let findings = json!([
+        {"id":"F1","severity":"high","file":"src/a.rs","line":12,
+         "summary":"critical bug","status":"open","evidence":"seen at x",
+         "proposed_fix":"handle x"},
+        {"id":"F2","severity":"low","file":"src/b.rs",
+         "summary":"style nit","status":"open"},
+        {"id":"F3","severity":"medium","file":"",
+         "summary":"no location or fix","status":"open"},
+        {"id":"F4","severity":"low","file":"src/c.rs",
+         "summary":"line one\nline two\u{1b}[2J","status":"open",
+         "proposed_fix":"handle\u{202e}it"}
+    ]);
+    let reply = result_reply(
+        &"g/parent".parse().unwrap(),
+        &status_rows(
+            &graph_snapshot(review_checkpoint("VERDICT: FAIL", findings)),
+            &GraphTarget {
+                graph: "g".into(),
+                node: Some("parent".into()),
+                attempt: None,
+            },
+        ),
+    );
+    let full = render_result_full(&reply);
+    assert!(full.contains("critical bug"), "{full}");
+    assert!(full.contains("src/a.rs:12"), "{full}");
+    assert!(full.contains("handle x"), "{full}");
+    assert!(full.contains("style nit"), "{full}");
+    assert!(full.contains("src/b.rs"), "{full}");
+    assert!(full.contains("no location or fix"), "{full}");
+    // The base renderer left a gap where the empty file and absent fix would
+    // sit, so the exact shape fails without the shared renderer; the old
+    // negative assertions could never fire on this fixture.
+    let bare = full
+        .lines()
+        .find(|line| line.contains("no location or fix"))
+        .expect("the finding is rendered in --full");
+    assert_eq!(
+        bare.trim(),
+        "finding: [medium] — no location or fix",
+        "no location or fix placeholder: {full}"
+    );
+    // A multi-line or bidi field stays on the one human line the finding owns.
+    assert!(full.contains("line oneline two[2J"), "{full}");
+    assert!(full.contains("handleit"), "{full}");
+    assert!(!full.contains('\u{1b}'), "raw ESC leaked: {full}");
+    assert!(
+        !full.contains('\u{202e}'),
+        "raw bidi override leaked: {full}"
+    );
+    assert_eq!(
+        full.lines()
+            .filter(|line| line.contains("line oneline two"))
+            .count(),
+        1,
+        "one human line per finding: {full}"
+    );
 }
 
 // Spec: docs/specs/cli.md#output-references-and-bounded-tails
@@ -1461,28 +1787,34 @@ fn remote_status_failure_downgrades_the_current_running_node_to_unknown() {
 }
 
 #[test]
-fn graph_status_reading_keeps_failure_cause_and_command_within_budget() {
+fn graph_status_full_reading_keeps_the_reason_and_compact_bounds_it() {
     let mut checkpoint = checkpoint("g");
     checkpoint.nodes[0].state = NodeState::Failed;
     checkpoint.nodes[0].advance_error_code = Some("AUTH_REQUIRED".into());
-    checkpoint.nodes[0].advance_error =
-        Some(format!("credentials unavailable {}", "界".repeat(4096)));
+    // Far past the old 1024-character row cap: a row builder must keep the
+    // reason whole so --full can print it, and only the compact renderer clips.
+    let long_reason = format!("credentials unavailable {}", "界".repeat(4096));
+    checkpoint.nodes[0].advance_error = Some(long_reason.clone());
     let target = GraphTarget {
         graph: "g".into(),
         node: None,
         attempt: None,
     };
     let rows = status_rows(&graph_snapshot(checkpoint), &target);
+    assert_eq!(
+        rows[1]["reason"], long_reason,
+        "the row builder clipped the reason before the render mode was known"
+    );
     // One graph row, then many node and attempt rows.
     let mut many = rows.clone();
     for _ in 0..100 {
         many.extend(rows.iter().filter(|row| row["kind"] != "graph").cloned());
     }
     let reading = render_graph_status(&many);
-    // The owner summary bound (cli.md "Agent output"): the graph line, at
-    // most LISTING_ROWS node lines and the omission count, each line within
-    // SUMMARY_ROW_BYTES. The suggested command is a typed step, rendered by
-    // the edge from the same argv the JSON envelope carries.
+    // The row count stays bounded: the graph line, at most LISTING_ROWS node
+    // lines and the omission count. Line *length*, however, is the renderer's
+    // choice: --full keeps the whole reason, so no per-line byte cap belongs
+    // in the row builder.
     use provenant_cli::limits::{LISTING_ROWS, SUMMARY_ROW_BYTES};
     let lines: Vec<_> = reading.lines().collect();
     let omissions = lines
@@ -1491,20 +1823,132 @@ fn graph_status_reading_keeps_failure_cause_and_command_within_budget() {
         .count();
     assert!(lines.len() <= 1 + LISTING_ROWS + omissions, "{reading}");
     assert!(
-        reading.lines().all(|line| line.len() <= SUMMARY_ROW_BYTES),
-        "{reading}"
+        reading.contains(&long_reason),
+        "the full reading clipped the failure reason: {reading}"
     );
     // Failed work is listed first, after the graph line.
     let first_node = reading.lines().nth(1).unwrap();
     assert!(first_node.starts_with("g/parent"), "{reading}");
     assert!(first_node.contains(" failed "), "{reading}");
     assert!(first_node.contains("AUTH_REQUIRED"), "{reading}");
+
+    // The default view bounds the same rows and shows the clip marker.
+    let summary = status_summary(&many);
+    let result = provenant_records::CommandResult::new(
+        "status",
+        provenant_records::Outcome::Ok,
+        json!({"rows": many}),
+    );
+    let mut out = Vec::new();
+    provenant_cli::render(
+        &result,
+        provenant_cli::RenderMode::Compact {
+            text: &reading,
+            read_only: true,
+            summary: Some(&summary),
+        },
+        &mut out,
+    )
+    .expect("compact render");
+    let compact = String::from_utf8(out).expect("utf8");
+    assert!(
+        compact
+            .lines()
+            .skip(1)
+            .all(|line| line.len() <= SUMMARY_ROW_BYTES),
+        "a compact row exceeded the bound: {compact}"
+    );
+    assert!(compact.contains("..."), "no clip marker: {compact}");
+
+    // --full renders the same rows through the human mode, which passes the
+    // owner's text through verbatim: the reason must survive that boundary.
+    let mut full_out = Vec::new();
+    provenant_cli::render(
+        &result,
+        provenant_cli::RenderMode::Human {
+            text: &reading,
+            read_only: true,
+            summary: Some(&summary),
+        },
+        &mut full_out,
+    )
+    .expect("full render");
+    let full = String::from_utf8(full_out).expect("utf8");
+    assert!(
+        full.contains(&long_reason),
+        "the full render clipped the failure reason: {full}"
+    );
+
     let step = graph_status_next(&rows).expect("a failed graph offers a next step");
     assert_eq!(step.argv, ["provenant", "retry", "g/parent"]);
     // Per-state omission counts are checked at the CLI boundary; do not
     // pin the human omission sentence here.
     assert_eq!(rows[1]["cause_code"], "AUTH_REQUIRED");
     assert_eq!(rows[1]["next"], "provenant retry g/parent");
+}
+
+#[test]
+fn compact_row_keeps_the_reason_leading_clause_with_a_long_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    // A `worktree_missing` refusal names its path before the first ';'. The
+    // compact renderer bounds a row from its front, so the digest carries that
+    // clause ahead of the longer evidence fields (#3835).
+    let mut checkpoint = checkpoint("g");
+    // A node with no attempt keeps the compact row's prefix short, as on a
+    // graph whose advance was refused before the writer launched.
+    let node = &mut checkpoint.nodes[1];
+    let node_id = node.id.clone();
+    node.state = NodeState::Failed;
+    let path = format!("/private/var/folders/xy/{}", "long-segment/".repeat(5));
+    let first_clause = format!("node parent--child: local worktree {path} does not exist");
+    let reason = format!("{first_clause}; create it with `provenant worktree create`");
+    node.advance_error = Some(reason.clone());
+    let target = GraphTarget {
+        graph: "g".into(),
+        node: None,
+        attempt: None,
+    };
+    let rows = status_rows(&graph_snapshot(checkpoint), &target);
+    let node_row = rows
+        .iter()
+        .find(|row| row["kind"] == "node" && row["node_id"] == node_id.as_str())
+        .expect("the failed node's row");
+    assert_eq!(
+        node_row["reason"], reason,
+        "the row builder clipped the reason"
+    );
+
+    let summary = status_summary(&rows);
+    let result = provenant_records::CommandResult::new(
+        "status",
+        provenant_records::Outcome::Ok,
+        json!({"rows": rows}),
+    );
+    let mut out = Vec::new();
+    provenant_cli::render(
+        &result,
+        provenant_cli::RenderMode::Compact {
+            text: "",
+            read_only: true,
+            summary: Some(&summary),
+        },
+        &mut out,
+    )?;
+    let compact = String::from_utf8(out)?;
+    let row = compact
+        .lines()
+        .find(|line| line.starts_with(&format!("g/{node_id} failed")))
+        .ok_or_else(|| format!("no compact node row carries the reason:\n{compact}"))?;
+    assert!(
+        row.contains(&first_clause),
+        "compact row lost the reason's leading clause: {row}"
+    );
+    assert!(row.ends_with("..."), "no clip marker: {row}");
+    assert!(
+        row.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES,
+        "compact row exceeded the bound: {row}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -2345,4 +2789,60 @@ fn state_ranking_and_predicates_behave_consistently() {
         assert!(!StateRank::of(state).needs_attention());
         assert!(!StateRank::of(state).is_live());
     }
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+#[test]
+fn settled_lane_output_skips_stale_failure_rows() {
+    let settled: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"settled-review","plan_digest":"digest","nodes":[
+            {"id":"review","state":"succeeded","worktree":null,"attempts":[],
+             "outputs":{"schema_version":2,"result":null,"verdict":"VERDICT: PASS",
+                        "findings":[],"branch":null,"commit":null,"warnings":[]}}
+        ]
+    }))
+    .expect("settled review checkpoint");
+    let progress = settled.nodes.first().expect("review node");
+    assert!(
+        !super::output_needs_graph_failures(false, progress),
+        "a settled review lane with a result must not append failure rows"
+    );
+
+    // An explicit attempt read never appends the graph's failure rows either.
+    assert!(!super::output_needs_graph_failures(true, progress));
+
+    // A failed settled lane's retained result is still its answer.
+    let mut failed = settled.clone();
+    failed.nodes[0].state = NodeState::Failed;
+    assert!(
+        !super::output_needs_graph_failures(false, &failed.nodes[0]),
+        "a failed settled lane with a result must not append failure rows"
+    );
+
+    // Failed work without a result still needs its diagnostics.
+    failed.nodes[0].outputs = None;
+    assert!(super::output_needs_graph_failures(false, &failed.nodes[0]));
+
+    // Unsettled work still needs its diagnostics, even after a prior result.
+    let mut running = settled;
+    running.nodes[0].state = NodeState::Running;
+    assert!(super::output_needs_graph_failures(false, &running.nodes[0]));
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+#[test]
+fn settled_lane_output_ignores_unfinished_sibling() {
+    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"review-panel","plan_digest":"digest","nodes":[
+            {"id":"review","state":"failed","worktree":null,"attempts":[],
+             "outputs":{"schema_version":2,"result":null,"verdict":"VERDICT: FAIL",
+                        "findings":[],"branch":null,"commit":null,"warnings":[]}},
+            {"id":"sibling","state":"running","worktree":null,"attempts":[]}
+        ]
+    }))
+    .expect("review panel checkpoint");
+    assert!(
+        !super::output_needs_graph_failures(false, &checkpoint.nodes[0]),
+        "a settled lane's retained output must not acquire stale failure rows while a sibling runs"
+    );
 }

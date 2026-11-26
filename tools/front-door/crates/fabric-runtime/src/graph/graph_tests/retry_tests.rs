@@ -1531,6 +1531,85 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
 }
 
 #[test]
+fn keyed_retry_replays_exact_target_after_checkpoint_restart() {
+    let (document, checkpoint, _) = settled();
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        catalogue: None,
+        library: &library,
+        resolvers: &resolvers,
+        journal: None,
+        limits: &limits,
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+    };
+    let operation_id = provenant_core::OperationId::parse(&"ab".repeat(16)).unwrap();
+    let mut retried = checkpoint;
+    let admitted = patch::retry_node_and_dependants_with_key(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut retried,
+        },
+        "work",
+        Some("repaired brief"),
+        &context,
+        &operation_id.to_string(),
+        "control-digest",
+    )
+    .unwrap();
+    assert!(!admitted.replayed);
+    let persisted = serde_json::to_value(&retried).unwrap();
+    let mut restored: GraphCheckpoint = serde_json::from_value(persisted).unwrap();
+    let before_replay = restored.clone();
+    let replay = patch::retry_node_and_dependants_with_key(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut restored,
+        },
+        "work",
+        Some("repaired brief"),
+        &context,
+        &operation_id.to_string(),
+        "control-digest",
+    )
+    .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.revision, admitted.revision);
+    assert_eq!(restored, before_replay);
+
+    let conflict = patch::retry_node_and_dependants_with_key(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut restored,
+        },
+        "different-node",
+        None,
+        &context,
+        &operation_id.to_string(),
+        "control-digest",
+    )
+    .unwrap_err();
+    assert_eq!(conflict.code, "idempotency_conflict");
+    assert_eq!(restored, before_replay);
+
+    let changed_payload = patch::retry_node_and_dependants_with_key(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut restored,
+        },
+        "work",
+        Some("different brief"),
+        &context,
+        &operation_id.to_string(),
+        "different-control-digest",
+    )
+    .unwrap_err();
+    assert_eq!(changed_payload.code, "idempotency_conflict");
+    assert_eq!(restored, before_replay);
+}
+
+#[test]
 fn planner_patched_loop_body_redo_recovers_after_checkpoint_crash() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1,"graph_id":"redo-dynamic-loop-crash","nodes":[
@@ -2549,6 +2628,8 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
     // does not so this exercises the unsupported container-edit diagnostic.
     checkpoint.expansions.push(plans::Expansion {
         extra: Default::default(),
+        delivery_review_disposition: None,
+        delivery_review_node: None,
         retired: None,
         retry_generation: None,
         final_result: false,
@@ -2646,4 +2727,151 @@ fn attempt_numbers_increase_across_retries_and_replay_is_stable() {
                 .count()
         );
     }
+}
+
+// Issue #3923: a launch blocked on writer-lock contention never reached the
+// host, so it is settled for retry and the worktree it created is reused.
+#[test]
+fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
+    use crate::coordination::facade::FacadeError;
+    let mut writer = node("work", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/launch-blocked".into());
+    writer.source = Some(SourceBinding::Commit {
+        commit: "a".repeat(40),
+    });
+    let document = graph(vec![writer]);
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
+        ..Default::default()
+    };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    // The launch created its writer checkout before the lock wait expired.
+    let binding = WriterWorktreeBinding {
+        extra: Default::default(),
+        source_directory_identity: None,
+        shared_worktree: None,
+        worktree: "/fixture/launch-blocked".into(),
+        head: "a".repeat(40),
+    };
+    checkpoint.nodes[0].writer_binding = Some(binding.clone());
+    // A pre-acceptance launch error leaves the fenced Starting row; the
+    // observation above only supplies the attempt identity for the fixture.
+    checkpoint.nodes[0].attempts[0].state = AttemptState::Starting;
+    let attempt = checkpoint.nodes[0].attempts.last().unwrap();
+    assert_eq!(attempt.state, AttemptState::Starting);
+    assert!(attempt.attempt_ref.is_none());
+    assert!(!attempt.host_refused_before_acceptance);
+
+    // Exhaust the contention wait at the provisioning deadline. The
+    // disposition error is a typed facade kind, so use the owner whose error
+    // type is FacadeError (as every other launch_disposition call here does).
+    // A named holder must reach the blocked diagnostic.
+    let holder = provenant_core::AttemptId::from_bytes([42; 16]);
+    let mut disposition_owner = ErrorLauncher::default();
+    launch_disposition::<ErrorLauncher, MemoryJournal>(
+        &mut disposition_owner,
+        &mut checkpoint,
+        0,
+        &FacadeError::WriterLockBusy {
+            holder: Some(holder),
+        },
+        LaunchTiming {
+            clock: Some(at(0)),
+            admission_seconds: 0,
+            policy: LaunchRetryPolicy::default(),
+        },
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
+    assert_eq!(
+        checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("launch_retry_exhausted")
+    );
+    assert_eq!(
+        checkpoint.nodes[0].advance_owner_code.as_deref(),
+        Some("writer_lock_busy")
+    );
+    // The pre-host fact is recorded from the typed error at disposition time,
+    // not inferred from the owner code; it authorises both the retry gate and
+    // the retry remedy in the blocked diagnostic.
+    assert!(
+        checkpoint.nodes[0].attempts[0].host_refused_before_acceptance,
+        "contention before acceptance must be recorded as a fact"
+    );
+    let reason = checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(
+        reason.contains(&holder.to_string()),
+        "blocked diagnostic must name the lock holder: {reason}"
+    );
+    assert!(
+        reason.contains("provenant retry"),
+        "blocked diagnostic must offer the retry remedy: {reason}"
+    );
+
+    retry(&document, &mut checkpoint, None, None).unwrap();
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Pending);
+    assert!(checkpoint.nodes[0].attempts.is_empty());
+    assert_eq!(checkpoint.nodes[0].previous_attempts.len(), 1);
+    assert_eq!(
+        checkpoint.nodes[0].writer_binding,
+        Some(binding),
+        "retry reuses the recorded worktree"
+    );
+
+    let mut resumed = MemoryJournal(Some(checkpoint));
+    let mut next_owner = FakeOwner {
+        observations: [done_as("retried-attempt")].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut next_owner, &mut resumed).unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .writer_binding
+            .as_ref()
+            .unwrap()
+            .worktree,
+        "/fixture/launch-blocked"
+    );
+    assert_eq!(next_owner.calls.len(), 1);
+}
+
+#[test]
+fn expansion_review_disposition_uses_declared_wire_fields() {
+    let disposition = DeliveryReviewDisposition {
+        operation_id: provenant_core::OperationId::parse("review-disposition-op").unwrap(),
+        request_id: provenant_core::HumanRequestId::from_bytes([5; 16]),
+        answer_id: provenant_core::HumanAnswerId::from_bytes([6; 16]),
+        head: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
+        reason: "reviewed exact head".into(),
+    };
+    let expansion = plans::Expansion {
+        extra: Default::default(),
+        delivery_review_disposition: Some(disposition.clone()),
+        delivery_review_node: Some("review".into()),
+        retired: None,
+        retry_generation: None,
+        final_result: false,
+        final_fragment: false,
+        floor_warnings: Vec::new(),
+        source: String::new(),
+        nodes: Vec::new(),
+        uses: Vec::new(),
+        patch: None,
+    };
+    let value = serde_json::to_value(&expansion).unwrap();
+    assert_eq!(value["delivery_review_node"], "review");
+    assert_eq!(
+        value["delivery_review_disposition"],
+        serde_json::to_value(&disposition).unwrap()
+    );
+    let decoded: plans::Expansion = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.delivery_review_disposition, Some(disposition));
+    assert_eq!(decoded.delivery_review_node.as_deref(), Some("review"));
+    assert!(decoded.extra.is_empty());
 }

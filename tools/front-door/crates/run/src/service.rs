@@ -317,6 +317,7 @@ impl<'a> Service<'a> {
                 prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
                 base_ref,
                 base,
+                fixture: task.fixture.filter(|fixture| fixture.is_valid()),
                 head: task.head,
                 source_head: task.source_head,
                 route: task.route,
@@ -682,14 +683,78 @@ impl<'a> Service<'a> {
     ) -> Result<Vec<RunEvent>> {
         self.store.events(after, limit, attempt, call)
     }
+    pub fn abandon_writer_creation_floor(
+        &self,
+        id: AttemptId,
+        resolved_common: Option<&Path>,
+        call: &Request<'_>,
+    ) -> Result<Option<provenant_core::WallTime>> {
+        let record = self.store.record(id, call)?;
+        if record.retry_of.is_some() {
+            return Ok(None);
+        }
+        let request = match self.store.request(id, call) {
+            Ok(request) => request,
+            Err(RunError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if request
+            .task
+            .context
+            .as_ref()
+            .and_then(|context| context.writer_predecessor)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let Some(writer) = request.task.writer.as_ref() else {
+            return Ok(None);
+        };
+        if !std::fs::symlink_metadata(&writer.worktree)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Ok(None);
+        }
+        let fallback_common;
+        let common = match resolved_common {
+            Some(path) => path,
+            None => {
+                let Some(found) = provenant_os::git::repository_marker(&writer.project)
+                    .and_then(|marker| marker.common_dir)
+                else {
+                    return Ok(None);
+                };
+                fallback_common = found;
+                &fallback_common
+            }
+        };
+        // The floor must precede every moment a process could have entered the
+        // checkout. The attempt's queue time does not (a lane may reuse a
+        // checkout created long before), so the floor is the Git registration's
+        // birth, which precedes the checkout's creation; an unreported birth
+        // time fails closed (#3914).
+        let Ok(Some((owner, Some(registered_at)))) =
+            provenant_confinement::worktrees::worktree_registration_for_path(
+                common,
+                &writer.worktree,
+            )
+        else {
+            return Ok(None);
+        };
+        let proven = owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
+            && owner.attempt_id == Some(id);
+        Ok(proven.then_some(registered_at.min(record.queued_at)))
+    }
     pub fn abandon_settlement(
         &self,
         id: AttemptId,
         reason: &str,
         workers: &dyn provenant_confinement::worktrees::WorkerObserver,
         call: &Request<'_>,
+        common: Option<&Path>,
     ) -> Result<Reconciled> {
-        self.store.abandon_settlement(id, reason, workers, call)
+        self.store
+            .abandon_settlement(id, reason, workers, call, common)
     }
     pub fn reconcile(
         &self,
@@ -746,6 +811,7 @@ error_kinds! {
     LaneDepth => "LANE_DEPTH", "Nested lane depth exceeds the configured maximum.";
     QueueFull => "QUEUE_FULL", "The host queue is full.";
     Contention => "CONTENTION", "The run store is contended or the call budget expired.";
+    ForgeQuota => "FORGE_QUOTA", "The forge rate limit is exhausted; retry after the reset it names.";
     Io => "IO", "Filesystem, database or other I/O failed.";
     Unsupported => "UNSUPPORTED", "The route or adapter does not support the requested launch.";
     ContinuationUnsupported => "CONTINUATION_UNSUPPORTED", "The attempt's provider session cannot be continued.";
@@ -857,6 +923,7 @@ impl ErrorKind {
             | Self::Conflict
             | Self::LaneDepth
             | Self::QueueFull
+            | Self::ForgeQuota
             | Self::Unsupported
             | Self::ContinuationUnsupported => "refused",
             _ => "error",
@@ -892,7 +959,7 @@ impl From<&RunError> for ErrorKind {
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,
             RunError::WriterProjectMismatch { .. } => Self::WriterProjectMismatch,
             RunError::Writer(
-                provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout,
+                provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout { .. },
             ) => Self::WriterLockBusy,
             RunError::Writer(
                 provenant_confinement::worktrees::WorktreeError::LockBusy
@@ -983,6 +1050,8 @@ pub struct DispatchTask {
     pub title: Option<String>,
     pub prompt: String,
     pub base: Option<String>,
+    /// A portable fixture staged into the lane's candidate scratch.
+    pub fixture: Option<provenant_records::run::StagedFixture>,
     /// Commit pinned by owned worktree creation. Keep `base` for replay comparison.
     pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
@@ -1068,7 +1137,9 @@ mod target_tests {
             ErrorKind::WriterBusy
         );
         assert_eq!(
-            ErrorKind::from(&RunError::Writer(WorktreeError::RegistryLockTimeout)),
+            ErrorKind::from(&RunError::Writer(WorktreeError::RegistryLockTimeout {
+                holder: None
+            })),
             ErrorKind::WriterLockBusy
         );
         assert_eq!(

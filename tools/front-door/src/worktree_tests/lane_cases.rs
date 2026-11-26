@@ -240,6 +240,10 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             .state
             .as_path()
             .join(format!("attempts/{}", prepared.attempt_id));
+        let temporary = roots
+            .state
+            .as_path()
+            .join(format!("attempt-scratch/{}/tmp", prepared.attempt_id));
         // Launch preparation links a short alias to `tmp` on macOS. The name
         // is unique to this process and attempt, and the rig unlinks it.
         let temporary_alias = cfg!(target_os = "macos").then(|| {
@@ -249,7 +253,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 std::process::id(),
                 id & ((1 << 96) - 1)
             ));
-            let _ = std::os::unix::fs::symlink(attempt.join("tmp"), &alias);
+            let _ = std::os::unix::fs::symlink(&temporary, &alias);
             alias
         });
         let paths = provenant_run::LaunchPaths {
@@ -260,7 +264,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             deadline_unix_ms: 4_000_000_000_000,
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),
-            temporary: attempt.join("tmp"),
+            temporary,
             temporary_alias,
         };
         // The active release root is its own directory, never the project.
@@ -338,8 +342,11 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         let store = provenant_run::RunStore::open(&context, &call)?;
         store.create(&prepared, &call)?;
         let task = &prepared.request.task;
+        // Production creates every run-store directory private; a fixture
+        // that pre-creates them must too, or the store refuses the mode.
         for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
-            fs::create_dir_all(path)?;
+            std::os::unix::fs::DirBuilderExt::mode(fs::DirBuilder::new().recursive(true), 0o700)
+                .create(path)?;
         }
         // Bound to the registered account, as the host loader binds it.
         let token = provenant_providers::claude::refresh_for_account(
@@ -431,11 +438,9 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         }
         let scratch = &confinement.plan.permissions().scratch.path;
         assert_eq!(scratch.join("publishing.gitconfig").exists(), publishing);
-        assert_eq!(scratch.join("bin/gh").exists(), publishing);
-        if publishing {
-            let gh_wrapper = fs::read_to_string(scratch.join("bin/gh"))?;
-            assert!(gh_wrapper.contains(&executable.display().to_string()));
-        }
+        // PR policy mediates gh independently of credential publishing.
+        let gh_wrapper = fs::read_to_string(scratch.join("bin/gh"))?;
+        assert!(gh_wrapper.contains(&executable.display().to_string()));
         assert!(
             launch
                 .environment

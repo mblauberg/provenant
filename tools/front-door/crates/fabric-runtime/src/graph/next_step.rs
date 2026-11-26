@@ -839,6 +839,21 @@ pub(super) fn settlement_fallback_decision(
         cause: fallback_cause,
         skipped_accounts,
     } = evidence;
+    // The run-side `retry` stall policy is an explicit, persisted request to
+    // consume the next route after custody has stopped the provider. It is the
+    // sole launched-attempt exception to fallback's normal safety gate.
+    if outcome == AttemptOutcome::ProviderStalledRetry {
+        return if launched && route_index + 1 < node.routes.len() && !review_limit_reached {
+            SettlementFallback::Continue
+        } else {
+            SettlementFallback::Fail {
+                code: Some("provider_stalled"),
+                message: Some(
+                    "the provider stalled and no next route is available; inspect the last-event time and retry or steer the attempt".into(),
+                ),
+            }
+        };
+    }
     let route = node.routes.get(route_index);
     // Preparation evidence proves custody. A refusal before provider launch
     // takes the cause default, while an explicit, non-pinned node override
@@ -850,6 +865,9 @@ pub(super) fn settlement_fallback_decision(
         AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
             Some(StopCause::SpawnFailure)
         }
+        AttemptOutcome::PreparationRefused(
+            provenant_records::run::TerminalCause::PreparationRefused,
+        ) => Some(StopCause::PreparationRefused),
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)
         }

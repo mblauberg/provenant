@@ -193,6 +193,7 @@ impl Error {
             ) => Outcome::Invalid,
             Self::Worktree(
                 WorktreeError::WorktreeExists { .. }
+                | WorktreeError::UnrelatedBase(..)
                 | WorktreeError::Dirty(_)
                 | WorktreeError::DetachedPrimary
                 | WorktreeError::DetachedUnmerged { .. }
@@ -666,6 +667,65 @@ fn session_list(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
     if result.is_ok() { 0 } else { 1 }
 }
 
+/// What one bounded pass decided about settled-scratch candidates. A candidate
+/// with undecided custody is deferred with its bytes intact, never collected.
+#[derive(Clone, Default, Serialize)]
+struct GcCandidateProgress {
+    decided: usize,
+    collected: usize,
+    deferred: usize,
+    /// Best-effort bytes reclaimed from collected candidates.
+    bytes: u64,
+    /// Retained bytes are unknown when any deferred tree was not fully measured.
+    deferred_bytes: Option<u64>,
+}
+
+fn candidate_progress(state: &provenant_run::ProviderStateGc) -> GcCandidateProgress {
+    let bytes = state.temporary_bytes();
+    let collected = state.attempt_tmp.len();
+    let deferred = state.scratch_deferred.len();
+    GcCandidateProgress {
+        decided: collected.saturating_add(deferred),
+        collected,
+        deferred,
+        bytes,
+        deferred_bytes: state
+            .scratch_deferred
+            .iter()
+            .try_fold(0_u64, |total, entry| {
+                entry.bytes.map(|bytes| total.saturating_add(bytes))
+            }),
+    }
+}
+
+fn candidate_progress_line(data: &GcData) -> String {
+    let Some(progress) = &data.candidate_progress else {
+        return "settled candidate progress: not measured (attempt scratch class did not run)\n"
+            .into();
+    };
+    let retained = progress
+        .deferred_bytes
+        .map_or_else(|| "unknown".into(), |bytes| format!("{bytes} bytes"));
+    format!(
+        "{} settled candidate(s) decided: {} {} ({} bytes {}), {} deferred ({} retained)\n",
+        progress.decided,
+        progress.collected,
+        if data.report.dry_run {
+            "would collect"
+        } else {
+            "collected"
+        },
+        progress.bytes,
+        if data.report.dry_run {
+            "reclaimable"
+        } else {
+            "reclaimed"
+        },
+        progress.deferred,
+        retained
+    )
+}
+
 #[derive(Serialize, Default)]
 struct GcData {
     #[serde(flatten)]
@@ -674,6 +734,9 @@ struct GcData {
     provider_state: provenant_run::ProviderStateGc,
     sweep_budget_seconds: u64,
     sweep_budget_source: String,
+    /// Resolved `gc.free_floor` and the layer or config file that set it.
+    free_floor_bytes: u64,
+    free_floor_source: String,
     sweep_cursor: Option<crate::gc_sweep::Cursor>,
     sweep_warning: Option<String>,
     sweep_stopped: bool,
@@ -698,6 +761,9 @@ struct GcData {
     /// them before the saved cursor or the sweep stopped first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     classes_not_run: Vec<provenant_config::RetentionKind>,
+    /// Settled-scratch candidates decided, collected and deferred this pass.
+    #[serde(default)]
+    candidate_progress: Option<GcCandidateProgress>,
     #[serde(skip)]
     retention_observations: Vec<provenant_config::RetentionBytes>,
     discard_archives: worktrees::ArchiveReport,
@@ -933,6 +999,103 @@ fn gc_removal_records(data: &GcData) -> Vec<RemovalRecord> {
         .collect()
 }
 
+/// Every class that deliberately kept a candidate, with bytes and reason.
+/// Observations that carry no byte census say so instead of claiming zero.
+fn gc_uncollected(data: &GcData) -> Vec<crate::gc_support::UncollectedItem> {
+    use crate::gc_support::UncollectedItem;
+    let mut rows = Vec::new();
+    for entry in &data.report.kept {
+        rows.push(UncollectedItem {
+            path: entry.path.clone(),
+            bytes: Some(entry.bytes),
+            class: "cargo_cache",
+            reason: entry.reason.as_str().to_owned(),
+        });
+    }
+    for path in &data.build_dirs.busy {
+        rows.push(UncollectedItem {
+            path: path.clone(),
+            bytes: None,
+            class: "cargo_target",
+            reason: "live holder or held Cargo lock".to_owned(),
+        });
+    }
+    for path in &data.build_dirs.recent {
+        rows.push(UncollectedItem {
+            path: path.clone(),
+            bytes: None,
+            class: "cargo_target",
+            reason: "recent write within the grace period".to_owned(),
+        });
+    }
+    // The target census measures bytes under managed roots but does not split
+    // them per kept target. Emit that total once instead of claiming each kept
+    // target has no measurable size.
+    if (!data.build_dirs.busy.is_empty() || !data.build_dirs.recent.is_empty())
+        && data.build_dirs.cache_bytes > 0
+    {
+        rows.push(UncollectedItem {
+            path: PathBuf::from("<managed cargo targets>"),
+            bytes: Some(data.build_dirs.cache_bytes),
+            class: "cargo_target",
+            reason: "class total under managed target roots".to_owned(),
+        });
+    }
+    for issue in &data.provider_state.kept {
+        // Only a separate retained-tree observation can describe bytes still here.
+        let bytes = data
+            .provider_state
+            .scratch_deferred
+            .iter()
+            .find(|entry| entry.path == issue.path)
+            .and_then(|entry| entry.bytes);
+        rows.push(UncollectedItem {
+            path: issue.path.clone(),
+            bytes,
+            class: "provider_state",
+            reason: issue.reason.clone(),
+        });
+    }
+    for path in &data.discard_archives.busy {
+        rows.push(UncollectedItem {
+            path: path.clone(),
+            bytes: None,
+            class: "discard_archive",
+            reason: "live holder".to_owned(),
+        });
+    }
+    for issue in &data.retention_errors {
+        rows.push(UncollectedItem {
+            path: issue.path.clone(),
+            bytes: None,
+            class: "retention",
+            reason: format!("{}: {}", issue.operation, issue.cause),
+        });
+    }
+    for process in &data.held_processes {
+        rows.push(UncollectedItem {
+            path: process.root.to_path_buf().unwrap_or_default(),
+            bytes: None,
+            class: "held_process",
+            reason: format!("live holder: {}", process.advisory()),
+        });
+    }
+    for work in &data.stranded_work {
+        rows.push(UncollectedItem {
+            path: work.path.clone(),
+            bytes: None,
+            class: "stranded_work",
+            reason: format!(
+                "unmerged work: {} ({} file(s), newest edit {})",
+                work.branch.as_deref().unwrap_or("no branch"),
+                work.files,
+                work.age
+            ),
+        });
+    }
+    rows
+}
+
 const GC_REPAIR: &str =
     "Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.";
 
@@ -961,6 +1124,7 @@ pub(crate) fn scheduled_gc(
     globals: &Globals,
     idle_seconds: u64,
     workers: &dyn WorkerObserver,
+    home: Option<&Path>,
 ) -> Result<GcCompletion, String> {
     let command = Gc {
         scheduled: true,
@@ -971,7 +1135,7 @@ pub(crate) fn scheduled_gc(
         idle: Some(idle_seconds),
         finished_branch: None,
     };
-    let data = gc(&command, globals, workers).map_err(|error| error.local_message())?;
+    let data = gc(&command, globals, workers, home).map_err(|error| error.local_message())?;
     if !data.provider_state.errors.is_empty()
         || !data.chair_logs.errors.is_empty()
         || !data.discard_archives.errors.is_empty()
@@ -1025,9 +1189,9 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
         }
         return crate::provider_retention::run_branch_scratch(globals, branch);
     }
-    match gc(&command, globals, workers) {
+    match gc(&command, globals, workers, None) {
         Ok(data) => {
-            let human = gc_compact_summary(&data);
+            let human = gc_compact_summary(&data, globals.full);
             let failed = !data.provider_state.errors.is_empty()
                 || !data.chair_logs.errors.is_empty()
                 || !data.discard_archives.errors.is_empty()
@@ -1093,14 +1257,39 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
     }
 }
 
-fn gc_compact_summary(data: &GcData) -> String {
+/// One line per kept class and reason. The default compact view shows this
+/// aggregate first so it survives the renderer's line clip; JSON and `--full`
+/// carry one row per candidate instead.
+fn gc_uncollected_aggregate_lines(data: &GcData) -> Vec<String> {
+    let mut groups: std::collections::BTreeMap<(&str, String), (usize, Option<u64>)> =
+        std::collections::BTreeMap::new();
+    for item in gc_uncollected(data) {
+        let entry = groups
+            .entry((item.class, item.reason))
+            .or_insert((0, Some(0)));
+        entry.0 += 1;
+        entry.1 = entry.1.zip(item.bytes).map(|(sum, bytes)| sum + bytes);
+    }
+    groups
+        .into_iter()
+        .map(|((class, reason), (count, bytes))| {
+            let bytes = bytes.map_or_else(
+                || "bytes unknown".to_owned(),
+                |bytes| format!("{bytes} bytes"),
+            );
+            format!("uncollected {class}: {count} item(s), {bytes}; kept: {reason}")
+        })
+        .collect()
+}
+
+fn gc_compact_summary(data: &GcData, full: bool) -> String {
     let trees: usize = data
         .worktree_cleanup
         .iter()
         .map(|entry| entry.worktrees.removed.len())
         .sum();
     let mut summary = format!(
-        "{}: {trees} worktrees, {} attempt scratch directories, {} known bytes; {} retention errors\nGC sweep budget: {}s (source: {})\n",
+        "{}: {trees} worktrees, {} attempt scratch directories, {} known bytes; {} retention errors\nGC sweep budget: {}s (source: {}); free-space floor: {} bytes (source: {})\n",
         if data.report.dry_run {
             "would collect"
         } else {
@@ -1110,8 +1299,15 @@ fn gc_compact_summary(data: &GcData) -> String {
         gc_known_reclaimed_bytes(data),
         data.retention_errors.len() + data.provider_state.errors.len(),
         data.sweep_budget_seconds,
-        data.sweep_budget_source
+        data.sweep_budget_source,
+        data.free_floor_bytes,
+        data.free_floor_source
     );
+    summary.push_str(&candidate_progress_line(data));
+    for line in gc_uncollected_aggregate_lines(data) {
+        summary.push_str(&line);
+        summary.push('\n');
+    }
     if let Some(notice) = &data.notice {
         summary.push_str(notice);
         summary.push('\n');
@@ -1142,6 +1338,12 @@ fn gc_compact_summary(data: &GcData) -> String {
     if data.held_incomplete {
         summary.push_str(worktrees::HELD_CENSUS_INCOMPLETE_WARNING);
         summary.push('\n');
+    }
+    if full {
+        for item in gc_uncollected(data) {
+            summary.push_str(&item.human_line());
+            summary.push('\n');
+        }
     }
     summary
 }
@@ -1191,6 +1393,7 @@ fn gc_data_summary(data: &GcData) -> String {
         .sum();
     human.push_str(&format!("{trees} merged worktree(s), {outputs} output directory(s), {} attempt tmp directory(s), {} capture(s)\n",
         data.provider_state.attempt_tmp.len(), data.provider_state.attempt_logs.len()));
+    human.push_str(&candidate_progress_line(data));
     human.push_str(&format!(
         "{} import pin(s) {}\n",
         data.import_pins,
@@ -1526,6 +1729,12 @@ fn gc_data_summary(data: &GcData) -> String {
     if let Some(notice) = &data.notice {
         human.push_str(&format!("{notice}\n"));
     }
+    // The failure view also aggregates kept candidates: one line per class
+    // and reason, never a long list of per-path rows.
+    for line in gc_uncollected_aggregate_lines(data) {
+        human.push_str(&line);
+        human.push('\n');
+    }
     human
 }
 
@@ -1549,11 +1758,14 @@ enum GcOutput<'a> {
     Detailed {
         #[serde(flatten)]
         data: &'a GcData,
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        uncollected: Vec<crate::gc_support::UncollectedItem>,
         retention_bytes: Vec<provenant_config::RetentionBytes>,
         removal_records: Vec<RemovalRecord>,
     },
     Summary {
         dry_run: bool,
+        candidate_progress: &'a Option<GcCandidateProgress>,
         retention_bytes: Vec<provenant_config::RetentionBytes>,
         removal_records: Vec<RemovalRecord>,
         removed: usize,
@@ -1583,6 +1795,10 @@ enum GcOutput<'a> {
         discard_archive_retention_source: &'a str,
         sweep_budget_seconds: u64,
         sweep_budget_source: &'a str,
+        free_floor_bytes: u64,
+        free_floor_source: &'a str,
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        uncollected: Vec<crate::gc_support::UncollectedItem>,
         sweep_cursor: &'a Option<crate::gc_sweep::Cursor>,
         sweep_warning: &'a Option<String>,
         sweep_stopped: bool,
@@ -1630,12 +1846,14 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
     if detailed {
         return GcOutput::Detailed {
             data,
+            uncollected: gc_uncollected(data),
             retention_bytes: gc_retention_bytes(data),
             removal_records: gc_removal_records(data),
         };
     }
     GcOutput::Summary {
         dry_run: data.report.dry_run,
+        candidate_progress: &data.candidate_progress,
         retention_bytes: gc_retention_bytes(data),
         removal_records: gc_removal_records(data),
         removed: data.report.removed.len(),
@@ -1668,6 +1886,9 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         discard_archive_retention_source: &data.discard_archive_retention_source,
         sweep_budget_seconds: data.sweep_budget_seconds,
         sweep_budget_source: &data.sweep_budget_source,
+        free_floor_bytes: data.free_floor_bytes,
+        free_floor_source: &data.free_floor_source,
+        uncollected: gc_uncollected(data),
         sweep_cursor: &data.sweep_cursor,
         sweep_warning: &data.sweep_warning,
         sweep_stopped: data.sweep_stopped,
@@ -1702,12 +1923,8 @@ struct GcProject {
     path: PathBuf,
     /// Import-extra pins the sweep removed (apply) or would remove (preview).
     import_pins: usize,
-    /// Advisory dwellers found by one census over terminal worktrees and
-    /// settled attempt directories. Never used to signal a process.
-    held_processes: Vec<worktrees::HeldProcess>,
     /// Uncommitted work in worktrees no lane holds. Kept and named only.
     stranded_work: Vec<crate::stranded_work::StrandedWork>,
-    held_incomplete: bool,
 }
 
 /// Open a checkout normally, or a bare common directory only through an
@@ -1736,37 +1953,47 @@ fn open_gc_repo(
     }
 }
 
-/// One bounded census over the terminal worktrees and settled attempt
-/// directories of a project. The result is reported by gc preview and apply;
-/// it never selects a PID to signal, and it excludes the caller's own session.
-fn settled_held_processes(
-    roots: &provenant_core::Roots,
-    context: &worktrees::WorktreeContext<'_>,
-    lanes: &[worktrees::WorktreeInfo],
-    cancel: &CancelToken,
-) -> worktrees::HeldReport {
-    let project = context.binding.project_id();
-    let terminal = crate::gc_support::lane_states(roots, project, cancel).ok();
-    let mut report_roots = crate::gc_support::project_settled_attempt_roots(roots, project, cancel);
-    for lane in lanes {
-        if terminal
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.get(&lane.path) == Some(&true))
-        {
-            report_roots.push(lane.path.clone());
+/// One advisory dweller observation for a whole GC pass. It runs after the
+/// collection classes, so a slow census cannot spend the sweep budget before
+/// any candidate is collected. The session caches process observations for the
+/// pass: no later project or candidate walks the process table again.
+///
+/// The report is advisory and never selects a PID to signal. A cancelled or
+/// cut-short observation is `incomplete`, so an undecided candidate is never
+/// read as free.
+struct DwellerCensus;
+
+impl DwellerCensus {
+    fn observe(
+        workers: &dyn WorkerObserver,
+        roots: &[PathBuf],
+        cancel: &CancelToken,
+    ) -> worktrees::HeldReport {
+        if cancel.is_cancelled() {
+            return worktrees::HeldReport {
+                incomplete: true,
+                ..worktrees::HeldReport::default()
+            };
         }
+        if roots.is_empty() {
+            return worktrees::HeldReport::default();
+        }
+        let clock = SystemClock::new();
+        let started = clock.mono_now().as_micros();
+        let within_budget = || {
+            !cancel.is_cancelled()
+                && clock.mono_now().as_micros().saturating_sub(started)
+                    < worktrees::HELD_CENSUS_BUDGET_MICROS
+        };
+        let session = worktrees::CensusSession::new(workers, &clock);
+        worktrees::held_report(&session, roots, &within_budget)
     }
-    report_roots.sort();
-    report_roots.dedup();
-    if report_roots.is_empty() {
-        return worktrees::HeldReport::default();
-    }
-    let started = context.clock.mono_now().as_micros();
-    let within_budget = || {
-        context.clock.mono_now().as_micros().saturating_sub(started)
-            < worktrees::HELD_CENSUS_BUDGET_MICROS
-    };
-    worktrees::held_report(context.workers, &report_roots, &within_budget)
+}
+
+/// Settled attempt directories and terminal worktrees across every project.
+/// One host-wide census covers them all instead of one census per project.
+fn dweller_roots(roots: &provenant_core::Roots, cancel: &CancelToken) -> Vec<PathBuf> {
+    crate::gc_support::settled_roots(roots, cancel)
 }
 
 #[allow(clippy::too_many_arguments)] // Project context and sweep deadline stay explicit at this boundary.
@@ -1825,7 +2052,6 @@ fn gc_project(
             let now_micros = crate::stranded_work::now_micros(context.clock);
             let stranded_work =
                 crate::stranded_work::survey_in_context(context, cancel, now_micros);
-            let report = settled_held_processes(roots, context, &lanes, cancel);
             // Settlement clears these pins on every outcome. GC is the
             // backstop for pins left by an earlier version or an attempt
             // whose record has since gone. The preview counts them without
@@ -1873,9 +2099,7 @@ fn gc_project(
                         .join(context.binding.project_id().to_string()),
                 )?,
                 lanes,
-                held_processes: report.processes,
                 stranded_work,
-                held_incomplete: report.incomplete,
             })
         },
     )
@@ -2311,7 +2535,12 @@ fn stale_age_text(seconds: u64) -> String {
     }
 }
 
-fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
+fn gc(
+    command: &Gc,
+    globals: &Globals,
+    workers: &dyn WorkerObserver,
+    home_override: Option<&Path>,
+) -> Result<GcData, Error> {
     use provenant_confinement::cache::CacheGcPolicy;
 
     let workspace = if command.scheduled {
@@ -2327,11 +2556,14 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     };
     let roots::Resolved {
         assets,
-        home,
+        home: resolved_home,
         project,
         roots,
         ..
     } = resolved;
+    // A checkpoint carries the settlement's home explicitly so an in-process
+    // sweep never scans the host's real home cache.
+    let home = home_override.map_or(resolved_home, Path::to_path_buf);
     let facts = worktrees::RepoFacts::default();
     let mut projects = Vec::new();
     let mut scheduled_project_ids = Vec::new();
@@ -2348,6 +2580,23 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .get("gc.sweep_budget")
         .map(gc_origin_source)
         .unwrap_or_else(|| "compiled default".into());
+    // One resolution of the floor and its source for admission, pressure and
+    // reporting. An explicit `--free-floor` override names itself as the source.
+    let (free_floor, free_floor_source) = match command.free_floor {
+        Some(bytes) => (bytes, "command --free-floor".to_owned()),
+        None => {
+            let limits = config
+                .gc
+                .disk_limits(roots.state.as_path())
+                .map_err(Error::DiskSpace)?;
+            let source = config
+                .origins
+                .get("gc.free_floor")
+                .map(gc_origin_source)
+                .unwrap_or_else(|| limits.free_floor_source.description().to_owned());
+            (limits.free_floor, source)
+        }
+    };
     if (command.scheduled || command.pressure) && !config.gc.schedule {
         return Ok(GcData {
             report: provenant_confinement::cache::CacheGcReport {
@@ -2357,6 +2606,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             idle_seconds: command.idle.unwrap_or(6 * 3600),
             sweep_budget_seconds,
             sweep_budget_source,
+            free_floor_bytes: free_floor,
+            free_floor_source: free_floor_source.clone(),
             provider_state: Default::default(),
             unobserved_projects,
             skipped_transient,
@@ -2367,18 +2618,39 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         });
     }
     let clock = SystemClock::new();
-    let deadline = crate::gc_sweep::Deadline::start(sweep_budget);
+    // An explicit floor request joins an in-flight sweep instead of reporting
+    // an empty skip. The join is bounded by the configured sweep budget; on
+    // expiry it is an error, never a successful collection of zero bytes.
+    let joins_held_sweep = command.free_floor.is_some() && !command.dry_run;
+    let wait_started = clock.mono_now();
     let mut lease = if command.dry_run {
         None
     } else {
-        match crate::gc_sweep::acquire(roots.state.as_path(), sweep_budget, &clock)
-            .map_err(|error| Error::RetentionCollection(error.to_string()))?
-        {
+        let acquired = if joins_held_sweep {
+            crate::gc_sweep::acquire_waiting(
+                roots.state.as_path(),
+                sweep_budget,
+                sweep_budget,
+                &clock,
+            )
+        } else {
+            crate::gc_sweep::acquire(roots.state.as_path(), sweep_budget, &clock)
+        }
+        .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+        match acquired {
             crate::gc_sweep::Acquire::Held(lease) => Some(lease),
+            crate::gc_sweep::Acquire::Busy(warning) if joins_held_sweep => {
+                return Err(Error::RetentionCollection(format!(
+                    "GC sweep still running after a {sweep_budget:?} bounded wait; {}; this invocation collected nothing",
+                    warning.unwrap_or_else(|| "sweep already running".into())
+                )));
+            }
             crate::gc_sweep::Acquire::Busy(warning) => {
                 return Ok(GcData {
                     sweep_budget_seconds,
                     sweep_budget_source,
+                    free_floor_bytes: free_floor,
+                    free_floor_source: free_floor_source.clone(),
                     sweep_warning: warning.clone(),
                     notice: Some(
                         warning.unwrap_or_else(|| "sweep already running; skipped".into()),
@@ -2388,6 +2660,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             }
         }
     };
+    let waited = Duration::from_micros(
+        clock
+            .mono_now()
+            .as_micros()
+            .saturating_sub(wait_started.as_micros()),
+    );
+    // This invocation's deadline starts only once it holds the lease, with the
+    // budget the bounded join left over.
+    let deadline = crate::gc_sweep::Deadline::start(sweep_budget.saturating_sub(waited));
     if let Some(lease) = &mut lease {
         lease
             .watch_fence(deadline.cancel().clone())
@@ -2487,11 +2768,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         });
     }
     if command.scheduled {
-        let floor = command
-            .free_floor
-            .map(Ok)
-            .unwrap_or_else(|| config.gc.free_floor_bytes(roots.state.as_path()))
-            .map_err(Error::DiskSpace)?;
+        let floor = free_floor;
         if provenant_confinement::disk::lane_available_bytes(roots.state.as_path(), &home, &project)
             .map_err(Error::DiskSpace)?
             >= floor
@@ -2514,6 +2791,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 },
                 sweep_budget_seconds,
                 sweep_budget_source,
+                free_floor_bytes: free_floor,
+                free_floor_source: free_floor_source.clone(),
                 sweep_cursor: initial_cursor,
                 sweep_warning,
                 retired_projects: retired_projects.clone(),
@@ -2830,11 +3109,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             .map(|project| project.binding.project_id())
             .collect()
     };
-    let free_floor = command
-        .free_floor
-        .map(Ok)
-        .unwrap_or_else(|| config.gc.free_floor_bytes(roots.state.as_path()))
-        .map_err(Error::DiskSpace)?;
     let output_idle_seconds = idle_seconds;
     let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
     let now_ns = SystemClock
@@ -2870,16 +3144,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map_err(|_| Error::GcObservation("invalid alert threshold"))?
         .unwrap_or(0)
         .max(free_floor);
-    let held_processes: Vec<_> = projects
-        .iter()
-        .flat_map(|project| project.held_processes.iter().cloned())
-        .collect();
     let mut stranded_work: Vec<_> = projects
         .iter()
         .flat_map(|project| project.stranded_work.iter().cloned())
         .collect();
     stranded_work.sort_by(|left, right| left.path.cmp(&right.path));
-    let held_incomplete = projects.iter().any(|project| project.held_incomplete);
     let import_pins = projects.iter().map(|project| project.import_pins).sum();
     let mut adapters = GcAdapters {
         command,
@@ -2910,10 +3179,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             import_pins,
             sweep_budget_seconds,
             sweep_budget_source: sweep_budget_source.clone(),
+            free_floor_bytes: free_floor,
+            free_floor_source: free_floor_source.clone(),
             sweep_warning,
-            held_processes,
             stranded_work,
-            held_incomplete,
             unobserved_projects,
             skipped_transient,
             retired_projects,
@@ -3066,6 +3335,18 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         }
     }
     adapters.data.sweep_stopped = stopped;
+    // Advisory dweller census, deliberately after the collection classes: a
+    // large settled store can no longer spend the sweep budget before any
+    // candidate is decided. One bounded observation covers every root in the
+    // pass and is reused by every project; an undecided root stays incomplete
+    // rather than being reported as free.
+    let dwellers = DwellerCensus::observe(
+        workers,
+        &dweller_roots(&roots, deadline.cancel()),
+        deadline.cancel(),
+    );
+    adapters.data.held_processes = dwellers.processes;
+    adapters.data.held_incomplete = dwellers.incomplete;
     if !stopped && let Some(lease) = adapters.lease.take() {
         lease
             .complete()
@@ -4039,7 +4320,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         if self.stop_at_resume()? {
             return Ok(());
         }
-        let report = {
+        let mut report = {
             let deadline = self.deadline;
             let cancel = deadline.cancel();
             let lease = self.lease.as_ref();
@@ -4065,6 +4346,16 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         if let Some(candidate) = report.interrupted_at.clone() {
             self.stop_at(None, Some(candidate), report.continuation.clone())?;
         }
+        // Scratch runs first and shares this report with provider-state GC.
+        // Preserve its outcomes and diagnostics when the later pass completes.
+        let scratch = &mut self.data.provider_state;
+        report.attempt_tmp.append(&mut scratch.attempt_tmp);
+        report.partial_tmp.append(&mut scratch.partial_tmp);
+        report
+            .scratch_deferred
+            .append(&mut scratch.scratch_deferred);
+        report.kept.append(&mut scratch.kept);
+        report.errors.append(&mut scratch.errors);
         self.data.provider_state = report;
         Ok(())
     }
@@ -4098,6 +4389,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         if let Some(candidate) = report.interrupted_at.clone() {
             self.stop_at(None, Some(candidate), report.continuation.clone())?;
         }
+        self.data.candidate_progress = Some(candidate_progress(&report));
         self.data
             .provider_state
             .attempt_tmp
@@ -4106,6 +4398,10 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             .provider_state
             .partial_tmp
             .append(&mut report.partial_tmp);
+        self.data
+            .provider_state
+            .scratch_deferred
+            .append(&mut report.scratch_deferred);
         self.data.provider_state.kept.append(&mut report.kept);
         self.data.provider_state.errors.append(&mut report.errors);
         Ok(())
@@ -4666,6 +4962,115 @@ mod human_tests {
 mod gc_preview_tests {
     #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
+
+    /// Counts observations instead of walking real processes. The one root that
+    /// stays unknown models a candidate whose custody the census cannot decide.
+    #[allow(dead_code)] // The harness=false worktree driver drops this #[test] helper.
+    #[derive(Default)]
+    struct CountingWorkers {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl WorkerObserver for CountingWorkers {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, worktrees::Occupancy> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            roots
+                .iter()
+                .map(|root| {
+                    let state = if root.file_name().is_some_and(|name| name == "undecided") {
+                        worktrees::Occupancy::census_unknown(root.clone(), "census cut short")
+                    } else {
+                        worktrees::Occupancy::Available
+                    };
+                    (root.clone(), state)
+                })
+                .collect()
+        }
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn one_pass_census_decides_many_candidates_and_keeps_the_undecided() {
+        let roots: Vec<PathBuf> = (0..256)
+            .map(|index| PathBuf::from(format!("/attempts/{index:04}")))
+            .chain(std::iter::once(PathBuf::from("/attempts/undecided")))
+            .collect();
+        let workers = CountingWorkers::default();
+        let cancel = CancelToken::new();
+        let report = DwellerCensus::observe(&workers, &roots, &cancel);
+        // One observation serves every settled candidate in the pass. It is
+        // never re-walked per attempt, and one undecided root makes the whole
+        // report incomplete: undecided custody is never read as free.
+        assert_eq!(
+            workers.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one census per pass, not per candidate"
+        );
+        assert!(report.incomplete, "an undecided candidate stays undecided");
+        assert!(report.processes.is_empty());
+
+        // A pass past its deadline spends nothing on the advisory census and
+        // still reports it incomplete rather than as a clean empty result.
+        let expired = CancelToken::new();
+        expired.cancel();
+        let skipped = DwellerCensus::observe(&workers, &roots, &expired);
+        assert_eq!(
+            workers.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an expired sweep does not start a new census"
+        );
+        assert!(skipped.incomplete);
+        assert!(skipped.processes.is_empty());
+
+        let mut state = provenant_run::ProviderStateGc::default();
+        for (index, bytes) in [(0, 4096), (1, 8192)] {
+            state.attempt_tmp.push(provenant_run::AttemptTmpRemoval {
+                path: PathBuf::from(format!("/attempt-scratch/{index}/tmp")),
+                bytes,
+            });
+        }
+        state.partial_tmp.push(provenant_run::AttemptTmpRemoval {
+            path: PathBuf::from("/attempt-scratch/2/tmp"),
+            bytes: 1024,
+        });
+        state.scratch_deferred.extend([
+            provenant_run::DeferredScratch {
+                path: PathBuf::from("/attempt-scratch/2/tmp"),
+                bytes: Some(512),
+            },
+            provenant_run::DeferredScratch {
+                path: PathBuf::from("/attempt-scratch/undecided/tmp"),
+                bytes: None,
+            },
+        ]);
+        state.kept.push(provenant_run::ProviderStateIssue {
+            path: PathBuf::from("/unrelated/provider-state"),
+            reason: "unrelated".into(),
+        });
+        let progress = candidate_progress(&state);
+        assert_eq!(progress.decided, 4);
+        assert_eq!(progress.collected, 2);
+        assert_eq!(
+            progress.deferred, 2,
+            "undecided candidates wait for the cursor"
+        );
+        assert_eq!(progress.bytes, 13_312);
+        assert_eq!(progress.deferred_bytes, None);
+        let _ = state.scratch_deferred.pop();
+        assert_eq!(candidate_progress(&state).deferred_bytes, Some(512));
+        assert!(DwellerCensus::observe(&workers, &[], &expired).incomplete);
+        let mut data = GcData::default();
+        assert!(candidate_progress_line(&data).contains("not measured"));
+        data.report.dry_run = true;
+        data.candidate_progress = Some(progress);
+        let line = candidate_progress_line(&data);
+        assert!(line.contains("would collect"));
+        assert!(line.contains("unknown retained"));
+    }
+
     #[test]
     fn gc_known_total_includes_scratch_archives_and_cargo_reclamation() {
         let mut data = GcData::default();
@@ -4683,6 +5088,104 @@ mod gc_preview_tests {
         let summary = serde_json::to_value(gc_result_data(&data, false)).unwrap();
         assert_eq!(summary["known_reclaimed_bytes"], 60);
         assert!(gc_data_summary(&data).contains("60 known allocated bytes reclaimable"));
+    }
+
+    #[test]
+    fn gc_reports_uncollected_candidates_with_reasons_sizes_and_floor_source() {
+        let mut data = GcData {
+            free_floor_bytes: 4096,
+            free_floor_source: "host config.toml".into(),
+            ..GcData::default()
+        };
+        data.report
+            .kept
+            .push(provenant_confinement::cache::CacheGcEntry {
+                path: PathBuf::from("/cache/live"),
+                bytes: 8192,
+                reason: provenant_confinement::cache::CacheGcReason::Live,
+            });
+        data.report
+            .kept
+            .push(provenant_confinement::cache::CacheGcEntry {
+                path: PathBuf::from("/cache/unknown"),
+                bytes: 1024,
+                reason: provenant_confinement::cache::CacheGcReason::Unobservable,
+            });
+        data.provider_state
+            .kept
+            .push(provenant_run::ProviderStateIssue {
+                path: PathBuf::from("/attempts/1/scratch"),
+                reason: "live holder".into(),
+            });
+        data.provider_state
+            .partial_tmp
+            .push(provenant_run::AttemptTmpRemoval {
+                path: PathBuf::from("/attempts/1/scratch"),
+                bytes: 2048,
+            });
+        data.retention_errors
+            .push(provenant_config::RetentionIssue {
+                path: PathBuf::from("/state/gc/archive"),
+                operation: "archive".into(),
+                cause: "retained evidence".into(),
+            });
+        data.stranded_work.push(crate::stranded_work::StrandedWork {
+            path: PathBuf::from("/worktrees/unmerged"),
+            branch: Some("fix/3950".into()),
+            issue: None,
+            operation: None,
+            files: 2,
+            lines: 9,
+            age: "1d".into(),
+            newest_edit_micros: None,
+        });
+        let rows = gc_uncollected(&data);
+        assert!(rows.iter().any(|row| row.bytes == Some(8192)
+            && row.class == "cargo_cache"
+            && row.reason == "live holder"));
+        assert!(rows.iter().any(|row| row.reason == "uncertain custody"));
+        assert!(
+            rows.iter()
+                .any(|row| row.reason.contains("retained evidence"))
+        );
+        assert!(rows.iter().any(|row| row.reason.contains("unmerged work")));
+        assert!(
+            rows.iter().any(|row| {
+                row.path == std::path::Path::new("/attempts/1/scratch") && row.bytes.is_none()
+            }),
+            "removed bytes must not be reported as retained: {rows:?}"
+        );
+        let json = serde_json::to_value(gc_result_data(&data, false)).unwrap();
+        assert_eq!(json["free_floor_bytes"], 4096);
+        assert_eq!(json["free_floor_source"], "host config.toml");
+        assert_eq!(json["uncollected"].as_array().unwrap().len(), rows.len());
+        // --json emits the Detailed variant: its uncollected list is the one
+        // the CLI actually serialises, not just the Summary variant's.
+        let detailed = serde_json::to_value(gc_result_data(&data, true)).unwrap();
+        let detailed_rows = detailed["uncollected"].as_array().unwrap();
+        assert_eq!(detailed_rows.len(), rows.len(), "{detailed}");
+        assert!(
+            detailed_rows.iter().any(|row| row["path"] == "/cache/live"
+                && row["bytes"] == 8192
+                && row["class"] == "cargo_cache"),
+            "{detailed}"
+        );
+        let human = gc_compact_summary(&data, false);
+        let head = human.lines().take(8).collect::<Vec<_>>().join("\n");
+        assert!(
+            head.contains("uncollected cargo_cache: 1 item(s), 8192 bytes; kept: live holder"),
+            "the aggregate must survive the compact line clip: {human}"
+        );
+        assert!(
+            !human.contains("uncollected cargo_cache /cache/live:"),
+            "the default view must not list every kept path: {human}"
+        );
+        let full = gc_compact_summary(&data, true);
+        assert!(
+            full.contains("uncollected cargo_cache /cache/live: 8192 bytes; kept: live holder"),
+            "--full must keep per-candidate rows: {full}"
+        );
+        assert!(human.contains("free-space floor: 4096 bytes (source: host config.toml)"));
     }
 
     #[test]
@@ -4736,6 +5239,15 @@ mod gc_preview_tests {
         assert_eq!(json["build_dir_budget_source"], "host");
         assert_eq!(json["build_dir_target_idle_setting"], "30d");
         assert_eq!(json["build_dir_target_idle_source"], "compiled default");
+        let rows = gc_uncollected(&data);
+        assert!(
+            rows.iter().any(|row| {
+                row.class == "cargo_target"
+                    && row.bytes == Some(8192)
+                    && row.reason.contains("class total")
+            }),
+            "kept Cargo targets must carry the measured class total: {rows:?}"
+        );
         let json = serde_json::to_value(gc_result_data(&data, true)).unwrap_or_default();
         assert_eq!(json["build_dirs"]["cache_bytes"], 8192);
         assert_eq!(json["build_dirs"]["budget_source"], "host");

@@ -11,6 +11,7 @@
       "lanes.budget_action",
       "lanes.budget_grace",
       "lanes.publish",
+      "lanes.pr",
       "lanes.cargo_cache_max",
       "lanes.ci_scope",
       "lanes.writer_dirty",
@@ -37,8 +38,11 @@
       "domains.fabric.graph.limits.concurrency",
       "providers.{provider}.update",
       "providers.{provider}.runtime_deadline_seconds",
+      "providers.{provider}.stall_after_seconds",
+      "providers.{provider}.stall_policy",
       "providers.codex.clean_config",
-      "gc.graph_checkpoint_days"
+      "gc.graph_checkpoint_days",
+      "session.digest.scope"
   ],
   "host_gc_settings": {
     "path": "gc",
@@ -142,6 +146,18 @@
       "max": 14400,
       "default": "unset",
       "effect": "Cap on the wall-clock runtime of any lane on this provider. A dispatch's own --provider-timeout applies when it is shorter. At the deadline the provider is stopped and the attempt settles as timed_out, whatever the host did meanwhile, including sleeping."
+    },
+    "stall_after_seconds": {
+      "type": "int",
+      "min": 0,
+      "default": "1800",
+      "effect": "Seconds without provider output after which a running attempt is reported as stalled in status, wait and the chair's digest, with the last-event time. 0 disables the report. The threshold starts at the last output, or provider start before the first output; queued time is excluded. Detection never signals the provider."
+    },
+    "stall_policy": {
+      "type": "enum",
+      "values": ["report", "steer", "retry", "fail"],
+      "default": "report",
+      "effect": "Opt-in action after the stall is reported: report warns only; steer queues a steering turn; retry stops the provider and advances to the next route within the retry budget; fail stops it with a typed provider_stalled cause. All actions warn first."
     }
   },
   "host_run_settings": {
@@ -373,7 +389,15 @@
       "limits.concurrency": {"type": "int", "allowed": "0 or more", "default": "0", "effect": "Graph concurrency limit. Unset or zero uses host lane caps; the bundled configuration sets zero."},
       "decide_timeout_seconds": {"type": "int", "allowed": "1 to 18446744073709 seconds", "min": 1, "default": "300", "effect": "Maximum time a graph decision step may take before it is reported as timed out.", "max": 18446744073709},
       "launch_wait_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "55", "effect": "General launch and read/wait allowance for a graph node."},
-      "writer_provision_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "55", "effect": "Independent allowance for provisioning each writer in a graph."}
+      "writer_provision_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "120", "effect": "Independent allowance for provisioning each writer in a graph; also bounds how long a launch waits for a contended writer lock."}
+    }
+  },
+  "host_delivery_queue_settings": {
+    "path": "domains.fabric.queue",
+    "settings": {
+      "max_parallel": {"type": "int", "allowed": "1 to 64", "min": 1, "max": 64, "default": "4", "effect": "Maximum number of active delivery item graphs."},
+      "ci_slots": {"type": "int", "allowed": "0 to 64", "min": 0, "max": 64, "default": "1", "effect": "Admission cap for delivery queue CI observations; zero disables the cap."},
+      "prep_retries": {"type": "int", "allowed": "0 to 64", "min": 0, "max": 64, "default": "2", "effect": "Number of queue item launch preparation retries before parking."}
     }
   },
   "host_model_policy_settings": {
@@ -460,6 +484,18 @@
         "effect": "Read-and-execute directory subtrees relative to the primary checkout. Entries escaping that checkout, missing, protected, credential or writable targets are ignored with a warning naming the configuration key."
       },
       "projects.{project}.user_skills": {"type": "enum", "default": "host user_skills", "effect": "Override host user skill discovery for this project."}
+    }
+  },
+  "native_hook_settings": {
+    "path": "domains.hooks",
+    "settings": {
+      "timeout_secs": {
+        "type": "int",
+        "min": 1,
+        "max": 300,
+        "default": 10,
+        "effect": "Timeout in seconds written into every installed chair hook (chair-start, chair-stop, chair-prompt) and the chair switch settings, with its source shown in `provenant doctor`. The hook runtime uses one local budget of 60% of this value, warns and records an overrun before the host kills the hook, and returns before the budget expires. Inspect value, default and origin with config show or config schema."
+      }
     }
   },
   "host_lane_build_settings": {
@@ -757,11 +793,17 @@
     },
     "confinement.census_ignore_unreadable": {
         "type": "census_ignore_list",
-        "default": [],
+        "default": [
+            {
+                "path": "/usr/bin/login",
+                "team_id": "platform",
+                "started_before": "root"
+            }
+        ],
         "strict": true, "safe": [],
         "host_only": true,
         "status": "wired",
-        "effect": "Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. All real/effective/saved uids must be system accounts foreign to every root owner; platform entries also require a root-owned chain with no group/other write permission. Listed executables may occupy a worktree. Invalid/unreadable signing state never qualifies. Host layer only: a launch override or Fabric override is not accepted."
+        "effect": "Host-owned exceptions for processes whose cwd cannot be read, matched on exact canonical executable path and signing team_id (or platform), optionally conditioned on started_before = \"root\" (stable kernel start at least 2s before the root's creation floor; during reconcile --abandon of a removed lane checkout, the earlier of queued_at and the Git registration's birth). A configured entry carries no uid condition and applies to every unreadable failure class: path, signature and the start condition are the whole proof, so add only entries you trust. Defaults to /usr/bin/login (team_id=platform, started_before=root). Invalid/unreadable signing or start state never qualifies, and each excusal raises a typed warning. Host layer only: a launch override or Fabric override is not accepted."
     },
     "routing.allow_unknown_partial_headroom": {
       "type": "bool", "default": false, "strict": true, "safe": false, "host_only": true, "status": "wired",
@@ -988,6 +1030,24 @@
       "effect": "What CI a writer lane runs or waits for, stated in its preamble and recorded with its value and source in the launch receipt and status. none: push the branch and report without dispatching, rerunning or waiting for CI; the chair runs CI once for the integrated batch. targeted: wait only for the checks that cover the change. full: wait for the full CI on the lane's pull request and fix what it reports. Set with `provenant config set lanes.ci_scope targeted` or under `[knobs]` in config.toml, or per graph node with `attempt.ci_scope` (`--set attempt.ci_scope=full`).",
       "trade_off": "Advisory guidance, not enforcement: it grants no CI dispatch authority and removes none. none saves runner minutes and the chair's waits; targeted or full lets a writer find its own CI failures before handoff at the cost of a CI run per lane."
     },
+    "lanes.pr": {
+      "type": "enum",
+      "values": ["never", "draft", "allowed"],
+      "default": "never",
+      "status": "wired",
+      "reader": "tools/front-door/crates/config/src/pr_policy.rs",
+      "effect": "Pull-request policy enforced by the lane's provider `gh` tool before it forwards a command. never (the default, and the default for leaf implement writer lanes in a graph) refuses `gh pr create|edit|close` and forge API writes; draft permits creation only as a draft (the wrapper adds `--draft`) and still refuses forge API writes; allowed forwards pull-request writes unchanged. A missing or unknown value falls back to never. The effective value and its source appear in the writer preamble, the launch receipt and `run --explain`. Set with `provenant config set lanes.pr draft` or under `[knobs]` in config.toml, or per launch with `--set lanes.pr=allowed`. Host-side publication after settlement is not a lane and is unaffected.",
+      "trade_off": "never keeps PR creation with the chair so a leaf cannot open one against the wrong base; draft lets a lane propose work without publishing it; allowed restores the old behaviour for lanes that must own their pull requests. The wrapper is a tool-policy control, not an authority boundary: a lane that invokes the real gh binary or another API client directly is outside it."
+    },
+    "lanes.verification": {
+      "type": "enum",
+      "values": ["check", "targeted", "full"],
+      "default": "targeted",
+      "status": "wired",
+      "reader": "tools/front-door/crates/run/src/verification.rs",
+      "effect": "Verification guidance in a writer lane's preamble. The lane formats only: it never compiles, seeds or admits a build. targeted (default) names the touched crates and their tests that the chair's integrated check compiles and lints; check narrows that to the touched crates; full names the whole workspace. CI runs the full suite in every case. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set with `provenant config set lanes.verification targeted` or under [knobs] in config.toml.",
+      "trade_off": "Advisory guidance; a wider scope spends the chair's host build cap, never the lane's, because lanes do not build."
+    },
     "lanes.brief_preamble": {
       "type": "string", "default": "", "status": "wired",
       "reader": "tools/front-door/crates/run/src/completion.rs",
@@ -1057,8 +1117,8 @@
       "default": "allow",
       "status": "wired",
       "reader": "tools/front-door/crates/run/src/objects.rs",
-      "effect": "Whether a lane may rebase or merge its own branch. allow (default) publishes a lane tip that diverged from the host branch by first merging the host branch into it; a real merge conflict retains the lane's commits and names the conflicting files and this setting, and unrelated histories, a configured merge.*.driver or a branch rewound behind its launch base retain them with their own typed cause. refuse retains the diverged commits in the attempt's private Git and refuses with the divergence cause, naming this setting. The effective value and its source appear in every divergence warning and refusal, and an unrecognised value warns with its layer and keeps this default. Set with `provenant config set lanes.history.rebase refuse` or under `[knobs]` in config.toml.",
-      "trade_off": "allow keeps a rebased or force-pushed lane's work and adds one host merge commit when the branch moved; refuse preserves the old history unchanged but needs the chair to reconcile the branch."
+      "effect": "Whether a lane may rebase or merge its own branch. allow (default) publishes a lane tip that diverged from the host branch by first merging the host branch into it. When the lane rewrites its unchanged custody-pinned launch tip, publication moves the host branch to the lane head with a rewritten-history warning and retains the displaced tip at refs/provenant/recovery/<oid>. A host tip advanced since launch takes the merge path regardless of remote-tracking refs. A real merge conflict retains the lane's commits and names the conflicting files and this setting, and unrelated histories, a configured merge.*.driver or a branch rewound behind its launch base retain them with their own typed cause. refuse retains the diverged commits in the attempt's private Git and refuses with the divergence cause, naming this setting. The effective value and its source appear in every divergence warning and refusal, and an unrecognised value warns with its layer and keeps this default. Set with `provenant config set lanes.history.rebase refuse` or under `[knobs]` in config.toml.",
+      "trade_off": "allow keeps a rebased or force-pushed lane's work; a genuine divergence adds one host merge commit, while a rewrite of the unchanged launch tip moves the branch with a warning and a recovery ref; refuse preserves the old history unchanged but needs the chair to reconcile the branch."
     },
     "lanes.history.unrooted_tip": {
       "type": "enum",
@@ -1089,6 +1149,15 @@
       "effect": "Whether the owner permits a non-fast-forward rewrite of the default branch by a push. refuse (default) is the owner gate: the push is refused with this setting and its source named. allow proceeds with a warning after the owner sets it in the host configuration; a launch override cannot grant it. Deleting the default branch and pushing it from a linked worktree stay refused under every value.",
       "trade_off": "refuse protects shared history; allow is the owner's explicit, host-only authority to replace it."
     },
+    "session.digest.scope": {
+      "type": "enum",
+      "values": ["project", "all"],
+      "default": "project",
+      "status": "wired",
+      "reader": "tools/front-door/src/hooks.rs, tools/front-door/src/hook_state.rs",
+      "effect": "Which projects' custody appears in the session-start digest. project (the default) names only custody this chair holds in the hook's project; unattended items open to adoption and other projects' rows collapse to one counted line naming `provenant status --adoptable`. all lists this chair's custody across projects as before. The effective scope and its layer appear in that line. Set with `provenant config set session.digest.scope all` or under `[knobs]` in config.toml.",
+      "trade_off": "project keeps another project's stale work out of the chair's context; all restores the cross-project view when the chair works across projects."
+    },
     "lanes.prepare_deps": {
       "type": "bool", "default": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/preparation.rs",
@@ -1107,7 +1176,7 @@
       "safe": false,
       "type": "bool", "default": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
-      "effect": "Let every lane with open network, read-only lanes included, use the host's gh login, a git credential helper and gh to push their own branch and read or update issues and pull requests.",
+      "effect": "Let every lane with open network, read-only lanes included, use the host's gh login, a git credential helper and gh to push their own branch and read or update issues and pull requests. Pull-request writes are separately governed by lanes.pr; with its default never the gh tool refuses them even when this knob is on.",
       "trade_off": "On (default) gives every networked lane your GitHub credential, so a malicious lane can extract the token and act outside the wrapper. false keeps publishing with the chair through host-side delivery."
     },
     "lanes.sandbox_floor": {

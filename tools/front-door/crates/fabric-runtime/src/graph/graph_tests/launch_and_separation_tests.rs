@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn node_pr_opt_in_resolves_with_launch_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let roots = provenant_test_support::test_roots(temp.path())
+        .unwrap()
+        .resolve(&provenant_test_support::IdentityPathResolver)
+        .unwrap();
+    let spec: AttemptSpec = serde_json::from_value(serde_json::json!({"pr": "draft"})).unwrap();
+    assert!(!spec.is_empty());
+    let peer_spec = spec.peer_bound();
+    let profile = provenant_config::read(&roots)
+        .unwrap()
+        .dispatch_profile(&peer_spec.lane_knobs())
+        .unwrap();
+    let policy = provenant_config::ResolvedPrPolicy::resolve(&profile);
+    assert_eq!(policy.receipt()["value"], "draft");
+    assert_eq!(policy.receipt()["source"], "launch");
+}
+
+#[test]
 fn node_attempt_spec_reaches_the_launch() {
     let spec = AttemptSpec {
         host: Some("workshop".into()),

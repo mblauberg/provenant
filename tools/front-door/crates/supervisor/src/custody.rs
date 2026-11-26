@@ -19,9 +19,13 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 mod indexes;
+mod writer_release;
 pub use indexes::{
     RecordedAttemptIndex, attempt_index_retired, recorded_attempt_indexes, register_attempt_index,
 };
+#[cfg(any(test, feature = "fixture"))]
+pub(crate) use writer_release::WRITER_LOCK_WAIT_HOOK;
+pub use writer_release::{lock_writer_exclusion, lock_writer_occupancy, release_in_progress};
 
 pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
@@ -89,7 +93,7 @@ pub enum CustodyError {
     #[error("record is invalid or belongs to another generation")]
     InvalidRecord,
     #[error(
-        "attempt evidence was written before shared worktree leases and is not upgraded in place; finish or stop that writer on the previous Provenant version, then reconcile it"
+        "attempt evidence was written before shared worktree leases and a holder may still be live; stop that holder and run `provenant reconcile` to clear the reservation"
     )]
     LegacyEvidence,
     #[error("launch handoff is unconfirmed; reservation remains fenced")]
@@ -416,6 +420,10 @@ pub(crate) struct Reservation {
     pub launch_state: LaunchState,
     pub attempt_device: Option<u64>,
     pub attempt_inode: Option<u64>,
+    #[serde(default)]
+    pub attempt_path: Option<PathBuf>,
+    #[serde(default)]
+    pub requester: Option<ActorId>,
     pub reservation_device: u64,
     pub reservation_inode: u64,
     pub binding: StoredWriterBinding,
@@ -748,6 +756,8 @@ pub(crate) fn acquire_writer_with_observer(
         launch_state: LaunchState::Prepared,
         attempt_device: None,
         attempt_inode: None,
+        attempt_path: None,
+        requester: None,
         reservation_device: metadata.device,
         reservation_inode: metadata.inode,
         binding: binding.0,
@@ -765,7 +775,7 @@ pub(crate) fn acquire_writer_with_observer(
     };
     reservation.validate()?;
     let siblings = list_writer_reservations_in_slot(&lock_directory)?;
-    if !siblings.issues.is_empty() {
+    if siblings.is_fenced() {
         return Err(CustodyError::Fenced);
     }
     let sibling_present = siblings
@@ -1396,6 +1406,11 @@ pub fn launch(
     };
     owned.lease.reservation.attempt_device = Some(metadata.device);
     owned.lease.reservation.attempt_inode = Some(metadata.inode);
+    owned.lease.reservation.attempt_path = match publication.directory.current_path() {
+        Ok(path) => Some(path),
+        Err(error) => return Err(failure(error.into(), publication)),
+    };
+    owned.lease.reservation.requester = Some(requester);
     if owned.cancel.is_cancelled() || capture.validate().is_err() {
         owned.lease.reservation.launch_state = LaunchState::NeverSpawned;
         owned.lease.reservation.unresolved_cleanup = false;
@@ -1552,6 +1567,19 @@ pub fn request_stop(
 }
 
 pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
+    stop_inner(handle, reason, false)
+}
+
+/// Request a stop without replacing a different, already recorded stop.
+pub fn stop_if_unrequested(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
+    stop_inner(handle, reason, true)
+}
+
+fn stop_inner(
+    handle: &CustodyHandle,
+    reason: StopReason,
+    preserve_existing: bool,
+) -> Result<StopReceipt> {
     let request = StopIntent {
         schema_version: 1,
         scope: handle.scope,
@@ -1577,6 +1605,7 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         Err(CustodyError::Filesystem(error)) if error.is_exists() => {
             match read_record::<StopIntent>(&handle.directory, "stop-intent.json", RECORD_LIMIT) {
                 Ok(previous) if previous == request => return Ok(StopReceipt::AlreadyRequested),
+                Ok(_) if preserve_existing => return Err(CustodyError::StopConflict),
                 Ok(previous)
                     if request.reason == StopReason::Steered
                         && previous.reason != StopReason::Steered =>
@@ -1836,6 +1865,12 @@ pub struct ProcessExit {
     /// The same descendants with boot and native start time, so recovery after
     /// the guardian is gone can prove a PID still names the process found.
     pub unresolved_identities: Vec<ProcessIdentity>,
+    /// Processes observed at the cleanup deadline with the writer lock path
+    /// still open. Descriptor occupancy is diagnostic only: it never grants
+    /// signal or settlement authority, so a holder found only by its open
+    /// descriptor is marked unproven.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_holders: Vec<ObservedHolder>,
     pub settlement_evidence: SettlementEvidence,
     /// Present while a guardian retains custody of this unresolved exit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1849,6 +1884,20 @@ pub struct ProcessExit {
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
+/// One process observed holding a lock resource at the cleanup deadline.
+/// `ownership_proven` is true only for an exact recorded descendant; a process
+/// found by its open descriptor is named for the owner but never signalled on
+/// that evidence alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedHolder {
+    pub pid: i64,
+    #[serde(default)]
+    pub command: String,
+    pub resource: String,
+    #[serde(default)]
+    pub ownership_proven: bool,
+}
+
 impl ProcessExit {
     /// Construct the guardian's pre-spawn admission evidence in one owner so
     /// retaining its resource fact cannot depend on an adapter's prose.
@@ -1887,6 +1936,7 @@ impl ProcessExit {
             unresolved_cleanup: false,
             unresolved_pids: vec![],
             unresolved_identities: vec![],
+            observed_holders: vec![],
             settlement_evidence: SettlementEvidence::NeverSpawned,
             retention: None,
             stdout: CaptureTotals::default(),
@@ -2348,12 +2398,6 @@ fn observe_checkpoint(
     })
 }
 
-#[cfg(any(test, feature = "fixture"))]
-thread_local! {
-    pub(crate) static WRITER_LOCK_WAIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 /// Observe other live occupancy holders using the per-attempt proof retained
 /// through guardian settlement. The caller's own holder is excluded by name.
 pub fn other_holders_live(
@@ -2386,80 +2430,6 @@ pub fn other_holders_live(
         }
     }
     Ok(false)
-}
-
-/// Acquire shared worktree occupancy without keeping the observation gate
-/// while another holder owns the lease.
-#[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
-pub fn lock_writer_occupancy(
-    directory: &Directory,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<LockGuard> {
-    lock_writer_mode(directory, LockMode::Shared, budget, cancel, clock)
-}
-
-/// Acquire exclusive worktree occupancy for removal and other operations that
-/// require every active holder to leave.
-#[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
-pub fn lock_writer_exclusion(
-    directory: &Directory,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<LockGuard> {
-    lock_writer_mode(directory, LockMode::Exclusive, budget, cancel, clock)
-}
-
-#[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
-fn lock_writer_mode(
-    directory: &Directory,
-    mode: LockMode,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<LockGuard> {
-    let timeout = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
-    let path = directory.current_path()?.join("writer.lock");
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| FsError::LockDeadlineOverflow { path: path.clone() })?;
-    loop {
-        if cancel.is_cancelled() {
-            return Err(FsError::Cancelled { path }.into());
-        }
-        // An observation is not writer custody: contention here is busy,
-        // regardless of the caller's permitted wait for the actual writer.
-        let observation = writer_admission_guard(directory)?;
-        // A nonblocking budget still probes the stable inode once. Keep the
-        // caller's cancellation checks before and after that acquisition.
-        let attempt = directory.lock(
-            OsStr::new("writer.lock"),
-            mode,
-            WaitBudget::nonblocking(clock.mono_now()),
-            cancel,
-            clock,
-        );
-        drop(observation);
-        match attempt {
-            Ok(lease) => return Ok(lease),
-            Err(FsError::LockTimeout { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
-        if cancel.is_cancelled() {
-            return Err(FsError::Cancelled { path }.into());
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(FsError::LockTimeout { path, timeout }.into());
-        }
-        #[cfg(any(test, feature = "fixture"))]
-        if let Some(hook) = WRITER_LOCK_WAIT_HOOK.with(|hook| hook.borrow_mut().take()) {
-            hook();
-        }
-        provenant_os::sys::wait_pause(remaining.min(Duration::from_millis(5)));
-    }
 }
 
 /// Initialise the short observer gate before publishing writer exclusion.
@@ -2535,7 +2505,7 @@ pub fn worktree_sharing_guard(
         return Err(CustodyError::InvalidRecord);
     }
     let siblings = list_writer_reservations_in_slot(slot)?;
-    if !siblings.issues.is_empty() {
+    if siblings.is_fenced() {
         return Err(CustodyError::Fenced);
     }
     let sibling_present = siblings
@@ -2783,6 +2753,11 @@ pub struct WriterReservation {
     /// Native presence of the recorded guardian; None means unobservable.
     pub live: Option<bool>,
     pub age: Option<String>,
+    /// Schema-1 evidence with no holder to stop: listed so reconcile and GC
+    /// can clear it, but still fencing until they do. Kept out of the report
+    /// so the stable serialized listing does not grow a policy-only field.
+    #[serde(skip)]
+    pub legacy_fence: bool,
 }
 impl WriterReservation {
     /// The stable lock slot containing this attempt's journal.
@@ -2811,6 +2786,19 @@ fn reservation_holder_live(
         ProcessObservation::Absent => Some(false),
         ProcessObservation::Unknown(_) => None,
     }
+}
+
+/// A pre-lease reservation whose launch never produced a holder has no process
+/// for a previous version to finish. This version can withdraw or settle it
+/// through reconcile, so it is listed as a fence with a current-version remedy
+/// instead of being reported as unresolvable legacy evidence.
+fn holderless_pre_lease_reservation(reservation: &Reservation) -> bool {
+    reservation.guardian.is_none()
+        && reservation.provider.is_none()
+        && matches!(
+            reservation.launch_state,
+            LaunchState::Prepared | LaunchState::NeverSpawned
+        )
 }
 
 fn format_age_ns(modified_ns: i128, now: provenant_core::WallTime) -> String {
@@ -2845,6 +2833,15 @@ pub enum ReservationIssueKind {
 pub struct ReservationListing {
     pub reservations: Vec<WriterReservation>,
     pub issues: Vec<ReservationIssue>,
+}
+impl ReservationListing {
+    /// Whether this listing holds custody evidence that keeps the slot fenced
+    /// until reconcile or GC clears it. Legacy holderless reservations are
+    /// listed rather than reported as issues so recovery can name and withdraw
+    /// them, but they must not open the slot to a new holder first.
+    pub fn is_fenced(&self) -> bool {
+        !self.issues.is_empty() || self.reservations.iter().any(|r| r.legacy_fence)
+    }
 }
 /// Malformed or inaccessible entries are reported without hiding other
 /// reservations. Only supervisor interprets its private reservation format.
@@ -3111,16 +3108,25 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             if attempt != OsStr::new(&reservation.scope.attempt.to_string()) {
                 return Err(CustodyError::InvalidRecord);
             }
-            // Reported with the reservation's other issues, so reconcile warns
-            // and names the attempt instead of leaving it silently fenced.
-            if liveness::is_legacy_record(&child)? {
+            let legacy = liveness::is_legacy_record(&child)?;
+            let holderless = holderless_pre_lease_reservation(&reservation);
+            // A schema-1 record whose launch never produced a holder is stale
+            // evidence this version can reconcile, not work for an older
+            // version. List it so reconcile and GC name the attempt and offer a
+            // remedy this version can carry out. Keep the fence for records
+            // that may still have a live holder.
+            if legacy && !holderless {
                 return Err(CustodyError::LegacyEvidence);
             }
+            let live = if legacy && holderless {
+                Some(false)
+            } else {
+                reservation_holder_live(&reservation, &SystemProcessObserver)
+            };
             let branch = match &reservation.binding {
                 StoredWriterBinding::Worktree { branch, .. } => Some(branch.clone()),
                 _ => None,
             };
-            let live = reservation_holder_live(&reservation, &SystemProcessObserver);
             let age = child
                 .metadata_at(OsStr::new("reservation.json"), false)
                 .ok()
@@ -3132,6 +3138,7 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
                 branch,
                 live,
                 age,
+                legacy_fence: legacy && holderless,
             }))
         };
         match entry() {
@@ -3573,6 +3580,56 @@ impl Recovery {
         )?)?;
         indexes::retire_unlaunched_index(&self.directory, &self.reservation)?;
         clear_reservation(&self.directory, self.scope())
+    }
+    /// Withdraw a holderless orphan after Run has proved that no attempt row
+    /// exists while this recovery holds both writer and holder exclusion.
+    /// Bound evidence must still name the exact private attempt directory.
+    pub fn withdraw_orphan(
+        self,
+        attempt: Option<&Directory>,
+        unbound_store_proven: bool,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<bool> {
+        if self.reservation.guardian.is_some()
+            || self.reservation.provider.is_some()
+            || !self.reservation.descendants.is_empty()
+            || self.reservation.omitted_descendants != 0
+        {
+            return Ok(false);
+        }
+        match self.reservation.launch_state {
+            LaunchState::Prepared if unbound_store_proven => {
+                self.withdraw_prepared()?;
+            }
+            LaunchState::NeverSpawned => {
+                let Some(attempt) = attempt else {
+                    return Ok(false);
+                };
+                let metadata = attempt.metadata()?;
+                if self.reservation.attempt_device != Some(metadata.device)
+                    || self.reservation.attempt_inode != Some(metadata.inode)
+                    || self.reservation.unresolved_cleanup
+                    || self.reservation.census_incomplete
+                {
+                    return Ok(false);
+                }
+                let _custody = attempt.lock(
+                    OsStr::new("custody.lock"),
+                    LockMode::Exclusive,
+                    budget,
+                    cancel,
+                    clock,
+                )?;
+                // No provider ran. Retire only a verified private index and keep
+                // all attempt artefacts for inspection.
+                indexes::retire_unlaunched_index(&self.directory, &self.reservation)?;
+                clear_reservation(&self.directory, self.scope())?;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
     pub fn verify_settlement(&self, attempt: &Directory) -> Result<SettlementCommit> {
         let metadata = attempt.metadata()?;

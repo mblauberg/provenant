@@ -233,6 +233,7 @@ pub fn build_candidate(
 )]
 mod tests {
     use super::*;
+    use crate::pr::landing::ports::Mergeability;
     use crate::pr::landing::{
         approval::Approvals,
         fakes::{FakeForge, FakeRepo},
@@ -245,6 +246,7 @@ mod tests {
             base_branch: branch.into(),
             author: author.into(),
             state: PullRequestState::Open,
+            mergeability: Mergeability::Unknown,
             merged_commit: None,
             stack: None,
             draft: false,

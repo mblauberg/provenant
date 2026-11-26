@@ -529,6 +529,7 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                 title: None,
                 prompt: "fixture".into(),
                 base: None,
+                fixture: None,
                 pinned_base: None,
                 source_head: None,
                 head: None,

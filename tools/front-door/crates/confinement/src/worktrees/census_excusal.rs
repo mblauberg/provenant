@@ -25,21 +25,24 @@ static SYSTEM_CWD_OBSERVER: SystemCwdObserver = SystemCwdObserver;
 /// a test injects a recording observer with `with_inner` and proves the trait
 /// method itself forwards non-empty entries to the matcher it calls.
 pub(super) struct PolicyCwdObserver<'a> {
-    entries: &'a [CensusIgnoreEntry],
+    entries: std::borrow::Cow<'a, [CensusIgnoreEntry]>,
     inner: &'a dyn CwdObserver,
 }
 
 impl<'a> PolicyCwdObserver<'a> {
-    pub(super) fn new(entries: &'a [CensusIgnoreEntry]) -> Self {
+    pub(super) fn for_roots(roots: &[PathBuf], entries: &'a [CensusIgnoreEntry]) -> Self {
         Self {
-            entries,
+            entries: resolve_entries_for_roots(roots, entries),
             inner: &SYSTEM_CWD_OBSERVER,
         }
     }
 
     #[cfg(test)]
     pub(super) fn with_inner(entries: &'a [CensusIgnoreEntry], inner: &'a dyn CwdObserver) -> Self {
-        Self { entries, inner }
+        Self {
+            entries: std::borrow::Cow::Borrowed(entries),
+            inner,
+        }
     }
 }
 
@@ -71,7 +74,10 @@ impl CwdObserver for PolicyCwdObserver<'_> {
         pid: i64,
         _: &[CensusIgnoreEntry],
     ) -> Option<CensusIgnoreEntry> {
-        self.inner.configured_unreadable_image(pid, self.entries)
+        self.inner.configured_unreadable_image(pid, &self.entries)
+    }
+    fn process_start_time(&self, pid: i64) -> Option<provenant_core::WallTime> {
+        self.inner.process_start_time(pid)
     }
     fn kernel_thread(&self, pid: i64) -> bool {
         self.inner.kernel_thread(pid)
@@ -84,7 +90,7 @@ impl CwdObserver for PolicyCwdObserver<'_> {
         provenant_os::pid::UnreadablePolicyExcusal,
         provenant_os::pid::UnreadablePolicyFailure,
     > {
-        self.inner.unreadable_policy_uids(pid, self.entries)
+        self.inner.unreadable_policy_uids(pid, &self.entries)
     }
     fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
         self.inner.cwd(pid)
@@ -225,15 +231,133 @@ pub(super) fn listed_uid_excusal(
 
 /// The host's configured exception extends the built-in defaults to any
 /// unreadable failure class. The observer matches the canonical executable and
-/// team identifier; a configured path that only looks similar never excuses.
-fn configured_excusal(
+/// team identifier; a configured path that only looks similar never excuses, and
+/// `started_before` requires a stable kernel start time preceding the floor by
+/// at least 2 seconds.
+pub(super) fn configured_entry_matches(
     cwd_observer: &dyn CwdObserver,
     pid: i64,
     entries: &[CensusIgnoreEntry],
 ) -> bool {
-    cwd_observer
-        .configured_unreadable_image(pid, entries)
-        .is_some()
+    let needs_start = entries.iter().any(|entry| entry.started_before.is_some());
+    let start_before = needs_start
+        .then(|| cwd_observer.process_start_time(pid))
+        .flatten();
+    let Some(matched) = cwd_observer.configured_unreadable_image(pid, entries) else {
+        return false;
+    };
+    // A conditioned entry needs a known start before the floor, read twice so
+    // a reused pid between the reads fails closed.
+    matched.started_before.is_none()
+        || (matched.started_before_allows(start_before)
+            && cwd_observer.process_start_time(pid) == start_before)
+}
+
+/// Rewrite every `StartedBefore::Root` entry to `StartedBefore::At(floor)` when
+/// a floor is available, or omit `Root`-conditioned entries when `floor` is `None`.
+fn rewrite_root_floor(
+    entries: &[CensusIgnoreEntry],
+    floor: Option<provenant_core::WallTime>,
+) -> Vec<CensusIgnoreEntry> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let mut cloned = entry.clone();
+            if cloned.started_before == Some(provenant_os::pid::StartedBefore::Root) {
+                cloned.started_before = Some(provenant_os::pid::StartedBefore::At(floor?));
+            }
+            Some(cloned)
+        })
+        .collect()
+}
+
+pub(super) fn apply_override_floor(
+    entries: Vec<CensusIgnoreEntry>,
+    floor: Option<provenant_core::WallTime>,
+) -> Vec<CensusIgnoreEntry> {
+    match floor {
+        Some(floor) => rewrite_root_floor(&entries, Some(floor)),
+        None => entries,
+    }
+}
+
+/// The filesystem birth time of `path` (following symlinks), or `None` when
+/// the path is absent or the filesystem does not report one.
+pub(super) fn birth_time(path: &std::path::Path) -> Option<provenant_core::WallTime> {
+    let created = std::fs::metadata(path).ok()?.created().ok()?;
+    let duration = created.duration_since(std::time::UNIX_EPOCH).ok()?;
+    let micros = i64::try_from(duration.as_micros()).ok()?;
+    provenant_core::WallTime::from_micros(micros).ok()
+}
+
+/// Earliest filesystem birth time across every scoped root. Every root must
+/// exist and report `Metadata::created()`; any absent root or error yields
+/// `None` so `StartedBefore::Root` fails closed.
+fn root_creation_floor(roots: &[PathBuf]) -> Option<provenant_core::WallTime> {
+    if roots.is_empty() {
+        return None;
+    }
+    let mut earliest: Option<provenant_core::WallTime> = None;
+    for root in roots {
+        let floor = birth_time(root)?;
+        earliest = Some(match earliest {
+            Some(current) => current.min(floor),
+            None => floor,
+        });
+    }
+    earliest
+}
+
+pub(super) fn resolve_entries_for_roots<'a>(
+    roots: &[PathBuf],
+    entries: &'a [CensusIgnoreEntry],
+) -> std::borrow::Cow<'a, [CensusIgnoreEntry]> {
+    if !entries
+        .iter()
+        .any(|entry| entry.started_before == Some(provenant_os::pid::StartedBefore::Root))
+    {
+        return std::borrow::Cow::Borrowed(entries);
+    }
+    std::borrow::Cow::Owned(rewrite_root_floor(entries, root_creation_floor(roots)))
+}
+
+pub(super) fn unknown_worker_evidence(roots: &[PathBuf], detail: &str) -> WorkerEvidence {
+    WorkerEvidence {
+        states: roots
+            .iter()
+            .cloned()
+            .map(|root| (root.clone(), Occupancy::census_unknown(root, detail)))
+            .collect(),
+        holders: BTreeMap::new(),
+        taints: roots
+            .iter()
+            .cloned()
+            .map(|root| {
+                (
+                    root,
+                    TaintCause::Uncertainty(UncertaintyReason::CensusUnavailable),
+                )
+            })
+            .collect(),
+        details: roots
+            .iter()
+            .cloned()
+            .map(|root| (root, detail.to_owned()))
+            .collect(),
+        held_incomplete: true,
+        ..WorkerEvidence::default()
+    }
+}
+
+impl super::census::CensusPolicyWorkers<'_> {
+    /// Supply a proven creation floor when a scoped root (such as a removed
+    /// writer worktree during abandonment) lacks a live birth time. Rewrites
+    /// `StartedBefore::Root` entries to `At(floor)`.
+    pub fn with_creation_floor(mut self, floor: provenant_core::WallTime) -> Self {
+        self.root_floor = Some(floor);
+        self.entries = rewrite_root_floor(&self.entries, Some(floor));
+        self
+    }
 }
 
 fn approved_daemon_executable(path: &Path) -> bool {
@@ -300,6 +424,9 @@ pub(super) struct ExcusalEvidence {
     pub placed_inside: bool,
     /// A root's own identity could not be read, so placement is undecidable.
     pub root_undecidable: bool,
+    /// The already-checked configured-image decision. It is taken once per
+    /// observation so its start-time recheck brackets the one decision used.
+    pub configured: bool,
 }
 
 /// Excuse one unreadable process from blocking the census, or return false
@@ -312,7 +439,6 @@ pub(super) fn excuse_unreadable(
     pid: i64,
     roots: &[PathBuf],
     evidence: ExcusalEvidence,
-    entries: &[CensusIgnoreEntry],
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> bool {
     let ExcusalEvidence {
@@ -320,6 +446,7 @@ pub(super) fn excuse_unreadable(
         listed,
         placed_inside,
         root_undecidable,
+        configured,
     } = evidence;
     if placed_inside || root_undecidable {
         return false;
@@ -333,9 +460,7 @@ pub(super) fn excuse_unreadable(
             {
                 "platform daemon with cwd outside every root"
             }
-            _ if configured_excusal(cwd_observer, pid, entries) => {
-                "configured unreadable image exception"
-            }
+            _ if configured => "configured unreadable image exception",
             _ => return false,
         }
     };

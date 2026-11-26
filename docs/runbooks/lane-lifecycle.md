@@ -54,8 +54,17 @@ refs intact. Failed and cancelled lanes keep their worktrees.
   `projects/PROJECT_ID/github.json` under the state root; matching calls warn
   and continue. The lane's `gh` warns every `lanes.gh_budget` calls and never
   stops one.
-- A lane opens its pull request with `gh pr create --body-file`; `provenant pr
-  open` is for a settled attempt (see [GitHub workflow](github-workflow.md#branch-commit-pull-request)).
+- A lane's pull requests follow `lanes.pr` (default `never`, so a leaf implement
+  lane does not open one against the wrong base). `never` makes the lane's `gh`
+  refuse PR mutations and forge writes; `draft` adds `--draft` to `pr create`,
+  permits edit, close, comment and review, and refuses other PR writes and forge
+  writes. Both refuse unknown PR subcommands until classified; `allowed` forwards
+  unchanged. The policy also applies when `lanes.publish=false`; an unsandboxed
+  lane can still access ambient host credentials. Set it with
+  `provenant config set lanes.pr draft` or `--set lanes.pr=allowed`. The value
+  and its source appear
+  in the preamble, launch receipt and `run --explain`. `provenant pr open` is a
+  host operation for a settled attempt (see [GitHub workflow](github-workflow.md#branch-commit-pull-request)).
 - Writers follow `lanes.ci_scope` (default `none`: push and report, and the chair
   runs CI once for the batch). Pass `--set attempt.ci_scope=targeted` (or `full`)
   for a lane that must wait for CI. `run --explain` shows both values and their
@@ -92,6 +101,15 @@ uncertain or reset a worktree with edits.
   import, so recover that work by hand. For a retained queued lane that never
   dispatched, run `provenant reconcile --abandon NAME/NODE#N --reason TEXT`; it
   refuses attempts with process evidence, a fence or worktree custody.
+- A lane whose guardian dies before publishing an exit can leave its recorded
+  process tree holding a heavy lock. `provenant reconcile TARGET` ends the
+  recorded provider and descendants under writer exclusion after proving the
+  guardian gone, then settles the attempt. When the guardian publishes a cleanup
+  observation, `status` names the observed PIDs and custody writer-lock path;
+  an open descriptor alone leaves ownership unproven. Arbitrary repository
+  locks and unrecorded detached processes may not be reported, especially if
+  the guardian dies before publishing an exit. It never signals on a bare PID,
+  a process group or an open path.
 - `reconcile` reports storage errors in `writer_reservation_errors` and exits
   non-zero.
 - A valid handoff declaring `stopped_early` or `blocked` makes an otherwise

@@ -21,6 +21,22 @@ when the metadata or the registry omits one.
 - Why: three independently kept lists drift silently unless each is checked
   against what the runtime accepts.
 
+## Chair hook budget
+
+`domains.hooks.timeout_secs` (default 10) is the one installed timeout for
+chair-start, chair-stop and chair-prompt, both for native registrations and for
+the chair's own switch settings. Every hook runs under a single local budget of
+60% of that value. A hook that reaches the budget warns with `HOOK_BUDGET_OVERRUN`,
+records the overrun and its setting source under the state root's
+`hooks/diagnostics/failures.jsonl`, and returns before the host timeout. Usage
+ingest is never done on the hook path: chair hooks queue a detached
+`telemetry ingest --incremental` worker, which resumes durable transcript cursors
+and has no time window to rescan. `provenant doctor` (and `provenant hosts doctor`)
+shows the installed timeout with its source and every overrun in the last 24 h.
+
+- Why: a slow transcript must not cost the chair a hook, and the operator can see
+  both the setting and its effect without reading raw diagnostics.
+
 ## Targets
 
 Target verbs share one grammar and resolve only the named graph. Ambiguity is
@@ -198,7 +214,16 @@ relayed rows use the same paced reread because the relay has no remote
 subscription. Every blocking forge operation inside a wait shares one request
 context (the wait's absolute deadline, capped per read by
 `domains.wait.pr_read_timeout_seconds`, and its cancellation), and a wait that
-settles cancels the forge transport of its other targets.
+settles cancels the forge transport of its other targets. Wait event lines,
+including `--follow` transitions and their digest lines, stay bounded to
+`SUMMARY_ROW_BYTES` with a clip marker: a wait is a stream of observations, not
+a detail view, even though `status NAME --full` prints whole rows.
+
+A live attempt past its configured silence threshold ends a wait
+with the `stalled` outcome and exit code 6. Each target's `settle` field is
+`stalled` and its line names the last-event time; the work is still running, so
+a stalled outcome never claims settlement and its next step points at `status`.
+A timeout still reports `wait timed out; the work continues`.
 
 Wait settings resolve in one place for every waiter. Configuration a waiter
 cannot use warns and leaves the compiled defaults in force, and reports name
@@ -221,12 +246,25 @@ graph with a live attempt is still listed. The headline leads with the live-lane
 count (`live_lanes` in JSON). One state vocabulary serves the summary, rows and
 `status NAME`: a live attempt is `running`, work waiting for admission or launch
 is `pending`, and a non-live writer keeps its presence label. Human and
-structured output share the selection.
+structured output share the selection. A live attempt always represents its
+node; otherwise the newest attempt that produced a result represents it, so a
+later preparation refusal that never launched cannot hide an earlier
+successful attempt, its result path or its summary. The refusal stays visible
+in the full rows and its own operation outcome. One bounded set of host-wide
+evidence — run store, admission holders, worktree index and process census —
+serves every listed graph, so a `--full` page never repeats those scans per graph.
+The admission summary reuses that holder reading, and the process census is
+taken only when local attempt evidence needs it.
 
 `status --mine` reads active custody across projects (or one `--project`),
 including attempts nested under the current chair and unattended items open to
-adoption. Settled custody leaves the view, and the session-start digest reads
-this view instead of extracting PRs from prose.
+adoption. `status --adoptable` lists only the unattended items open to adoption.
+Settled custody leaves the view. The session-start digest reads this view
+instead of extracting PRs from prose: it names only custody this chair holds in
+the hook's project, and collapses unattended and other projects' rows into one
+`Unattended: N (M this project) — provenant status --adoptable` line. Set
+`session.digest.scope = all` under `[knobs]` to list the chair's custody across
+projects again; the effective scope and its layer appear in that line.
 
 Writer presence is `live`, `unattended`, `settling` or `unknown`. `running` shows
 only while the recorded guardian or provider identity is present. A changed boot
@@ -234,14 +272,27 @@ proves the old process tree is gone; same-boot absence, a reused PID, an
 unobservable host, incomplete evidence and unreachable peers stay `unknown`,
 because a child may have forked into another session and been reparented. Status
 never mutates or schedules recovery; unattended and settling rows name the scoped
-`provenant reconcile` action, which rechecks custody before settlement.
+`provenant reconcile` action, which rechecks custody before settlement. A
+settling row also names PIDs and the custody writer-lock path observed at the
+guardian's cleanup deadline, when that observation was published; a resource
+found only through its open descriptor is labelled ownership unproven, because
+an observed path is not proof of ownership. Other locks and unrecorded detached
+processes may not be observed, including when no exit was published. `provenant reconcile <lane>` ends only the
+survivors the attempt proved and leaves unproven holders for the owner to close.
 
 `status NAME --full` gives each unsettled attempt its newest event time and
 names the source (`output`, `started` or `queued`), so old output is not mistaken
-for a heartbeat. `child_command` is set only for a command that went through the
+for a heartbeat. `status --json` also carries `stalled: true` when a live
+attempt's last output, or its start if no output has arrived, is older than
+`providers.<id>.stall_after_seconds`; the queued fallback never sets it. The
+chair's digest prints `stalled last_event=<time>` beside the same attempt. The threshold and its layer appear under the row's recorded limits and
+in `run --explain`. `child_command` is set only for a command that went through the
 admission shim, and a lane waiting on a heavy-job lock reports the command it
 waits to run. The attempt directory and child command stay host-local and never
-cross a peer boundary.
+cross a peer boundary. `--full` prints each status row whole, including a long
+refusal reason naming its path; the default summary bounds each row to
+`SUMMARY_ROW_BYTES` with a clip marker, keeping the reason's leading clause (the
+text before the first `;`) inside that bound.
 
 `status` and `worktree list` report `stranded work` (`stranded_work` in
 `status --json`): a worktree with uncommitted edits or an interrupted Git
@@ -262,6 +313,11 @@ external action warns and can be retried by adoption.
 `result NAME[/NODE[#N]]` reads current lane evidence in one call, and for a
 review node projects the settled `verdict` and typed `findings[]` through the
 projection `status` and `wait` read, not by parsing the result artifact again.
+The human `--full` view prints each finding's severity, location (`file:line`
+when present), summary and suggested fix from those same typed fields, with no
+placeholder for a missing location or fix. Each field is terminal-safe: control,
+format and bidi characters are stripped before it is bounded, so one finding
+cannot forge or reorder human lines. The compact view keeps a severity count.
 Missing or unavailable evidence is not proof of a check.
 
 `output GRAPH` reads the newest settled attempt of a graph's one non-composite
@@ -270,16 +326,41 @@ exports without inventing an attempt identity, `output GRAPH/NODE` selects a
 composite explicitly, and a bare graph with several top-level nodes is
 ambiguous and lists them. Offsets and limits count bytes; a page that splits a
 UTF-8 character returns lossless base64 and advances by the bytes returned.
-`output` and `steer` resolve the same numbered attempt, and a clamped tail
-reports its effective bound.
+The default view shows a bounded page, keeping its opening and tail and naming any omitted middle.
+A result may span pages or exceed that view. `output TARGET --final --to FILE` collects the complete
+sealed lane result into FILE, including its final message and handoff, checking page identity as it
+reads. It replaces FILE and reports the written byte count; it requires a settled lane attempt.
+`--full` prints the selected page with host facts.
+`--tail N` bounds the last N bytes; `--tail-lines N` bounds the last N lines and
+is clamped to the shared line bound in every reader, including peer, composite
+and event reads. A non-applicable header is omitted, never printed as
+unavailable, and when stdout is not a TTY human output carries no ANSI escapes.
+A settled lane that already carries a result, including a failed lane, is not
+followed by the graph's failure rows, even if a sibling is unfinished: stale
+attempt status, including unreadable records, belongs to a reader of unfinished
+work, not to the lane's answer. `output` and `steer` resolve the same numbered
+attempt, and a clamped tail
+reports its effective bound in `tail` for bytes or `tail_lines` for lines, with
+`tail_clamped` indicating whether the requested line count was reduced.
 
 - Why: a reader must be able to inspect the intended attempt safely.
 
 ### Settled attempt provenance receipts
 
 A receipt identifies a settled local attempt and reports only supported route
-and reviewer attribution. Ambiguous, running or peer-owned targets are refused;
-missing evidence stays unknown.
+and reviewer attribution. Every receipt names the adapter, model, family,
+effort, `effort_source`, `resolved_from` and role, for both writer and reviewer
+lanes and for every adapter. Family for both the applied model and observed
+reviewer comes from the effective routing catalogue at output time, including
+discovery and host and project overlays;
+an effort is the applied value, or the value and source recorded when an adapter
+dropped or defaulted it. A requested effort alone is not evidence of the
+applied effort; without recorded applied or warning evidence, both effort and
+its source are `unknown`. `resolved_from` names
+the recorded launch decision (an explicit pin, a pool, a named route, a
+fallback or a continuation), so dispatched lanes do not collapse to "unknown".
+Ambiguous, running or peer-owned targets are refused; missing evidence stays
+unknown with its source.
 
 - Why: provenance must not mistake a writer for a reviewer or infer a route.
 
@@ -424,6 +505,16 @@ GraphQL and REST when either is unavailable or rate limited. A wait's
 conditional observation reports `review=unknown` because the REST response has no
 review decision; CI settlement alone decides the verdict.
 
+Review-subject selection reads the same observer. When its REST core quota is
+spent, a batched GraphQL row with valid base and head subject fields and a usable
+PR URL serves the launch even if its check rollup is truncated; rollup completeness
+does not determine subject completeness. A fresh cached row missing or invalidating
+those fields is refreshed through GraphQL before refusing. When the required subject
+fields are unavailable, the refusal is typed `FORGE_QUOTA` and its `next:` says `retry after
+<reset>`. It is never rendered as invalid input, because the caller supplied no
+bad field, and a peer refusing this way is retried rather than settled as a
+verdict. (#3986)
+
 ### Integration batch membership
 
 `pr status` infers integration batches from bounded Git history: a member whose
@@ -450,6 +541,15 @@ GitHub's head, the wait warns and watches the local tip. The last line of output
 names every target's settle state (`settled ok`, `failed`, `needs input` or
 `still running at timeout`) and the one next command; the observation method
 shows only under `--full` and in JSON.
+
+A head does not settle on whichever checks happen to exist. `wait --pr` reads
+the base branch's required-check policy through the same CI observer as the
+head's checks, and stays pending until every required check has been created
+and passed on that head. A pending selector job, a required check that has not
+been created, or an unreadable policy means wait; a failed required check
+settles a failure. The names come from branch protection and rulesets, so a
+change to the required set needs no code change. An unsuccessful wait names the
+failed check in its output rather than returning exit 1 without a reason.
 
 `ci failures pr NUMBER` and `ci failures run ID` read each ended job's log from
 the Actions jobs endpoint, so evidence is available when that job ends, not when

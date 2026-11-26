@@ -102,10 +102,20 @@ impl Summary {
     /// shared row limits. Rows past the limit are counted, not dropped silently.
     pub fn new(headline: impl Into<String>, rows: Vec<String>) -> Self {
         let omitted = rows.len().saturating_sub(limits::SUMMARY_ROWS);
+        Self::bounded(
+            headline,
+            rows.into_iter().take(limits::SUMMARY_ROWS).collect(),
+            omitted,
+        )
+    }
+    /// A headline and owner-selected rows, each bounded by the shared row limit,
+    /// with the owner's count of rows it held back. This is the compact view's
+    /// one bound: owners build whole rows, and `--full` renders that whole text
+    /// instead of calling this.
+    pub fn bounded(headline: impl Into<String>, rows: Vec<String>, omitted: usize) -> Self {
         let lines = std::iter::once(headline.into())
             .chain(
                 rows.iter()
-                    .take(limits::SUMMARY_ROWS)
                     .map(|row| bounded_text(row, limits::SUMMARY_ROW_BYTES)),
             )
             .collect();
@@ -736,6 +746,43 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn compact_summary_bounds_owner_selected_rows_and_full_keeps_them_whole()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The owner hands over whole rows; only the compact renderer bounds
+        // them. --full renders the same text without going through the summary.
+        let whole = format!("node failed: {}", "z".repeat(limits::SUMMARY_ROW_BYTES));
+        let summary = Summary::bounded("head", vec![whole.clone()], 0);
+        let result = CommandResult::new("status", Outcome::Ok, ());
+
+        let mut compact = Vec::new();
+        render(
+            &result,
+            RenderMode::Compact {
+                text: &whole,
+                read_only: true,
+                summary: Some(&summary),
+            },
+            &mut compact,
+        )?;
+        let compact = String::from_utf8(compact)?;
+        let row = compact.lines().nth(1).expect("the summary row");
+        assert!(row.len() <= limits::SUMMARY_ROW_BYTES, "{row}");
+        assert!(row.ends_with("..."), "no clip marker: {row}");
+
+        let mut full = Vec::new();
+        render(
+            &result,
+            RenderMode::Human {
+                text: &whole,
+                read_only: true,
+                summary: Some(&summary),
+            },
+            &mut full,
+        )?;
+        assert_eq!(String::from_utf8(full)?, whole);
+        Ok(())
+    }
+    #[test]
     fn fallback_says_how_much_it_omitted_and_never_invents_a_next()
     -> Result<(), Box<dyn std::error::Error>> {
         let text = (0..100)
@@ -1119,6 +1166,7 @@ mod tests {
             (Outcome::Waiting, 0),
             (Outcome::Timeout, 124),
             (Outcome::Cancelled, 130),
+            (Outcome::Stalled, 6),
         ] {
             assert_eq!(exit_status(&outcome), code);
         }

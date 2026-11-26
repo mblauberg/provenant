@@ -1,7 +1,8 @@
 //! Process census and worker observation.
 use super::census_excusal::{
     ExcusalEvidence, PlacementEvidence, PolicyCwdObserver, UnreadableFailure,
-    any_root_identity_unreadable, excusal_applies, excuse_unreadable, listed_uid_excusal,
+    any_root_identity_unreadable, apply_override_floor, configured_entry_matches, excusal_applies,
+    excuse_unreadable, listed_uid_excusal, resolve_entries_for_roots, unknown_worker_evidence,
     warn_unreadable_processes,
 };
 use super::*;
@@ -202,7 +203,7 @@ pub(super) fn root_is_undecidable(root: &Path) -> bool {
 /// anchors the split, so a firmlink or symlink alias of the same directory
 /// splits the same way. `None` for a relative path, a parent traversal, a
 /// dangling symlink among the removed components or an unreadable ancestor.
-fn split_at_extant_directory(path: &Path) -> Option<((u64, u64), PathBuf)> {
+pub(super) fn split_at_extant_directory(path: &Path) -> Option<((u64, u64), PathBuf)> {
     use std::path::Component;
     if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
         return None;
@@ -247,6 +248,41 @@ pub(super) fn absent_root_contains(path: &Path, root: &Path) -> Option<bool> {
         return Some(false);
     }
     Some(path_directory == root_directory && path_removed.starts_with(&root_removed))
+}
+
+/// Rule out a removed root for a path that cannot be split because a
+/// directory on it is unreadable to this user. A symlink-free path under the
+/// removed root passes through every existing ancestor of that root, so when
+/// the path's nearest readable directory is none of them, by identity, the
+/// path cannot lie under it. Kernel-reported paths are symlink-free; a path
+/// that shows a symlink below its nearest readable directory could still alias
+/// the root and stays possibly inside, as does anything unresolved. The rule
+/// assumes the root and the path are seen through one mount view.
+fn absent_root_could_hold(path: &Path, root: &Path) -> bool {
+    let directory = |candidate: &Path| {
+        std::fs::metadata(candidate)
+            .ok()
+            .filter(std::fs::Metadata::is_dir)
+            .map(|metadata| (metadata.dev(), metadata.ino()))
+    };
+    let root_ancestors = root
+        .ancestors()
+        .skip(1)
+        .filter_map(directory)
+        .collect::<Vec<_>>();
+    if root_ancestors.is_empty() {
+        return true;
+    }
+    for ancestor in path.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(metadata) if metadata.is_dir() => {
+                return root_ancestors.contains(&(metadata.dev(), metadata.ino()));
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 /// The owner of a scoped root. A removed root is owned as its nearest existing
@@ -869,6 +905,7 @@ pub struct CensusPolicyWorkers<'a> {
     inner: &'a dyn WorkerObserver,
     pub(super) entries: Vec<CensusIgnoreEntry>,
     pub(super) exclude_ancestors: bool,
+    pub(super) root_floor: Option<provenant_core::WallTime>,
     roots: provenant_core::Roots,
     for_run: bool,
 }
@@ -898,6 +935,7 @@ impl<'a> CensusPolicyWorkers<'a> {
             inner,
             entries: config.census_ignore_unreadable()?,
             exclude_ancestors: for_run && config.census_exclude_ancestors()?,
+            root_floor: None,
             roots: roots.clone(),
             for_run,
         })
@@ -946,7 +984,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
         let config = provenant_config::read_knobs(&self.roots).ok()?;
         Some(CensusEpochPolicy {
-            entries: config.census_ignore_unreadable().ok()?,
+            entries: apply_override_floor(config.census_ignore_unreadable().ok()?, self.root_floor),
             exclude_ancestors: self.for_run && config.census_exclude_ancestors().ok()?,
         })
     }
@@ -1279,7 +1317,7 @@ pub(super) fn system_live_process_with_policy(
     observe_worker_holders(
         &roots,
         &SystemProcessObserver,
-        &PolicyCwdObserver::new(entries),
+        &PolicyCwdObserver::for_roots(&roots, entries),
         &current,
         ancestors,
     )
@@ -1323,46 +1361,17 @@ fn system_worker_evidence_while(
 ) -> WorkerEvidence {
     let ProcessObservation::Present(current) = current_process() else {
         let detail = process_detail(
-            &PolicyCwdObserver::new(entries),
+            &PolicyCwdObserver::for_roots(roots, entries),
             i64::from(std::process::id()),
             "current process unavailable",
         );
-        return WorkerEvidence {
-            states: roots
-                .iter()
-                .cloned()
-                .map(|root| {
-                    (
-                        root.clone(),
-                        Occupancy::census_unknown(root, detail.clone()),
-                    )
-                })
-                .collect(),
-            holders: BTreeMap::new(),
-            taints: roots
-                .iter()
-                .cloned()
-                .map(|root| {
-                    (
-                        root,
-                        TaintCause::Uncertainty(UncertaintyReason::CensusUnavailable),
-                    )
-                })
-                .collect(),
-            details: roots
-                .iter()
-                .cloned()
-                .map(|root| (root, detail.clone()))
-                .collect(),
-            held_incomplete: true,
-            ..WorkerEvidence::default()
-        };
+        return unknown_worker_evidence(roots, &detail);
     };
     worker_evidence_from_census(
         roots,
         ancestors,
         &SystemProcessObserver,
-        &PolicyCwdObserver::new(entries),
+        &PolicyCwdObserver::for_roots(roots, entries),
         &current,
         keep_going,
         entries,
@@ -1448,7 +1457,7 @@ pub(super) fn system_worker_roots_with_policy_taints(
     observe_worker_root_taints(
         roots,
         &SystemProcessObserver,
-        &PolicyCwdObserver::new(entries),
+        &PolicyCwdObserver::for_roots(roots, entries),
         &current,
         ancestors,
     )
@@ -1594,6 +1603,8 @@ pub(super) fn observe_worker_holders_while(
     if roots.is_empty() {
         return (states, holders, details, taints);
     }
+    let resolved_entries = resolve_entries_for_roots(roots, entries);
+    let entries = resolved_entries.as_ref();
     let census = match observer.census_while(65_536, &within_budget) {
         Ok(census) => census,
         Err(error) => {
@@ -1660,6 +1671,16 @@ pub(super) fn observe_worker_holders_while(
             child = parent;
         }
     }
+    // Exclude only verified descendants for every census, independently of
+    // the optional ancestor policy. Ambiguous ancestry remains in the census.
+    for fact in census.facts() {
+        if !within_budget() {
+            return (states, holders, details, taints);
+        }
+        if census.ancestry(&fact.identity, &current.identity) == Ancestry::Yes {
+            excluded.insert(fact.identity.clone());
+        }
+    }
     // Custody is decided per root. A gap that could hide a process anywhere
     // (an incomplete or truncated listing, or a process that could not be
     // described or placed) leaves every root that is not positively live
@@ -1675,15 +1696,25 @@ pub(super) fn observe_worker_holders_while(
             if !within_budget() {
                 return (states, holders, details, taints);
             }
+            // A vanished query is only absence if a fresh identity lookup
+            // agrees; the PID may already have been reused.
+            if matches!(
+                occupancy.gap,
+                Some(
+                    provenant_os::pid::OccupancyGap::Vanished
+                        | provenant_os::pid::OccupancyGap::Churn
+                )
+            ) && matches!(observer.observe(pid), ProcessObservation::Absent)
+            {
+                continue;
+            }
             // EPERM is a common limit of process listings. Place every
             // positive path first; only a complete descriptor observation can
             // prove that the other roots are clear.
             let descriptors_denied =
                 occupancy.gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied);
             let listed = listed_uid_excusal(cwd_observer, pid, roots, entries);
-            let configured = cwd_observer
-                .configured_unreadable_image(pid, entries)
-                .is_some();
+            let configured = configured_entry_matches(cwd_observer, pid, entries);
             let cwd_supported = matches!(
                 &cwd,
                 Ok(CwdObservation::Path(_)
@@ -1747,6 +1778,13 @@ pub(super) fn observe_worker_holders_while(
                         .then_some(UnreadableFailure::CwdDenied)
                 });
             if let Some(failure) = failure
+                && !matches!(
+                    occupancy.gap,
+                    Some(
+                        provenant_os::pid::OccupancyGap::Vanished
+                            | provenant_os::pid::OccupancyGap::Churn
+                    )
+                )
                 && excuse_unreadable(
                     cwd_observer,
                     pid,
@@ -1756,8 +1794,8 @@ pub(super) fn observe_worker_holders_while(
                         listed,
                         placed_inside: under_candidate,
                         root_undecidable,
+                        configured,
                     },
-                    entries,
                     unplaceable,
                 )
             {
@@ -1837,6 +1875,13 @@ pub(super) fn observe_worker_holders_while(
             }
             let foreign_uids = uids_before.filter(|uids| {
                 stable
+                    && !matches!(
+                        occupancy.gap,
+                        Some(
+                            provenant_os::pid::OccupancyGap::Vanished
+                                | provenant_os::pid::OccupancyGap::Churn
+                        )
+                    )
                     && Some(*uids) == uids_after
                     && excusal_applies(
                         &provenant_os::pid::UnreadablePolicyExcusal { uids: *uids },
@@ -1995,7 +2040,16 @@ pub(super) fn observe_worker_holders_while(
         // These processes were listed, so the listed-uid policy never applies;
         // `placed` already folds in undecidable roots, so no second blocking
         // signal is needed here.
-        if occupancy_gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied)
+        let descriptors_denied =
+            occupancy_gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied);
+        let cwd_denied = matches!(
+            &cwd,
+            NativeCwd::PolicyExcluded(_) | NativeCwd::PolicyRejected(_)
+        );
+        // One configured-image decision serves both arms below.
+        let configured = (descriptors_denied || cwd_denied)
+            && configured_entry_matches(cwd_observer, pid, entries);
+        if descriptors_denied
             && excuse_unreadable(
                 cwd_observer,
                 pid,
@@ -2005,18 +2059,21 @@ pub(super) fn observe_worker_holders_while(
                     listed: false,
                     placed_inside: placed,
                     root_undecidable: any_root_identity_unreadable(roots),
+                    configured,
                 },
-                entries,
                 unplaceable,
             )
         {
             continue;
         }
-        let cwd_denied = matches!(
-            &cwd,
-            NativeCwd::PolicyExcluded(_) | NativeCwd::PolicyRejected(_)
-        );
         if cwd_denied
+            && !matches!(
+                occupancy_gap,
+                Some(
+                    provenant_os::pid::OccupancyGap::Vanished
+                        | provenant_os::pid::OccupancyGap::Churn
+                )
+            )
             && excuse_unreadable(
                 cwd_observer,
                 pid,
@@ -2026,8 +2083,8 @@ pub(super) fn observe_worker_holders_while(
                     listed: false,
                     placed_inside: placed,
                     root_undecidable: any_root_identity_unreadable(roots),
+                    configured,
                 },
-                entries,
                 unplaceable,
             )
         {
@@ -2230,6 +2287,9 @@ pub(super) fn occupancy_path_could_be_under(path: &Path, root: &Path) -> bool {
     }
     if let Some(inside) = absent_root_contains(path, root) {
         return inside;
+    }
+    if root_is_absent(root) {
+        return absent_root_could_hold(path, root);
     }
     if !std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
         return true;

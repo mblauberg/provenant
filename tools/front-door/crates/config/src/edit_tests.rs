@@ -71,12 +71,13 @@ fn census_ignore_schema_apply_and_unset_keep_structured_host_entries() {
     assert_eq!(field.kind, "census_ignore_list");
     assert_eq!(field.value, value);
     let cleared = patch(&roots, json!({name: null}), &EditOptions::new("test")).unwrap();
-    assert!(
-        cleared
-            .config
-            .census_ignore_unreadable()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        cleared.config.census_ignore_unreadable().unwrap(),
+        vec![provenant_os::pid::CensusIgnoreEntry {
+            path: std::path::PathBuf::from("/usr/bin/login"),
+            team_id: "platform".into(),
+            started_before: Some(provenant_os::pid::StartedBefore::Root),
+        }]
     );
 }
 

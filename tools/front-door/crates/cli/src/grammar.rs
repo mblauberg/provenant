@@ -79,6 +79,8 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<Hosts>,
     },
+    /// Report host health, installed hook settings and recent hook timeouts
+    Doctor,
     /// Show and edit configuration
     #[command(subcommand)]
     Config(Config),
@@ -179,7 +181,7 @@ pub enum Command {
     Retry(Resume),
     /// Deliver a steering note; resume the session where the provider supports it
     #[command(
-        long_about = "Save a steering note durably, then hand it to the live attempt. Providers that can resume a session (claude, codex, cursor, agy, opencode) keep that session across the restart. Providers without session resume (command and host-native routes) restart fresh with the accepted brief, prior handoff and queued steering text. The configured fallback and its source are printed before the live attempt is interrupted, and restarts are staggered so a batch cannot race the launch lock.",
+        long_about = "Queue a steering note for the next turn without interrupting the running attempt. Settlement resumes the retained session or applies the configured fallback. The default fresh_with_handoff starts fresh with the accepted brief, prior handoff and queued steering text; refuse rejects unsupported routes up front and leaves unavailable sessions without a successor.",
         add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md")
     )]
     Steer(crate::inbox::Steer),
@@ -715,7 +717,7 @@ pub struct GraphRunArgs {
     /// Create an owned writer worktree on this branch
     #[arg(long, catalog_requires = "base")]
     pub branch: Option<String>,
-    /// Git base for a new writer branch
+    /// New writer branch starts here; for an existing branch, its merge target
     #[arg(long, catalog_requires = "branch")]
     pub base: Option<String>,
     /// Pin a review to this pull request, or repair a PR with `run implement --pr N` (host resolves its base and head)
@@ -810,17 +812,49 @@ pub struct Output {
     #[arg(long, value_name = "FILE", conflicts_with = "path")]
     pub to: Option<PathBuf>,
     /// Print the attempt's artifact path for this part instead of its content
-    #[arg(long, conflicts_with_all = ["to", "offset", "tail", "max_bytes"])]
+    #[arg(long, conflicts_with_all = ["to", "offset", "tail", "tail_lines", "max_bytes"])]
     pub path: bool,
+    /// Write the complete final result to --to FILE, paging through the sealed artifact
+    #[arg(long = "final", requires = "to", conflicts_with_all = ["path", "offset", "tail", "tail_lines", "max_bytes"])]
+    pub final_result: bool,
     /// Byte offset to start from
-    #[arg(long, default_value = "0", conflicts_with = "tail")]
+    #[arg(long, default_value = "0", conflicts_with_all = ["tail", "tail_lines"])]
     pub offset: u64,
     /// Return at most the last N bytes of the selected part
     #[arg(long, catalog_u64_range = 1..)]
     pub tail: Option<u64>,
+    /// Return at most the last N lines of the selected part (clamped to the shared line bound)
+    #[arg(long, catalog_u64_range = 1.., conflicts_with_all = ["to", "offset", "tail"])]
+    pub tail_lines: Option<u64>,
     /// Maximum bytes to return
     #[arg(long, default_value = "65536", catalog_u64_range = 1..=65536)]
     pub max_bytes: u64,
+}
+
+/// The unit of a bounded tail. One selection is shared by every reader so a
+/// line request means the same thing for an attempt, a peer, a composite and
+/// an event stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tail {
+    Bytes(u64),
+    Lines(u64),
+}
+
+impl Output {
+    /// The tail the caller selected, with line counts clamped once here. A
+    /// byte count stays a byte count: the page bound still applies to both.
+    pub fn tail_selection(&self) -> Option<Tail> {
+        self.tail.map(Tail::Bytes).or_else(|| {
+            self.tail_lines
+                .map(|lines| Tail::Lines(lines.min(crate::limits::TAIL_LINES)))
+        })
+    }
+
+    /// Whether a line request exceeded the shared bound and was clamped.
+    pub fn tail_clamped(&self) -> bool {
+        self.tail_lines
+            .is_some_and(|lines| lines > crate::limits::TAIL_LINES)
+    }
 }
 #[derive(Clone, Debug, Args)]
 pub struct Cancel {
@@ -830,6 +864,15 @@ pub struct Cancel {
     /// Reason to record (up to 256 bytes)
     #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
     pub reason: Option<String>,
+    /// Apply this existing stop operation as a revisioned delivery queue control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Stable ID for replaying this queue control
+    #[arg(long, requires = "queue_control", value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Resume {
@@ -845,6 +888,23 @@ pub struct Resume {
     /// Raise a graph limit or budget (KEY=VALUE) on a graph target; may be repeated
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,
+    /// Apply this existing retry operation as a revisioned delivery queue control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Stable ID for replaying this queue control
+    #[arg(long, requires = "queue_control", value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum QueueControlAction {
+    Accept,
+    Fix,
+    Retry,
+    Drop,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Reconcile {
@@ -986,6 +1046,9 @@ pub struct Ingest {
     /// Ingest transcripts written, and messages stamped, from this date or timestamp, or a span such as 1d ago
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
+    /// Resume from the durable cursor instead of rescanning a time window
+    #[arg(long)]
+    pub incremental: bool,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Mileage {
@@ -1378,8 +1441,11 @@ pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str>
 #[derive(Clone, Debug, Args)]
 pub struct Status {
     /// Active custody of this chair and unattended items, across projects unless --project is set
-    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all"])]
+    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all", "adoptable"])]
     pub mine: bool,
+    /// Unattended custody open to adoption, across projects unless --project is set
+    #[arg(long, conflicts_with_all = ["mine", "targets", "session_stream", "all"])]
+    pub adoptable: bool,
     /// Exact chair session for the custody view (used by the session-start digest)
     #[arg(long = "session", requires = "mine")]
     pub custody_session: Option<String>,

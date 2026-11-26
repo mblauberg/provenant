@@ -145,6 +145,42 @@ fn a_removed_root_spelled_through_the_data_firmlink_places_by_identity()
 }
 
 #[test]
+fn an_unreadable_path_elsewhere_cannot_hold_a_removed_root() -> Result<(), Box<dyn Error>> {
+    use super::census::occupancy_path_could_be_under;
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let anchor = temp.path().join("worktrees");
+    let root = anchor.join("removed-writer-tree");
+    let elsewhere = temp.path().join("daemon-store");
+    let sibling = anchor.join("locked-sibling");
+    for locked in [&elsewhere, &sibling] {
+        fs::create_dir_all(locked.join("restricted/stream"))?;
+        fs::set_permissions(locked.join("restricted"), fs::Permissions::from_mode(0o000))?;
+    }
+    // A symlink loop cannot be split either, and could alias the root.
+    let looped = temp.path().join("loop");
+    std::os::unix::fs::symlink("loop", &looped)?;
+    let unreadable = fs::metadata(elsewhere.join("restricted/stream")).is_err();
+    let verdicts = [
+        occupancy_path_could_be_under(&elsewhere.join("restricted/stream/local"), &root),
+        occupancy_path_could_be_under(&sibling.join("restricted/stream/local"), &root),
+        occupancy_path_could_be_under(&root.join("src/file"), &root),
+        occupancy_path_could_be_under(&looped.join("file"), &root),
+    ];
+    for locked in [&elsewhere, &sibling] {
+        fs::set_permissions(locked.join("restricted"), fs::Permissions::from_mode(0o755))?;
+    }
+    if !unreadable {
+        // Running as a superuser: nothing is unreadable, so nothing to pin.
+        return Ok(());
+    }
+    // Neither locked directory is an ancestor of the removed root; a path left
+    // in the removed tree, or one through a symlink, still could be under it.
+    assert_eq!(verdicts, [false, false, true, true]);
+    Ok(())
+}
+
+#[test]
 fn session_root_that_appears_during_the_census_is_unknown() -> Result<(), Box<dyn Error>> {
     struct Creating(PathBuf);
     impl WorkerObserver for Creating {
@@ -644,6 +680,17 @@ fn native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree()
 #[test]
 #[allow(clippy::disallowed_methods)] // A real child provides the cwd observation fixture.
 fn system_observer_names_the_process_inside_a_tree() -> Result<(), Box<dyn Error>> {
+    const ROOT: &str = "PROVENANT_CENSUS_NAMED_PROCESS_ROOT";
+    const PID: &str = "PROVENANT_CENSUS_NAMED_PROCESS_PID";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let pid: i64 = std::env::var(PID)?.parse()?;
+        assert!(matches!(
+            live_refusal(&SystemWorkerObserver, Path::new(&root)),
+            WorktreeError::LiveProcess(process) if process.pid == pid
+        ));
+        return Ok(());
+    }
+
     struct Child(std::process::Child);
     impl Drop for Child {
         fn drop(&mut self) {
@@ -662,10 +709,27 @@ fn system_observer_names_the_process_inside_a_tree() -> Result<(), Box<dyn Error
             .spawn()?,
     );
     let pid = i64::from(child.0.id());
-    assert!(matches!(
-        live_refusal(&SystemWorkerObserver, &path),
-        WorktreeError::LiveProcess(process) if process.pid == pid
-    ));
+    // The observer is a sibling of the occupant, like a separate lane. A
+    // direct child of the observer is deliberately excluded from the census.
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "worktrees::census_tests::system_observer_names_the_process_inside_a_tree",
+        ])
+        .env(ROOT, &path)
+        .env(PID, pid.to_string())
+        .output()?;
+    assert!(
+        output.status.success(),
+        "observer failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "observer test did not run: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     Ok(())
 }
 
@@ -745,7 +809,7 @@ fn worker_census_places_a_process_in_a_deleted_directory_by_its_nearest_ancestor
 }
 
 #[test]
-fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
+fn land_worker_census_excludes_verified_ancestors_and_the_callers_children()
 -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
     struct Processes(Census);
@@ -763,13 +827,14 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
             Ok(self.0.clone())
         }
     }
-    struct Cwds(BTreeMap<i64, PathBuf>);
+    struct Cwds(BTreeMap<i64, PathBuf>, PathBuf);
     impl CwdObserver for Cwds {
-        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+        fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+            let denied = pid == 110 && self.0.get(&pid) == Some(&self.1);
             provenant_os::pid::OccupancyObservation {
                 paths: vec![],
-                complete: true,
-                gap: None,
+                complete: !denied,
+                gap: denied.then_some(provenant_os::pid::OccupancyGap::DescriptorsDenied),
             }
         }
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
@@ -831,6 +896,7 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
                     )
                 })
                 .collect(),
+            root.clone(),
         );
         let observe = |cwds: &Cwds, ancestors| {
             observe_worker_roots(
@@ -846,13 +912,57 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
         assert!(observe(&cwds, false).is_observed());
         let state = observe(&cwds, true);
         assert_eq!(state.is_available(), complete);
-        // Above-session ancestors, siblings, descendants and independent
-        // sessions remain live, even when the census is incomplete.
-        for pid in [1, 95, 110, 200] {
+        // Above-session ancestors, siblings and independent sessions remain
+        // live, even when the census is incomplete.
+        for pid in [1, 95, 200] {
             cwds.0.insert(pid, root.clone());
             assert!(observe(&cwds, true).is_observed(), "pid {pid}");
             cwds.0.insert(pid, outside.clone());
         }
+        // The caller's verified child is part of the caller, not an
+        // independent writer: a probe the caller spawned must not make the
+        // worktree live even while it is still in the listing.
+        let before_child = observe(&cwds, true);
+        cwds.0.insert(110, root.clone());
+        assert_eq!(observe(&cwds, true), before_child);
+    }
+    // Descendant exclusion applies with or without ancestor exclusion.
+    {
+        let processes = Processes(Census::from_observations(
+            facts.clone(),
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?);
+        let mut cwds = Cwds(
+            facts
+                .iter()
+                .map(|fact| (fact.identity.pid, outside.clone()))
+                .collect(),
+            root.clone(),
+        );
+        cwds.0.insert(110, root.clone()); // verified child of the caller
+        let observe = |ancestors| {
+            observe_worker_roots(
+                std::slice::from_ref(&root),
+                &processes,
+                &cwds,
+                &current,
+                ancestors,
+            )
+            .0[&root]
+                .clone()
+        };
+        assert!(
+            observe(false).is_available(),
+            "ordinary census must exclude the caller's child"
+        );
+        assert!(
+            observe(true).is_available(),
+            "land census must exclude the caller's child"
+        );
     }
     for ambiguity in [
         "equal_stamp",
@@ -910,6 +1020,7 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
                 .iter()
                 .map(|fact| (fact.identity.pid, outside.clone()))
                 .collect(),
+            root.clone(),
         );
         let observe = |cwds: &Cwds| {
             observe_worker_roots(
@@ -929,6 +1040,213 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
         // inside the root it still makes the root live.
         cwds.0.insert(10, root.clone());
         assert!(observe(&cwds).is_observed(), "{ambiguity}");
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence
+#[test]
+fn a_vanished_descriptor_query_is_absent_but_live_eprem_stays_unknown() -> Result<(), Box<dyn Error>>
+{
+    use provenant_os::pid::OccupancyGap;
+    use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct GapObserver {
+        census: Census,
+        outside: PathBuf,
+        gap: Option<OccupancyGap>,
+        after: ProcessObservation,
+        queried: AtomicBool,
+    }
+    impl ProcessObserver for GapObserver {
+        fn boot_identity(&self) -> Result<String, CensusError> {
+            Ok("boot".into())
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            if pid == 200 && self.queried.load(Ordering::Relaxed) {
+                return self.after.clone();
+            }
+            match self.census.process(pid) {
+                ProcessLookup::Present(fact) => ProcessObservation::Present(fact.clone()),
+                _ => ProcessObservation::Absent,
+            }
+        }
+        fn census(&self, _: usize) -> Result<Census, CensusError> {
+            Ok(self.census.clone())
+        }
+    }
+    impl CwdObserver for GapObserver {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(self.outside.clone()))
+        }
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            self.queried.store(true, Ordering::Relaxed);
+            provenant_os::pid::OccupancyObservation {
+                paths: Vec::new(),
+                complete: false,
+                gap: self.gap,
+            }
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let worktree = temp.path().join("worktree");
+    provenant_os::fixture::private_state_dir(&worktree)?;
+    let root = canonicalize(&worktree)?;
+    let outside = canonicalize(temp.path())?;
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: 10,
+            session_id: 10,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let current = fact(100);
+    let state_for =
+        |gap: OccupancyGap, after: ProcessObservation| -> Result<Occupancy, Box<dyn Error>> {
+            let census =
+                Census::from_observations([current.clone(), fact(200)], [], [], true, false, 32)?;
+            let observer = GapObserver {
+                census,
+                outside: outside.clone(),
+                gap: Some(gap),
+                after,
+                queried: AtomicBool::new(false),
+            };
+            Ok(observe_worker_roots(
+                std::slice::from_ref(&root),
+                &observer,
+                &observer,
+                &current,
+                true,
+            )
+            .0[&root]
+                .clone())
+        };
+    // ESRCH says the process exited mid-census: it holds nothing and cannot
+    // make the worktree unknown.
+    assert!(state_for(OccupancyGap::Vanished, ProcessObservation::Absent)?.is_available());
+    // Conflicting live or reused identities cannot be discarded on one ESRCH.
+    assert!(
+        state_for(
+            OccupancyGap::Vanished,
+            ProcessObservation::Present(fact(200))
+        )?
+        .is_unknown()
+    );
+    let mut reused = fact(200);
+    reused.identity.native_start += 1;
+    assert!(state_for(OccupancyGap::Vanished, ProcessObservation::Present(reused))?.is_unknown());
+    // EPERM on a still-listed process is a real permission failure, so the
+    // data-loss boundary keeps the worktree Unknown.
+    assert!(
+        state_for(
+            OccupancyGap::DescriptorsDenied,
+            ProcessObservation::Present(fact(200))
+        )?
+        .is_unknown()
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence
+#[cfg(target_os = "linux")]
+#[test]
+fn vanished_linux_proc_entry_needs_an_absent_identity_recheck() -> Result<(), Box<dyn Error>> {
+    use provenant_os::pid::{OccupancyGap, SystemCwdObserver};
+    use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+
+    const GONE_PID: i64 = i32::MAX as i64;
+    struct Processes {
+        census: Census,
+        recheck: ProcessObservation,
+    }
+    impl ProcessObserver for Processes {
+        fn boot_identity(&self) -> Result<String, CensusError> {
+            Ok("boot".into())
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            if pid == GONE_PID {
+                self.recheck.clone()
+            } else {
+                match self.census.process(pid) {
+                    ProcessLookup::Present(fact) => ProcessObservation::Present(fact.clone()),
+                    _ => ProcessObservation::Absent,
+                }
+            }
+        }
+        fn census(&self, _: usize) -> Result<Census, CensusError> {
+            Ok(self.census.clone())
+        }
+    }
+    struct NativeOccupancy(PathBuf);
+    impl CwdObserver for NativeOccupancy {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(self.0.clone()))
+        }
+        fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+            SystemCwdObserver.occupancy(pid)
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let worktree = temp.path().join("worktree");
+    provenant_os::fixture::private_state_dir(&worktree)?;
+    let root = canonicalize(&worktree)?;
+    let cwd = NativeOccupancy(canonicalize(temp.path())?);
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let current = fact(100);
+    let census = Census::from_observations(
+        [current.clone()],
+        [(GONE_PID, ObservationIssue::PermissionDenied)],
+        [],
+        true,
+        false,
+        32,
+    )?;
+    // This PID is beyond Linux's supported pid_max: both the executable and
+    // descriptor queries fail, and the missing /proc entry confirms exit.
+    assert_eq!(cwd.occupancy(GONE_PID).gap, Some(OccupancyGap::Vanished));
+    for (recheck, available) in [
+        (ProcessObservation::Absent, true),
+        (ProcessObservation::Present(fact(GONE_PID)), false),
+    ] {
+        let processes = Processes {
+            census: census.clone(),
+            recheck,
+        };
+        let state = &observe_worker_roots(
+            std::slice::from_ref(&root),
+            &processes,
+            &cwd,
+            &current,
+            false,
+        )
+        .0[&root];
+        if available {
+            assert!(state.is_available());
+        } else {
+            assert!(state.is_unknown());
+        }
     }
     Ok(())
 }
@@ -1237,6 +1555,7 @@ fn configured_entry_excuses_unplaceable_descriptor_process() -> Result<(), Box<d
         entries: vec![CensusIgnoreEntry {
             path: PathBuf::from("/usr/libexec/UserEventAgent"),
             team_id: "platform".into(),
+            started_before: None,
         }],
         team_id: None,
         executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
@@ -1280,6 +1599,7 @@ fn configured_entry_excuses_unplaceable_process_path_with_readable_roots()
         entries: vec![CensusIgnoreEntry {
             path: PathBuf::from("/usr/libexec/UserEventAgent"),
             team_id: "platform".into(),
+            started_before: None,
         }],
         team_id: None,
         executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
@@ -1327,6 +1647,7 @@ fn mismatched_configured_entry_does_not_excuse() -> Result<(), Box<dyn Error>> {
         entries: vec![CensusIgnoreEntry {
             path: PathBuf::from("/usr/libexec/UserEventAgent"),
             team_id: "platform".into(),
+            started_before: None,
         }],
         team_id: None,
         executable: Some(PathBuf::from("/usr/bin/true")),
@@ -1448,6 +1769,7 @@ fn configured_entry_with_unreadable_root_metadata_keeps_root_unknown() -> Result
         entries: vec![CensusIgnoreEntry {
             path: PathBuf::from("/usr/libexec/UserEventAgent"),
             team_id: "platform".into(),
+            started_before: None,
         }],
         team_id: None,
         executable: Some(PathBuf::from("/usr/libexec/UserEventAgent")),
@@ -1498,6 +1820,7 @@ fn configured_entry_with_cwd_inside_root_and_denied_descriptors_blocks()
     let entries = [CensusIgnoreEntry {
         path: executable.clone(),
         team_id: "platform".into(),
+        started_before: None,
     }];
     struct ConfiguredInside<'a> {
         inner: &'a InjectedCensus,
@@ -2736,12 +3059,18 @@ fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
         seen[0],
         vec![CensusIgnoreEntry {
             path: "/Library/Daemon".into(),
-            team_id: "TEAM123".into()
+            team_id: "TEAM123".into(),
+            started_before: None,
         }]
     );
-    assert!(
-        seen[1].is_empty(),
-        "policy must not leak across roots or wrappers"
+    assert_eq!(
+        seen[1],
+        vec![CensusIgnoreEntry {
+            path: "/usr/bin/login".into(),
+            team_id: "platform".into(),
+            started_before: Some(provenant_os::pid::StartedBefore::Root),
+        }],
+        "policy must not leak across roots or wrappers and unset config gets bundled login default"
     );
     Ok(())
 }
@@ -2769,6 +3098,7 @@ fn policy_cwd_observer_forwards_configured_entries_to_the_matcher() -> Result<()
     let entries = [CensusIgnoreEntry {
         path: PathBuf::from("/usr/libexec/UserEventAgent"),
         team_id: "TEAM123".into(),
+        started_before: None,
     }];
     let recorder = Recording(std::sync::Mutex::new(Vec::new()));
     let policy = PolicyCwdObserver::with_inner(&entries, &recorder);
@@ -4878,6 +5208,362 @@ fn held_report_aggregates_eperm_dwellers_and_excludes_the_caller() -> Result<(),
     assert!(
         rows.iter()
             .all(|row| row.kind == ProcessEvidenceKind::WorkingDirectory)
+    );
+    Ok(())
+}
+
+struct StartTimeSignals<'a> {
+    inner: &'a UnreadableSignals,
+    start_times: Vec<Option<provenant_core::WallTime>>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl CwdObserver for StartTimeSignals<'_> {
+    fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+        self.inner.cwd(pid)
+    }
+    fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+        self.inner.occupancy(pid)
+    }
+    fn process_uids(&self, pid: i64) -> Option<ProcessUids> {
+        self.inner.process_uids(pid)
+    }
+    fn platform_signed_image(&self, pid: i64) -> Option<provenant_os::pid::PlatformSignedImage> {
+        self.inner.platform_signed_image(pid)
+    }
+    fn configured_unreadable_image(
+        &self,
+        pid: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Option<CensusIgnoreEntry> {
+        self.inner.configured_unreadable_image(pid, entries)
+    }
+    fn process_start_time(&self, _: i64) -> Option<provenant_core::WallTime> {
+        if self.start_times.is_empty() {
+            return None;
+        }
+        let index = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.start_times
+            .get(index)
+            .or_else(|| self.start_times.last())
+            .copied()
+            .flatten()
+    }
+    fn unreadable_policy_uids(
+        &self,
+        pid: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Result<
+        provenant_os::pid::UnreadablePolicyExcusal,
+        provenant_os::pid::UnreadablePolicyFailure,
+    > {
+        self.inner.unreadable_policy_uids(pid, entries)
+    }
+    fn executable(&self, pid: i64) -> Option<PathBuf> {
+        self.inner.executable(pid)
+    }
+    fn process_details(&self, pid: i64) -> Option<String> {
+        self.inner.process_details(pid)
+    }
+}
+
+type RootObservation = (
+    BTreeMap<PathBuf, Occupancy>,
+    Vec<provenant_records::warning::Warning>,
+);
+
+fn observe_unreadable_roots_with_starts(
+    roots: &[PathBuf],
+    signals: &UnreadableSignals,
+    start_times: Vec<Option<provenant_core::WallTime>>,
+) -> Result<RootObservation, Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ObservationIssue};
+    let current = refused_fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations(
+            [current.clone()],
+            [(200, ObservationIssue::PermissionDenied)],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let observer = StartTimeSignals {
+        inner: signals,
+        start_times,
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let (states, warnings) = provenant_records::warning::capture(|| {
+        observe_worker_holders_with_taints_and_audit(
+            roots,
+            &processes,
+            &observer,
+            &current,
+            false,
+            &mut |_, _| {},
+            &signals.entries,
+        )
+        .0
+    });
+    Ok((states, warnings))
+}
+
+#[test]
+fn started_before_root_requires_two_second_margin_and_stable_start_time()
+-> Result<(), Box<dyn Error>> {
+    use provenant_core::WallTime;
+    use provenant_os::pid::{STARTED_BEFORE_MARGIN_MICROS, StartedBefore};
+
+    let fixture = Fixture::new()?;
+    let root = fixture.root.join("login-floor-present");
+    fs::create_dir(&root)?;
+    let birth = fs::metadata(&root)?
+        .created()?
+        .duration_since(std::time::UNIX_EPOCH)?;
+    let birth = WallTime::from_micros(i64::try_from(birth.as_micros())?)?;
+    let at_margin = WallTime::from_micros(birth.as_micros() - STARTED_BEFORE_MARGIN_MICROS)?;
+    let too_recent = WallTime::from_micros(birth.as_micros() - STARTED_BEFORE_MARGIN_MICROS + 1)?;
+    let much_earlier = WallTime::from_micros(birth.as_micros() - 10_000_000)?;
+    let after_root = WallTime::from_micros(birth.as_micros() + 1_000_000)?;
+
+    let owner = provenant_os::fs::effective_uid();
+    let elevated = if owner == 0 { 1 } else { 0 };
+    let signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: elevated,
+            saved: elevated,
+        }),
+        platform_signed: true,
+        entries: vec![CensusIgnoreEntry {
+            path: PathBuf::from("/usr/bin/login"),
+            team_id: "platform".into(),
+            started_before: Some(StartedBefore::Root),
+        }],
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/bin/login")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: Vec::new(),
+    };
+
+    for allowed_start in [much_earlier, at_margin] {
+        let (states, warnings) = observe_unreadable_roots_with_starts(
+            std::slice::from_ref(&root),
+            &signals,
+            vec![Some(allowed_start)],
+        )?;
+        assert!(states[&root].is_available(), "{states:?}");
+        assert!(warning_names_process(&warnings, 200), "{warnings:?}");
+    }
+
+    for blocked in [
+        vec![Some(too_recent)],
+        vec![Some(after_root)],
+        vec![None],
+        vec![Some(much_earlier), Some(at_margin)],
+        vec![Some(much_earlier), None],
+    ] {
+        let (states, warnings) = observe_unreadable_roots_with_starts(
+            std::slice::from_ref(&root),
+            &signals,
+            blocked.clone(),
+        )?;
+        assert!(
+            states[&root].is_unknown(),
+            "{blocked:?} should fail closed: {states:?}"
+        );
+        assert!(!warning_names_process(&warnings, 200), "{warnings:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn started_before_root_fails_closed_when_any_root_absent_until_at_floor_supplied()
+-> Result<(), Box<dyn Error>> {
+    use provenant_core::WallTime;
+    use provenant_os::pid::StartedBefore;
+
+    let fixture = Fixture::new()?;
+    let present = fixture.root.join("floor-present");
+    fs::create_dir(&present)?;
+    let removed = fixture.root.join("floor-removed");
+    let floor = WallTime::from_micros(1_780_000_010_000_000)?;
+    let old_start = WallTime::from_micros(1_780_000_005_000_000)?;
+    let recent_start = WallTime::from_micros(1_780_000_009_000_000)?;
+
+    let owner = provenant_os::fs::effective_uid();
+    let elevated = if owner == 0 { 1 } else { 0 };
+    let mut signals = UnreadableSignals {
+        uids: Some(ProcessUids {
+            real: owner,
+            effective: elevated,
+            saved: elevated,
+        }),
+        platform_signed: true,
+        entries: vec![CensusIgnoreEntry {
+            path: PathBuf::from("/usr/bin/login"),
+            team_id: "platform".into(),
+            started_before: Some(StartedBefore::Root),
+        }],
+        team_id: None,
+        executable: Some(PathBuf::from("/usr/bin/login")),
+        cwd: CwdObservation::PermissionDenied,
+        occupancy_paths: Vec::new(),
+    };
+
+    // Removed root with StartedBefore::Root has no floor -> fails closed.
+    let (states, _) = observe_unreadable_roots_with_starts(
+        std::slice::from_ref(&removed),
+        &signals,
+        vec![Some(old_start)],
+    )?;
+    assert!(states[&removed].is_unknown(), "{states:?}");
+
+    // Mixed [present, absent] roots: missing floor for any scoped root fails closed.
+    let (mixed, _) = observe_unreadable_roots_with_starts(
+        &[present.clone(), removed.clone()],
+        &signals,
+        vec![Some(old_start)],
+    )?;
+    assert!(mixed[&present].is_unknown(), "{mixed:?}");
+    assert!(mixed[&removed].is_unknown(), "{mixed:?}");
+
+    // Supplying At(floor) excuses only when start_time precedes floor by >= 2s.
+    signals.entries[0].started_before = Some(StartedBefore::At(floor));
+    let (excused, warnings) = observe_unreadable_roots_with_starts(
+        std::slice::from_ref(&removed),
+        &signals,
+        vec![Some(old_start)],
+    )?;
+    assert!(excused[&removed].is_available(), "{excused:?}");
+    assert!(warning_names_process(&warnings, 200), "{warnings:?}");
+
+    let (rejected, _) = observe_unreadable_roots_with_starts(
+        std::slice::from_ref(&removed),
+        &signals,
+        vec![Some(recent_start)],
+    )?;
+    assert!(rejected[&removed].is_unknown(), "{rejected:?}");
+    Ok(())
+}
+
+#[test]
+fn policy_workers_with_creation_floor_rewrites_root_entries_only_when_supplied()
+-> Result<(), Box<dyn Error>> {
+    use provenant_core::WallTime;
+    use provenant_os::pid::StartedBefore;
+
+    struct Probe(std::sync::Mutex<Vec<Vec<CensusIgnoreEntry>>>);
+    impl WorkerObserver for Probe {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root.clone(), Occupancy::census_unknown(root, "fixture")))
+                .collect()
+        }
+        fn observe_roots_with_policy(
+            &self,
+            roots: &[PathBuf],
+            entries: &[CensusIgnoreEntry],
+            _: bool,
+        ) -> WorkerObservations {
+            self.0.lock().unwrap().push(entries.to_vec());
+            (self.observe_roots(roots), BTreeMap::new())
+        }
+    }
+
+    let fixture = Fixture::new()?;
+    let root = canonicalize(&fixture.root)?;
+    let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+    inputs.state_dir = Some(fixture._temp.path().join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let floor = WallTime::from_micros(1_780_000_020_000_000)?;
+    let probe = Probe(Default::default());
+
+    let plain = CensusPolicyWorkers::from_roots(&probe, &roots)?;
+    let _ = plain.observe_roots(std::slice::from_ref(&root));
+    let floored = CensusPolicyWorkers::from_roots(&probe, &roots)?.with_creation_floor(floor);
+    let _ = floored.observe_roots(std::slice::from_ref(&root));
+    let clock = provenant_core::TestClock::new(floor, provenant_core::MonoTime::from_micros(0));
+    let session = CensusSession::new(&floored, &clock);
+    let _ = session.observe_roots(std::slice::from_ref(&root));
+
+    let seen = probe.0.lock().unwrap();
+    assert_eq!(seen[0][0].started_before, Some(StartedBefore::Root));
+    assert_eq!(seen[1][0].started_before, Some(StartedBefore::At(floor)));
+    assert_eq!(seen[2][0].started_before, Some(StartedBefore::At(floor)));
+    Ok(())
+}
+
+#[test]
+fn worktree_owner_for_path_matches_removed_checkout_by_directory_identity()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let canonical = canonicalize(&fixture.root)?;
+    let common = canonical.join("repo/.git");
+    let registration = common.join("worktrees/lane-1");
+    fs::create_dir_all(&registration)?;
+    let removed = canonical.join("trees/lane-1");
+    let owner = super::owner::WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([7; 16])),
+        operation_id: Some("op-owner".parse()?),
+        branch: "fix/3914".into(),
+        base: "1".repeat(40),
+        host: provenant_core::HostId::from_bytes([2; 16]),
+        created_at: provenant_core::WallTime::from_micros(1_780_000_000_000_000)?,
+        origin: super::owner::WorktreeOrigin::Lane,
+        label: None,
+        reference: None,
+    };
+    fs::write(
+        registration.join("gitdir"),
+        format!("{}/.git\n", removed.display()),
+    )?;
+    fs::write(
+        registration.join("provenant-owner.json"),
+        serde_json::to_vec(&owner)?,
+    )?;
+
+    assert_eq!(
+        super::owner::worktree_owner_for_path(&common, &removed)?,
+        Some(owner.clone())
+    );
+    // The registration's birth survives the checkout's removal and is the
+    // creation floor an abandon uses (#3914).
+    let registered = super::owner::worktree_registration_for_path(&common, &removed)?;
+    assert_eq!(
+        registered,
+        Some((
+            owner.clone(),
+            super::census_excusal::birth_time(&registration)
+        ))
+    );
+    #[cfg(target_os = "macos")]
+    assert!(
+        registered.is_some_and(|(_, born)| born.is_some()),
+        "APFS reports a registration birth time"
+    );
+    #[cfg(unix)]
+    {
+        let alias = canonical.join("alias");
+        std::os::unix::fs::symlink(&canonical, &alias)?;
+        assert_eq!(
+            super::owner::worktree_owner_for_path(&common, &alias.join("trees/lane-1"))?,
+            Some(owner)
+        );
+    }
+    assert_eq!(
+        super::owner::worktree_owner_for_path(&common, &canonical.join("trees/other"))?,
+        None
+    );
+    assert_eq!(
+        super::owner::worktree_owner_for_path(&common, Path::new("trees/lane-1"))?,
+        None
     );
     Ok(())
 }

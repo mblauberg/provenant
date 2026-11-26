@@ -1,4 +1,9 @@
 //! Provenant-only provider customisation and writer publishing setup.
+mod pr_policy;
+#[cfg(test)]
+mod pr_policy_tests;
+
+use self::pr_policy::pr_policy_guard;
 use crate::launch::{exact, subtree};
 use crate::{ProviderError, SetupStep};
 use provenant_confinement::permissions::ProviderProfileSpec;
@@ -285,6 +290,11 @@ pub struct GhShim<'a> {
     /// A workflow in this repository runs on pull request label events, so a
     /// label change starts CI: say so when a command changes labels.
     pub label_ci_warning: bool,
+    /// The lane's pull-request policy, enforced before the wrapper forwards a
+    /// command. The resolver supplies it from `lanes.pr`.
+    pub pr_policy: provenant_config::PrPolicy,
+    /// The layer that set `lanes.pr`, named in a refusal.
+    pub pr_source: &'a str,
 }
 
 impl Default for GhShim<'static> {
@@ -300,6 +310,8 @@ impl Default for GhShim<'static> {
             budget: provenant_config::DEFAULT_GH_BUDGET,
             budget_source: "default",
             label_ci_warning: false,
+            pr_policy: provenant_config::PrPolicy::Never,
+            pr_source: "default",
         }
     }
 }
@@ -907,6 +919,7 @@ fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_
         }
         guard.push_str("      case \"$value\" in *,*) value=${value#*,} ;; *) break ;; esac\n    done\n    shift\n  done\n}\ncheck_labels \"$@\"\n");
     }
+    guard.push_str(&pr_policy_guard(shim.pr_policy, shim.pr_source));
     let config = gh_config
         .map(|config| format!("GH_CONFIG_DIR={config}\nexport GH_CONFIG_DIR\n"))
         .unwrap_or_default();
@@ -2403,6 +2416,8 @@ mod tests {
                     budget: 0,
                     budget_source: "default",
                     label_ci_warning: false,
+                    pr_policy: provenant_config::PrPolicy::Allowed,
+                    pr_source: "default",
                 },
             ),
         )?;
@@ -2478,6 +2493,8 @@ mod tests {
                     budget: 2,
                     budget_source: "launch",
                     label_ci_warning: false,
+                    pr_policy: provenant_config::PrPolicy::Allowed,
+                    pr_source: "default",
                 },
             ),
         )?;
@@ -2525,6 +2542,8 @@ mod tests {
                         budget: 0,
                         budget_source: "launch",
                         label_ci_warning,
+                        pr_policy: provenant_config::PrPolicy::Allowed,
+                        pr_source: "default",
                     },
                 ),
             )?;
@@ -2598,6 +2617,8 @@ mod tests {
                     budget: 100,
                     budget_source: "default",
                     label_ci_warning: false,
+                    pr_policy: provenant_config::PrPolicy::Allowed,
+                    pr_source: "default",
                 },
             );
             assert!(

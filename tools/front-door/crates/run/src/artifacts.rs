@@ -1,7 +1,7 @@
 use crate::*;
 use provenant_core::RelativePath;
 use provenant_os::fs::{Directory, FileHandle, FileKind, Metadata, PayloadTree, PublishMode};
-use provenant_records::{AttemptFile, CanonicalV1, PathWire};
+use provenant_records::{AttemptFile, CanonicalV1, PathWire, handoff::HandoffError};
 use std::{ffi::OsStr, io::Read, path::Component};
 
 pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<Directory> {
@@ -21,41 +21,43 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 /// attempt terminal and unreserved. It checks worktree reservations first,
 /// then holds the attempt's writer lock, which excludes read-only guardians.
 /// It does not hold the worktree writer lock during deletion.
-/// The exception is rooted at the literal tmp entry, never the attempt itself.
+/// The exception is rooted at the literal tmp entry of the per-attempt scratch
+/// root, never the attempt record directory (#3947).
 pub(crate) fn remove_unreserved_terminal_temporary(
-    attempt: &Directory,
+    scratch: &Directory,
+    temporary: &std::path::Path,
     keep_going: &dyn Fn() -> bool,
     reclaimed: &mut u64,
 ) -> provenant_os::fs::Result<u64> {
     if !keep_going() {
         return Err(provenant_os::fs::FsError::Cancelled {
-            path: attempt.anchored_path().join("tmp"),
+            path: temporary.to_owned(),
         });
     }
-    crate::short_temporary::remove(attempt);
+    crate::short_temporary::remove(temporary);
     let name = OsStr::new("tmp");
-    let metadata = match attempt.metadata_at(name, false) {
+    let metadata = match scratch.metadata_at(name, false) {
         Ok(metadata) => metadata,
         Err(error) if error.is_not_found() => return Ok(0),
         Err(error) => return Err(error),
     };
     if metadata.kind != FileKind::Directory {
-        attempt.unlink(name)?;
+        scratch.unlink(name)?;
         *reclaimed = reclaimed.saturating_add(metadata.allocated);
         return Ok(metadata.allocated);
     }
-    attempt.make_owner_accessible_at(name)?;
-    let metadata = attempt.metadata_at(name, false)?;
-    let tree = PayloadTree::claim(attempt, name, &metadata)?;
+    scratch.make_owner_accessible_at(name)?;
+    let metadata = scratch.metadata_at(name, false)?;
+    let tree = PayloadTree::claim(scratch, name, &metadata)?;
     let bytes = metadata
         .allocated
         .saturating_add(remove_payload_contents(&tree, keep_going, reclaimed)?);
     drop(tree);
-    if !attempt.metadata_at(name, false)?.same_identity(&metadata) {
+    if !scratch.metadata_at(name, false)?.same_identity(&metadata) {
         return Err(provenant_os::fs::FsError::PayloadMismatch { name: name.into() });
     }
     // tmp itself is not lock-named, so ordinary removal suffices.
-    attempt.rmdir(name)?;
+    scratch.rmdir(name)?;
     *reclaimed = reclaimed.saturating_add(metadata.allocated);
     Ok(bytes)
 }
@@ -262,13 +264,12 @@ impl RunStore {
         }
         let mut result = capture.finish();
         // One handoff rule: the settled attempt's sealed snapshot,
-        // not a re-reading of the text.
-        result.handoff = self.handoff(&record).unwrap_or_else(|_| {
-            Err(provenant_records::handoff::HandoffError::new(
-                "$",
-                "handoff snapshot unreadable",
-            ))
-        });
+        // not a re-reading of the text. The handoff is auxiliary to the result:
+        // a slot read error degrades to the malformed-handoff marker so a
+        // defect in the snapshot never hides result.md (#3844).
+        result.handoff = self
+            .handoff(&record)
+            .unwrap_or_else(|_| Err(HandoffError::new("$", "handoff snapshot unreadable")));
         result.digest = digest.to_string();
         Ok(result)
     }
@@ -918,6 +919,52 @@ mod tests {
         store.publish_terminal(attempt, 1, &done, &exit, &call)?;
         let result = store.stream_result(attempt, &call, None)?;
         assert_eq!(result.verdict.as_deref(), Some("VERDICT: PASS"));
+        Ok(())
+    }
+
+    /// #3844: the settled handoff is auxiliary to the result. An unreadable
+    /// slot must not hide `result.md`: capture degrades to the malformed-handoff
+    /// marker and the answer still streams.
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    #[test]
+    fn stream_result_keeps_the_answer_when_the_settled_slot_is_unreadable() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let attempt = run.attempt_id;
+        crate::tests::seal_exit_fixture(&store, &run)?;
+        let text = "password=\"secret\" end\n\nVERDICT: PASS\n";
+        let mut done = crate::tests::publication();
+        done.result = text;
+        let exit = crate::tests::exit();
+        store.publish_terminal(attempt, 1, &done, &exit, &call)?;
+
+        // A link in the slot fails the typed sealed read; stream_result must
+        // keep the captured answer and mark the handoff malformed.
+        let dir = store.attempt_dir(attempt, false)?;
+        let slot = dir.current_path()?.join(AttemptFile::Handoff.name());
+        if slot.symlink_metadata().is_ok() {
+            std::fs::remove_file(&slot)?;
+        }
+        std::os::unix::fs::symlink("not-read-target", &slot)?;
+
+        let result = store.stream_result(attempt, &call, None)?;
+        assert_eq!(result.verdict.as_deref(), Some("VERDICT: PASS"));
+        assert!(
+            matches!(&result.handoff, Err(error) if error.to_string().contains("handoff snapshot unreadable")),
+            "an unreadable slot degrades to a malformed handoff: {:?}",
+            result.handoff
+        );
+        assert!(
+            result.excerpt.contains("password="),
+            "the captured answer still streams: {:?}",
+            result.excerpt
+        );
         Ok(())
     }
 }

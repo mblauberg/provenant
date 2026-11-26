@@ -1357,10 +1357,13 @@ fn constraints(path: &str) -> Vec<String> {
     if path == "provenant output" {
         return vec![
             "target is NAME[/NODE[#N]]; a node reads its newest settled attempt".into(),
-            format!("tail above {0} lines is clamped to {0}", limits::TAIL_LINES),
             format!(
-                "a result shows whole up to {} KiB, then its head and tail; at most {} changed paths of {} bytes are named; missing evidence is null",
-                limits::OUTPUT_BYTES / 1024,
+                "--tail N bounds the last N bytes; --tail-lines N bounds the last N lines and clamps above {0}",
+                limits::TAIL_LINES
+            ),
+            format!(
+                "a result page shows whole up to {} KiB, then a short head and tail; --final --to FILE exports the complete sealed result; at most {} changed paths of {} bytes are named; missing evidence is null",
+                (limits::FINAL_HEAD_BYTES + limits::FINAL_TAIL_BYTES) / 1024,
                 limits::OUTPUT_PATHS,
                 limits::PATH_BYTES
             ),
@@ -1385,6 +1388,7 @@ fn constraints(path: &str) -> Vec<String> {
         ],
         "provenant retry" => &[
             "target is NAME[/NODE[#N]]: a graph recovers, a node starts its next attempt, an attempt continues",
+            "a settled graph of one node infers that node; a wider graph needs /NODE",
         ],
         "provenant chair log append" => &[
             "operation-id and issued-at are generated when omitted; supply both for planned retries",
@@ -1417,18 +1421,23 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
-    fn steer_help_names_providers_that_keep_or_restart_the_session() {
+    fn steer_help_explains_queued_delivery_and_fallback() {
         let mut model = command_model();
         let steer = model.find_subcommand_mut("steer").expect("steer grammar");
         let help = steer.render_long_help().to_string();
-        for provider in ["claude", "codex", "cursor", "agy", "opencode"] {
-            assert!(help.contains(provider), "help must name {provider}: {help}");
+        for contract in [
+            "next turn without interrupting the running attempt",
+            "resumes the retained session",
+            "fresh_with_handoff",
+            "accepted brief, prior handoff and queued steering text",
+            "refuse rejects unsupported routes up front",
+            "leaves unavailable sessions without a successor",
+        ] {
+            assert!(
+                help.contains(contract),
+                "help must explain {contract}: {help}"
+            );
         }
-        for restart in ["command", "host-native"] {
-            assert!(help.contains(restart), "help must name {restart}: {help}");
-        }
-        assert!(help.contains("keep that session"), "{help}");
-        assert!(help.contains("restart fresh"), "{help}");
     }
 
     #[test]
@@ -3321,6 +3330,10 @@ mod tests {
         invalid(&["output", attempt, "--tail", "0"]);
         invalid(&["output", attempt, "--max-bytes", "65537"]);
         invalid(&["output", attempt, "--offset", "0", "--tail", "1"]);
+        valid(&["output", attempt, "--tail-lines", "501"]);
+        invalid(&["output", attempt, "--tail-lines", "0"]);
+        invalid(&["output", attempt, "--tail", "1", "--tail-lines", "1"]);
+        invalid(&["output", attempt, "--offset", "0", "--tail-lines", "1"]);
         valid(&["telemetry", "trace", "--peers", "fix-login"]);
     }
     #[test]

@@ -9,6 +9,131 @@ fn stranded_worktree_path(value: &Value) -> Result<PathBuf> {
     Ok(Path::new(root).join(relative))
 }
 
+/// Spec: docs/specs/disk.md#dispatch-and-new-build-pressure
+/// A natural checkpoint starts a bounded sweep only below the floor. The
+/// free-space reading is injected, so this never depends on the host's disk.
+pub(super) fn gc_floor_checkpoint_fires_below_floor_only() -> Result {
+    let rig = repository()?;
+    let workers = provenant_confinement::worktrees::SystemWorkerObserver;
+    let checkpoint = |free: u64| {
+        crate::gc_support::collect_below_floor(&rig.state, &rig.home, &workers, |_| Ok(free))
+    };
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='1B'\n",
+    )?;
+    assert!(
+        !checkpoint(u64::MAX)?,
+        "a healthy free-space reading must not sweep"
+    );
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    assert!(checkpoint(0)?, "a below-floor reading must start a sweep");
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\nschedule=false\n",
+    )?;
+    assert!(
+        !checkpoint(0)?,
+        "disabled scheduling must not start a sweep"
+    );
+    Ok(())
+}
+
+/// Spec: docs/specs/disk.md#floor-triggered-and-joined-sweeps
+/// An explicit floor request joins a held sweep within the configured budget;
+/// an expired join is a reported failure, never a successful empty collection.
+pub(super) fn gc_free_floor_bounded_join_fails_when_sweep_is_held() -> Result {
+    let rig = repository()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nsweep_budget='0'\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let crate::gc_sweep::Acquire::Held(_lease) =
+        crate::gc_sweep::acquire(&rig.state, Duration::from_secs(30), &clock)?
+    else {
+        return Err("could not hold the sweep lease".into());
+    };
+    let output = command(
+        &rig,
+        &[
+            "gc",
+            "--apply",
+            "--free-floor",
+            "18446744073709551615B",
+            "--json",
+        ],
+    )?;
+    assert_ne!(
+        code(&output),
+        0,
+        "a bounded join that expired must fail: {}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    let value = json(&output)?;
+    let message = value["error"]["message"]
+        .as_str()
+        .ok_or("gc failure message")?;
+    assert!(message.contains("bounded wait"), "{message}");
+    assert!(
+        message.contains("this invocation collected nothing"),
+        "{message}"
+    );
+    assert!(!message.contains("holder"), "{message}");
+    Ok(())
+}
+
+/// Spec: docs/specs/disk.md#floor-triggered-and-joined-sweeps
+/// Settlement runs its own collection before the floor checkpoint, and the
+/// checkpoint starts a scheduled sweep with the injected below-floor reading.
+/// The explicit home keeps that sweep inside the rig.
+pub(super) fn gc_cleanup_below_floor_starts_a_sweep() -> Result {
+    let fixture = crate::fabric::peer_tests::SettlementFixture::resumed()?;
+    // Settlement sweeps from the state root it recorded; configure and
+    // observe that root, not the rig's spelling of it.
+    let state = fixture.settled.roots.state_root.clone();
+    fs::write(
+        state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let request = serde_json::to_string(&(
+        fixture.settled.clone(),
+        None::<provenant_run::WriterDeliveryReceipt>,
+    ))?;
+    let before = fs::read_to_string(state.join("tick").join("gc-sweep-epoch"))
+        .ok()
+        .and_then(|epoch| epoch.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    // Drive the production entry point with the rig's installed environment;
+    // no volume has u64::MAX bytes free, so the real measurement is below it.
+    let cleanup = command(&fixture.rig, &["internal", "lane-cleanup", &request])?;
+    assert_eq!(
+        code(&cleanup),
+        0,
+        "{}",
+        String::from_utf8_lossy(&cleanup.stderr.bytes)
+    );
+    assert!(
+        !String::from_utf8_lossy(&cleanup.stderr.bytes).contains("did not complete"),
+        "{}",
+        String::from_utf8_lossy(&cleanup.stderr.bytes)
+    );
+    // A completed sweep clears its progress record; the sweep lease epoch is
+    // the durable evidence that a sweep acquired the lease and ran.
+    let epoch = fs::read_to_string(state.join("tick").join("gc-sweep-epoch"))?;
+    assert!(
+        epoch
+            .trim()
+            .parse::<u64>()
+            .is_ok_and(|epoch| epoch > before),
+        "sweep epoch did not advance past {before}: {epoch:?}"
+    );
+    Ok(())
+}
+
 pub(super) fn gc_keeps_and_names_stranded_work() -> Result {
     let rig = repository()?;
     let created = ok(
@@ -1342,6 +1467,154 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     Ok(())
 }
 
+// Spec: docs/specs/disk.md#bounded-sweeps
+pub(super) fn gc_bounded_passes_collect_settled_scratch_and_keep_busy_custody() -> Result {
+    use provenant_os::fs::{Directory, LockMode};
+    use std::ffi::OsStr;
+    use std::os::unix::fs::DirBuilderExt;
+
+    let rig = repository()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nsweep_budget='1s'\nfree_floor='1B'\n",
+    )?;
+    let (roots, context) = writer_context(&rig)?;
+    let store = open_writer_store(&context)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    let mut scratch = Vec::new();
+    for seed in 0..96_u8 {
+        let mut input = writer_run(
+            provenant_run::WriterRequest {
+                extra: Default::default(),
+                custody_project: Some(context.project_id),
+                project: rig.project.clone(),
+                worktree: rig.project.join("unused"),
+            },
+            &format!("gc-census-{seed}"),
+            seed,
+            "fixture",
+        )?;
+        input.request.task.writer = None;
+        input.created_at = provenant_core::WallTime::from_micros(1)?;
+        store.create(&input, &call)?;
+        let tmp = provenant_run::scratch_root(&rig.state, input.attempt_id).join("tmp");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&tmp)?;
+        fs::write(tmp.join("payload"), [1_u8; 8192])?;
+        store.withdraw(
+            input.attempt_id,
+            provenant_run::AttemptState::Queued {
+                extra: Default::default(),
+            },
+            provenant_run::Outcome::Cancelled,
+            "fixture",
+            provenant_core::WallTime::from_micros(2)?,
+            &call,
+        )?;
+        scratch.push(tmp);
+    }
+    drop(store);
+    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    db.execute("UPDATE attempts SET tmp_retained=1", [])?;
+    drop(db);
+    let census_roots = crate::gc_support::settled_roots(&roots, &cancel);
+    assert!(
+        census_roots.len() >= scratch.len(),
+        "the census must see settled attempts"
+    );
+    let held_id = scratch[0]
+        .parent()
+        .and_then(|root| root.file_name())
+        .ok_or("scratch attempt id")?;
+    let held_attempt = Directory::open_anchor(&rig.state.join("attempts").join(held_id))?;
+    let held = held_attempt.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+    let mut previous = scratch.len();
+    let mut saw_progress = false;
+    let mut saw_deferred = false;
+    let mut first_scratch_report = None;
+    let mut last_report = Value::Null;
+    for _ in 0..30 {
+        let output = command(&rig, &["gc", "--apply", "--idle", "0", "--json"])?;
+        let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let remaining = scratch.iter().filter(|path| path.exists()).count();
+        assert!(
+            remaining <= previous,
+            "collection must be monotonic: {report}"
+        );
+        assert!(
+            scratch[0].exists(),
+            "busy custody must remain protected: {report}"
+        );
+        let progress = &report["data"]["candidate_progress"];
+        if progress.is_object() && first_scratch_report.is_none() {
+            first_scratch_report = Some(report.clone());
+        }
+        if progress["deferred"].as_u64().unwrap_or(0) > 0 {
+            assert!(
+                progress["deferred_bytes"].is_null()
+                    || progress["deferred_bytes"]
+                        .as_u64()
+                        .is_some_and(|bytes| bytes >= 8192),
+                "retained bytes are measured or explicitly unknown: {report}"
+            );
+        }
+        if let Some(deferred) = report["data"]["provider_state"]["scratch_deferred"]
+            .as_array()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry["path"] == scratch[0].to_string_lossy().as_ref())
+            })
+        {
+            saw_deferred = true;
+            assert!(
+                deferred["bytes"].is_null()
+                    || deferred["bytes"]
+                        .as_u64()
+                        .is_some_and(|bytes| bytes >= 8192),
+                "retained bytes are measured or explicitly unknown: {report}"
+            );
+        }
+        saw_progress |= remaining < previous;
+        previous = remaining;
+        last_report = report;
+        if remaining == 1 {
+            break;
+        }
+    }
+    assert!(
+        saw_progress && saw_deferred && previous == 1,
+        "bounded passes must collect every available candidate: remaining={previous}, progress={saw_progress}, deferred={saw_deferred}, first scratch report={first_scratch_report:?}, last report={last_report}"
+    );
+    drop(held);
+    for _ in 0..30 {
+        let output = command(&rig, &["gc", "--apply", "--idle", "0", "--json"])?;
+        let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let remaining = scratch.iter().filter(|path| path.exists()).count();
+        assert!(
+            remaining <= previous,
+            "collection must be monotonic: {report}"
+        );
+        previous = remaining;
+        if remaining == 0 {
+            assert!(
+                report["data"]["candidate_progress"].is_object(),
+                "scratch progress must be reported: {report}"
+            );
+            break;
+        }
+    }
+    assert_eq!(
+        previous, 0,
+        "bounded passes must finish after custody releases"
+    );
+    Ok(())
+}
+
 pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result {
     use std::os::unix::fs::DirBuilderExt;
     let rig = repository()?;
@@ -1368,8 +1641,11 @@ pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result
     store.create(&input, &call)?;
     let id = input.attempt_id;
     let attempt = rig.state.join(format!("attempts/{id}"));
-    let temporary = attempt.join("tmp");
-    fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+    let temporary = rig.state.join(format!("attempt-scratch/{id}/tmp"));
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&temporary)?;
     fs::write(temporary.join("payload"), vec![1; 8192])?;
     store.withdraw(
         id,
@@ -1403,7 +1679,10 @@ pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result
         "provider-history/candidate-0/thread_history_1.sqlite",
     ] {
         let path = attempt.join(name);
-        fs::create_dir_all(path.parent().ok_or("retained parent")?)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path.parent().ok_or("retained parent")?)?;
         if !path.exists() {
             fs::write(&path, format!("retained fixture: {name}\n\0"))?;
         }
@@ -1420,6 +1699,8 @@ pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result
     assert_eq!(removal["path"], temporary.to_str().ok_or("tmp path")?);
     let bytes = removal["bytes"].as_u64().ok_or("tmp bytes")?;
     assert!(bytes >= 8192);
+    assert_eq!(preview["data"]["candidate_progress"]["collected"], 1);
+    assert_eq!(preview["data"]["candidate_progress"]["bytes"], bytes);
     assert!(temporary.exists());
     let text = command(&rig, &["gc", "--dry-run"])?;
     assert_eq!(code(&text), 0);
@@ -1431,6 +1712,15 @@ pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result
         applied["data"]["provider_state"]["attempt_tmp"][0],
         *removal
     );
+    assert_eq!(applied["data"]["candidate_progress"]["collected"], 1);
+    assert_eq!(applied["data"]["candidate_progress"]["bytes"], bytes);
+    let scratch_bytes = applied["data"]["retention_bytes"]
+        .as_array()
+        .ok_or("retention bytes")?
+        .iter()
+        .find(|row| row["class"] == "attempt_scratch")
+        .ok_or("scratch byte observation")?;
+    assert_eq!(scratch_bytes["observation"]["bytes"], bytes);
     assert!(!temporary.exists());
     for (path, bytes) in retained {
         assert_eq!(
@@ -1666,9 +1956,11 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
                 provenant_os::fs::LockMode::Exclusive,
             )?;
             let pending_receipt = settlement_receipt(&fixture)?;
-            crate::fabric::gc_cleanup::run(&request, &FreeWorkers).map_err(|error| {
-                format!("busy settlement cleanup failed: {error}; receipt={pending_receipt}")
-            })?;
+            crate::fabric::gc_cleanup::run(&request, &FreeWorkers, |_| Ok(u64::MAX)).map_err(
+                |error| {
+                    format!("busy settlement cleanup failed: {error}; receipt={pending_receipt}")
+                },
+            )?;
             assert!(fixture.worktree.exists());
             drop(held);
         } else {
@@ -1725,7 +2017,7 @@ pub(super) fn completion_and_sweep_retain_unlanded_or_dirty_lanes() -> Result {
             .map_err(|error| error.to_string())?
             .pop()
             .ok_or("settlement did not start collection")?;
-        crate::fabric::gc_cleanup::run(&request, &FreeWorkers)?;
+        crate::fabric::gc_cleanup::run(&request, &FreeWorkers, |_| Ok(u64::MAX))?;
         assert!(
             fixture.worktree.exists(),
             "settlement collection removed a kept lane (dirty={dirty})"

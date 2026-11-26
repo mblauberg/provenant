@@ -1,5 +1,5 @@
 //! Non-billable sign-in diagnostics. Captures remain bounded and in memory.
-use crate::{emit, fail, roots};
+use crate::{emit, fail, hook_diagnostics, roots};
 use provenant_cli::{
     Globals, Hosts,
     fabric::{Context, PeerFailure, facade_outcome},
@@ -72,6 +72,15 @@ fn login_account(row: provenant_quota::AccountRow) -> LoginAccount {
         repair: row.repair,
     }
 }
+/// The installed chair-hook timeout and the overruns seen in the last day.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct HookDoctor {
+    timeout_secs: u64,
+    source: String,
+    #[serde(default)]
+    recent: Vec<hook_diagnostics::HookOverrun>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Report {
     claude: Vec<Identity>,
@@ -103,6 +112,8 @@ pub(crate) struct Report {
     /// census. Reported only; no signal is ever sent from this list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     held_processes: Vec<provenant_confinement::worktrees::HeldProcess>,
+    #[serde(default)]
+    hooks: HookDoctor,
 }
 fn executable(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
@@ -377,6 +388,22 @@ pub(crate) fn local(
         .map(|config| agy_accounts(&config.domains.accounts, home))
         .unwrap_or_default();
     let mut warnings = crate::pool_effort_warnings(roots);
+    let hooks = hook_doctor(state, roots);
+    if !hooks.recent.is_empty() {
+        let worst = hooks
+            .recent
+            .iter()
+            .map(|row| row.overrun_ms)
+            .max()
+            .unwrap_or_default();
+        warnings.push(format!(
+            "{} hook budget overrun(s) in the last 24 h, worst {} ms over; installed timeout {} s from {}; check hook transcripts and raise `provenant config set hooks.timeout_secs` if needed",
+            hooks.recent.len(),
+            worst,
+            hooks.timeout_secs,
+            hooks.source
+        ));
+    }
     if let Some(warning) = legacy_state_warning(home) {
         warnings.push(warning.into());
     }
@@ -444,6 +471,7 @@ pub(crate) fn local(
         agy_accounts,
         managed_error,
         warnings,
+        hooks,
     })
 }
 struct DoctorError {
@@ -620,6 +648,18 @@ fn valid_remote(report: &Report) -> bool {
                 && row.report.len() <= 1024
                 && !row.report.chars().any(char::is_control)
         })
+        && report.hooks.source.len() <= 1024
+        && !report.hooks.source.chars().any(char::is_control)
+        && report.hooks.recent.len() <= 128
+        && report.hooks.recent.iter().all(|row| {
+            [&row.action, &row.cause, &row.source]
+                .iter()
+                .all(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
+                && row
+                    .at
+                    .as_ref()
+                    .is_none_or(|text| text.len() <= 64 && !text.chars().any(char::is_control))
+        })
 }
 fn discard_remote_repairs(report: &mut Report) {
     report.tick_agent.repair = None;
@@ -714,7 +754,18 @@ pub fn run(
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> u8 {
     let Hosts::Doctor { host } = command;
-    match inspect(globals, host.as_deref(), workers) {
+    doctor(host.as_deref(), globals, workers, "hosts doctor")
+}
+
+/// Render one doctor report. `name` keeps the envelope honest for both the
+/// `hosts doctor` and top-level `doctor` spellings.
+pub(crate) fn doctor(
+    host: Option<&str>,
+    globals: &Globals,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    name: &str,
+) -> u8 {
+    match inspect(globals, host, workers) {
         Ok(report) => {
             let mut text = String::new();
             for warning in &report.warnings {
@@ -724,6 +775,19 @@ pub fn run(
             for process in &report.held_processes {
                 text.push_str(&process.advisory());
                 text.push('\n');
+            }
+            text.push_str(&format!(
+                "hook timeout: {} s ({}); {} overrun(s) in the last 24 h\n",
+                report.hooks.timeout_secs,
+                report.hooks.source,
+                report.hooks.recent.len()
+            ));
+            for overrun in &report.hooks.recent {
+                let at = overrun.at.as_deref().unwrap_or("unknown time");
+                text.push_str(&format!(
+                    "hook overrun [{} {}]: {} ms over a {} ms budget; {}\n",
+                    overrun.action, at, overrun.overrun_ms, overrun.budget_ms, overrun.cause
+                ));
             }
             match &report.nextest {
                 Some(path) => {
@@ -852,20 +916,43 @@ pub fn run(
                 text.push_str(&format!("  repair: {repair}\n"));
             }
             emit(
-                &CommandResult::new("hosts doctor", Outcome::Ok, report),
+                &CommandResult::new(name, Outcome::Ok, report),
                 globals,
                 &text,
                 true,
             )
         }
         Err(error) => fail(
-            "hosts doctor",
+            name,
             error.outcome,
             error.code,
             &error.message,
             error.repair(),
             globals,
         ),
+    }
+}
+
+/// The hook section of the doctor report: the installed timeout with its layer,
+/// and every local-budget overrun recorded in the last day.
+fn hook_doctor(state: &Path, roots: &provenant_core::Roots) -> HookDoctor {
+    let recent = hook_diagnostics::recent_overruns(state, hook_diagnostics::DOCTOR_WINDOW);
+    match provenant_cli::config_reads::show_for(roots, "hosts doctor") {
+        Ok(read) => HookDoctor {
+            timeout_secs: read.domains.hooks.timeout_secs,
+            source: provenant_cli::config_reads::setting_source(
+                &read.origins,
+                "domains.hooks.timeout_secs",
+            ),
+            recent,
+        },
+        Err(error) => HookDoctor {
+            timeout_secs: provenant_config::DEFAULT_HOOK_TIMEOUT_SECS,
+            source: format!(
+                "compiled defaults (domains.hooks.timeout_secs); config unavailable: {error}"
+            ),
+            recent,
+        },
     }
 }
 
@@ -886,6 +973,46 @@ mod tests {
         assert!(super::legacy_state_warning(home.path()).is_some());
         std::fs::remove_dir(&legacy).unwrap();
         assert!(super::legacy_state_warning(home.path()).is_none());
+    }
+
+    #[test]
+    fn doctor_reports_the_hook_timeout_source_and_recent_overruns() {
+        use provenant_core::{Clock, RootInputs};
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let mut inputs = RootInputs::new(home.clone(), home.clone());
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(roots.state.as_path())
+                .unwrap();
+        }
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version = 1\n[domains.hooks]\ntimeout_secs = 7\n",
+        )
+        .unwrap();
+        let directory = roots.state.as_path().join("hooks/diagnostics");
+        std::fs::create_dir_all(&directory).unwrap();
+        let at = provenant_os::clock::SystemClock::new().wall_now().unwrap();
+        let line = serde_json::json!({
+            "at": at.to_string(), "action": "chair-stop", "event": "Stop",
+            "cause": "hook deadline exceeded by 100 ms", "duration_ms": 6100,
+            "budget_ms": 6000, "overrun_ms": 100,
+            "source": "config.toml (domains.hooks.timeout_secs)",
+        });
+        std::fs::write(directory.join("failures.jsonl"), line.to_string()).unwrap();
+        let report = super::hook_doctor(roots.state.as_path(), &roots);
+        assert_eq!(report.timeout_secs, 7);
+        assert!(report.source.contains("config.toml"), "{}", report.source);
+        assert_eq!(report.recent.len(), 1, "{:?}", report.recent);
+        assert_eq!(report.recent[0].action, "chair-stop");
+        assert_eq!(report.recent[0].overrun_ms, 100);
     }
 
     #[test]

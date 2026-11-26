@@ -1,5 +1,21 @@
 include!("interface_implement_invariants.rs");
 #[test]
+fn route_overrides_skip_host_owned_delivery_nodes() {
+    use provenant_fabric_runtime::graph::GraphNode;
+    let choice = super::RouteChoice::parse(&json!("writer=junior")).unwrap();
+    for kind in ["hygiene", "publish"] {
+        let mut node: GraphNode = serde_json::from_value(json!({
+            "id":kind, "kind":kind, "access":"worktree_write", "worktree":"retained"
+        }))
+        .unwrap();
+        super::override_tier(&mut node, &choice);
+        super::override_launch(&mut node, &json!({"model":"openai/gpt-5"})).unwrap();
+        assert!(node.route.is_none());
+        assert!(node.routes.is_none());
+    }
+}
+
+#[test]
 fn tier_override_preserves_leaf_family_constraints() {
     use provenant_fabric_runtime::graph::GraphNode;
     let override_route = super::RouteChoice::Alias("senior".into());
@@ -18,6 +34,85 @@ fn tier_override_preserves_leaf_family_constraints() {
         assert_eq!(route.alias.as_deref(), Some("senior"));
         assert_eq!(route.required_family.as_deref(), Some("openai"));
     }
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#inputs-and-resources
+fn pinned_review_prompt_says_the_subject_is_checked_out_in_the_working_directory() {
+    use provenant_fabric_runtime::graph::{GraphNode, SourceBinding};
+    let head = "1111111111111111111111111111111111111111";
+    let base = "2222222222222222222222222222222222222222";
+    let mut node: GraphNode = serde_json::from_value(json!({
+        "id": "review", "access": "read_only", "prompt": "review the subject",
+        "review_behaviour": "lens",
+    }))
+    .unwrap();
+    super::bind_submission_subject(&mut node, Some(base), head);
+    assert_eq!(
+        node.source,
+        Some(SourceBinding::Commit {
+            commit: head.into()
+        })
+    );
+    assert!(node.prompt.contains(base), "{}", node.prompt);
+    assert!(node.prompt.contains("authoritative"), "{}", node.prompt);
+    assert!(
+        node.prompt.contains(&format!(
+            "already checked out at {head} in your working directory"
+        )),
+        "{}",
+        node.prompt
+    );
+    assert!(
+        node.prompt
+            .contains("Do not check out, switch or reset any other checkout"),
+        "{}",
+        node.prompt
+    );
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#inputs-and-resources
+fn review_preamble_names_the_host_pinned_base_without_a_remote_default_ref() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    // The fixture carries no remote-tracking ref, so a reviewer cannot confirm
+    // the base with `git merge-base origin/<default> HEAD` (#3977).
+    assert!(
+        crate::worktree_tests::git(
+            &rig,
+            &["for-each-ref", "--format=%(refname)", "refs/remotes"]
+        )?
+        .is_empty(),
+        "the fixture must have no remote default ref"
+    );
+    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    std::fs::write(rig.project.join("subject.txt"), "subject\n")?;
+    crate::worktree_tests::git(&rig, &["add", "subject.txt"])?;
+    crate::worktree_tests::git(&rig, &["commit", "-qm", "subject"])?;
+    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    let response = factory.graph_document(
+        json!({
+            "op":"run", "template":"review", "brief":"Review", "explain":true,
+            "set":{"subject":head,"review_base":base},
+        }),
+        budget,
+        &cancel,
+    )?;
+    let prompt = response["document"]["nodes"][0]["prompt"]
+        .as_str()
+        .ok_or("review node prompt")?;
+    assert!(prompt.contains(&base), "{prompt}");
+    assert!(prompt.contains(&head), "{prompt}");
+    assert!(prompt.contains("authoritative"), "{prompt}");
+    assert!(prompt.contains(provenant_run::REVIEW_BASE_REF), "{prompt}");
+    assert_eq!(
+        response["document"]["review_base"], base,
+        "the document and the prompt must name the same host-pinned base"
+    );
+    Ok(())
 }
 
 #[test]
@@ -716,7 +811,7 @@ fn tightened_retry_limit_preserves_the_checkpoint_envelope() -> Result {
     let mut target = factory
         .graph_target("g-test/reader")?
         .ok_or("retry target")?;
-    factory.prepare_retry(&mut target, &request, &document, &mut staged)?;
+    factory.prepare_retry_inner(&mut target, &request, &document, &mut staged, None)?;
     provenant_fabric_runtime::graph::admit_candidate(
         &document,
         Some(&staged),
@@ -908,6 +1003,94 @@ fn branch_without_base_uses_the_remote_default_branch() -> Result {
         )
         .is_err()
     );
+    Ok(())
+}
+
+/// `--branch` and the branch resolved by `run implement --pr N` must land in
+/// the branch's existing linked checkout rather than provisioning a second
+/// one. Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn branch_named_launch_binds_an_existing_linked_checkout() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let factory = factory(&rig)?;
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "reuse-free",
+            ".worktrees/reuse-free",
+        ],
+    )?;
+    fn writer_leaf(node: &Value) -> Option<&Value> {
+        match node.pointer("/composite/nodes").and_then(Value::as_array) {
+            Some(children) => children.iter().find_map(writer_leaf),
+            None => (node["access"] == "worktree_write").then_some(node),
+        }
+    }
+    let bound = factory.child_request(&json!({
+        "op":"run", "template":"implement", "brief":"Repair",
+        "branch":"reuse-free", "base":"HEAD"
+    }))?;
+    let node = writer_leaf(&bound.launch.as_ref().ok_or("launch")?.node).ok_or("writer")?;
+    assert_eq!(
+        node["worktree"],
+        json!(rig.project.join(".worktrees/reuse-free")),
+        "the existing checkout must be the target: {node}"
+    );
+    assert!(
+        node["attempt"]["new_worktree"].is_null(),
+        "an existing checkout must not be provisioned again: {node}"
+    );
+
+    // The PR repair lowers to the same branch control, so it takes the same
+    // target as an explicit --branch.
+    let repaired = factory.apply_pr_repair_with(
+        json!({"op":"run", "template":"implement", "brief":"Repair", "pr":7}),
+        |_| {
+            Ok(super::PrRepairFact {
+                branch: "reuse-free".into(),
+                base: "HEAD".into(),
+                failures: String::new(),
+            })
+        },
+    )?;
+    let from_pr = factory.child_request(&repaired)?;
+    let node = writer_leaf(&from_pr.launch.as_ref().ok_or("launch")?.node).ok_or("writer")?;
+    assert_eq!(
+        node["worktree"],
+        json!(rig.project.join(".worktrees/reuse-free")),
+        "the PR repair must reuse the checkout: {node}"
+    );
+    assert!(
+        node["attempt"]["new_worktree"].is_null(),
+        "the PR repair must not provision the checkout again: {node}"
+    );
+    Ok(())
+}
+
+/// A held checkout still refuses, and the remedy names the holder and the
+/// exact command that settles it.
+#[test]
+fn held_writer_refusal_names_holder_and_exact_reconcile_command() -> Result {
+    let holder = provenant_core::AttemptId::from_bytes([53; 16]);
+    let lease = FacadeError::WriterLeaseHeld {
+        holder: Some(holder),
+        branch: Some("refs/heads/holder".into()),
+        worktree: Some("/fixture/holder".into()),
+        age: Some("1h".into()),
+        live: Some(true),
+    };
+    let next = lease.diagnostic().next.ok_or("lease remedy")?;
+    assert!(next.contains(&holder.to_string()), "{next}");
+    assert!(next.contains("provenant reconcile"), "{next}");
+    let busy = FacadeError::WriterBusy {
+        holder: Some(holder),
+    };
+    let next = busy.diagnostic().next.ok_or("busy remedy")?;
+    assert!(next.contains(&holder.to_string()), "{next}");
+    assert!(next.contains("provenant reconcile"), "{next}");
     Ok(())
 }
 
@@ -1662,6 +1845,75 @@ fn replay_digest_tracks_delivery_source_commit() -> Result {
 }
 
 #[test]
+fn smoke_root_commit_skips_review_without_blocking_other_nodes() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let factory = factory(&rig)?;
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let cancel = CancelToken::new();
+    let preview = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    let skipped = preview["skipped"].as_array().ok_or("skipped rows")?;
+    assert!(
+        skipped.iter().any(|row| {
+            row["node"]
+                .as_str()
+                .is_some_and(|id| id.contains("review--"))
+                && row["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("smoke-review"))
+        }),
+        "review must be skipped: {preview}"
+    );
+    assert!(
+        !skipped.iter().any(|row| {
+            row["node"].as_str().is_some_and(|id| {
+                id.ends_with("task--read")
+                    || id.ends_with("task--retry-route")
+                    || id.ends_with("task--steer-route")
+            })
+        }),
+        "other read nodes must remain eligible: {preview}"
+    );
+    assert!(
+        preview["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("checkout first parent is unavailable"))
+            })),
+        "the reason must be recorded: {preview}"
+    );
+
+    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    std::fs::write(rig.project.join("subject.txt"), "subject\n")?;
+    crate::worktree_tests::git(&rig, &["add", "subject.txt"])?;
+    crate::worktree_tests::git(&rig, &["commit", "-qm", "subject"])?;
+    let with_parent = factory.graph_document(
+        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    assert!(
+        !with_parent["skipped"]
+            .as_array()
+            .ok_or("skipped rows")?
+            .iter()
+            .any(|row| {
+                row["node"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("review--"))
+            }),
+        "a parent must enable review: {with_parent}"
+    );
+    assert!(serde_json::to_string(&with_parent["document"])?.contains(&base));
+    Ok(())
+}
+
+#[test]
 fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
     let rig = TestRig::new()?;
     let remote_host = provenant_core::HostId::from_bytes([2; 16]);
@@ -1700,11 +1952,13 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
             &cancel,
         )
         .map_err(|error| format!("default smoke preview: {error:?}"))?;
-    let preview_remote = factory.graph_document(
-            json!({"op":"run", "template":"smoke", "host":"peer-a", "set":{"worktree":rig.project}, "explain":true}),
+    let preview_remote = factory
+        .graph_document(
+            json!({"op":"run", "template":"smoke", "host":"peer-a", "explain":true}),
             budget,
             &cancel,
-        ).map_err(|error| format!("remote smoke preview: {error:?}"))?;
+        )
+        .map_err(|error| format!("remote smoke preview: {error:?}"))?;
     let preview_local = factory
         .graph_document(
             json!({"op":"run", "template":"smoke", "set":{"worktree":rig.project}, "explain":true}),
@@ -1730,15 +1984,83 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
                 .as_str()
                 .is_some_and(|reason| reason.contains("smoke-write"))
     }));
-    assert!(skipped_writer(&preview_remote));
+    // A remote launch has no caller worktree, so the facade provisions the
+    // writer from a sourced scratch branch and the peer exercises it.
     assert!(
-        !serde_json::to_string(&preview_remote["document"])?
-            .contains(&rig.project.to_string_lossy().to_string())
+        !skipped_writer(&preview_remote),
+        "remote smoke must run its writer from a sourced default: {preview_remote}"
+    );
+    let remote_encoded = serde_json::to_string(&preview_remote["document"])?;
+    assert!(
+        !remote_encoded.contains(&rig.project.to_string_lossy().to_string()),
+        "a caller path reached the remote document: {remote_encoded}"
+    );
+    assert!(
+        remote_encoded.contains("smoke/"),
+        "the remote writer has no sourced scratch branch: {remote_encoded}"
+    );
+    // A caller worktree is still refused on the remote boundary: only branch
+    // and base intent may name a worktree the peer creates in its own clone.
+    let caller_path = factory
+        .graph_document(
+            json!({"op":"run", "template":"smoke", "host":"peer-a",
+                "worktree":rig.project, "explain":true}),
+            budget,
+            &cancel,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&caller_path, FacadeError::InvalidInput {
+            detail: Some(InvalidInputDetail::Field(field)),
+        } if field.as_str() == "worktree"),
+        "a remote smoke caller path must be refused: {caller_path:?}"
     );
     assert!(!skipped_writer(&preview_local));
     assert!(
         serde_json::to_string(&preview_local["document"])?
             .contains(&rig.project.to_string_lossy().to_string())
+    );
+
+    // A branch gives the peer its own worktree intent, so remote smoke now
+    // runs the writer instead of skipping it, without a caller path.
+    let preview_remote_writer = factory
+        .graph_document(
+            json!({"op":"run", "template":"smoke", "host":"peer-a",
+                "branch":"smoke/peer", "base":"HEAD", "explain":true}),
+            budget,
+            &cancel,
+        )
+        .map_err(|error| format!("remote smoke writer preview: {error:?}"))?;
+    assert!(
+        !skipped_writer(&preview_remote_writer),
+        "a peer-owned worktree must enable the remote write node: {preview_remote_writer}"
+    );
+    let encoded = serde_json::to_string(&preview_remote_writer["document"])?;
+    assert!(
+        !encoded.contains(&rig.project.to_string_lossy().to_string()),
+        "a caller path reached the remote document: {encoded}"
+    );
+    assert!(encoded.contains("smoke/peer"), "{encoded}");
+
+    // An explicit disable still skips the remote writer, with that reason.
+    let preview_remote_disabled = factory
+        .graph_document(
+            json!({"op":"run", "template":"smoke", "host":"peer-a",
+                "set":{"smoke-write":false}, "explain":true}),
+            budget,
+            &cancel,
+        )
+        .map_err(|error| format!("disabled remote smoke preview: {error:?}"))?;
+    assert!(skipped_writer(&preview_remote_disabled));
+    assert!(
+        preview_remote_disabled["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("smoke-write is not enabled"))
+            })),
+        "the skipped remote writer must name its reason: {preview_remote_disabled}"
     );
 
     Ok(())
@@ -1987,7 +2309,7 @@ fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> 
     let launch = || {
         barrier.wait();
         provenant_cli::run::with_deferred_provider_launch(|| {
-            factory.launch_submission(document.clone(), &json!({}), budget, &cancel, None)
+            factory.launch_submission(document.clone(), &json!({}), None, budget, &cancel, None)
         })
     };
     let results = std::thread::scope(|scope| {
@@ -2020,8 +2342,14 @@ fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> 
     )?
     .ok_or("checkpoint")?;
     assert_eq!(saved.nodes[0].attempts.len(), 1);
-    let replay =
-        factory.launch_submission(document, &json!({"wait_seconds":30}), budget, &cancel, None)?;
+    let replay = factory.launch_submission(
+        document,
+        &json!({"wait_seconds":30}),
+        None,
+        budget,
+        &cancel,
+        None,
+    )?;
     assert_eq!(replay["replayed"], true);
     assert_eq!(replay["timed_out"], false);
     let after = FileJournal::read_checkpoint(
@@ -2075,6 +2403,38 @@ fn attempt_settings_merge_before_graph_and_child_template_binding() -> Result {
             .ok_or("child launch missing")?;
         assert_eq!(child.node["attempt"]["host"], "local");
     }
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
+fn explain_names_the_stall_threshold_and_its_source() -> Result {
+    let rig = TestRig::new()?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+    let response = factory.graph_document(
+        json!({"op":"run", "brief":"Inspect", "explain":true}),
+        budget,
+        &cancel,
+    )?;
+    assert_eq!(
+        response["stall"]["default_threshold_seconds"],
+        provenant_records::DEFAULT_STALL_AFTER_SECONDS
+    );
+    let providers = response["stall"]["providers"]
+        .as_object()
+        .ok_or("stall providers")?;
+    let codex = providers.get("codex").ok_or("codex stall settings")?;
+    assert_eq!(
+        codex["threshold_seconds"],
+        provenant_records::DEFAULT_STALL_AFTER_SECONDS
+    );
+    assert_eq!(codex["policy"], "report");
+    assert!(
+        !codex["source"].is_null(),
+        "stall source is hidden: {codex}"
+    );
     Ok(())
 }
 

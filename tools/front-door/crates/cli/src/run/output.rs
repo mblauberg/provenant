@@ -99,13 +99,14 @@ pub(super) fn result_projection(
 }
 
 /// Render a host-owned read through the same CLI projection.
-pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Reply {
+pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full: bool) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
-        .then_some(command.tail)
+        .then(|| command.tail_selection())
         .flatten();
     let headed = matches!(command.part, Part::Result);
     let warn_human = headed && !command.path && command.to.is_none();
     let to = command.to.clone();
+    let final_result = command.final_result;
     let mut out = reply(
         "output",
         read.and_then(|(mut data, mut text)| {
@@ -128,9 +129,19 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
                     text = format!("{state}\npartial result\n{text}");
                 }
             }
-            if let Some(bytes) = receipt_tail {
-                text = text[tail_start_bytes(text.as_bytes(), bytes)..].to_owned();
-                data["tail"] = json!(bytes);
+            if let Some(tail) = command.tail_selection() {
+                match tail {
+                    crate::Tail::Bytes(bytes) => data["tail"] = json!(bytes),
+                    crate::Tail::Lines(lines) => data["tail_lines"] = json!(lines),
+                }
+                data["tail_clamped"] = json!(command.tail_clamped());
+            }
+            if let Some(tail) = receipt_tail {
+                let start = match tail {
+                    crate::Tail::Bytes(bytes) => tail_start_bytes(text.as_bytes(), bytes),
+                    crate::Tail::Lines(lines) => tail_start_lines(text.as_bytes(), lines),
+                };
+                text = text[start..].to_owned();
                 data["tail_text"] = json!(text);
             }
             if let Some(path) = &to {
@@ -147,6 +158,9 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
                 let written_path = std::fs::canonicalize(path).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
                 data["to"] = json!(provenant_records::StructuredPathWire::from_path(&written_path).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?);
                 data["written"] = json!(bytes.len());
+                if final_result {
+                    data["bytes"] = json!({"encoding": "utf8", "data": ""});
+                }
                 text = format!("wrote {} bytes to {}\n", bytes.len(), path.display());
             }
             Ok((data, text))
@@ -154,7 +168,6 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     );
     out.read_only = true;
     if out.result.error.is_none() {
-        let full = std::env::args_os().any(|arg| arg == "--full");
         if full {
             // The full view renders the owner's human text, so the host-fact
             // headers and the whole result become that text; compact keeps the
@@ -191,9 +204,16 @@ pub fn output_from_session(
     session: &Session,
     attempt: AttemptId,
     call: &run::Request<'_>,
+    full: bool,
 ) -> Reply {
-    let read = output_read(command.clone(), edge, session, attempt, call);
-    render_output(command, read)
+    let read = if command.final_result {
+        collect_final(&command, |page| {
+            output_read(page, edge, session, attempt, call)
+        })
+    } else {
+        output_read(command.clone(), edge, session, attempt, call)
+    };
+    render_output(command, read, full)
 }
 
 /// Read a peer attempt using the owning service's budget and cancellation.
@@ -201,12 +221,116 @@ pub fn output_from_host(
     command: Output,
     host: provenant_core::HostId,
     attempt: provenant_core::AttemptId,
-    read: impl FnMut(
+    mut read: impl FnMut(
         provenant_fabric_runtime::coordination::facade::OutputInput,
-    ) -> Result<provenant_fabric_runtime::coordination::facade::OutputResult, Fail>,
+    )
+        -> Result<provenant_fabric_runtime::coordination::facade::OutputResult, Fail>,
+    full: bool,
 ) -> Reply {
-    let result = remote::read_output_with(&command, host, attempt, read);
-    render_output(command, result)
+    let result = if command.final_result {
+        collect_final(&command, |page| {
+            remote::read_output_with(&page, host, attempt, &mut read)
+        })
+    } else {
+        remote::read_output_with(&command, host, attempt, read)
+    };
+    render_output(command, result, full)
+}
+
+/// Collect a sealed result by stable, contiguous pages before writing the file.
+pub fn collect_final(
+    command: &Output,
+    mut read: impl FnMut(Output) -> Result<(Value, String), Fail>,
+) -> Result<(Value, String), Fail> {
+    if !matches!(command.part, Part::Result) {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "--final requires --part result",
+        ));
+    }
+    let corrupt = || {
+        Fail::new(
+            Status::Error,
+            ErrorKind::StateCorrupt,
+            "final result changed or returned an invalid page",
+        )
+    };
+    let mut page = command.clone();
+    page.final_result = false;
+    page.to = None;
+    page.offset = 0;
+    let mut bytes = Vec::new();
+    let mut first = None;
+    let mut digest = None;
+    let mut attempt = None;
+    loop {
+        let (data, _) = read(page.clone())?;
+        if matches!(
+            data["state"].as_str(),
+            Some("queued" | "starting" | "running" | "settling")
+        ) {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "--final requires a settled result",
+            ));
+        }
+        let page_attempt = data["attempt_id"].as_str().ok_or_else(|| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "--final needs a lane attempt",
+            )
+        })?;
+        if attempt
+            .as_deref()
+            .is_some_and(|expected| expected != page_attempt)
+        {
+            return Err(corrupt());
+        }
+        attempt = Some(page_attempt.to_owned());
+        let page_digest = data
+            .get("digest")
+            .filter(|d| !d.is_null())
+            .ok_or_else(corrupt)?;
+        if digest
+            .as_ref()
+            .is_some_and(|expected| expected != page_digest)
+        {
+            return Err(corrupt());
+        }
+        digest = Some(page_digest.clone());
+        let offset = data["offset"].as_u64().ok_or_else(corrupt)?;
+        let next = data["next_offset"].as_u64().ok_or_else(corrupt)?;
+        let chunk = chunk_bytes(&data).ok_or_else(corrupt)?;
+        if offset != page.offset || next != offset + chunk.len() as u64 {
+            return Err(corrupt());
+        }
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > provenant_records::run::RESULT_LIMIT as usize {
+            return Err(corrupt());
+        }
+        let eof = data["eof"].as_bool().ok_or_else(corrupt)?;
+        if first.is_none() {
+            first = Some(data);
+        }
+        if eof {
+            break;
+        }
+        if next <= offset {
+            return Err(corrupt());
+        }
+        page.offset = next;
+    }
+    let mut data = first.ok_or_else(corrupt)?;
+    data["next_offset"] = json!(bytes.len());
+    data["length"] = json!(bytes.len());
+    data["eof"] = json!(true);
+    data["clipped"] = json!(false);
+    data["bytes"] =
+        json!(provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(bytes));
+    Ok((data, String::new()))
 }
 
 /// What an agent needs from a read: how the attempt settled, what it changed,
@@ -216,15 +340,116 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
     summary(data, text, headed, true)
 }
 
-/// The compact default view: verdict, findings and verify first, with the
-/// host-fact narration and lane prose available through `--full`.
+/// The compact default view: verdict, findings and verify first, then a
+/// bounded view of the result page with a head and tail, marking the omitted
+/// middle; host facts remain behind `--full`.
 /// Spec: docs/specs/lane-contracts.md#result-projection
 pub(super) fn output_summary_default(data: &Value, text: &str, headed: bool) -> crate::Summary {
     summary(data, text, headed, false)
 }
 
+/// One typed review finding as a bounded, terminal-safe human line. Every field
+/// comes from the same structured finding the JSON envelope carries; a missing
+/// location or suggested fix leaves no placeholder behind. Control, format and
+/// bidi characters are stripped before the byte bound so one finding cannot
+/// forge or reorder human lines.
+/// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+pub fn finding_human_line(finding: &Value) -> String {
+    const FIELD_BYTES: usize = 256;
+    let field = |key: &str| {
+        finding[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| plain_text(value, usize::MAX))
+            .filter(|value| !value.is_empty())
+            .map(|value| crate::bounded_text(&value, FIELD_BYTES))
+    };
+    let severity = field("severity").unwrap_or_else(|| "unknown".into());
+    let mut line = format!("finding: [{severity}]");
+    match (field("file"), finding["line"].as_u64()) {
+        (Some(file), Some(number)) => line.push_str(&format!(" {file}:{number}")),
+        (Some(file), None) => line.push_str(&format!(" {file}")),
+        (None, Some(number)) => line.push_str(&format!(" line {number}")),
+        (None, None) => {}
+    }
+    if let Some(summary) = field("summary") {
+        line.push_str(&format!(" — {summary}"));
+    }
+    if let Some(fix) = field("proposed_fix") {
+        line.push_str(&format!(" (fix: {fix})"));
+    }
+    line
+}
+
+/// A bounded view of a result page. The marker names omitted bytes; `--final`
+/// exports the complete sealed result across pages.
+/// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+fn final_result_view(text: &str) -> String {
+    let final_head = crate::limits::FINAL_HEAD_BYTES;
+    let final_tail = crate::limits::FINAL_TAIL_BYTES;
+    if text.len() <= final_head + final_tail {
+        return text.to_owned();
+    }
+    let mut head = final_head.min(text.len());
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    if let Some(cut) = text[..head].rfind('\n') {
+        head = cut + 1;
+    }
+    let mut tail = text.len().saturating_sub(final_tail);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    if let Some(cut) = text[tail..].find('\n') {
+        let snap = tail + cut + 1;
+        // Only snap forward when a whole line follows; the last newline ends
+        // the final line and snapping there would drop the handoff.
+        if snap < text.len() {
+            tail = snap;
+        }
+    }
+    let omitted = tail.saturating_sub(head);
+    format!(
+        "{}[... {} bytes omitted; use --full for all of it ...]\n{}",
+        &text[..head],
+        omitted,
+        &text[tail..]
+    )
+}
+
 fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary {
     let mut lines = Vec::new();
+    // How the attempt settled leads: it is a host observation, not a lane
+    // claim, and it explains why the rest of the projection is present.
+    if headed && let Some(state) = data["state"].as_str() {
+        let reason = data["reason"].as_str();
+        lines.push(match reason {
+            Some(reason) => format!(
+                "settlement: {} ({})",
+                crate::bounded_text(state, 64),
+                crate::bounded_text(reason, 2048)
+            ),
+            None => format!("settlement: {}", crate::bounded_text(state, 64)),
+        });
+        if state == "failed" {
+            if let Some(error) = data["provider_error"].as_str() {
+                lines.push(format!(
+                    "provider error: {}",
+                    crate::bounded_text(error, PROVIDER_ERROR_BYTES)
+                ));
+            }
+            if let Some(path) = structured_path_text(&data["result_path"]) {
+                lines.push(format!("result: {}", crate::bounded_text(&path, 512)));
+            }
+        }
+    }
+    if headed && let Some(result) = data["result"].as_str() {
+        // An unsealed attempt has no prose yet; its typed state still belongs
+        // in the compact view instead of a head-and-tail of the raw text.
+        lines.push(format!("result: {}", crate::bounded_text(result, 64)));
+    }
     if headed && let Some(verdict) = data["selected"]["verdict"].as_str() {
         lines.push(format!(
             "review verdict: {}",
@@ -238,6 +463,13 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
             None => "availability unknown",
         };
         lines.push(format!("findings: {} ({availability})", findings.len()));
+        if full {
+            lines.extend(
+                findings
+                    .iter()
+                    .map(|finding| format!("  {}", finding_human_line(finding))),
+            );
+        }
     }
     if headed {
         let verify = data["handoff"]["Ok"]["verify"]
@@ -272,28 +504,6 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
             line.push_str(&format!("; {dirty} dirty paths left uncommitted"));
         }
         lines.push(line);
-    }
-    if headed && let Some(state) = data["state"].as_str() {
-        let reason = data["reason"].as_str();
-        lines.push(match reason {
-            Some(reason) => format!(
-                "settlement: {} ({})",
-                crate::bounded_text(state, 64),
-                crate::bounded_text(reason, 2048)
-            ),
-            None => format!("settlement: {}", crate::bounded_text(state, 64)),
-        });
-        if state == "failed" {
-            if let Some(error) = data["provider_error"].as_str() {
-                lines.push(format!(
-                    "provider error: {}",
-                    crate::bounded_text(error, PROVIDER_ERROR_BYTES)
-                ));
-            }
-            if let Some(path) = structured_path_text(&data["result_path"]) {
-                lines.push(format!("result: {}", crate::bounded_text(&path, 512)));
-            }
-        }
     }
     if let Some(error) = data.get("handoff").and_then(|value| value.get("Err"))
         && let Ok(error) =
@@ -343,16 +553,33 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
             }
         }
     }
-    if full && headed && data.get("writer_base").is_some() {
-        for (label, key) in [
-            ("base", "writer_base"),
-            ("committed head", "writer_head"),
-            ("publication", "publication"),
-            ("residual tree state", "residual_tree"),
+    if full && headed {
+        // A local read records writer-specific fields; a peer read projects the
+        // owning lane instead, where the committed head is `head` and a pushed
+        // publication is evidence in `delivery`. Read both shapes so a peer's
+        // real head and publication are not silently dropped. A missing or null
+        // value is absent evidence: never render a header saying "unavailable".
+        // Spec: docs/specs/lane-contracts.md#result-projection
+        let lane_publication = (data["delivery"]["state"]["state"].as_str() == Some("delivered")
+            && data["delivery"]["integration"]["remote"]
+                .as_str()
+                .is_some_and(|remote| !remote.is_empty()))
+        .then_some("pushed");
+        for (label, value) in [
+            ("base", data["writer_base"].as_str()),
+            (
+                "committed head",
+                data["writer_head"]
+                    .as_str()
+                    .or_else(|| data["head"].as_str()),
+            ),
+            (
+                "publication",
+                data["publication"].as_str().or(lane_publication),
+            ),
+            ("residual tree state", data["residual_tree"].as_str()),
         ] {
-            // A present key with a null value is absent evidence, not a line
-            // saying so: only real values render a header.
-            if let Some(value) = data[key].as_str() {
+            if let Some(value) = value {
                 lines.push(format!("{label}: {value}"));
             }
         }
@@ -377,13 +604,25 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
         };
         lines.push(format!("changed files ({total}): {listed}{more}"));
     }
-    // An empty result uses its safe diagnostic as human text. The settlement
-    // header already contains that detail, so render it only once.
-    if !headed || data["reason"].as_str() != Some(text.trim()) {
+    // Other parts are the requested bytes, not narration: a transcript or a
+    // stderr read still shows its text in the compact view. A result's final
+    // message may span pages, so the compact view keeps both ends of this page
+    // and marks the middle it omitted. An empty result
+    // repeats its diagnostic as text, already carried by the settlement line,
+    // so render it only once.
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    if !headed {
         let body = if full {
             text.to_owned()
         } else {
             crate::head_and_tail(text, limits::OUTPUT_BYTES)
+        };
+        lines.extend(body.lines().map(str::to_owned));
+    } else if data["reason"].as_str() != Some(text.trim()) {
+        let body = if full {
+            text.to_owned()
+        } else {
+            final_result_view(text)
         };
         lines.extend(body.lines().map(str::to_owned));
     }
@@ -435,15 +674,40 @@ pub(super) fn receipt_model(adapter: Option<&str>, model: Option<&str>) -> Optio
     })
 }
 
-pub(super) fn receipt_family(model: Option<&str>) -> String {
-    provenant_routing::Catalogue::bundled()
-        .ok()
+pub(super) fn receipt_family(
+    catalogue: Option<&provenant_routing::Catalogue>,
+    model: Option<&str>,
+) -> String {
+    catalogue
         .and_then(|catalogue| {
             ModelId::parse(model?)
                 .ok()
                 .and_then(|id| catalogue.model(&id).and_then(|entry| entry.family.clone()))
         })
         .unwrap_or_else(|| "unknown".into())
+}
+
+/// The effort that actually ran, paired with the evidence that justifies it.
+/// A recorded applied effort wins. An adapter warning supplies the recorded
+/// applied default or drop; without either, the effort and its source are unknown.
+pub(super) fn receipt_effort(record: &run::AttemptRecord) -> (String, String) {
+    let route = record.applied_route.as_ref();
+    if let Some(effort) = route
+        .and_then(|route| route.effort.as_deref())
+        .filter(|value| !value.is_empty())
+    {
+        return (effort.to_owned(), "applied_route.effort".into());
+    }
+    if let Some(warning) = route.and_then(|route| route.effort_warning.as_ref()) {
+        let source = format!("effort_warning:{}", warning.source);
+        if let Some(applied) = warning.applied.as_deref().filter(|value| !value.is_empty()) {
+            return (applied.to_owned(), source);
+        }
+        // The adapter dropped the requested effort: report the applied value
+        // explicitly rather than presenting the requested effort as applied.
+        return ("none".into(), source);
+    }
+    ("unknown".into(), "unknown".into())
 }
 
 pub(super) fn receipt_resolution(record: &run::AttemptRecord) -> String {
@@ -461,6 +725,24 @@ pub(super) fn receipt_resolution(record: &run::AttemptRecord) -> String {
             "unknown".into()
         };
     }
+    // Dispatched lanes name a route rather than an exact model. The launch
+    // record carries the decision that selected the applied model, so use it
+    // instead of reporting an unknown resolution for every named lane.
+    match route.source.as_deref() {
+        Some("pin") => return "explicit".into(),
+        Some("pool") => return "pool".into(),
+        Some("named_route") => {
+            return match &record.requested_route {
+                run::RequestedRoute::Named { name, .. }
+                | run::RequestedRoute::Review { name, .. } => format!("route {name}"),
+                _ => "route".into(),
+            };
+        }
+        Some("fallback") => return "fallback".into(),
+        Some("continuation") => return "continuation".into(),
+        _ => {}
+    }
+    // A model pin may predate the recorded launch source.
     let run::RequestedRoute::Model {
         provider, model, ..
     } = &record.requested_route
@@ -479,6 +761,7 @@ pub(super) fn receipt_resolution(record: &run::AttemptRecord) -> String {
 pub(super) fn reviewer_receipt(
     record: &provenant_records::run::AttemptRecord,
     writer: bool,
+    catalogue: Option<&provenant_routing::Catalogue>,
 ) -> Result<(Value, String), Fail> {
     use provenant_records::run::AttemptState;
     if !matches!(record.state, AttemptState::Terminal { .. }) {
@@ -499,18 +782,15 @@ pub(super) fn reviewer_receipt(
         .unwrap_or("unknown");
     let qualified_model =
         route.and_then(|r| receipt_model(r.provider.as_deref(), r.model.as_deref()));
-    let effort = route
-        .and_then(|r| r.effort.as_deref())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
-    let family = receipt_family(qualified_model.as_deref());
+    let (effort, effort_source) = receipt_effort(record);
+    let family = receipt_family(catalogue, qualified_model.as_deref());
     let resolved_from = receipt_resolution(record);
     let reviewer = run::fact(record.clone())?.reviewer;
     let reviewer_model = record
         .observed_route
         .as_ref()
         .and_then(|route| receipt_model(route.provider.as_deref(), route.model.as_deref()));
-    let reviewer_family = receipt_family(reviewer_model.as_deref());
+    let reviewer_family = receipt_family(catalogue, reviewer_model.as_deref());
     let provenance = reviewer
         .as_ref()
         .map_or("unknown", |reviewer| match reviewer.provenance {
@@ -534,20 +814,17 @@ pub(super) fn reviewer_receipt(
     let label = if writer { "Writer" } else { "Reviewer" };
     let qualified_model = qualified_model.as_deref().unwrap_or("unknown");
     let line = format!(
-        "{label}: {qualified_model}@{effort} ({family}; resolved from {resolved_from}), attempt {} {}",
+        "{label}: {qualified_model}@{effort} ({family}; resolved from {resolved_from}; effort source {effort_source}), attempt {} {}",
         record.key, record.attempt_id
     );
     let attribution = format!(
         "Reviewer provenance: {provenance}, actor {actor}, model {reviewer_model}, family {reviewer_family}"
     );
     Ok((
-        json!({"key": record.key, "attempt_id": record.attempt_id, "adapter": adapter, "model": model, "effort": effort, "family": family, "role": role, "resolved_from": resolved_from, "receipt": line, "reviewer": {"provenance": provenance, "actor_id": actor, "model": reviewer_model, "family": reviewer_family}, "reviewer_provenance": attribution}),
+        json!({"key": record.key, "attempt_id": record.attempt_id, "adapter": adapter, "model": model, "effort": effort, "effort_source": effort_source, "family": family, "role": role, "resolved_from": resolved_from, "receipt": line, "reviewer": {"provenance": provenance, "actor_id": actor, "model": reviewer_model, "family": reviewer_family}, "reviewer_provenance": attribution}),
         format!("{line}\n{attribution}\n"),
     ))
 }
-
-/// The most lines `output --tail` returns; a larger request is clamped.
-pub(super) const TAIL_MAX: u64 = limits::TAIL_LINES;
 
 /// Read the selected part and attach the shared lane projection.
 fn output_read(
@@ -642,7 +919,8 @@ fn output_read_part(
     let part = match command.part {
         Part::Receipt => {
             let task = session.store.request(record.attempt_id, call)?.task;
-            return reviewer_receipt(&record, task.writer.is_some());
+            let catalogue = crate::model_discovery::effective(edge.roots).ok();
+            return reviewer_receipt(&record, task.writer.is_some(), catalogue.as_ref());
         }
         Part::Result => run::ArtifactPart::Result,
         Part::Prompt => run::ArtifactPart::Prompt,
@@ -653,7 +931,8 @@ fn output_read_part(
             let mut events = session
                 .service()
                 .events(command.offset, 64, Some(id), call)?;
-            if let Some(lines) = command.tail {
+            let tail = command.tail_selection();
+            if tail.is_some() {
                 let mut cursor = events.last().map_or(command.offset, |event| event.sequence);
                 let mut more = events.len() == 64;
                 while more {
@@ -669,18 +948,26 @@ fn output_read_part(
                     }
                     cursor = next;
                     events.extend(page);
-                    let excess = events.len().saturating_sub(lines.min(TAIL_MAX) as usize);
+                    if let Some(crate::Tail::Lines(lines)) = tail {
+                        let excess = events.len().saturating_sub(lines as usize);
+                        events.drain(..excess);
+                    }
+                }
+                if let Some(crate::Tail::Lines(lines)) = tail {
+                    let excess = events.len().saturating_sub(lines as usize);
                     events.drain(..excess);
                 }
-                let excess = events.len().saturating_sub(lines.min(TAIL_MAX) as usize);
-                events.drain(..excess);
+                let byte_bound = match tail {
+                    Some(crate::Tail::Bytes(bytes)) => command.max_bytes.min(bytes),
+                    _ => command.max_bytes,
+                };
                 while !events.is_empty()
                     && serde_json::to_vec(&events)
                         .map_err(|error| {
                             Fail::new(Status::Error, ErrorKind::Io, error.to_string())
                         })?
                         .len() as u64
-                        > command.max_bytes
+                        > byte_bound
                 {
                     events.remove(0);
                 }
@@ -703,7 +990,7 @@ fn output_read_part(
     if matches!(part, run::ArtifactPart::Result)
         && record.result.is_none()
         && command.offset == 0
-        && command.tail.is_none()
+        && command.tail_selection().is_none()
         && command.to.is_none()
         && let Some(reason) = &detail
     {
@@ -741,14 +1028,17 @@ fn output_read_part(
         ));
     }
     let mut chunk = session.service().output(id, part, range, call)?;
-    let tail = command.tail;
-    if let Some(bytes) = tail {
+    let tail = command.tail_selection();
+    if let Some(tail) = tail {
         range.offset = chunk.len.saturating_sub(command.max_bytes);
         // A short transcript's first page already includes the requested tail.
         if !matches!(part, run::ArtifactPart::Transcript) || range.offset != chunk.offset {
             chunk = session.service().output(id, part, range, call)?;
         }
-        let start = tail_start_bytes(&chunk.bytes, bytes);
+        let start = match tail {
+            crate::Tail::Bytes(bytes) => tail_start_bytes(&chunk.bytes, bytes),
+            crate::Tail::Lines(lines) => tail_start_lines(&chunk.bytes, lines),
+        };
         chunk.offset += start as u64;
         chunk.bytes.drain(..start);
     }
@@ -768,7 +1058,7 @@ fn output_read_part(
     if matches!(command.part, Part::Result)
         && text.is_empty()
         && command.offset == 0
-        && command.tail.is_none()
+        && command.tail_selection().is_none()
         && command.to.is_none()
         && let Some(reason) = &reason
     {
@@ -800,11 +1090,10 @@ fn output_read_part(
             text = "payload evicted by retention; the retained capture tail is empty\n".into();
         }
     }
-    if let Some(bytes) = tail {
-        data["tail"] = json!(bytes);
-        data["tail_clamped"] = json!(false);
-    }
-    if matches!(command.part, Part::Result) && command.tail.is_none() && command.offset == 0 {
+    if matches!(command.part, Part::Result)
+        && command.tail_selection().is_none()
+        && command.offset == 0
+    {
         let base = run::writer_base(session.context.state_root.as_path(), &record)
             .ok()
             .flatten();
@@ -1116,12 +1405,36 @@ fn changed_paths(
 
 /// Byte offset that leaves at most `max_bytes` of `bytes`, aligned forward to
 /// a UTF-8 boundary so the returned tail is whole text.
-pub(super) fn tail_start_bytes(bytes: &[u8], max_bytes: u64) -> usize {
+pub fn tail_start_bytes(bytes: &[u8], max_bytes: u64) -> usize {
     let mut start = bytes.len().saturating_sub(max_bytes as usize);
     while start < bytes.len() && std::str::from_utf8(&bytes[start..]).is_err() {
         start += 1;
     }
     start
+}
+
+/// Byte offset that leaves at most the last `lines` lines of `bytes`. A
+/// trailing newline ends the last line rather than starting an empty one, and
+/// a newline byte cannot occur inside UTF-8, so the offset is a text boundary.
+pub fn tail_start_lines(bytes: &[u8], lines: u64) -> usize {
+    if lines == 0 {
+        return bytes.len();
+    }
+    let mut end = bytes.len();
+    if bytes.last() == Some(&b'\n') {
+        end -= 1;
+    }
+    let mut seen = 0u64;
+    while end > 0 {
+        end -= 1;
+        if bytes[end] == b'\n' {
+            seen += 1;
+            if seen >= lines {
+                return end + 1;
+            }
+        }
+    }
+    0
 }
 
 /// A clipped page that ends inside a UTF-8 character stops before it, so the
@@ -1157,504 +1470,15 @@ pub fn attempt_provider(
     Ok([&record.applied_route, &record.resolved_route]
         .into_iter()
         .flatten()
-        .find_map(|route| route.provider.clone()))
+        .find_map(|route| {
+            if route.host_native.is_some() {
+                Some(provenant_records::Harness::HostNative.spec().name.into())
+            } else {
+                route.provider.clone()
+            }
+        }))
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn committed_paths_follow_git_across_edits_and_push() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("repo");
-        let remote = temp.path().join("remote.git");
-        std::fs::create_dir(&repo).unwrap();
-        let git = |args: &[&str]| -> String {
-            String::from_utf8(provenant_os::fixture::run_git(&repo, args).unwrap())
-                .unwrap()
-                .trim()
-                .to_owned()
-        };
-        git(&["init", "-q"]);
-        git(&["config", "user.name", "Fixture"]);
-        git(&["config", "user.email", "fixture@example.invalid"]);
-        git(&["commit", "--allow-empty", "-qm", "base"]);
-        let base: provenant_core::GitOid = git(&["rev-parse", "HEAD"]).parse().unwrap();
-        git(&["init", "--bare", "-q", remote.to_str().unwrap()]);
-        for step in 0..4 {
-            if step == 1 || step == 3 {
-                std::fs::write(repo.join(format!("file{step}")), step.to_string()).unwrap();
-                git(&["add", "."]);
-                git(&["commit", "-qm", "change"]);
-            }
-            if step == 2 {
-                std::fs::write(repo.join("uncommitted"), "edit").unwrap();
-                git(&[
-                    "push",
-                    "-q",
-                    remote.to_str().unwrap(),
-                    "HEAD:refs/heads/lane",
-                ]);
-            }
-            let head: provenant_core::GitOid = git(&["rev-parse", "HEAD"]).parse().unwrap();
-            let expected = git(&["diff", "--name-only", &base.to_string(), &head.to_string()]);
-            let paths = super::changed_paths(&repo, base, head).unwrap();
-            assert_eq!(
-                paths,
-                expected.lines().map(str::to_owned).collect::<Vec<_>>()
-            );
-        }
-        let missing: provenant_core::GitOid =
-            "1111111111111111111111111111111111111111".parse().unwrap();
-        assert!(super::changed_paths(&repo, base, missing).is_none());
-    }
-
-    use super::{
-        Status, add_planner_fallback, fallback_reason_for_graph, output_summary,
-        output_summary_default, provider_error_from_result, provider_error_from_stderr,
-        tail_start_bytes,
-    };
-    use serde_json::json;
-
-    #[test]
-    fn output_followups_use_the_public_handle_for_local_and_peer_placements() {
-        for host in [
-            serde_json::Value::Null,
-            json!("11111111111111111111111111111111"),
-        ] {
-            let mut data = json!({
-                "attempt_id":"22222222222222222222222222222222", "host":host,
-                "state":"running", "eof":false,
-                "part":"result", "next_offset":42
-            });
-            let command = crate::Output {
-                target: "repair/writer#2".parse().unwrap(),
-                part: crate::Part::Result,
-                to: None,
-                path: false,
-                offset: 0,
-                tail: None,
-                max_bytes: 65536,
-            };
-            let rendered = super::render_output(command.clone(), Ok((data.clone(), String::new())));
-            assert_eq!(
-                rendered.result.next[0].argv,
-                [
-                    "provenant",
-                    "output",
-                    "repair/writer#2",
-                    "--part",
-                    "result",
-                    "--offset",
-                    "42"
-                ]
-            );
-            data["eof"] = json!(true);
-            let rendered = super::render_output(command, Ok((data, String::new())));
-            assert_eq!(
-                rendered.result.next[0].argv,
-                ["provenant", "wait", "repair/writer#2"]
-            );
-        }
-    }
-
-    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
-    #[test]
-    fn a_running_result_envelope_is_ok_and_labels_partial_or_pending() {
-        let command = crate::Output {
-            target: "repair/writer#2".parse().unwrap(),
-            part: crate::Part::Result,
-            to: None,
-            path: false,
-            offset: 0,
-            tail: None,
-            max_bytes: 65536,
-        };
-        // An unsealed result with no bytes is a typed pending page, never an
-        // empty partial result.
-        let pending = json!({
-            "attempt_id": "22222222222222222222222222222222",
-            "state": "running",
-            "reason": null,
-            "part": "result",
-            "offset": 0, "next_offset": 0, "length": 0,
-            "eof": true, "clipped": false, "complete": false,
-            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            "bytes": {"encoding": "utf8", "data": ""},
-        });
-        let reply = super::render_output(command.clone(), Ok((pending, String::new())));
-        assert_eq!(reply.result.status, Status::Ok);
-        assert_eq!(reply.result.data["status"], "running");
-        assert_eq!(reply.result.data["state"], "running");
-        assert_eq!(reply.result.data["result"], "pending");
-        assert!(
-            reply
-                .human
-                .starts_with("running\nno result yet: the result is not sealed"),
-            "{}",
-            reply.human
-        );
-        assert!(!reply.human.contains("partial result"), "{}", reply.human);
-
-        // Bytes that did arrive before settlement are labelled partial.
-        let partial = json!({
-            "attempt_id": "22222222222222222222222222222222",
-            "state": "running",
-            "reason": null,
-            "part": "result",
-            "offset": 0, "next_offset": 13, "length": 13,
-            "eof": true, "clipped": false, "complete": false,
-            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            "bytes": {"encoding": "utf8", "data": "half a result"},
-        });
-        let reply = super::render_output(command.clone(), Ok((partial, "half a result".into())));
-        assert_eq!(reply.result.status, Status::Ok);
-        assert_eq!(reply.result.data["result"], "partial");
-        assert!(reply.human.starts_with("running\npartial result\n"));
-        assert!(reply.human.contains("half a result"));
-        let summary = reply
-            .summary
-            .expect("a headed result has a summary")
-            .lines
-            .join("\n");
-        assert!(summary.contains("partial result"), "{summary}");
-
-        let settled = json!({
-            "attempt_id": "22222222222222222222222222222222",
-            "state": "succeeded",
-            "part": "result",
-            "eof": true, "complete": true,
-            "bytes": {"encoding": "utf8", "data": "all of it"},
-        });
-        let reply = super::render_output(command, Ok((settled, "all of it".into())));
-        assert!(reply.result.data.get("status").is_none());
-        assert!(reply.result.data.get("result").is_none());
-        assert!(!reply.human.contains("partial result"));
-        assert!(!reply.human.contains("no result yet"));
-    }
-
-    #[test]
-    fn output_summary_reports_stopped_commits_and_dirty_paths() {
-        let unpushed = serde_json::json!({
-            "state":"cancelled",
-            "stop_work":{"head":"abcdef0123456789","ahead":2,"dirty_paths":3,"push":"not_granted"}
-        });
-        let summary = output_summary(&unpushed, "", true);
-        assert!(
-            summary.lines.iter().any(|line| line
-                == "2 commits unpushed at abcdef0123456789; 3 dirty paths left uncommitted")
-        );
-        let pushed = serde_json::json!({
-            "state":"cancelled",
-            "stop_work":{"head":"abcdef0123456789","ahead":2,"dirty_paths":null,"push":"pushed"}
-        });
-        let summary = output_summary(&pushed, "", true);
-        assert!(
-            summary
-                .lines
-                .iter()
-                .any(|line| line == "2 commits pushed at abcdef0123456789")
-        );
-    }
-
-    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
-    #[test]
-    fn output_summary_prints_headers_only_for_non_null_values() {
-        let null_headers = json!({
-            "state":"succeeded",
-            "writer_base":null, "writer_head":null, "publication":null,
-            "residual_tree":null, "changed_files":null
-        });
-        let summary = output_summary(&null_headers, "answer", true);
-        for key in [
-            "base",
-            "committed head",
-            "publication",
-            "residual tree state",
-            "changed files",
-        ] {
-            let prefix = format!("{key}:");
-            assert!(
-                !summary.lines.iter().any(|line| line.starts_with(&prefix)),
-                "null {key} still rendered a header: {:?}",
-                summary.lines
-            );
-        }
-
-        let real_headers = json!({
-            "state":"succeeded",
-            "writer_base":"aaaa", "writer_head":"bbbb", "publication":"pushed",
-            "residual_tree":"clean (current observation)",
-            "changed_files":["src/main.rs"], "changed_files_total":1
-        });
-        let summary = output_summary(&real_headers, "", true);
-        for (label, value) in [
-            ("base", "aaaa"),
-            ("committed head", "bbbb"),
-            ("publication", "pushed"),
-            ("residual tree state", "clean (current observation)"),
-        ] {
-            let expected = format!("{label}: {value}");
-            assert!(
-                summary.lines.contains(&expected),
-                "non-null {label} lost its header: {:?}",
-                summary.lines
-            );
-        }
-        assert!(
-            summary
-                .lines
-                .iter()
-                .any(|line| line.starts_with("changed files (1):"))
-        );
-    }
-
-    #[test]
-    fn output_summary_shows_malformed_handoff_field_diagnostics() {
-        let error =
-            provenant_records::handoff::HandoffError::new("spec_concerns[0]", "expected concern");
-        let data = json!({"state":"review_required", "cause":"handoff_malformed", "handoff":{"Err":error}});
-        let summary = output_summary(&data, "captured answer", true);
-        assert!(
-            summary
-                .lines
-                .iter()
-                .any(|line| line.contains("spec_concerns[0]"))
-        );
-        assert!(
-            summary
-                .lines
-                .iter()
-                .any(|line| line.contains("expected concern"))
-        );
-    }
-
-    #[test]
-    fn output_summary_surfaces_structured_route_warnings_once() {
-        let data = json!({
-            "state":"succeeded",
-            "applied_route":{
-                "availability_warning":"account work availability is stale; the provider will check it",
-                "launch_warnings":[
-                    "warning: pinned model is outside the configured provider scope",
-                    "warning: image input is not supported"
-                ]
-            }
-        });
-        let summary = output_summary(&data, "answer", true);
-        assert_eq!(
-            summary
-                .lines
-                .iter()
-                .filter(|line| line.as_str()
-                    == "warning: pinned model is outside the configured provider scope")
-                .count(),
-            1
-        );
-        assert!(summary.lines.iter().any(|line| {
-            line == "warning: account work availability is stale; the provider will check it"
-        }));
-        assert!(
-            summary
-                .lines
-                .iter()
-                .any(|line| line == "warning: image input is not supported")
-        );
-    }
-
-    #[test]
-    fn output_summary_names_planner_fallback_and_reason() {
-        let data = json!({
-            "attempt_id":"attempt",
-            "state":"succeeded",
-            "planner_fallback":{"stage":"static", "reason":"planner route failed"}
-        });
-        let summary = output_summary(&data, "fallback completed", true);
-        let text = summary.lines.join("\n");
-        assert!(text.contains("planner fallback: static (reason: planner route failed)"));
-    }
-
-    #[test]
-    fn output_summary_sanitises_planner_fallback_reason() {
-        let data = json!({
-            "planner_fallback":{"stage":"static", "reason":"fragment \u{1b}[31minvalid"}
-        });
-        let summary = output_summary(&data, "fallback completed", true);
-        let text = summary.lines.join("\n");
-        assert!(text.contains("planner fallback: static (reason: fragment [31minvalid)"));
-        assert!(!text.contains('\u{1b}'));
-    }
-
-    #[test]
-    fn planner_fallback_text_sanitises_reason_and_keeps_json_value() {
-        let reason = "invalid fragment \u{1b}[31mpattern";
-        let mut data = serde_json::Value::Null;
-        let mut text = String::new();
-        add_planner_fallback(&mut data, &mut text, reason.into());
-        assert!(text.contains("Reason: invalid fragment [31mpattern"));
-        assert!(!text.contains('\u{1b}'));
-        assert_eq!(data["planner_fallback"]["reason"], reason);
-    }
-
-    #[test]
-    fn output_finds_fallback_reason_for_every_node_of_the_graph() {
-        // `synthesis` depends on the expansion but is not part of it.
-        let checkpoint = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[
-                {"id":"planner", "state":"succeeded", "attempts":[],
-                 "outputs":{"schema_version":2,"result":null,"verdict":null,"findings":[],"findings_available":null,"branch":null,"commit":null,"warnings":[],
-                    "plan":{"fallback_reason":"planner fragment invalid: invalid fragment"}}},
-                {"id":"planner--fallback--static", "state":"succeeded", "attempts":[]},
-                {"id":"synthesis", "state":"succeeded", "attempts":[]}
-            ],
-            "expansions":[{"source":"planner","nodes":[{
-                "id":"planner--fallback--static","access":"read_only","prompt":"Static stage","route":{"alias":"junior"}
-            }]}]
-        }))
-        .unwrap();
-        assert_eq!(
-            fallback_reason_for_graph(&checkpoint).as_deref(),
-            Some("planner fragment invalid: invalid fragment")
-        );
-    }
-
-    #[test]
-    fn output_reports_no_fallback_when_no_planner_fell_back() {
-        let checkpoint = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[
-                {"id":"synthesis", "state":"succeeded", "attempts":[]}
-            ]
-        }))
-        .unwrap();
-        assert_eq!(fallback_reason_for_graph(&checkpoint), None);
-    }
-
-    #[test]
-    fn local_provider_errors_are_raw_in_off_and_secrets_modes() {
-        let text = b"failure ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-        for mode in [provenant_redact::Mode::Off, provenant_redact::Mode::Secrets] {
-            let _mode = provenant_redact::scoped(mode);
-            assert_eq!(
-                provider_error_from_result(text).unwrap(),
-                String::from_utf8_lossy(text)
-            );
-            assert_eq!(
-                provider_error_from_stderr(text).unwrap(),
-                String::from_utf8_lossy(text)
-            );
-        }
-    }
-
-    #[test]
-    fn local_provider_errors_keep_credential_shapes_and_assignments_raw() {
-        let text = b"provider failed: sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"";
-        for mode in [provenant_redact::Mode::Off, provenant_redact::Mode::Secrets] {
-            let _mode = provenant_redact::scoped(mode);
-            for reason in [
-                provider_error_from_result(text),
-                provider_error_from_stderr(text),
-            ] {
-                let reason = reason.unwrap();
-                assert!(reason.contains("sk-abcdefghijklmnopqrstuvwxyz"));
-                assert!(reason.contains("printed-value"));
-            }
-        }
-    }
-
-    #[test]
-    fn provider_error_keeps_multiline_context() {
-        let message = provider_error_from_result(
-            b"Model not recognized: gemini-3.8-pro\npass: fix the code\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
-        )
-        .unwrap();
-        assert!(message.starts_with("Model not recognized: gemini-3.8-pro; "));
-        assert!(message.ends_with("GPT-OSS 120B (Medium)"));
-        assert!(message.contains("pass: fix the code"));
-        assert_eq!(provider_error_from_result(b"\n  \n"), None);
-    }
-
-    #[test]
-    fn provider_error_uses_failure_before_trailing_tracing_warning() {
-        let stderr = b"provider process failed: exit code 1\n\
-2026-11-02T00:00:00.123456Z  WARN codex_core: skill scan failed\n";
-        assert_eq!(
-            provider_error_from_stderr(stderr).as_deref(),
-            Some("provider process failed: exit code 1")
-        );
-    }
-
-    #[test]
-    fn provider_error_keeps_non_warning_lines_that_mention_warn() {
-        assert_eq!(
-            provider_error_from_stderr(b"test-failed WARN: pass: fix the code\n").as_deref(),
-            Some("test-failed WARN: pass: fix the code")
-        );
-    }
-
-    #[test]
-    fn provider_error_skips_warning_level_lines() {
-        assert_eq!(
-            provider_error_from_stderr(
-                b"warning: retrying request\nreal failure\n2026-11-02T00:00:00Z WARN cleanup failed\n"
-            )
-            .as_deref(),
-            Some("real failure")
-        );
-    }
-
-    #[test]
-    fn provider_error_does_not_headline_a_warning_without_a_failure_line() {
-        assert_eq!(
-            provider_error_from_stderr(
-                b"WARN: skill scan failed\n2026-11-02T00:00:00Z WARN cleanup failed\n"
-            ),
-            None
-        );
-    }
-
-    // Spec: docs/specs/lane-contracts.md#result-projection
-    #[test]
-    fn default_view_leads_with_verdict_findings_and_verify() {
-        let data = json!({
-            "state": "succeeded",
-            "selected": {
-                "verdict": "PASS",
-                "findings": [{"id":"F1"}],
-                "findings_available": true
-            },
-            "handoff": {"Ok": {
-                "schema_version": 2, "status": "done", "note": "done",
-                "remaining": [], "decisions": [], "verify": ["ran tests"]
-            }}
-        });
-        let summary = output_summary_default(&data, "narration", true);
-        let lines = &summary.lines;
-        let verdict = lines
-            .iter()
-            .position(|line| line.starts_with("review verdict:"));
-        let findings = lines.iter().position(|line| line.starts_with("findings:"));
-        let verify = lines.iter().position(|line| line.starts_with("verify:"));
-        assert!(
-            verdict.is_some() && findings.is_some() && verify.is_some(),
-            "{lines:?}"
-        );
-        assert!(
-            verdict.unwrap() < findings.unwrap() && findings.unwrap() < verify.unwrap(),
-            "{lines:?}"
-        );
-        assert!(
-            !lines.iter().any(|line| line.starts_with("base:")),
-            "{lines:?}"
-        );
-    }
-
-    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
-    #[test]
-    fn tail_returns_at_most_the_requested_bytes() {
-        let bytes = b"0123456789abcdef";
-        for n in [0u64, 1, 4, 15, 16, 64] {
-            let start = tail_start_bytes(bytes, n);
-            assert!(bytes.len() - start <= n as usize, "n={n}, start={start}");
-            assert!(std::str::from_utf8(&bytes[start..]).is_ok(), "n={n}");
-        }
-    }
-}
+#[path = "output_tests.rs"]
+mod tests;

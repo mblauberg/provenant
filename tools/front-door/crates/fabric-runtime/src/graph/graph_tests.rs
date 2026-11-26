@@ -49,6 +49,7 @@ struct FakeOwner {
     delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
     fast_forward_only: Vec<bool>,
     observations: VecDeque<AttemptObservation>,
+    steer_refused: bool,
     calls: Vec<(AttemptKey, GraphRoute)>,
     attempt_numbers: Vec<Option<u32>>,
     titles: Vec<String>,
@@ -115,6 +116,14 @@ struct FakeOwner {
     fallback_custody_pending: bool,
     fail_fallback_evidence: bool,
     fallback_cause: Option<provenant_records::RouteExclusionReason>,
+    hygiene_outcomes: VecDeque<provenant_records::graph::HygieneOutcome>,
+    hygiene_calls: usize,
+    hygiene_requests: Vec<(String, String, String)>,
+    publication_receipts: VecDeque<DeliveryPublication>,
+    publication_calls: usize,
+    publication_requests: Vec<(String, String, String, Option<String>)>,
+    park_calls: Vec<String>,
+    park_receipt: Option<provenant_core::HumanRequestId>,
 }
 
 /// An inbox reply from `chair`, choosing `option` or sending `text`.
@@ -129,6 +138,9 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn continuation_refused(&mut self, _reference: &str) -> Result<bool, Self::Error> {
+        Ok(self.steer_refused)
+    }
     fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
         provenant_config::PortTable::builtin().worktree_layout
     }
@@ -299,6 +311,47 @@ impl AttemptOwner for FakeOwner {
     }
     fn actor(&self) -> String {
         self.actor.clone()
+    }
+    fn run_hygiene(
+        &mut self,
+        request: HygieneRequest<'_>,
+    ) -> Result<HygieneExecution, Self::Error> {
+        self.hygiene_calls += 1;
+        self.hygiene_requests.push((
+            request.operation_id.to_owned(),
+            request.input_head.to_owned(),
+            request.expected_head.to_owned(),
+        ));
+        let outcome = self.hygiene_outcomes.pop_front().ok_or(NoObservation)?;
+        Ok(HygieneExecution {
+            outcome,
+            branch: Some("retained-branch".into()),
+            formatter_source: Some("repository".into()),
+            diagnostic: None,
+        })
+    }
+    fn publish_delivery(
+        &mut self,
+        request: PublicationRequest<'_>,
+    ) -> Result<Option<DeliveryPublication>, Self::Error> {
+        self.publication_calls += 1;
+        self.publication_requests.push((
+            request.operation_id.to_owned(),
+            request.expected_head.to_owned(),
+            request.source_branch.to_owned(),
+            request.expected_remote_head.map(str::to_owned),
+        ));
+        self.publication_receipts
+            .pop_front()
+            .map(Some)
+            .ok_or(NoObservation)
+    }
+    fn park_delivery(
+        &mut self,
+        request: DeliveryParkRequest<'_>,
+    ) -> Result<Option<provenant_core::HumanRequestId>, Self::Error> {
+        self.park_calls.push(request.operation_id.to_owned());
+        Ok(self.park_receipt)
     }
     fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
         let id = &filing.ask.ask_id;
@@ -572,8 +625,33 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
     }
 }
 
+#[test]
+fn ci_admission_wait_retains_bounded_deadline_across_restart() {
+    let mut document = graph(Vec::new());
+    document.queue_ci_wait = Some(provenant_records::Sourced {
+        value: 55,
+        source: provenant_records::Source {
+            layer: provenant_records::Layer::Default,
+            origin: None,
+        },
+    });
+    let now = provenant_core::WallTime::from_micros(10_000_000).unwrap();
+    let wait = start_delivery_ci_wait::<FakeOwner, MemoryJournal>(&document, "publish", Some(now))
+        .unwrap();
+    let restored: DeliveryCiAdmissionWait =
+        serde_json::from_value(serde_json::to_value(&wait).unwrap()).unwrap();
+    assert_eq!(restored.deadline.as_micros(), 65_000_000);
+    let before = provenant_core::WallTime::from_micros(64_500_000).unwrap();
+    let wake = delivery_ci_wait_retry_at(&restored, before);
+    assert_eq!(wake, restored.deadline);
+    assert!(!delivery_ci_wait_expired(&restored, Some(before)));
+    assert!(delivery_ci_wait_expired(&restored, Some(wake)));
+}
+
 fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        queue_ci_wait: None,
+        queue: None,
         review: None,
         review_subject_missing: false,
         exclude: Vec::new(),
@@ -660,6 +738,38 @@ fn separation_run(
     )
     .unwrap();
     (owner, run.checkpoint)
+}
+
+#[test]
+fn peer_owned_writer_launches_and_replays_without_a_local_worktree() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "peer-writer",
+        "nodes": [{"id":"write", "prompt":"write", "access":"worktree_write",
+            "worktree":"", "route":{"alias":"junior"},
+            "attempt":{"host":"peer", "new_worktree":{"branch":"smoke/test", "base":"HEAD"}}}]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [done_as("peer/1")].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.permissions, vec![(AccessMode::WorktreeWrite, None)]);
+    assert!(owner.provisions.is_empty());
+    assert!(run.checkpoint.nodes[0].writer_binding.is_none());
+    assert_eq!(
+        owner.attempt_specs[0]
+            .as_ref()
+            .unwrap()
+            .new_worktree
+            .as_ref()
+            .unwrap()
+            .branch,
+        "smoke/test"
+    );
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.len(), 1, "replay must not launch again");
 }
 
 #[test]

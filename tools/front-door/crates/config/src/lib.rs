@@ -32,14 +32,21 @@ pub use gc::{
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
 };
+pub use pr_policy::{KNOB as PR_KNOB, PrPolicy, ResolvedPrPolicy};
 mod harness;
 mod hooks;
 pub use hooks::{hook_plugin_source, lane_hook_settings, registrations as hook_registrations};
+pub mod hooks_config;
+pub use hooks_config::{
+    DEFAULT_HOOK_TIMEOUT_SECS, HOOK_BUDGET_PERCENT, SECTION as HOOKS_SECTION,
+    Settings as HookSettings, hook_budget,
+};
 mod inspection;
 mod knobs;
 mod lane_history;
 mod loader;
 mod managed;
+mod pr_policy;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
 pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
 pub mod overlays;
@@ -47,6 +54,7 @@ pub use overlays::{OVERLAY_PRECEDENCE, OverlayLayer, OverlayWarning};
 pub mod policy;
 mod presets;
 mod providers;
+pub use provenant_records::StallPolicy;
 pub use providers::{
     OutOfScopePin, ProviderSettings, ProviderUpdate, defaults as provider_defaults,
 };

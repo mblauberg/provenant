@@ -45,6 +45,9 @@ pub struct SubmittedTask {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// A portable fixture carried to the peer and staged in its scratch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<provenant_records::run::StagedFixture>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
     /// Original writer source, retained when a graph retry starts from a later head.
@@ -186,7 +189,12 @@ bounded_input! {
 #[serde(rename_all = "snake_case")]
 pub enum DispatchRefusalFact {
     DetachedWriter,
-    DirtyWriter,
+    /// The bounded, display-sanitised summary of the dirty paths a launch or
+    /// retry counted. The free-form refusal reason stays untrusted and is not
+    /// carried here.
+    DirtyWriter {
+        paths: String,
+    },
     CheckedOutWriter,
     GraphSchema,
     GraphComposite,
@@ -333,6 +341,12 @@ pub enum InvalidInputDetail {
     UnresolvableBase(String),
     /// A launch input check that is not tied to one document field.
     InputReason(String),
+    /// A pinned review head that is not the pull request's current head. Both
+    /// ids are approved facts, and the field is the flag the caller set.
+    StaleHead {
+        supplied: String,
+        current: String,
+    },
     Field(String),
     FieldDecode {
         field: String,
@@ -368,6 +382,7 @@ impl InvalidInputDetail {
             | Self::Field(text)
             | Self::FieldTitle(text)
             | Self::Configuration(text) => vec![text],
+            Self::StaleHead { supplied, current } => vec![supplied, current],
             Self::RetryNode { graph, node } => vec![graph, node],
             Self::Parameter(refusal) => refusal.strings_mut(),
             Self::FieldDecode { field, .. } | Self::FieldTooLarge { field, .. } => vec![field],
@@ -405,6 +420,9 @@ impl InvalidInputDetail {
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
             Self::Schema => Some("graph document schema_version is invalid".into()),
             Self::UnresolvableBase(name) => Some(format!("unresolvable base `{name}`")),
+            Self::StaleHead { supplied, current } => Some(format!(
+                "invalid input field `--head`: {supplied} is not the pull request's head (forge reports {current})"
+            )),
             Self::InputReason(reason) => Some(reason.clone()),
             Self::InputUnreadable => {
                 Some("input file is unreadable or is not a regular file".into())
@@ -554,8 +572,14 @@ pub enum FacadeError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         holder: Option<AttemptId>,
     },
-    #[error("writer registry lock is still held after the bounded wait expired")]
-    WriterLockBusy,
+    /// A registry-lock refusal. The file lock itself carries no attempt
+    /// identity, but callers that resolved one name it so the blocked
+    /// diagnostic says which writer kept custody.
+    #[error("writer registry lock is still held after the bounded wait expired{}", .holder.map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
+    WriterLockBusy {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder: Option<AttemptId>,
+    },
     #[error("writer custody is unknown")]
     WriterUnknown,
     #[error("a requested credential-root grant was refused")]
@@ -654,9 +678,12 @@ pub enum FacadeError {
         resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_failure: Option<provenant_records::diagnostic::IoFact>,
-        /// The source error's fixed text, kept in-process for local edges.
+        /// The source error's text, kept in-process for local edges. A local
+        /// failure stores its operation, path and source here so the node
+        /// diagnostic names them; peer-supplied operations and paths are never
+        /// trusted and stay out of this field.
         #[serde(skip)]
-        cause: Option<&'static str>,
+        cause: Option<Box<str>>,
     },
 }
 
@@ -955,6 +982,17 @@ impl FacadeError {
                 projected = projected.detail(refusal.to_string())
                     .next(next);
             }
+            Self::InvalidInput { detail: Some(detail @ InvalidInputDetail::StaleHead { supplied, .. }) }
+            | Self::GraphRelayRefused { detail: Some(detail @ InvalidInputDetail::StaleHead { supplied, .. }), .. } => {
+                let text = detail.safe_text().unwrap_or_default();
+                // The caller pinned the head they just pushed; the forge still
+                // reports its predecessor. Name the pinned head in the repair:
+                // rerunning with the forge's stale head would repeat the review
+                // of the wrong commit once the push becomes visible.
+                projected = projected.detail(text).next(format!(
+                    "the pinned head is stale; rerun with --head {supplied} once the push is visible"
+                ));
+            }
             Self::InvalidInput { detail: Some(detail) } | Self::GraphRelayRefused { detail: Some(detail), .. } => {
                 if let Some(detail) = detail.safe_text() {
                     projected = projected.detail(detail);
@@ -1025,7 +1063,14 @@ impl FacadeError {
                 };
                 let (detail, action): (String, &str) = match fact {
                     DispatchRefusalFact::DetachedWriter => unreachable!(),
-                    DispatchRefusalFact::DirtyWriter => ("the writer worktree has uncommitted edits".into(), "preserve or commit the edits before retrying"),
+                    DispatchRefusalFact::DirtyWriter { paths } => {
+                        let detail = if paths.is_empty() {
+                            "the writer worktree has uncommitted edits".into()
+                        } else {
+                            format!("the writer worktree has uncommitted edits: {paths}")
+                        };
+                        (detail, "preserve or commit the edits before retrying")
+                    }
                     DispatchRefusalFact::CheckedOutWriter => ("the branch is already checked out".into(), "run `provenant worktree list`, inspect custody, then select the existing checkout with --worktree"),
                     DispatchRefusalFact::GraphSchema => (named("graph document schema_version is invalid"), "use a schema version that supports the document fields"),
                     DispatchRefusalFact::GraphComposite => (named("graph composite or loop expansion is invalid"), "inspect the composite or loop definition"),
@@ -1056,17 +1101,33 @@ impl FacadeError {
             Self::Io { operation, .. } if operation == REPOSITORY_FACT_LIMIT_OPERATION => {
                 projected = projected.detail("repository fact output exceeded its capture limit");
             }
-            // Only the in-process fixed cause is disclosed: operation text can
-            // arrive from a peer and the path is unanchored.
-            Self::Io { cause: Some(cause), .. } => projected = projected.detail(*cause),
+            // Only the in-process local cause is disclosed: operation text can
+            // arrive from a peer and the path is unanchored. Local failures put
+            // their operation, path and source into this one field, so the
+            // writer-binding diagnostic names them without trusting wire text.
+            Self::Io { cause: Some(cause), .. } => projected = projected.detail(&**cause),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {
                     projected = projected.detail(format!("writer is held by attempt {holder}"));
+                    // A facade projection has no store to resolve the work key:
+                    // the shared formatter advises the bare sweep and still
+                    // names the holder. Spec: docs/specs/run-launch.md#writer-binding
+                    projected = projected.next(
+                        provenant_records::work_key::held_writer_next(Some(*holder), None),
+                    );
+                } else {
+                    projected = projected.next("wait for the current writer or lock holder to finish");
                 }
-                projected = projected.next("wait for the current writer or lock holder to finish");
             }
-            Self::WriterLockBusy => projected = projected.detail(self.to_string()).next("wait for the writer lock holder to finish, then retry"),
+            Self::WriterLockBusy { holder } => {
+                projected = projected
+                    .detail(holder.map_or_else(
+                        || "writer registry lock held; holder unknown".to_owned(),
+                        |holder| format!("writer registry lock held by attempt {holder}"),
+                    ))
+                    .next("wait for the writer lock holder to finish, then retry")
+            }
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
             Self::WorktreeMissing { path, node } => {
                 projected = projected
@@ -1101,7 +1162,13 @@ impl FacadeError {
                 if !facts.is_empty() {
                     projected = projected.detail(facts.join(", "));
                 }
-                projected = projected.next("reconcile the holding attempt before retrying writer binding");
+                // The shared formatter already names the holder and prints a
+                // valid reconcile command, whether or not a work key was
+                // resolved. Spec: docs/specs/run-launch.md#writer-binding
+                projected = projected.next(provenant_records::work_key::held_writer_next(
+                    *holder,
+                    None,
+                ));
             }
             Self::RunKind { resource: Some(fact), .. } => projected = fact.project(projected),
             Self::RunKind { next, detail, resource: None, .. } => {
@@ -1166,7 +1233,7 @@ impl FacadeError {
             Self::ConfinementRefused { .. } => "confinement_refused",
             Self::RunKind { .. } => "run_refused",
             Self::WriterBusy { .. } => "writer_busy",
-            Self::WriterLockBusy => "writer_lock_busy",
+            Self::WriterLockBusy { .. } => "writer_lock_busy",
             Self::WriterUnknown => "writer_unknown",
             Self::WriterLeaseHeld { .. } => "writer_lease_held",
             Self::CredentialRoot { .. } => "credential_root",
@@ -1268,19 +1335,43 @@ impl FacadeError {
         }
     }
 
-    /// A local I/O failure whose source error has the fixed text `cause`.
-    pub fn io_caused(operation: impl Into<String>, cause: Option<&'static str>) -> Self {
+    /// A local I/O failure that composes its operation, known path and source
+    /// text into the one in-process detail field. This is the typed carrier for
+    /// the writer-binding path: the operation and path reach the node
+    /// diagnostic without being re-formatted at each conversion site. When
+    /// neither a path nor a source is known the detail is absent, so no failure
+    /// text is invented. `operation` and `path` stay subject to their wire
+    /// projection; only the composed detail is local-only.
+    pub fn io_failure(
+        operation: impl Into<String>,
+        path: Option<&std::path::Path>,
+        source: Option<&dyn std::fmt::Display>,
+    ) -> Self {
+        let operation = operation.into();
+        let path_text = path.map(|path| path.to_string_lossy().into_owned());
+        let detail = match (path_text.as_deref(), source) {
+            (Some(path), Some(source)) => Some(format!("{operation} {path}: {source}")),
+            (Some(path), None) => Some(format!("{operation} {path}")),
+            (None, Some(source)) => Some(format!("{operation}: {source}")),
+            (None, None) => None,
+        };
         let mut error = Self::io(operation);
-        if let Self::Io { cause: slot, .. } = &mut error {
-            *slot = cause;
+        if let Self::Io {
+            cause: slot,
+            path: slot_path,
+            ..
+        } = &mut error
+        {
+            *slot_path = path_text;
+            *slot = detail.map(|detail| provenant_core::bounded_line(&detail, 4096).into());
         }
         error
     }
 
-    /// The source error's fixed text, when this failure kept one.
-    pub fn cause(&self) -> Option<&'static str> {
+    /// The source error's local text, when this failure kept one.
+    pub fn cause(&self) -> Option<&str> {
         match self {
-            Self::Io { cause, .. } => *cause,
+            Self::Io { cause, .. } => cause.as_deref(),
             _ => None,
         }
     }
@@ -1294,32 +1385,39 @@ impl FacadeError {
         anchor: Option<&std::path::Path>,
     ) -> Self {
         use provenant_os::fs::FsError;
-        let (operation, path) = match error {
+        let (operation, path, source) = match error {
             FsError::Io {
-                operation, path, ..
-            } => (*operation, Some(path.clone())),
-            FsError::ReadIo { path, .. } => ("read file", Some(path.clone())),
-            FsError::Rename { to_path, .. } => ("rename", Some(to_path.clone())),
-            FsError::Symlink { path, .. } => ("resolve path", Some(path.clone())),
-            FsError::CrossDevice { path } => ("verify filesystem device", Some(path.clone())),
-            FsError::LockTimeout { path, .. } | FsError::Cancelled { path } => {
-                ("acquire lock", Some(path.clone()))
+                operation,
+                path,
+                source,
+            } => (*operation, Some(path.clone()), Some(source.to_string())),
+            FsError::ReadIo { path, source } => {
+                ("read file", Some(path.clone()), Some(source.to_string()))
             }
-            FsError::LockDeadlineOverflow { path } => ("set lock deadline", Some(path.clone())),
-            _ => ("verify filesystem entry", None),
+            FsError::Rename {
+                to_path, source, ..
+            } => ("rename", Some(to_path.clone()), Some(source.to_string())),
+            FsError::Symlink { path, source } => {
+                ("resolve path", Some(path.clone()), Some(source.to_string()))
+            }
+            FsError::CrossDevice { path } => ("verify filesystem device", Some(path.clone()), None),
+            FsError::LockTimeout { path, .. } | FsError::Cancelled { path } => {
+                ("acquire lock", Some(path.clone()), None)
+            }
+            FsError::LockDeadlineOverflow { path } => {
+                ("set lock deadline", Some(path.clone()), None)
+            }
+            // No operation ran and neither path nor source is known; leave the
+            // detail absent rather than inventing one.
+            _ => ("verify filesystem entry", None, None),
         };
-        Self::Io {
-            delivery_limit: None,
-            delivery_stage: None,
-            resource: None,
-            input_failure: None,
-            cause: None,
-            operation: operation.into(),
-            path: path
-                .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
-                .filter(|path| path.is_absolute())
-                .map(|path| path.to_string_lossy().into_owned()),
-        }
+        let path = path
+            .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
+            .filter(|path| path.is_absolute());
+        let source = source
+            .as_ref()
+            .map(|source| source as &dyn std::fmt::Display);
+        Self::io_failure(operation, path.as_deref(), source)
     }
 }
 

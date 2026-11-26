@@ -22,18 +22,37 @@ pub(crate) struct NodeDigest {
     pub attempt_state: Option<String>,
     /// This host's current liveness projection for the selected attempt.
     pub attempt_presence: Option<String>,
+    /// A live attempt silent past its configured silence threshold.
+    pub stalled: bool,
+    /// The last output or provider start time, rendered beside `stalled`.
+    pub last_event_at: Option<String>,
     pub line: String,
     pub state: String,
     pub settled: bool,
     pub handoff_status: Option<String>,
     pub open_asks: Vec<Value>,
     pub evidence_error: Option<String>,
+    pub delivery_loop: Value,
+    pub escalation: Value,
+    pub delivery_park: Value,
+    pub wait_source: Option<String>,
+    pub item: Option<String>,
+    pub active_lane: Option<String>,
+    pub last_event_source: Option<String>,
 }
 
 fn text(value: &Value, limit: usize) -> Option<String> {
     value
         .as_str()
         .map(|s| provenant_fabric_runtime::hosts::plain_text(s, limit))
+}
+
+/// A sanitised field kept whole. The digest builder owns the facts; the compact
+/// renderer owns the `SUMMARY_ROW_BYTES` bound, so no fact is cut here.
+fn whole_text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(|s| provenant_fabric_runtime::hosts::plain_text(s, usize::MAX))
 }
 
 /// The one state vocabulary shared by the status listing and the detail view.
@@ -84,6 +103,37 @@ pub(super) fn path_text(value: &Value) -> Option<String> {
     })
 }
 
+/// Select the attempt that represents a node in status. A live attempt always
+/// owns the display. Once the node is settled, an attempt that never launched
+/// cannot carry a result, so it must not hide an earlier successful attempt and
+/// its result: a preparation refusal is an operation outcome, not the node's
+/// work (#3987). A node with no result-bearing attempt keeps its latest one.
+fn selected_attempt<'a>(node: &Value, rows: &'a [Value]) -> Option<&'a Value> {
+    let attempts: Vec<_> = rows
+        .iter()
+        .filter(|row| row["kind"] == "attempt" && row["work_key"] == node["work_key"])
+        .collect();
+    attempts
+        .iter()
+        .rfind(|row| {
+            matches!(
+                row["state"].as_str(),
+                Some("running" | "starting" | "queued")
+            ) || row["presence"].as_str() == Some("live")
+        })
+        .or_else(|| {
+            attempts.iter().rfind(|row| {
+                row["outcome"].as_str() == Some("succeeded")
+                    || !row["result_path"].is_null()
+                    || row["result_summary"]
+                        .as_str()
+                        .is_some_and(|summary| !summary.is_empty())
+            })
+        })
+        .or_else(|| attempts.last())
+        .copied()
+}
+
 /// Select each node's current attempt once, or the explicitly selected older
 /// attempt. Node state owns settlement; a previous attempt cannot settle it.
 pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
@@ -97,9 +147,7 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
         nodes
             .into_iter()
             .map(|node| {
-                let attempt = rows
-                    .iter()
-                    .rfind(|row| row["kind"] == "attempt" && row["work_key"] == node["work_key"]);
+                let attempt = selected_attempt(node, rows);
                 (node, attempt.unwrap_or(node))
             })
             .collect()
@@ -116,6 +164,8 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 matches!(attempt_state.as_deref(), Some("running" | "starting"))
                     .then(|| "unknown".to_owned())
             });
+            let stalled = attempt["stalled"] == true;
+            let last_event_at = text(&attempt["last_event_at"], 64);
             let settled = if node["kind"] == "node" {
                 matches!(
                     state.as_str(),
@@ -176,6 +226,15 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             };
             let open_asks = node["open_asks"].as_array().cloned().unwrap_or_default();
             let evidence_error = text(&attempt["evidence_error"], 200);
+            let delivery_loop = node["delivery_loop"].clone();
+            let escalation = node["escalation"].clone();
+            let delivery_park = node["delivery_park"].clone();
+            let wait_source = text(&node["wait_source"], 128);
+            let item = text(&delivery_park["item"], 256);
+            let active_lane = (attempt_presence.as_deref() == Some("live"))
+                .then(|| text(&attempt["attempt_id"], 256))
+                .flatten();
+            let last_event_source = text(&attempt["last_event_source"], 128);
             let current_state = lane_state(
                 &state,
                 attempt_state.as_deref(),
@@ -189,6 +248,20 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             } else {
                 format!("{key} {current_state} outcome={outcome}")
             };
+            // The reason leads the evidence fields. The compact renderer bounds
+            // a row from its front, so a failure's reason (which names a path on
+            // a `worktree_missing` refusal) must come before the longer evidence
+            // fields or its leading clause would be clipped away (#3835).
+            let result =
+                whole_text(&attempt["result_summary"]).filter(|summary| !summary.is_empty());
+            let note = if result.is_some() {
+                None
+            } else {
+                whole_text(&node["reason"]).or_else(|| whole_text(&node["waiting_for"]))
+            };
+            if let Some(reason) = note.as_deref() {
+                line.push_str(&format!(" note={reason}"));
+            }
             line.push_str(&format!(
                 " cause={} branch={} pr={} ci={} result_path={}",
                 cause.as_deref().unwrap_or("-"),
@@ -214,6 +287,43 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 },
                 result_path.as_deref().unwrap_or("-")
             ));
+            // The checkpoint head is an observation, not a fresh forge read.
+            if let Some(head) = text(&attempt["head"], 128).or_else(|| text(&node["head"], 128)) {
+                line.push_str(&format!(" head={head}/recorded"));
+            }
+            if let Some(item) = &item {
+                line.push_str(&format!(" item={item}"));
+            }
+            if let Some(lane) = &active_lane {
+                line.push_str(&format!(" active_lane={lane}"));
+            }
+            if stalled {
+                line.push_str(" stalled");
+            }
+            if stalled || last_event_at.is_some() {
+                line.push_str(&format!(
+                    " last_event={}",
+                    last_event_at.as_deref().unwrap_or("unknown")
+                ));
+                if let Some(source) = &last_event_source {
+                    line.push_str(&format!(" ({source})"));
+                }
+            }
+            if let Some(round) = delivery_loop["round"].as_u64() {
+                line.push_str(&format!(" round={round}"));
+            }
+            if let Some(rung) = escalation["rung"].as_u64() {
+                line.push_str(&format!(" rung={rung}"));
+            }
+            if let Some(source) = &wait_source {
+                line.push_str(&format!(" wait_source={source}"));
+            }
+            if let Some(reason) = text(&delivery_park["reason"], 128) {
+                line.push_str(&format!(" parked={reason}"));
+            }
+            if let Some(handoff) = text(&delivery_park["handoff"], 1024) {
+                line.push_str(&format!(" parked_handoff={handoff}"));
+            }
             if let Some(presence) = &attempt_presence {
                 line.push_str(&format!(" attempt_presence={presence}"));
             }
@@ -256,18 +366,13 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             if let Some(error) = &evidence_error {
                 line.push_str(&format!(" evidence_unavailable={error}"));
             }
-            if let Some(summary) =
-                text(&attempt["result_summary"], 200).filter(|summary| !summary.is_empty())
-            {
+            if let Some(summary) = result {
                 line.push_str(&format!(" result={summary}"));
-            } else if let Some(reason) =
-                text(&node["reason"], 200).or_else(|| text(&node["waiting_for"], 200))
-            {
-                line.push_str(&format!(" note={reason}"));
             }
             // Identity, outcome and all evidence fields stay in the structured
-            // digest even when a long human line is abbreviated.
-            line = provenant_fabric_runtime::hosts::plain_text(&line, 4096);
+            // digest; the whole human line is kept and bounded only by the
+            // compact renderer, never before the render mode is known.
+            line = provenant_fabric_runtime::hosts::plain_text(&line, usize::MAX);
             Some(NodeDigest {
                 key,
                 outcome,
@@ -283,12 +388,21 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 review_partial,
                 attempt_state,
                 attempt_presence,
+                stalled,
+                last_event_at,
                 line,
                 state,
                 settled,
                 handoff_status,
                 open_asks,
                 evidence_error,
+                delivery_loop,
+                escalation,
+                delivery_park,
+                wait_source,
+                item,
+                active_lane,
+                last_event_source,
             })
         })
         .collect();
@@ -458,5 +572,176 @@ mod tests {
             );
             assert!(!digest.settled);
         }
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
+    fn digest_reports_a_stall_with_its_last_event_time() {
+        use super::node_digests;
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = json!(WorkKey::new(ProjectId::from_bytes([8; 16]), "g", "n", 1).unwrap());
+        let rows = vec![
+            json!({"kind":"node","work_key":key,"state":"running"}),
+            json!({
+                "kind":"attempt","work_key":key,"state":"running","presence":"live",
+                "stalled":true,"last_event_at":"2026-11-26T04:58:00Z"
+            }),
+        ];
+        let digest = node_digests(&rows).remove(0);
+        assert!(digest.stalled);
+        assert_eq!(
+            digest.last_event_at.as_deref(),
+            Some("2026-11-26T04:58:00Z")
+        );
+        assert!(
+            digest
+                .line
+                .contains("stalled last_event=2026-11-26T04:58:00Z")
+        );
+        assert!(!digest.settled, "a stall is not a settlement");
+    }
+
+    #[test]
+    fn delivery_and_stall_share_one_selected_attempt_event() {
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = json!(WorkKey::new(ProjectId::from_bytes([9; 16]), "g", "n", 1).unwrap());
+        for stalled in [false, true] {
+            let rows = vec![
+                json!({"kind":"node","work_key":key,"state":"running"}),
+                json!({"kind":"attempt","work_key":key,"state":"running","presence":"live",
+                    "stalled":stalled,"last_event_at":"2026-11-26T04:58:00Z",
+                    "last_event_source":"output"}),
+            ];
+            let digest = super::node_digests(&rows).remove(0);
+            assert_eq!(
+                digest.last_event_at.as_deref(),
+                Some("2026-11-26T04:58:00Z")
+            );
+            assert_eq!(digest.last_event_source.as_deref(), Some("output"));
+            assert_eq!(digest.line.matches("last_event=").count(), 1);
+            assert!(
+                digest
+                    .line
+                    .contains("last_event=2026-11-26T04:58:00Z (output)")
+            );
+            assert_eq!(digest.line.contains(" stalled last_event="), stalled);
+        }
+    }
+
+    #[test]
+    fn digest_labels_the_recorded_head_as_an_observation() {
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "task", 1).unwrap();
+        let rows = vec![json!({"kind":"node", "work_key":key, "state":"waiting", "head":"abc123"})];
+        let digest = super::node_digests(&rows).remove(0);
+        assert!(digest.line.contains("head=abc123/recorded"));
+    }
+
+    #[test]
+    fn delivery_digest_retains_recorded_progress_and_park() {
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "task", 1).unwrap();
+        let rows = vec![json!({"kind":"node", "work_key":key, "state":"blocked",
+            "head":"abc123", "delivery_loop":{"round":2},
+            "escalation":{"rung":1}, "wait_source":"graph checkpoint",
+            "delivery_park":{"item":"issue-42", "reason":"ci_unavailable", "handoff":"inspect CI"}})];
+        let digest = super::node_digests(&rows).remove(0);
+        assert_eq!(digest.item.as_deref(), Some("issue-42"));
+        assert_eq!(digest.delivery_loop["round"], 2);
+        assert_eq!(digest.escalation["rung"], 1);
+        assert_eq!(digest.delivery_park["handoff"], "inspect CI");
+        for text in [
+            "head=abc123/recorded",
+            "item=issue-42",
+            "round=2",
+            "rung=1",
+            "wait_source=graph checkpoint",
+            "parked=ci_unavailable",
+            "parked_handoff=inspect CI",
+        ] {
+            assert!(digest.line.contains(text));
+        }
+    }
+
+    #[test]
+    fn digest_line_keeps_a_long_refusal_reason_whole() {
+        // A worktree_missing refusal names its path; the renderer, not the
+        // digest builder, decides how much of it a bounded view shows.
+        use super::node_digests;
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::{Value, json};
+
+        let key = json!(WorkKey::new(ProjectId::from_bytes([9; 16]), "g", "node", 1).unwrap());
+        let path = format!("/host/{}", "long/path/segment/".repeat(40));
+        let reason = format!("worktree_missing: checkout at {path} was removed");
+        let rows: Vec<Value> = vec![json!({
+            "kind":"node","work_key":key,"state":"failed","reason":reason
+        })];
+
+        let digest = node_digests(&rows).remove(0);
+        assert!(
+            digest.line.contains(&reason),
+            "digest clipped the reason: {}",
+            digest.line
+        );
+    }
+
+    #[test]
+    fn a_never_launched_refusal_does_not_hide_the_successful_attempt() {
+        // Spec: docs/specs/cli.md#status-selection
+        use super::node_digests;
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::{Value, json};
+
+        let key = json!(WorkKey::new(ProjectId::from_bytes([11; 16]), "g", "task", 1).unwrap());
+        let rows: Vec<Value> = vec![
+            json!({"kind":"node","work_key":key,"state":"succeeded"}),
+            json!({
+                "kind":"attempt","work_key":key,"state":"terminal",
+                "outcome":"succeeded","result_path":"attempts/1/result.md",
+                "result_summary":"task 1 finished and pushed its commits"
+            }),
+            json!({
+                "kind":"attempt","work_key":key,"state":"terminal",
+                "outcome":"rejected","terminal_cause":"handoff_refused",
+                "cause_code":"handoff_refused","result_path":null,
+                "reason":"writer lineage: invalid run record: graph predecessor writer or source"
+            }),
+        ];
+
+        let digest = node_digests(&rows).remove(0);
+        assert_eq!(digest.outcome, "succeeded");
+        assert_eq!(
+            digest.result_path.as_deref(),
+            Some("attempts/1/result.md"),
+            "a refusal that never launched hid the successful result: {}",
+            digest.line
+        );
+        assert!(
+            digest
+                .line
+                .contains("result=task 1 finished and pushed its commits"),
+            "{}",
+            digest.line
+        );
+        assert!(
+            !digest.line.contains("cause=handoff_refused"),
+            "the refused attempt replaced the successful one: {}",
+            digest.line
+        );
     }
 }

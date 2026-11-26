@@ -444,14 +444,16 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
     ) {
         return FacadeError::Busy;
     }
-    if matches!(
-        &error,
-        provenant_run::RunError::Writer(
-            provenant_confinement::worktrees::WorktreeError::LockBusy
-                | provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout
-        )
-    ) {
-        return FacadeError::WriterLockBusy;
+    if let provenant_run::RunError::Writer(writer) = &error {
+        match writer {
+            provenant_confinement::worktrees::WorktreeError::LockBusy => {
+                return FacadeError::WriterLockBusy { holder: None };
+            }
+            provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout { holder } => {
+                return FacadeError::WriterLockBusy { holder: *holder };
+            }
+            _ => {}
+        }
     }
     if let provenant_run::RunError::Writer(writer) = &error
         && let Some((operation, lock_failure)) = writer.mutation_failure()
@@ -474,13 +476,15 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
             reason: String::new(),
         };
     }
-    if matches!(
-        &error,
-        provenant_run::RunError::Writer(provenant_confinement::worktrees::WorktreeError::Dirty(_))
-    ) {
+    if let provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::Dirty(paths),
+    ) = &error
+    {
         return FacadeError::DispatchRefused {
             fact: Some(
-                provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DirtyWriter,
+                provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DirtyWriter {
+                    paths: provenant_records::diagnostic::safe_text(paths),
+                },
             ),
             disk: None,
             reason: String::new(),
@@ -567,8 +571,26 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                     path: "inspect worktree registration".into(),
                 };
             }
-            Some(DiagnosticFact::Filesystem { operation, cause }) => {
-                return FacadeError::io_caused(*operation, *cause);
+            Some(DiagnosticFact::Filesystem {
+                operation,
+                detail,
+                cause,
+            }) => {
+                let source = detail
+                    .as_ref()
+                    .and_then(|detail| detail.source.as_deref())
+                    .or(*cause);
+                let path = detail
+                    .as_ref()
+                    .and_then(|detail| detail.path.as_deref())
+                    .map(std::path::Path::new);
+                return FacadeError::io_failure(
+                    *operation,
+                    path,
+                    source
+                        .as_ref()
+                        .map(|source| source as &dyn std::fmt::Display),
+                );
             }
             Some(DiagnosticFact::DiskPressure {
                 available,
@@ -645,12 +667,12 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
         },
         Some(FacadeError::Io {
             operation,
+            path,
             delivery_limit,
             delivery_stage,
             resource,
             input_failure,
             cause,
-            ..
         }) => FacadeError::Io {
             delivery_limit,
             delivery_stage,
@@ -658,7 +680,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             input_failure,
             cause,
             operation,
-            path: None,
+            path,
         },
         Some(error @ FacadeError::InvalidInput { detail: None }) => {
             with_run_detail(error, fail.projection.as_deref())
@@ -798,6 +820,7 @@ fn run_kind_next(kind: provenant_run::ErrorKind) -> &'static str {
         | E::DuplicatePacingProfile => {
             "supply the missing lane, parent or account context and retry"
         }
+        E::ForgeQuota => "wait for the forge quota reset named in the refusal, then retry",
         E::Contention | E::Processes | E::MemoryFloor | E::StaleReadiness | E::HostClock => {
             "wait for the named host resource observation to settle, then retry"
         }
@@ -849,7 +872,7 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
             age: None,
             live: None,
         },
-        E::WriterLockBusy => FacadeError::WriterLockBusy,
+        E::WriterLockBusy => FacadeError::WriterLockBusy { holder: None },
         E::WriterUnknown => FacadeError::WriterUnknown,
         E::CredentialRoot => FacadeError::CredentialRoot {
             access: "requested".into(),
@@ -1564,10 +1587,20 @@ impl BinaryRunOwner<'_> {
         )
         .map_err(fail_error)?;
         if let Some(host) = host.filter(|host| *host != self.factory.context.identity.host) {
+            // A peer-owned writer carries only a branch and a base ref. It
+            // never carries a caller path or a host filesystem grant.
+            let caller_path = task
+                .worktree
+                .as_deref()
+                .is_some_and(|path| !path.is_empty());
+            let peer_writer = task.access
+                == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && !caller_path
+                && task.new_worktree.is_some();
             if !self.allow_remote
-                || task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                || task.worktree.is_some()
-                || task.new_worktree.is_some()
+                || (task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                    && !peer_writer)
+                || caller_path
             {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
@@ -1679,6 +1712,7 @@ impl BinaryRunOwner<'_> {
                 settlement_retry_limit,
                 context: task.context,
                 base: task.base,
+                fixture: task.fixture,
                 pinned_base: None,
                 head: task.head,
                 source_head: task.source_head,
@@ -2744,5 +2778,43 @@ mod facade_kind_tests {
                 .unwrap()
                 .contains("candidate worktree path refused")
         );
+    }
+
+    #[test]
+    fn fail_error_operation_io_names_the_operation_and_path() {
+        let root = tempfile::tempdir().expect("create a temporary directory");
+        let worktree = root.path().join("writer");
+        let fail = provenant_cli::run::Fail::from(provenant_run::RunError::OperationIo {
+            operation: "create worktree dir",
+            path: Some(worktree.clone()),
+            source: std::io::Error::other("resource temporarily unavailable"),
+        });
+        let error = super::fail_error(fail);
+        let detail = error
+            .diagnostic()
+            .detail
+            .expect("a run io failure keeps a local detail");
+        let path_text = worktree.to_str().expect("test path is UTF-8");
+        assert!(detail.contains("create worktree dir"), "{detail}");
+        assert!(detail.contains(path_text), "{detail}");
+        assert!(
+            detail.contains("resource temporarily unavailable"),
+            "{detail}"
+        );
+        let wire = serde_json::to_string(&error).expect("serialise facade error");
+        assert!(!wire.contains(path_text), "{wire}");
+        assert!(!wire.contains("resource temporarily unavailable"), "{wire}");
+    }
+
+    #[test]
+    fn fail_error_filesystem_without_path_or_source_has_no_invented_detail() {
+        let fail = provenant_cli::run::Fail::from(provenant_run::RunError::Filesystem(
+            provenant_os::fs::FsError::NotPrivate {
+                name: "payload".into(),
+            },
+        ));
+        let error = super::fail_error(fail);
+        assert_eq!(error.cause(), None);
+        assert!(error.diagnostic().detail.is_none());
     }
 }

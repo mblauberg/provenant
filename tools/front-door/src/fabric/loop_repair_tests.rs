@@ -87,6 +87,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 title: None,
                 prompt: "reply OK".into(),
                 base: Some(head.to_string()),
+                fixture: None,
                 pinned_base: None,
                 head: None,
                 profile: Default::default(),
@@ -326,6 +327,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     service.execute(
         InboxInput::Answer {
             extra: Default::default(),
+                    queue_control: None,
             id: ask.id,
             action: AnswerAction::Choose,
             option_id: Some("accept".into()),

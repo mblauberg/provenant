@@ -8,9 +8,17 @@ Paths are relative to `tools/front-door/`.
 ## Admission and custody
 
 Admission commits the reservation and attempt together. A worktree's owning lane decides who
-else writes in it; active lanes share an occupancy lease. Resource probes run outside the
-admission transaction, and busy capacity is not a queue. Uncertain custody keeps its ownership
-until release is proved. Reconciliation reports released custody only after exclusion and native
+else writes in it; active lanes share an occupancy lease. A launch that finds `writer.lock` held
+checks the slot's reservations: a scoped stop intent for the inode-bound attempt or a reservation
+in the settling phase is a release already under way, so the launch waits on the store lock budget
+(the same sourced SQLite busy timeout that bounds the store's own locks) and wakes as soon as the
+lock is free. A live holder or any other occupancy without that evidence still refuses on the first
+probe, so a release wait never becomes a queue behind a foreign lane. Resource probes run outside
+the admission transaction, and busy capacity is not a
+queue. Uncertain custody keeps its ownership until release is proved, except for a terminal
+read-only review: it holds no Git work, so a reservation left by its guardian is not uncertainty
+and reconciliation settles it with a typed warning ([outcome before release](run-settlement.md#outcome-before-release)).
+Reconciliation reports released custody only after exclusion and native
 absence evidence prove it safe; an unknown or live holder retains custody, and uncertain custody
 and unreadable reservations warn while reconciliation continues. Writer-bind refusals identify
 the durable lease holder, branch, worktree, reservation age (from its last durable update) and
@@ -34,7 +42,9 @@ attempt's staging and launching another attempt never resets a live sibling's in
 private views keep native semantics for commit, merge, cherry-pick and rebase without a shell
 interceptor. A commit becomes visible on the host branch only after object verification and
 settlement's expected-old-tip compare-and-swap. A divergent sibling publication is merged into
-the host branch by the host when no conflict exists, and published. A real conflict, or
+the host branch by the host when no conflict exists, and published. A rewrite replaces the
+unchanged custody-pinned launch tip with a warning and a recovery ref; a later host tip takes the
+merge path regardless of remote-tracking refs. A real conflict, or
 `lanes.history.rebase = "refuse"`, retains the loser's private commits and index; the refusal
 names the setting and the conflicting files. A continuation that needs a predecessor commit
 launches after that predecessor settles. Scope attribution starts at the attempt's captured
@@ -93,6 +103,27 @@ recorded in `terminal-pending.json` and shown by `result` and `wait`. A refusal 
 names none reads `unrecorded`, never a cause the host did not observe. A pre-launch routing refusal
 keeps a bounded host-authored explanation; provider diagnostics never supply it.
 
+A refusal while preparing the local launch (for example Git setup with no declared or inferable
+remote) is `preparation_refused` with a typed `git_setup` preparation failure, never a lost or
+refused handoff to a guardian. Its note carries the host's bounded reason and the remedy that
+reason implies — declare `ports.git.remote` or set the branch's upstream — into `result.md` and
+`provenant status`. Only a real host handoff refusal reads `launch_handoff_refused` and tells the
+operator to run `provenant reconcile`. Remote inference still never guesses a remote.
+- Why: the remedy must repair the step that refused; sending an operator to reconcile a Git
+  setup failure hides the actual cause and strands the lane.
+- A writer-lineage check at launch is the same local preparation step: its
+  refusal is a typed `preparation_refused` outcome whose note names the
+  retained worktree's owner, source and head to check before retrying, never an
+  "invalid run record" or a generic `provenant reconcile` instruction. An
+  unfinished predecessor still refuses at the authority boundary, because no
+  successor may take its worktree. A new graph can adopt a retained writer
+  worktree whose owner, terminal record and released custody match: it inherits
+  the worktree and its commits, not the earlier graph's source and head pins.
+  - Why: a repair must name the step that refused, and adoption must not be
+    refused for commits the writer made after an earlier graph sealed its head.
+  - Owner: `crates/run/src/launch/hand_off.rs`, `crates/run/src/controls.rs`,
+    `crates/records/src/run.rs`
+
 Terminal attempts are immutable. A retry is a new linked attempt, a terminal attempt has at most
 one successor, and a writer is never replayed over its edits.
 - Why: continuation must preserve both history and its attempt's custody.
@@ -115,11 +146,29 @@ superseded and print the newer handle as the next step; they never redirect sile
 `--branch B --base REF` allocates a managed writer worktree under the project layout, not under
 the invoking checkout. The launch owner resolves and checkpoints `REF` before any Git effect,
 creates the worktree from that commit and binds it by source identity and head, identically from
-a primary checkout, a linked worktree, a separate Git directory or a bare linked checkout. An
-existing clean worktree at the exact checkpointed head, including one a chair pre-created with
-`provenant worktree create`, is rebound; a different branch, head or unclean tree is refused with
-the named cause. Relative `--worktree` and graph writer paths resolve from the project's primary
-root, so a launch from a linked worktree of the same repository selects the same managed
+a primary checkout, a linked worktree, a separate Git directory or a bare linked checkout. During
+provisioning and recovery, an existing clean worktree at the exact checkpointed head, including
+one a chair pre-created with `provenant worktree create`, is rebound; a different branch, head or
+unclean tree is refused with the named cause. When the managed path already holds a registered
+linked checkout on the named branch, `--branch` and the branch resolved by `run implement --pr N`
+bind that checkout in place as `--worktree` would, and report its path on an info line rather than
+provisioning it again. Reuse takes the checkout's own head: for an existing branch `--base` is the
+merge target for diffs, stray-work accounting and the PR, never an ancestry requirement or a reset.
+A branch whose base is in its history is reused without a behind-base warning; a branch behind its
+base is reused with `BRANCH_BEHIND_BASE`, naming how many commits it is behind and that the lane may
+merge the base. A base with no merge base at all is unrelated and refuses with a `WRITER_SCOPE`
+message that names `--worktree` and the merge/rebase option; an incomplete history from a shallow
+clone warns and proceeds instead of refusing on absent evidence. An unheld
+dirty checkout follows `lanes.writer_dirty` (`wip_commit` by default), not the provisioning
+refusal. A live writer or an unsettled attempt on that checkout still refuses, naming the holder
+and the exact command that settles it (or a wait-for-holder step when no attempt is named); that
+refusal protects another lane's uncommitted work and never advises committing or preserving it.
+The target grammar never accepts a raw attempt id, so a holder resolved to its work key is advised
+as `provenant reconcile <graph>/<node>#<attempt>`; where no store can resolve the key, the remedy
+names the attempt separately and advises the bare `provenant reconcile` sweep. One shared formatter
+owns all four emissions (submission preflight, facade `writer_busy` and `writer_lease_held`, and the
+run diagnostic) so the copies cannot drift. Relative `--worktree` and graph writer paths resolve
+from the project's primary root, so a launch from a linked worktree of the same repository selects the same managed
 checkouts as the primary checkout. A host-planned writer (`provision_worktree` with no attempt
 `new_worktree`) is skipped by the pre-attempt integration-target check: it has no branch until
 provisioning, and provisioning verifies the exact branch and head.
@@ -166,11 +215,30 @@ A node whose launch condition (`when`) does not hold never runs, so it needs no 
 submission neither inspects nor preflights its worktree. A composite template takes no launch
 control (access mode, worktree, branch, base or write scope) and the first one given is named in
 the refusal; the bundled `smoke` template is the exception for worktree and branch/base, which
-bind to its write node only. Remote placement takes neither control. A graph reader without an
-explicit worktree or attempt directory uses its selected project as its source; `upgrade --verify`
-selects a temporary committed scratch project for its smoke graph.
-- Why: a verification graph must run on a real install, and a skipped node must not refuse the
-  run it does not take part in.
+bind to its write node only. Remote placement takes no caller path: a caller `worktree` is refused,
+but `--branch` with an optional `--base` is carried as peer-owned worktree intent so the peer
+creates the writer in its own clone. A bundled smoke launch with no branch provisions that intent
+from a sourced scratch branch (overridable with `--branch`/`--base` or `--set write_attempt`), so
+`upgrade --verify --host PEER` exercises the remote writer without a caller-supplied branch. The
+sender's graph does not bind or provision a local worktree for that writer; its checkpoint retains
+the peer provisioning intent for replay. A graph reader without an explicit worktree or attempt
+directory uses its selected project as its source; `upgrade --verify` selects a temporary
+committed scratch project for its smoke graph and binds a fixed review range so no lens fails on
+an empty range. A remote reader binds the peer's **own** checkout HEAD, not the sender's pinned
+commit: the sender's head names a commit in its scratch project that the peer clone may never
+have seen, and the source view materialiser refuses an absent commit rather than substituting a
+nearby ref. The peer's HEAD first parent supplies its review base; when Git evidence is missing,
+the launch warns and falls back to the sender's pins. For a manual bundled smoke launch without a
+`diff_base`, the checkout's first parent supplies the range; if unavailable, review is skipped with a reason and the other eligible
+nodes continue. A node may name a small project-relative fixture;
+the host stages its bytes with the task, so a peer places the same file in its own candidate
+scratch and the brief names its path instead of leaking a caller path. The upgrade smoke fixture
+carries a fresh random fact that exists only in those staged bytes, never in a committed tree or
+the bundled template, so a reader that reconstructs the answer from source cannot report it.
+- Why: a verification graph must run on a real install and exercise a writer, and a skipped node
+  must not refuse the run it does not take part in. A fixture must reach every host that runs a
+  reader, not just the host that owns the checkout; a stale peer clone must still read a valid
+  tree, and a smoke pass must be evidence that the staged fixture was actually read.
 
 Every refusal of a launch input names the field that caused it, or the decoded path of a document
 or patch field; an unnamed `invalid input` is a defect. A refused bind keeps its typed cause to
@@ -255,10 +323,53 @@ alone, its own token helper entries are appended after the host configuration (a
 entry is filtered, copied or rewritten.
 - Why: lanes are free to see the host's Git settings, not a filtered subset (ADR 0035).
 
+### Lane pull requests
+
+`lanes.pr` resolves to `never` (the default), `draft` or `allowed`, and every
+effective value names the layer that set it. The default is `never`, so a leaf
+implement writer lane in a graph does not open a pull request; the chair owns
+publication after settlement. Host, launch and node settings opt a lane in.
+Set `attempt.pr = "draft"` or `"allowed"` on a graph node, or pass
+`--set attempt.pr=draft` at launch; the node override is reported as the launch
+source and takes precedence over the host setting.
+The provider's `gh` tool enforces the policy before forwarding a command,
+including when `lanes.publish=false`. Publishing controls credential delivery;
+an unsandboxed lane can still access ambient host credentials.
+`never` refuses `gh pr create|edit|close` (and the other PR mutations) and
+mutating forge API calls while leaving reads working. Repository and hostname
+selectors at command boundaries do not change the policy. Explicit GET or HEAD
+requests with query fields
+remain reads. Fields without an explicit method imply POST and are
+refused; `draft` adds `--draft`
+to `pr create`, permits edit, close, comment and review, and refuses promotion,
+merge, reopen, lock, unlock, update-branch, revert and forge writes. Unknown PR
+subcommands are refused under both restrictive policies until classified;
+`allowed` forwards unchanged. A missing or unknown value falls back to `never`.
+The effective value and source appear in the writer preamble, the launch
+receipt and `run --explain`. This is a cooperative policy mediating ordinary
+`gh` use, not a sandbox against a lane deliberately evading it: a lane that runs
+the real `gh` binary or another API
+client directly is outside it, and host-side delivery is unaffected.
+- Why: a leaf implement lane must not open a PR against the wrong base, and a
+  refusal must name the setting that caused it.
+- Owner: `crates/config/src/pr_policy.rs`, `crates/providers/src/lane.rs`,
+  `crates/run/src/completion.rs`, `cli/src/run/provider/preparation.rs`
+
+### Lane scratch stays outside the attempt record
+
+A lane's temporary directory is `<state>/attempt-scratch/<attempt id>/tmp`, and
+`LaunchPaths::scratch` is its `scratch` child. Both are outside `attempts/<id>`, as
+are the temporary alias and its target. The lane's `provider-state`, progress handoff,
+prompt and durable output paths remain in the attempt directory. Retention, disk
+classification, writer-Git readers and terminal cleanup follow the sibling root; the
+alias is unlinked with its target. There is no fallback to the old scratch paths.
+- Why: an incidental relative write from lane scratch must not land in the attempt's
+  settlement records (#3844, #3947).
+
 ### Lane state stays outside the worktree
 
-`finalise_provider_env` rebinds `HOME` and the `XDG_*` homes into the attempt scratch
-(`scratch/home`, `scratch/xdg/<name>`, mode 0700) whenever the final value is the worktree or
+`finalise_provider_env` rebinds `HOME` and the `XDG_*` homes into the lane's per-attempt
+scratch (`scratch/home`, `scratch/xdg/<name>`, mode 0700) whenever the final value is the worktree or
 under it, compared lexically and canonically, and records one warning naming the variable, old
 path, new path and reason. Values outside the worktree are unchanged.
 - Why: a lane whose tool state resolves inside its checkout can commit that state with its work,
@@ -294,6 +405,18 @@ explain status names the same commit. Absent or unusable Git evidence stays advi
 refuses the launch.
 - Why: file:line evidence from a stale working tree reports findings upstream has fixed, and a
   plan should read the base it will implement rather than the caller's checkout.
+
+A review launch pinned to a pull-request head binds that head as its node source. The host materialises
+an attempt-private, read-only detached view of the commit and launches the review lane with that view
+as its working directory. The view carries a named ref, `refs/provenant/review/base`, at the
+host-supplied base, even when the source checkout has no remote default ref. The lane's prompt names
+that base and head, states that both are authoritative, and forbids fetching, confirming either
+commit against a remote default ref, or checking out, switching or resetting any other checkout,
+including the project's primary; a pinned review never needs to touch the primary checkout.
+- Why: a host-access lane can still reach the primary, so a model told only a SHA checks it out there
+  itself, leaving the primary detached and displacing concurrent writers (#3943). A detached view has
+  no `origin/<default>` ref and the lane cannot fetch, so a reviewer asked to confirm the host's merge
+  base goes `inconclusive` unless the base is shipped and declared authoritative (#3977).
 
 Unreadable required host inputs reject an attempt before launch, and a pinned source view reports
 its failure without exposing captured contents or credentials.

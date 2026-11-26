@@ -633,12 +633,29 @@ pub(super) enum WorktreeCleanliness {
     Unknown,
 }
 
+/// The one dirtiness observation a launch or retry makes: a fresh
+/// `git status --porcelain` reading, with ignored paths excluded. A recorded
+/// private attempt index is a snapshot of an earlier attempt, retained across
+/// stop, not an observation of this worktree; it must not refuse a new writer
+/// whose native status is clean. Removal and GC, which destroy that private
+/// Git, use [`worktree_cleanliness_with_attempt_indexes_at`] instead.
 pub(super) fn worktree_cleanliness_at(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
     cancel: &CancelToken,
 ) -> Result<WorktreeCleanliness, WorktreeError> {
-    let cleanliness = native_worktree_cleanliness_at(context, repo, cancel)?;
+    native_worktree_cleanliness_at(context, repo, cancel)
+}
+
+/// The removal verdict also accounts for every durable private attempt index:
+/// removing the worktree destroys those indexes, so staged work invisible to
+/// the native status must still retain the tree.
+pub(super) fn worktree_cleanliness_with_attempt_indexes_at(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<WorktreeCleanliness, WorktreeError> {
+    let cleanliness = worktree_cleanliness_at(context, repo, cancel)?;
     require_attempt_indexes_clean(context, repo, cancel)?;
     Ok(cleanliness)
 }
@@ -1229,6 +1246,24 @@ pub fn writer_holder(project_state: &Directory, path: &Path) -> Option<provenant
         .filter(|record| record.custody_directory() == Some(slot.as_path()));
     let holder = matches.next()?.scope.attempt;
     matches.next().is_none().then_some(holder)
+}
+
+/// Identify the writer slot holder when only the host state root and project
+/// are available, such as a launch budget that expired outside a
+/// `WorktreeContext`.
+pub fn recorded_writer_holder(
+    state_root: &Path,
+    project: provenant_core::ProjectId,
+    path: &Path,
+) -> Option<provenant_core::AttemptId> {
+    let state = Directory::open_anchor(state_root).ok()?;
+    let registry = state
+        .open_verified_directory(OsStr::new("worktrees"))
+        .ok()?;
+    let project = registry
+        .open_verified_directory(OsStr::new(&project.to_string()))
+        .ok()?;
+    writer_holder(&project, path)
 }
 
 /// Observe exclusion under the short probe gate. Writer acquisition waits for

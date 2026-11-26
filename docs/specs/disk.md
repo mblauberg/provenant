@@ -53,10 +53,15 @@ deletion authority: GC revalidates its own conditions.
 Released read-only attempt scratch becomes collectable after `gc.idle`, with no
 branch, PR, graph or worktree condition. Settled writer scratch (`tmp/`) does too
 once the attempt is terminal with its effects complete and no live holder,
-writer slot or Cargo lock holds the files, and sooner when its branch is merged,
-its PR closed, its graph cancelled or superseded or its worktree removed. Live,
-busy and unreleased attempts are never touched, and collection preserves durable
-results, handoffs, logs and process records. After a merge, cleanup targets only
+writer slot, live settlement owner or Cargo lock holds the files, and sooner when
+its branch is merged, its PR closed, its graph cancelled or superseded or its
+worktree removed. A settlement driver keeps the attempt's private Git objects and
+review source checkout busy until its import and final reconciliation finish;
+GC holds the same lease throughout collection and retains scratch until settlement is
+complete, including between retries or when ownership cannot be determined. Existing
+custody failures remain reported when they prevent collection. Live, busy and
+unreleased attempts are never touched, and collection preserves durable results,
+handoffs, logs and process records. After a merge, cleanup targets only
 the merged branch's worktree and attempt scratch.
 
 Cargo targets here may serve lane checks, the chair's warm check, CI or
@@ -135,11 +140,60 @@ so a large tree progresses across passes. A survey snapshot never grants removal
 authority: takeover and resumption need fresh candidate custody checks. Each
 trigger and scope keeps its own bounded restart record, so unfinished scopes
 resume independently without growing the lease record, and an ambiguous cursor
-restarts its scope from the beginning rather than skipping work.
-- Why: a large or abandoned sweep must not prevent later collection.
+restarts its scope from the beginning rather than skipping work. Attempt
+scratch collection precedes the broader provider-state and payload-cap scans so
+they cannot consume its first pass budget. The advisory dweller census runs
+after the collection classes: one bounded observation is cached for the whole
+pass and reused for every settled attempt
+and terminal worktree instead of re-walking the process table per candidate.
+A census cut short by its bound or the sweep deadline is reported incomplete;
+an undecided candidate is kept, never treated as free. The report names how
+many settled candidates the pass decided, collected and deferred, with the
+known bytes reclaimed and the bytes still retained, or unknown when retained
+bytes were not measured. Deferred paths and byte observations refer to
+`attempt-scratch/<attempt-id>/tmp`; custody locks remain with the attempt record.
+A preview labels reclaimable bytes and candidates it
+would collect; a class not reached is reported as unmeasured. Partially removed
+bytes count as reclaimed, never as retained.
+- Why: a large or abandoned sweep must not prevent later collection, and a
+  slow census must never spend the budget that collection needs.
 
 Collection belongs to [worktrees](supervisor.md#worktrees) and
 [state retention](state.md#retention-keeps-evidence).
+
+## Floor-triggered and joined sweeps
+
+`gc.free_floor` is overridable and its effective value and source (compiled
+default, host setting or config file) are reported by `provenant gc` in both
+human and JSON output. Lane launch already starts a bounded sweep when free
+space on the state volume is below the floor; settlement does the same through
+the cleanup worker, so no daemon is needed. Above the floor, or with
+`gc.schedule = false`, a checkpoint starts nothing.
+- Why: a host that fills up between daily ticks still recovers space, while a
+  healthy host is never swept merely because a lane started.
+
+An explicit `provenant gc --free-floor SIZE` that finds the single-flight
+lease held joins that sweep for up to the configured `gc.sweep_budget`, then
+runs its own collection on the freed lock with the budget the join left over.
+It never turns a busy lease into a successful empty skip: if the bound expires
+it fails with the wait and the fact that this invocation collected nothing.
+The lease record does not carry a holder name, so neither does the failure.
+- Why: the operator who asks for space back must see either a real result or a
+  failure, not "sweep already running; skipped" with zero bytes.
+
+## What was not collected
+
+Every gc report lists the candidates it deliberately kept: path, class,
+observed bytes (or an explicit unknown), and the reason — live holder,
+uncertain custody, retained evidence, unmerged work, held Cargo lock, recent
+write and similar. Bytes already measured for attempt scratch and Cargo
+targets are carried into those rows; where only a class total was measured,
+the row reports that total. A measurement that cannot report bytes says so
+rather than claiming zero. JSON and `gc --full` give one row per candidate;
+the default human view aggregates by class and reason so the lines survive its
+compact clip.
+- Why: collection must preserve evidence and live data; naming what stayed is
+  what lets an operator act on it.
 
 ## Dispatch and new-build pressure
 

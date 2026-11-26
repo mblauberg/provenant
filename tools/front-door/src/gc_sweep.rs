@@ -573,6 +573,35 @@ pub(crate) fn acquire(
     Ok(Acquire::Held(lease))
 }
 
+/// Acquire the sweep lease, waiting up to `wait` for a running sweep to
+/// release it. A second explicit collection joins the in-flight pass in this
+/// way instead of returning an empty skip while another process holds the
+/// lease. The wait is bounded and never holds the metadata mutex while it
+/// waits; `Acquire::Busy` means the bound elapsed, not that work was done.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "A bounded join of an in-flight sweep is an explicit real-time boundary; the lease fence observes cancellation."
+)]
+pub(crate) fn acquire_waiting(
+    state_root: &std::path::Path,
+    budget: Duration,
+    wait: Duration,
+    clock: &dyn Clock,
+) -> Result<Acquire, Box<dyn std::error::Error>> {
+    let started = Instant::now();
+    loop {
+        match acquire(state_root, budget, clock)? {
+            Acquire::Held(lease) => return Ok(Acquire::Held(lease)),
+            Acquire::Busy(warning) => {
+                if started.elapsed() >= wait {
+                    return Ok(Acquire::Busy(warning));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+}
+
 fn metadata_lock(directory: &Directory) -> Result<LockGuard, provenant_os::fs::FsError> {
     directory.try_lock(OsStr::new(LOCK_FILE), LockMode::Exclusive)
 }
@@ -786,6 +815,59 @@ mod tests {
             panic!("released sweep is busy");
         };
         assert!(next.matches_identity("full_gc", "manual:second"));
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The test releases a held lease on a short real-time boundary."
+    )]
+    fn explicit_gc_waits_for_a_held_sweep_instead_of_skipping() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let clock = test_clock();
+        let Acquire::Held(lease) = acquire(&root, Duration::from_secs(30), &clock).unwrap() else {
+            panic!("first sweep should acquire its lease");
+        };
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(75));
+            drop(lease);
+        });
+        let acquired = acquire_waiting(
+            &root,
+            Duration::from_secs(30),
+            Duration::from_secs(2),
+            &clock,
+        )
+        .unwrap();
+        release.join().unwrap();
+        assert!(
+            matches!(acquired, Acquire::Held(_)),
+            "a held sweep must be waited for and joined, not skipped"
+        );
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn waiting_for_a_held_sweep_is_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let clock = test_clock();
+        let Acquire::Held(_lease) = acquire(&root, Duration::from_secs(30), &clock).unwrap() else {
+            panic!("first sweep should acquire its lease");
+        };
+        let outcome = acquire_waiting(
+            &root,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+            &clock,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, Acquire::Busy(_)),
+            "an in-flight sweep must report a bounded wait, not an empty skip"
+        );
     }
 
     // Spec: docs/specs/disk.md#bounded-sweeps

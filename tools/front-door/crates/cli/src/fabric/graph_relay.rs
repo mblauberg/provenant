@@ -1361,7 +1361,7 @@ fn recover_provisioning(
                 .map_err(|_| ServiceError::Facade(FacadeError::StateCorrupt))?;
             let contention = matches!(
                 &error,
-                WorktreeError::RegistryLockTimeout
+                WorktreeError::RegistryLockTimeout { .. }
                     | WorktreeError::WriterBusy { .. }
                     | WorktreeError::LockBusy
             );
@@ -1414,6 +1414,7 @@ fn recover_provisioning(
                     | WorktreeError::CheckedOut
                     | WorktreeError::InvalidRequest
                     | WorktreeError::WorktreeExists { .. }
+                    | WorktreeError::UnrelatedBase(..)
                     | WorktreeError::BranchCollision { .. }
                     | WorktreeError::RemoteOnlyBranch { .. }
                     | WorktreeError::BaseNotFound { .. }
@@ -2106,13 +2107,15 @@ fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) 
         });
     }
     let fact = match &error {
-        WorktreeError::Dirty(_) => Some(DispatchRefusalFact::DirtyWriter),
+        WorktreeError::Dirty(paths) => Some(DispatchRefusalFact::DirtyWriter {
+            paths: provenant_records::diagnostic::safe_text(paths),
+        }),
         WorktreeError::DetachedWorktree { .. } | WorktreeError::DetachedPrimary => {
             Some(DispatchRefusalFact::DetachedWriter)
         }
         WorktreeError::CheckedOut => Some(DispatchRefusalFact::CheckedOutWriter),
-        WorktreeError::RegistryLockTimeout => {
-            return ServiceError::Facade(FacadeError::WriterLockBusy);
+        WorktreeError::RegistryLockTimeout { holder } => {
+            return ServiceError::Facade(FacadeError::WriterLockBusy { holder: *holder });
         }
         WorktreeError::WriterBusy { holder } => {
             return ServiceError::Facade(FacadeError::WriterBusy { holder: *holder });
@@ -2192,7 +2195,13 @@ pub fn provision_writer_checked(
     use provenant_confinement::worktrees;
     let clock = provenant_os::clock::SystemClock::new();
     if budget.remaining(clock.mono_now()).as_micros() == 0 {
-        return Err(worktrees::WorktreeError::RegistryLockTimeout);
+        return Err(worktrees::WorktreeError::RegistryLockTimeout {
+            holder: worktrees::recorded_writer_holder(
+                context.roots.state.as_path(),
+                context.identity.project,
+                &context.project_root.join(path),
+            ),
+        });
     }
     worktrees::with_context(
         &context.roots,
@@ -2201,9 +2210,6 @@ pub fn provision_writer_checked(
         &clock,
         cancel,
         |worktree_context| {
-            if budget.remaining(clock.mono_now()).as_micros() == 0 {
-                return Err(worktrees::WorktreeError::RegistryLockTimeout);
-            }
             let worktree_context = worktrees::WorktreeContext {
                 lock_budget: budget,
                 ..*worktree_context
@@ -2215,6 +2221,11 @@ pub fn provision_writer_checked(
             )
             .map_err(worktrees::WorktreeError::PortConfiguration)?;
             let expected = resolve_managed_writer_path(&ports, layout.root(), path, branch)?;
+            if budget.remaining(clock.mono_now()).as_micros() == 0 {
+                return Err(worktrees::WorktreeError::RegistryLockTimeout {
+                    holder: worktrees::writer_holder(worktree_context.project_state, &expected),
+                });
+            }
             provision_in_context(&worktree_context, path, branch, source, owner, cancel)?;
             Ok(expected)
         },
@@ -2277,10 +2288,14 @@ fn provision_in_context(
         let _writer = worktrees::cache_writer_guard(context.project_state, tree.path()).map_err(
             |occupancy| match occupancy {
                 worktrees::Occupancy::Held => WorktreeError::WriterBusy {
-                    holder: worktrees::load_owner(&tree)
-                        .ok()
-                        .flatten()
-                        .and_then(|owner| owner.attempt_id),
+                    holder: worktrees::writer_holder(context.project_state, tree.path()).or_else(
+                        || {
+                            worktrees::load_owner(&tree)
+                                .ok()
+                                .flatten()
+                                .and_then(|owner| owner.attempt_id)
+                        },
+                    ),
                 },
                 other => worktrees::custody_refusal(other),
             },

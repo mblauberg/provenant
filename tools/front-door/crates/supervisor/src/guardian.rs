@@ -546,6 +546,11 @@ pub trait Holder {
     fn budget_warning(&self, _context: &[u8], _tokens: u64, _budget: u64) -> Result<()> {
         Ok(())
     }
+    /// Let Run apply its configured silence policy while the provider is live.
+    /// A failure is advisory and is retried on the next tick.
+    fn provider_activity(&self, _context: &[u8], _last_output: Option<WallTime>) -> Result<()> {
+        Ok(())
+    }
     /// Read-only clean-point evidence. Unknown state is not a clean point.
     fn budget_clean_point(&self, _context: &[u8]) -> Result<bool> {
         Ok(false)
@@ -869,6 +874,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         last_tracking: None,
         journal_warning_active: false,
         cleanup_holders_warned: false,
+        observed_holders: Vec::new(),
         stopped_descendants: std::collections::BTreeSet::new(),
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
@@ -949,6 +955,10 @@ struct Driver<'a> {
     journal_warning_active: bool,
     /// The diagnostic holder scan has run; it runs once per guardian.
     cleanup_holders_warned: bool,
+    /// Processes seen holding the writer lock path at the cleanup deadline.
+    /// The exit carries these so status can name survivors even when the
+    /// guardian that observed them is gone.
+    observed_holders: Vec<crate::custody::ObservedHolder>,
     /// Descendants this guardian signalled, for the one summary warning.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stopped_descendants: std::collections::BTreeSet<ProcessIdentity>,
@@ -1383,8 +1393,8 @@ impl Driver<'_> {
             .watch_cancellation_directory(&self.attempt)
             .is_ok();
         let mut last_output_bytes = 0_u64;
-        let mut last_output_checkpoint_ms = None;
         let mut last_output_at: Option<WallTime> = None;
+        let mut last_activity_policy_ms: Option<u64> = None;
         let mut census_warning_active = false;
         let mut last_full_census_ms: Option<u64> = None;
         let mut last_census_ms: Option<u64> = None;
@@ -1438,17 +1448,31 @@ impl Driver<'_> {
                 out.read(&mut child.stdout);
                 err.read(&mut child.stderr);
             }
-            // The board shows when a lane last wrote output, at 5 s granularity.
+            // Record each observed output change so an active provider cannot
+            // be mistaken for silent at a short configured threshold.
             let output_bytes = out
                 .outcome()
                 .total_bytes
                 .saturating_add(err.outcome().total_bytes);
-            if output_bytes != last_output_bytes
-                && last_output_checkpoint_ms.is_none_or(|last| now.saturating_sub(last) >= 5_000)
-            {
+            if output_bytes != last_output_bytes {
                 last_output_bytes = output_bytes;
                 last_output_at = wall_now();
-                last_output_checkpoint_ms = Some(now);
+            }
+            if exit.is_none()
+                && last_activity_policy_ms.is_none_or(|last| now.saturating_sub(last) >= 1_000)
+            {
+                if let Some(holder) = self.holder
+                    && holder
+                        .provider_activity(&self.holder_context, last_output_at)
+                        .is_err()
+                {
+                    warn(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        "provider activity policy failed; will retry",
+                    );
+                }
+                last_activity_policy_ms = Some(now);
             }
             if io_ready && let Some(stdin) = child.stdin.as_mut() {
                 if input_offset == input.len() {
@@ -1923,6 +1947,14 @@ impl Driver<'_> {
                     .unwrap_or(0)
             });
             let mut wait_ms = cadence.full_ms;
+            if exit.is_none() && self.holder.is_some() {
+                wait_ms = wait_ms.min(
+                    last_activity_policy_ms
+                        .unwrap_or(wait_now)
+                        .saturating_add(1_000)
+                        .saturating_sub(wait_now),
+                );
+            }
             if let Some(last) = last_full_census_ms {
                 wait_ms = wait_ms.min(
                     last.saturating_add(cadence.full_ms)
@@ -2157,6 +2189,7 @@ impl Driver<'_> {
             } else {
                 Vec::new()
             },
+            observed_holders: self.observed_holders.clone(),
             settlement_evidence: self.settlement_evidence,
             retention: unresolved.then(|| Retention {
                 guardian: self.guardian.clone(),

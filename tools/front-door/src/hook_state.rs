@@ -7,8 +7,9 @@ use provenant_cli::Globals;
 use provenant_core::{Clock, MonoTime};
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+use provenant_records::custody::HolderPresence;
 use provenant_workflow::session::{
-    CommandPrefix, LaneLine, SessionState, Unavailable, WorktreeLine,
+    CommandPrefix, CustodyLine, DigestScope, LaneLine, SessionState, Unavailable, WorktreeLine,
 };
 use serde_json::Value;
 use std::{
@@ -28,6 +29,12 @@ pub struct Want {
     /// Unix seconds; lanes settled after this count as new.
     pub settled_after_unix: i64,
     pub session: Option<String>,
+    /// Project the hook ran in, used to scope custody rows in the digest.
+    pub project: Option<String>,
+    /// Where the digest looks for custody; from `session.digest.scope`.
+    pub scope: DigestScope,
+    /// Config layer that set `scope`, shown in the unattended line.
+    pub scope_source: Option<String>,
 }
 
 /// This binary's own read commands, run in `cwd` with the hook's state root.
@@ -227,6 +234,9 @@ fn collect_with_cli(
     want: &Want,
     deadline: MonoTime,
 ) -> SessionState {
+    state.current_project = want.project.clone();
+    state.scope = want.scope;
+    state.scope_source = want.scope_source.clone();
     std::thread::scope(|scope| {
         let active = scope.spawn(move || cli.lane_listing(deadline, None));
         let settled =
@@ -292,9 +302,17 @@ fn collect_with_cli(
                 match serde_json::from_value::<provenant_records::custody::CustodyStatus>(data) {
                     Ok(view) => {
                         for item in view.items {
-                            state
-                                .custody
-                                .push(format!("{} ({:?})", item.record.subject, item.presence));
+                            let presence = match item.presence {
+                                HolderPresence::Live => "live",
+                                HolderPresence::Unattended => "unattended",
+                                HolderPresence::Unknown => "unknown",
+                            };
+                            state.custody.push(CustodyLine {
+                                subject: item.record.subject.to_string(),
+                                presence: presence.to_owned(),
+                                project: item.record.project.to_string(),
+                                mine: item.mine,
+                            });
                         }
                         state.custody_more = view.next.map(|cursor| {
                             state
@@ -589,6 +607,9 @@ mod tests {
                 worktrees: true,
                 settled_after_unix: 0,
                 session: None,
+                project: None,
+                scope: DigestScope::Project,
+                scope_source: None,
             },
             deadline,
         );
@@ -780,6 +801,9 @@ mod tests {
             worktrees: true,
             settled_after_unix: 0,
             session: None,
+            project: None,
+            scope: DigestScope::Project,
+            scope_source: None,
         };
         let mut state = SessionState::default();
         unavailable_sources(&mut state, &want, "executable unavailable".into());

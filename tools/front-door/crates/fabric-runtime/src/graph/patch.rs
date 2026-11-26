@@ -389,6 +389,259 @@ pub fn admit_patch(
     admit_patch_for_retry(graph, parent, patch, context, None)
 }
 
+/// Admit a chair disposition for one complete review result at one exact head.
+/// This uses the graph's ordinary expansion revision and idempotency journal,
+/// while leaving the reviewer's original output untouched.
+pub fn admit_delivery_review_disposition(
+    graph: &mut LiveGraph<'_>,
+    expected_revision: u64,
+    node_id: &str,
+    disposition: &DeliveryReviewDisposition,
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    requester_path: Option<&[u8]>,
+) -> Result<Admitted, PatchError> {
+    let key = disposition.operation_id.to_string();
+    let digest = CanonicalV1::record_digest(
+        "delivery-review-disposition",
+        1,
+        &(expected_revision, node_id, disposition),
+    )
+    .map_err(|error| PatchError::invalid(format!("disposition is not canonical: {error}")))?
+    .to_string();
+    if let Some(record) = graph
+        .checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .find(|record| record.key.as_deref() == Some(key.as_str()))
+    {
+        return if record.digest == digest {
+            Ok(Admitted {
+                revision: record.revision,
+                replayed: true,
+                added: Vec::new(),
+            })
+        } else {
+            Err(PatchError::new(
+                "idempotency_conflict",
+                format!("idempotency key {key} was used for a different disposition"),
+            ))
+        };
+    }
+    let current = revision(graph.checkpoint);
+    if expected_revision != current {
+        return Err(PatchError::new(
+            "stale_revision",
+            format!("disposition expects revision {expected_revision}, graph is at {current}"),
+        ));
+    }
+    if graph.document.queue.is_none() {
+        return Err(PatchError::new(
+            "conflict",
+            "review disposition requires a delivery queue graph",
+        ));
+    }
+    if disposition.reason.trim().is_empty()
+        || disposition.reason.len() > REASON_BYTES
+        || disposition.reason.contains('\0')
+    {
+        return Err(PatchError::invalid("review disposition reason is invalid"));
+    }
+    scan_for_secrets(&disposition.reason).map_err(PatchError::invalid)?;
+
+    let expanded = plans::expand(
+        graph.document,
+        &graph.checkpoint.extensions,
+        &graph.checkpoint.expansions,
+        limits,
+    )?;
+    let (plan, _) = validate_flat_plan(&expanded, &plans::generous())
+        .map_err(|error| PatchError::invalid(error.to_string()))?;
+    if !plan
+        .nodes
+        .iter()
+        .any(|node| node.id == node_id && node.delivery_review.is_some())
+    {
+        return Err(PatchError::new(
+            "conflict",
+            format!("{node_id} is not a delivery review node"),
+        ));
+    };
+    let progress_index = graph
+        .checkpoint
+        .nodes
+        .iter()
+        .position(|progress| progress.id == node_id)
+        .ok_or_else(|| PatchError::invalid(format!("unknown review node {node_id}")))?;
+    let progress = &graph.checkpoint.nodes[progress_index];
+    let settlement = progress
+        .review_settlement
+        .as_ref()
+        .ok_or_else(|| PatchError::new("conflict", "review node has no settled review proof"))?;
+    let outputs = progress
+        .outputs
+        .as_ref()
+        .ok_or_else(|| PatchError::new("conflict", "review node has no complete output"))?;
+    if progress.state != NodeState::Succeeded
+        || !settlement.independent
+        || settlement.head != disposition.head
+        || settlement.verdict == provenant_records::workflow::ReviewVerdict::Approve
+        || outputs.partial
+        || outputs.findings_available != Some(true)
+        || outputs.verdict_error.is_some()
+        || outputs
+            .verdict
+            .as_deref()
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+            != Some(settlement.verdict)
+    {
+        return Err(PatchError::new(
+            "conflict",
+            "review disposition requires complete independent findings at the exact non-approving head",
+        ));
+    }
+    let approval_gates: BTreeSet<_> = plan
+        .nodes
+        .iter()
+        .filter(|candidate| {
+            candidate.inputs.iter().any(|input| input.node == node_id)
+                && matches!(
+                    candidate.condition.as_ref(),
+                    Some(GateCondition::Verdict { expected, .. })
+                        if provenant_records::workflow::ReviewVerdict::from_token(expected)
+                            == Some(provenant_records::workflow::ReviewVerdict::Approve)
+                )
+        })
+        .map(|gate| gate.id.as_str())
+        .collect();
+    if approval_gates.is_empty() {
+        return Err(PatchError::new(
+            "conflict",
+            "review node does not feed a delivery approval gate",
+        ));
+    }
+    let reviewed_head = disposition.head.to_string();
+    if !graph.checkpoint.nodes.iter().any(|progress| {
+        progress.delivery_park.as_ref().is_some_and(|park| {
+            park.request_id == Some(disposition.request_id)
+                && park.reason == provenant_records::graph::ParkReason::LadderExhausted
+                && park.head.as_deref() == Some(reviewed_head.as_str())
+                && (progress.id == node_id || approval_gates.contains(progress.id.as_str()))
+        })
+    }) {
+        return Err(PatchError::new(
+            "conflict",
+            "review disposition is not bound to the current review-evidence park",
+        ));
+    }
+
+    let next_revision = current
+        .checked_add(1)
+        .ok_or_else(|| PatchError::invalid("graph revision exhausted"))?;
+    let expansion = Expansion {
+        extra: Default::default(),
+        delivery_review_disposition: Some(disposition.clone()),
+        delivery_review_node: Some(node_id.to_owned()),
+        retired: None,
+        retry_generation: None,
+        final_result: false,
+        final_fragment: false,
+        floor_warnings: Vec::new(),
+        source: String::new(),
+        nodes: Vec::new(),
+        uses: Vec::new(),
+        patch: Some(PatchRecord {
+            extra: Default::default(),
+            child_receipt: None,
+            revision: next_revision,
+            digest,
+            key: Some(key),
+            parent: None,
+            reason: Some(disposition.reason.clone()),
+            skipped: Vec::new(),
+            replaced: Vec::new(),
+            journaled: false,
+            restart: None,
+        }),
+    };
+    let mut candidate = graph.checkpoint.clone();
+    candidate.nodes[progress_index].set_delivery_review_disposition(disposition);
+    candidate.expansions.push(expansion.clone());
+    let admitted = admit_candidate(
+        graph.document,
+        Some(&candidate),
+        &[],
+        limits,
+        budget,
+        requester_path,
+    )
+    .map_err(|error| {
+        let mut refusal = PatchError::invalid(error.to_string());
+        refusal.candidate = Some(Box::new(error));
+        refusal
+    })?;
+    let revision = commit(
+        graph.checkpoint,
+        expansion,
+        &admitted.expanded,
+        &admitted.plan,
+        limits,
+    );
+    graph.checkpoint.nodes[progress_index].set_delivery_review_disposition(disposition);
+    Ok(Admitted {
+        revision,
+        replayed: false,
+        added: Vec::new(),
+    })
+}
+
+/// Queue review gates that must be reset after admitting a disposition so the
+/// scheduler rechecks the review result and every downstream landing gate.
+pub fn failed_delivery_review_gates(
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+    review_node: &str,
+    limits: &crate::config::GraphLimits,
+) -> Result<Vec<String>, PatchError> {
+    if document.queue.is_none() {
+        return Err(PatchError::new(
+            "conflict",
+            "review gate recovery requires a delivery queue graph",
+        ));
+    }
+    let expanded = plans::expand(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        limits,
+    )?;
+    let (plan, _) = validate_flat_plan(&expanded, &plans::generous())
+        .map_err(|error| PatchError::invalid(error.to_string()))?;
+    let mut gates = Vec::new();
+    for gate in &plan.nodes {
+        let approves_review = gate.inputs.iter().any(|input| input.node == review_node)
+            && matches!(
+                gate.condition.as_ref(),
+                Some(GateCondition::Verdict { expected, .. })
+                    if provenant_records::workflow::ReviewVerdict::from_token(expected)
+                        == Some(provenant_records::workflow::ReviewVerdict::Approve)
+            );
+        if approves_review
+            && checkpoint
+                .nodes
+                .iter()
+                .find(|progress| progress.id == gate.id)
+                .is_some_and(|progress| {
+                    matches!(progress.state, NodeState::Failed | NodeState::Blocked)
+                })
+        {
+            gates.push(gate.id.clone());
+        }
+    }
+    Ok(gates)
+}
+
 fn admit_patch_for_retry(
     graph: &mut LiveGraph<'_>,
     parent: Option<&str>,
@@ -488,6 +741,8 @@ fn admit_patch_for_retry(
         }
         graph.checkpoint.expansions.push(Expansion {
             extra: Default::default(),
+            delivery_review_disposition: None,
+            delivery_review_node: None,
             retired: None,
             retry_generation: None,
             final_result: false,
@@ -578,7 +833,61 @@ pub fn retry_node_and_dependants(
     brief: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    retry_node_scope(graph, id, brief, context, true, None, None)
+    retry_node_scope(
+        graph,
+        id,
+        brief,
+        context,
+        RetryOptions {
+            dependants: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// Redo a queue control's exact target, keyed by its durable operation ID.
+/// The queue ledger validates the input digest before this replay boundary.
+pub fn retry_node_and_dependants_with_key(
+    graph: &mut LiveGraph<'_>,
+    id: &str,
+    brief: Option<&str>,
+    context: &PatchContext<'_>,
+    operation_id: &str,
+    operation_digest: &str,
+) -> Result<Admitted, PatchError> {
+    let reason = format!("queue control {operation_id} retry node {id} intent {operation_digest}");
+    if let Some(record) = graph
+        .checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .find(|record| record.key.as_deref() == Some(operation_id))
+    {
+        return if record.reason.as_deref() == Some(reason.as_str()) {
+            Ok(Admitted {
+                revision: record.revision,
+                replayed: true,
+                added: Vec::new(),
+            })
+        } else {
+            Err(PatchError::new(
+                "idempotency_conflict",
+                format!("idempotency key {operation_id} was used for a different retry"),
+            ))
+        };
+    }
+    retry_node_scope(
+        graph,
+        id,
+        brief,
+        context,
+        RetryOptions {
+            dependants: true,
+            reason: Some((&reason, None)),
+            idempotency_key: Some(operation_id),
+            ..Default::default()
+        },
+    )
 }
 
 /// Redo a settled node or container, retaining prior attempts and journalling the reset.
@@ -589,7 +898,7 @@ pub fn retry_node(
     brief: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    retry_node_scope(graph, id, brief, context, false, None, None)
+    retry_node_scope(graph, id, brief, context, RetryOptions::default())
 }
 
 /// A host restart after a stop uses the same checked, journalled reset as an
@@ -613,10 +922,20 @@ pub(super) fn restart_stopped(
         id,
         brief,
         context,
-        false,
-        Some((&reason, Some(restart))),
-        Some(routes),
+        RetryOptions {
+            reason: Some((&reason, Some(restart))),
+            replacement_routes: Some(routes),
+            ..Default::default()
+        },
     )
+}
+
+#[derive(Default)]
+struct RetryOptions<'a> {
+    dependants: bool,
+    reason: Option<(&'a str, Option<Restart>)>,
+    replacement_routes: Option<&'a [GraphRoute]>,
+    idempotency_key: Option<&'a str>,
 }
 
 fn retry_node_scope(
@@ -624,10 +943,14 @@ fn retry_node_scope(
     id: &str,
     brief: Option<&str>,
     context: &PatchContext<'_>,
-    dependants: bool,
-    reason: Option<(&str, Option<Restart>)>,
-    replacement_routes: Option<&[GraphRoute]>,
+    options: RetryOptions<'_>,
 ) -> Result<Admitted, PatchError> {
+    let RetryOptions {
+        dependants,
+        reason,
+        replacement_routes,
+        idempotency_key,
+    } = options;
     let normalised_brief = brief
         .map(prompt_text::normalise_prompt_text)
         .transpose()
@@ -898,6 +1221,7 @@ fn retry_node_scope(
     let patch = Patch {
         schema_version: PATCH_SCHEMA_VERSION,
         expected_revision: Some(revision(graph.checkpoint)),
+        idempotency_key: idempotency_key.map(str::to_owned),
         reason: Some(
             reason
                 .as_ref()
@@ -973,18 +1297,34 @@ fn container_brief_refusal(
 // An explicit host-proven refusal leaves a Starting row but no process to
 // stop. Apply the same proof to the selected node and every reset descendant;
 // stale launch flags alone never establish that a handoff was not accepted.
+// Pre-host writer contention is the same safe case, and the disposition that
+// blocked the node recorded that fact from the typed error. This gate reads
+// that recorded fact and the shared contention classifier, not a third copy
+// of the owner-code list: generic `busy` also covers post-acceptance lock
+// timeouts, where a guardian may already be live.
 fn refused_before_launch(progress: &NodeProgress) -> bool {
-    progress.state == NodeState::Blocked
-        && progress.advance_error_code.as_deref() == Some("launch_refused")
+    if progress.state != NodeState::Blocked {
+        return false;
+    }
+    // An exhausted retry is safe only when it was a writer-custody wait, not
+    // a transport retry that may have left a live guardian. Use the same
+    // classifier the disposition used to record the fact, never a third copy
+    // of the contention list and never generic `busy`.
+    let settled = match progress.advance_error_code.as_deref() {
+        Some("launch_refused") => true,
+        Some("launch_retry_exhausted") => progress
+            .advance_owner_code
+            .as_deref()
+            .is_some_and(super::next_attempt::pre_host_contention),
+        _ => return false,
+    };
+    settled
+        && super::next_attempt::all_attempts_refused_before_acceptance(progress)
         && progress
             .attempts
             .iter()
             .filter(|attempt| attempt.state != AttemptState::Terminal)
-            .all(|attempt| {
-                attempt.host_refused_before_acceptance
-                    && attempt.attempt_ref.is_none()
-                    && attempt.state == AttemptState::Starting
-            })
+            .all(|attempt| attempt.attempt_ref.is_none() && attempt.state == AttemptState::Starting)
 }
 
 fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, PatchError> {
@@ -1212,6 +1552,8 @@ pub fn compile_submission(
         return Err(PatchError::invalid("patch adds no nodes"));
     }
     let mut document = GraphDocument {
+        queue_ci_wait: None,
+        queue: None,
         review: None,
         review_subject_missing: false,
         exclude: Vec::new(),
@@ -1551,6 +1893,7 @@ pub(super) fn prepare(
                     "source",
                     "capabilities",
                     "attachments",
+                    "fixture",
                     "read_roots",
                     "composite",
                     "loop",
@@ -1772,6 +2115,8 @@ pub(super) fn prepare(
     let revision = current + 1;
     let mut expansion = Expansion {
         extra: Default::default(),
+        delivery_review_disposition: None,
+        delivery_review_node: None,
         retired: None,
         retry_generation: None,
         final_result: false,
@@ -1969,260 +2314,12 @@ pub(super) fn correct_review_verdict(
         id,
         Some(brief),
         context,
-        false,
-        Some((&format!("correct review verdict {id}"), None)),
-        None,
+        RetryOptions {
+            reason: Some((&format!("correct review verdict {id}"), None)),
+            ..Default::default()
+        },
     )
 }
 
 #[cfg(test)]
-mod advisory_write_scope_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn writer(id: &str, worktree: &str, scopes: &[&str]) -> GraphNode {
-        serde_json::from_value(json!({
-            "id": id,
-            "access": "worktree_write",
-            "worktree": worktree,
-            "write_scope": scopes,
-            "prompt": "write",
-            "route": {"alias": "senior"}
-        }))
-        .expect("valid writer fixture")
-    }
-
-    // Spec: docs/specs/run-launch.md#admission-and-custody
-    #[test]
-    fn overlapping_shared_worktree_scopes_are_admitted_and_warning_is_persisted() {
-        let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version": 1,
-            "graph_id": "shared-worktree-claims",
-            "nodes": [{
-                "id": "first",
-                "access": "worktree_write",
-                "worktree": "/repo/shared",
-                "write_scope": ["src/lib"],
-                "prompt": "first writer",
-                "route": {"alias": "senior"}
-            }]
-        }))
-        .expect("valid initial graph");
-        let limits = plans::generous();
-        document.admit(&limits).expect("initial graph is valid");
-        let expanded = super::super::plans::expand(&document, &[], &[], &limits)
-            .expect("initial graph expands");
-        let (plan, _) =
-            super::super::validate_flat_plan(&expanded, &limits).expect("initial graph validates");
-        let digest = super::super::journal::plan_digest(&plan)
-            .expect("initial graph digest")
-            .to_string();
-        let mut checkpoint = super::super::transitions::initial_checkpoint(
-            &document, &plan, digest, None, None, None,
-        );
-        let library = TemplateLibrary::bundled();
-        let resolvers = BTreeMap::new();
-        let patch = Patch {
-            schema_version: PATCH_SCHEMA_VERSION,
-            expected_revision: Some(0),
-            nodes: vec![json!({
-                "id": "second",
-                "access": "worktree_write",
-                "worktree": "/repo/shared",
-                "write_scope": ["src/lib/module.rs"],
-                "prompt": "second writer",
-                "route": {"alias": "senior"}
-            })],
-            ..Default::default()
-        };
-
-        let admission = admit_patch(
-            &mut LiveGraph {
-                document: &document,
-                checkpoint: &mut checkpoint,
-            },
-            None,
-            &patch,
-            &PatchContext {
-                catalogue: None,
-                library: &library,
-                resolvers: &resolvers,
-                journal: None,
-                limits: &limits,
-                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
-            },
-        )
-        .expect("overlapping advisory claims remain admissible");
-
-        assert_eq!(admission.added, ["second"]);
-        assert!(
-            checkpoint
-                .nodes
-                .iter()
-                .any(|node| { node.id == "first" && node.state == NodeState::Pending })
-        );
-        assert!(
-            checkpoint
-                .nodes
-                .iter()
-                .any(|node| { node.id == "second" && node.state == NodeState::Pending })
-        );
-        let warnings = &checkpoint
-            .expansions
-            .last()
-            .expect("admission persisted")
-            .floor_warnings;
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("first"));
-        assert!(warnings[0].contains("second"));
-    }
-
-    // Spec: docs/specs/run-launch.md#admission-and-custody
-    #[test]
-    fn overlapping_static_submission_scopes_are_admitted_and_warning_is_durable() {
-        let mut document: GraphDocument = serde_json::from_value(json!({
-            "schema_version": 1,
-            "graph_id": "static-shared-worktree-claims",
-            "integration_branch": "batch/static-shared-worktree-claims",
-            "nodes": [
-                {
-                    "id": "first",
-                    "access": "worktree_write",
-                    "worktree": "/repo/shared",
-                    "write_scope": ["src/lib"],
-                    "prompt": "first writer",
-                    "route": {"alias": "senior"}
-                },
-                {
-                    "id": "second",
-                    "access": "worktree_write",
-                    "worktree": "/repo/shared",
-                    "write_scope": ["src/lib/module.rs"],
-                    "prompt": "second writer",
-                    "route": {"alias": "senior"}
-                }
-            ]
-        }))
-        .expect("valid static graph");
-        let limits = plans::generous();
-        super::submission(
-            &mut document,
-            "static-scope-overlap",
-            &limits,
-            provenant_config::PortTable::builtin().worktree_layout,
-        )
-        .expect("overlapping advisory claims do not refuse submission");
-        let expanded = super::super::plans::expand(&document, &[], &[], &limits)
-            .expect("static graph expands");
-        let (plan, _) =
-            super::super::validate_flat_plan(&expanded, &limits).expect("static graph validates");
-        let digest = super::super::journal::plan_digest(&plan)
-            .expect("static graph digest")
-            .to_string();
-        let mut checkpoint = super::super::transitions::initial_checkpoint(
-            &document, &plan, digest, None, None, None,
-        );
-        let library = TemplateLibrary::bundled();
-        let resolvers = BTreeMap::new();
-        let submission = document
-            .submission_patch
-            .as_ref()
-            .expect("submission patch was retained")
-            .clone();
-        let admitted = admit_patch(
-            &mut LiveGraph {
-                document: &document,
-                checkpoint: &mut checkpoint,
-            },
-            None,
-            &submission,
-            &PatchContext {
-                catalogue: None,
-                library: &library,
-                resolvers: &resolvers,
-                journal: None,
-                limits: &limits,
-                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
-            },
-        )
-        .expect("initial static admission succeeds");
-
-        assert_eq!(
-            admitted.added,
-            vec!["first".to_owned(), "second".to_owned()]
-        );
-        assert!(
-            checkpoint
-                .nodes
-                .iter()
-                .all(|node| node.state == NodeState::Pending)
-        );
-        let persisted: GraphCheckpoint = serde_json::from_value(
-            serde_json::to_value(&checkpoint).expect("checkpoint serialises"),
-        )
-        .expect("checkpoint reloads");
-        let warnings = &persisted
-            .expansions
-            .last()
-            .expect("initial expansion persisted")
-            .floor_warnings;
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("first"));
-        assert!(warnings[0].contains("second"));
-    }
-
-    // Spec: docs/specs/run-launch.md#admission-and-custody
-    #[test]
-    fn disjoint_or_absent_claims_do_not_warn() {
-        let changed = BTreeSet::from(["second".to_owned()]);
-        let disjoint = vec![
-            writer("first", ".worktrees/shared", &["src/lib"]),
-            writer("second", ".worktrees/shared", &["src/library"]),
-        ];
-        assert!(advisory_write_scope_warnings(&disjoint, &changed).is_empty());
-
-        let isolated = vec![
-            writer("first", ".worktrees/one", &["src/lib"]),
-            writer("second", ".worktrees/two", &["src/lib/module.rs"]),
-        ];
-        assert!(advisory_write_scope_warnings(&isolated, &changed).is_empty());
-
-        let absent = vec![
-            writer("first", ".worktrees/shared", &["src/lib"]),
-            writer("second", ".worktrees/shared", &[]),
-        ];
-        assert!(advisory_write_scope_warnings(&absent, &changed).is_empty());
-    }
-
-    // Spec: docs/specs/run-launch.md#admission-and-custody
-    #[test]
-    fn glob_claims_are_compared_conservatively() {
-        let nodes = vec![
-            writer("first", ".worktrees/shared", &["src/*.rs"]),
-            writer("second", ".worktrees/shared", &["docs/readme.md"]),
-        ];
-        let changed = BTreeSet::from(["second".to_owned()]);
-        assert_eq!(advisory_write_scope_warnings(&nodes, &changed).len(), 1);
-    }
-
-    #[test]
-    fn lexical_scope_paths_preserve_leading_parent_components() {
-        assert_eq!(
-            lexical_path(Path::new("../../src/lib")),
-            PathBuf::from("../../src/lib")
-        );
-        assert_eq!(
-            lexical_path(Path::new("a/../../src/lib")),
-            PathBuf::from("../src/lib")
-        );
-    }
-
-    #[test]
-    fn mixed_scope_paths_resolve_against_an_absolute_worktree() {
-        assert!(scopes_overlap(
-            Path::new("/repo/shared"),
-            "src/lib",
-            "/repo/shared/src/lib/module.rs"
-        ));
-    }
-}
+mod advisory_write_scope_tests;

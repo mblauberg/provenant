@@ -633,6 +633,17 @@ impl GraphProject {
             env: Vec::new(),
         })
     }
+    fn add_review_subject(&self) -> Result {
+        std::fs::write(self.project.join("subject.txt"), "review subject\n")?;
+        for args in [vec!["add", "subject.txt"], vec!["commit", "-qm", "subject"]] {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&self.project)
+                .args(args)
+                .output()?;
+            assert!(output.status.success(), "{output:?}");
+        }
+        Ok(())
+    }
     fn state(&self) -> PathBuf {
         self.temp.path().join("state")
     }
@@ -1349,6 +1360,62 @@ fn node_route_table_reaches_explain_with_one_full_model_spelling() -> Result {
         assert_eq!(node["route"]["adapter"], "opencode", "{node}");
         assert_eq!(node["route"]["model"], full, "{node}");
     }
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#attempt-silence-is-reported-action-is-opt-in
+#[test]
+fn silent_provider_is_visible_in_status_and_ends_wait() -> Result {
+    if !PROVIDER_CUSTODY {
+        return Ok(());
+    }
+    let mut rig = GraphProject::new()?;
+    rig.enable_codex_fixture()?;
+    rig.declare_forge("master")?;
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[providers.codex]\nstall_after_seconds=1\n",
+    )?;
+    let document = rig.document(&json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "silent-provider",
+        "integration_branch": "silent/integration",
+        "nodes": [{
+            "id": "writer", "prompt": "write the change", "access": "worktree_write",
+            "worktree": ".worktrees/silent-provider-writer", "write_scope": ["."],
+            "delivery": "integrate:silent/integration", "provision_worktree": true,
+            "route": {"adapter": "codex", "model": "codex/gpt-6-luna"}
+        }]
+    }))?;
+    let document = document.to_str().ok_or("document path")?;
+    let (launch, launched) = rig.run(&["run", "--file", document])?;
+    assert_launch_admitted(&launch, &launched)?;
+    let graph = launched["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or("graph id")?;
+    let output = rig
+        .command()
+        .args(["wait", graph, "--timeout", "8s"])
+        .output()?;
+    let waited = last_record(&output)?;
+    let (_, status) = rig.run(&["status", graph])?;
+    std::fs::write(
+        rig.project
+            .join(".worktrees/silent-provider-writer/fixture-release"),
+        b"release",
+    )?;
+    assert_eq!(output.status.code(), Some(6), "{waited}");
+    assert_eq!(
+        waited["data"]["targets"][0]["settle"], "stalled",
+        "{waited}"
+    );
+    let rows = status["data"]["rows"].as_array().ok_or("status rows")?;
+    let attempt = rows
+        .iter()
+        .find(|row| row["kind"] == "attempt" && row["stalled"] == true)
+        .ok_or_else(|| format!("no stalled attempt: {status}"))?;
+    assert_eq!(attempt["last_event_source"], "started", "{attempt}");
+    assert!(attempt["last_event_at"].is_string(), "{attempt}");
     Ok(())
 }
 
@@ -2384,8 +2451,61 @@ fn upgrade_verify_dry_run_explains_a_scratch_project() -> Result {
 
 // Spec: docs/specs/run-launch.md#writer-binding
 #[test]
+fn smoke_explanation_skips_review_only_when_no_base_is_available() -> Result {
+    let rig = GraphProject::new()?;
+    let (_, root) = rig.run(&["run", "smoke", "--explain"])?;
+    let review_skipped = |reply: &Value| {
+        reply["data"]["skipped"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["node"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("review--"))
+                    && row["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("smoke-review"))
+            })
+        })
+    };
+    assert!(
+        review_skipped(&root),
+        "root commit must skip review: {root}"
+    );
+    assert!(
+        root["data"]["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("checkout first parent is unavailable"))
+            })
+        }),
+        "root commit must explain the skip: {root}"
+    );
+    rig.add_review_subject()?;
+    let (_, parent) = rig.run(&["run", "smoke", "--explain"])?;
+    assert!(
+        !review_skipped(&parent),
+        "a parent must enable review: {parent}"
+    );
+    assert!(
+        parent["data"]["source_admission"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["node"]
+                        .as_str()
+                        .is_some_and(|id| id.contains("review--"))
+                })
+            }),
+        "review must be admitted: {parent}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
 fn smoke_explanation_uses_selected_project_from_credential_containing_cwd() -> Result {
     let rig = GraphProject::new()?;
+    rig.add_review_subject()?;
     let home = rig.temp.path().join("home");
     std::fs::create_dir_all(home.join(".ssh"))?;
     let output = rig
@@ -2502,6 +2622,7 @@ fn bundled_smoke_runs_from_a_primary_checkout_and_a_linked_worktree() -> Result 
 #[test]
 fn bundled_smoke_binds_branch_and_worktree_controls_to_its_write_node() -> Result {
     let rig = GraphProject::new()?;
+    rig.add_review_subject()?;
     let (_, explained) = rig.run(&[
         "run",
         "smoke",
@@ -2975,41 +3096,111 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
     journal.save(&checkpoint)?;
     drop(journal);
     // Spec: docs/specs/fabric.md#session-ready-steering
-    // The default `lanes.steer_settled=queue` keeps the note for the next
-    // follow-up and names it in the output instead of refusing.
+    // The node's graph is now complete: no future attempt can read the note.
+    // Steer refuses with a typed cause and a new-round command instead of
+    // reporting a queued follow-up that will never run.
     let (output, value) =
         rig.run(&["steer", "steer-ambiguous/accept", "--brief", "amended work"])?;
-    assert!(output.status.success(), "{value}");
-    assert_eq!(value["status"], "ok", "{value}");
-    assert_eq!(value["data"]["queued"], true, "{value}");
-    assert_eq!(
-        value["data"]["follow_up"], "steer-ambiguous/accept",
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("provenant run implement --worktree")),
         "{value}"
     );
-    // The queued note reaches the follow-up as a scoped shared note.
-    let (output, notes) = rig.run(&[
-        "notes",
-        "read",
-        "--scope",
-        "steer-ambiguous/accept",
-        "--replay",
-    ])?;
-    assert!(output.status.success(), "{notes}");
-    let events = notes["data"]["events"].as_array().ok_or("notes events")?;
+    let human = rig
+        .human_command()
+        .args(["steer", "steer-ambiguous/accept", "--brief", "amended work"])
+        .output()?;
+    assert!(!human.status.success(), "{human:?}");
+    // Non-JSON refusals are rendered on stderr, not stdout.
+    let text = String::from_utf8_lossy(&human.stderr);
     assert!(
-        events.iter().any(|event| {
-            event["detail"]["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("amended work"))
-        }),
-        "{notes}"
+        text.contains("has no further attempt")
+            && text.contains("provenant run implement --worktree"),
+        "{text}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+// Invariant: a node-scoped steer at a settled node refuses with a next step
+// even when a sibling is still running. A sibling's turn cannot read this
+// node's note, so graph-wide "unfinished" is not a follow-up for the target.
+#[test]
+fn steer_at_a_settled_node_refuses_even_while_a_sibling_is_running() -> Result {
+    let rig = GraphProject::new()?;
+    let document = json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"steer-sibling","nodes":[
+        {"id":"done","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+        {"id":"live","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+    ]});
+    let path = rig.document(&document)?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphJournal, NodeState};
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-steer-sibling.json")
+        })
+        .ok_or("checkpoint")?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let execution = FileJournal::execution(&state, project, "steer-sibling")?.ok_or("execution")?;
+    let mut checkpoint =
+        FileJournal::read_checkpoint(&state, project, "steer-sibling")?.ok_or("checkpoint")?;
+    let attempt = json!({"key":{"graph_id":"steer-sibling","node_id":"done","route_index":0,"attempt":1},
+        "launched":false,"route":{"alias":"senior"},"state":"starting","attempt_ref":null,
+        "outcome":null,"launch_actor":"fixture"});
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
+    checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
+    checkpoint.nodes[0].attempts[0].outcome =
+        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+    // A sibling still running keeps the graph unfinished, but cannot read the
+    // settled node's steering note.
+    checkpoint.nodes[1].state = NodeState::Running;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        "steer-sibling",
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(execution)?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let (output, value) = rig.run(&["steer", "steer-sibling/done", "--brief", "amended work"])?;
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("steer-sibling/done")),
+        "{value}"
     );
     Ok(())
 }
 
 // Spec: docs/specs/fabric.md#session-ready-steering
 #[test]
-fn steer_on_a_settled_lane_warns_without_effect_when_configured() -> Result {
+fn steer_on_a_complete_graph_refuses_even_when_warn_is_configured() -> Result {
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"steer-settled-warn","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
     let output = rig.command().args(["run", "--file"]).arg(path).output()?;
@@ -3062,24 +3253,24 @@ fn steer_on_a_settled_lane_warns_without_effect_when_configured() -> Result {
     journal.bind(execution)?;
     journal.save(&checkpoint)?;
     drop(journal);
+    // A completed graph has no follow-up to warn about: the steer is refused
+    // before either settled mode can accept text nothing will read.
     let (output, value) = rig.run(&[
         "steer",
         "steer-settled-warn/accept",
         "--brief",
         "ignored steer note",
     ])?;
-    assert!(output.status.success(), "{value}");
-    assert_eq!(value["status"], "ok", "{value}");
-    assert_eq!(value["data"]["queued"], false, "{value}");
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
     assert!(
-        value["warnings"].as_array().is_some_and(|warnings| {
-            warnings
-                .iter()
-                .any(|warning| warning["code"] == "STEER_TARGET_SETTLED")
-        }),
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("provenant run implement --worktree")),
         "{value}"
     );
-    // warn mode writes no note for the follow-up.
+    // No note is written for a follow-up that will never run.
     let (output, notes) = rig.run(&[
         "notes",
         "read",
@@ -3343,16 +3534,22 @@ fn settled_task_graph(rig: &GraphProject) -> Result<String> {
 
 // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
 #[test]
-fn settled_graph_retry_requires_a_node() -> Result {
+fn settled_single_node_graph_retry_infers_the_node() -> Result {
     let rig = GraphProject::new()?;
     let id = settled_task_graph(&rig)?;
-    let (output, refusal) = rig.run(&["retry", &id])?;
-    assert!(!output.status.success(), "{refusal}");
+    let (output, retried) = rig.run(&["retry", &id])?;
     assert!(
-        refusal["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains(&format!("provenant retry {id}/task"))),
-        "{refusal}"
+        output.status.success(),
+        "retry: {retried}, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // An inferred node is a changed retry: it resets the node and stages a new
+    // attempt, rather than being admitted as a running no-op.
+    assert!(
+        retried["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["kind"] == "attempt")),
+        "{retried}"
     );
     Ok(())
 }
@@ -3792,10 +3989,11 @@ fn cancelled_graph_retry_resumes_without_refusal() -> Result {
 }
 
 // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
-// A cancel flag on a graph with nothing left to restore resumes nothing, so a
-// retry that does nothing must still be refused (#3456).
+// A cancel flag alone restores nothing (#3456), but a settled graph of one node
+// now infers its only node (#3976): the retry stages a fresh attempt instead of
+// being refused as a graph-wide no-op.
 #[test]
-fn cancelled_flag_without_restorable_work_is_still_refused() -> Result {
+fn cancelled_flag_without_restorable_work_infers_the_only_node() -> Result {
     use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
     use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
 
@@ -3836,9 +4034,20 @@ fn cancelled_flag_without_restorable_work_is_still_refused() -> Result {
 
     let (output, retried) = rig.run(&["retry", &id])?;
     assert!(
-        !output.status.success(),
-        "a retry that restores nothing must not exit 0: {retried}"
+        output.status.success(),
+        "retry: {retried}, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    // The inferred node is a changed retry: it resets the node and stages a
+    // new attempt, and the cancel fence is cleared with it.
+    assert!(
+        retried["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["kind"] == "attempt")),
+        "{retried}"
+    );
+    let resumed = FileJournal::read_checkpoint(&state, project, &id)?.ok_or("checkpoint")?;
+    assert!(!resumed.cancelled, "cancelled state must be cleared");
     Ok(())
 }
 

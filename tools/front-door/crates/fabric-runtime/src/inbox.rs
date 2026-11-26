@@ -194,6 +194,78 @@ pub fn locate_request(
     Ok(None)
 }
 
+/// Construct the inbox operation for one persisted delivery parking transition.
+/// The caller must persist and reuse `operation_id` and the complete input on
+/// replay; the inbox binds that ID to the content and returns the same receipt.
+/// TODO(#3972-queue): attach a sealed tracker item when queue admission supplies one.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "parking records the complete delivery context"
+)]
+pub fn delivery_park(
+    session: String,
+    operation_id: OperationId,
+    work: RequestWork,
+    item: Option<&str>,
+    attempt_key: Option<&provenant_records::graph::AttemptKey>,
+    reason: provenant_records::graph::ParkReason,
+    handoff: &str,
+    evidence: &[String],
+) -> Result<InboxInput, InboxError> {
+    // The request body is the durable, bounded handoff. Refuse oversized
+    // identities or evidence rather than silently changing their meaning.
+    if work.graph.trim().is_empty()
+        || work
+            .node
+            .as_deref()
+            .is_none_or(|node| node.trim().is_empty())
+        || (work.attempt_id.is_none() && attempt_key.is_none())
+        || attempt_key.is_some_and(|key| {
+            key.graph_id != work.graph || key.node_id.trim().is_empty() || key.attempt == 0
+        })
+        || item.is_some_and(|item| item.trim().is_empty())
+    {
+        return Err(InboxError::Invalid("delivery park identity"));
+    }
+    let mut end = handoff.len().min(1024);
+    while !handoff.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = end < handoff.len();
+    let handoff = &handoff[..end];
+    let body = serde_json::json!({
+        "item": item,
+        "item_pending": item.is_none(),
+        "graph_id": work.graph,
+        "attempt_key": attempt_key,
+        "reason": reason,
+        "handoff": handoff,
+        "handoff_truncated": truncated,
+        "evidence": evidence,
+    })
+    .to_string();
+    let input = InboxInput::Ask {
+        extra: Default::default(),
+        session,
+        request: Box::new(RequestDraft {
+            extra: Default::default(),
+            supersedes: None,
+            deadline: None,
+            work: Some(work),
+            kind: RequestKind::Decision,
+            title: "Delivery parked".into(),
+            body,
+            blocking: true,
+            options: Vec::new(),
+            recommended_option_id: None,
+            proceeding_with: None,
+        }),
+        operation_id: Some(operation_id),
+    };
+    input.validate()?;
+    Ok(input)
+}
+
 /// Verified provenance for a graph attempt that is steered across hosts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphSteerContext {
@@ -226,6 +298,8 @@ pub enum InboxInput {
     Answer {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_control: Option<crate::graph::queue_control::Metadata>,
         id: HumanRequestId,
         action: AnswerAction,
         option_id: Option<String>,
@@ -327,6 +401,8 @@ impl From<InboxCursor> for String {
 pub struct InboxReceipt {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_control: Option<QueueControlReceipt>,
     pub operation_id: OperationId,
     pub request_id: HumanRequestId,
     pub revision: u64,
@@ -335,6 +411,21 @@ pub struct InboxReceipt {
     pub delivery: Option<AnswerDelivery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_coverage: Option<WorkCoverage>,
+}
+
+/// Typed receipt attached to a completed durable delivery-queue control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueControlReceipt {
+    pub action: crate::graph::queue_control::Action,
+    pub operation_id: OperationId,
+    pub graph_id: String,
+    pub target_node: Option<String>,
+    pub expected_revision: u64,
+    pub applied_revision: Option<u64>,
+    pub state: crate::graph::queue_control::Phase,
+    pub replayed: bool,
+    pub request_id: Option<HumanRequestId>,
+    pub answer_id: Option<HumanAnswerId>,
 }
 
 // Flattened into `InboxResult::Saved`: a single-pass reader keeps that chain at
@@ -351,6 +442,7 @@ provenant_records::deserialize_with_extra!(InboxReceipt {
         answer_id: Option<HumanAnswerId>,
         delivery: Option<AnswerDelivery>,
         work_coverage: Option<WorkCoverage>,
+        queue_control: Option<QueueControlReceipt>,
     }
 });
 
@@ -434,7 +526,7 @@ pub struct InboxPeerCoverage {
 pub enum InboxResult {
     Saved {
         #[serde(flatten)]
-        receipt: InboxReceipt,
+        receipt: Box<InboxReceipt>,
     },
     Item {
         #[serde(flatten)]
@@ -514,6 +606,8 @@ pub enum InboxError {
     WorkLookup(String),
     #[error("steering could not be queued: {0}")]
     Steer(String),
+    #[error("steering has no graph continuation turn for this attempt")]
+    SteerNoTurn,
     #[error("work repository or head mismatch")]
     WorkMismatch,
     #[error(
@@ -569,7 +663,8 @@ pub fn execute_with_steer(
     validate_request(identity, config, in_lane, &input)?;
     let mut service = InboxService::open(root, identity, clock, cancel)?
         .with_work_lookup(work_lookup)
-        .with_control_lookup(control_lookup);
+        .with_control_lookup(control_lookup)
+        .with_steer_fallback(config.steer.fallback);
     if let Some(delivery) = steer_delivery {
         service = service.with_steer_delivery(delivery);
     }
@@ -652,6 +747,7 @@ impl InboxError {
             Self::RequestLimit => "request_limit",
             Self::WorkLookup(_) => "work_lookup_failed",
             Self::Steer(_) => "steer_failed",
+            Self::SteerNoTurn => "steer_no_turn",
             Self::WorkMismatch => "work_mismatch",
             Self::Store(provenant_fabric_store::Error::NotFound) => "not_found",
             Self::Store(provenant_fabric_store::Error::Busy) => "busy",
@@ -957,6 +1053,7 @@ pub struct InboxService<'a> {
     work_lookup: Option<&'a WorkLookup<'a>>,
     control_lookup: Option<&'a ControlLookup<'a>>,
     steer_delivery: Option<&'a SteerDelivery<'a>>,
+    steer_fallback: crate::config::SteerFallback,
     identity: &'a Identity,
     clock: &'a dyn Clock,
 }
@@ -973,6 +1070,7 @@ impl<'a> InboxService<'a> {
             work_lookup: None,
             control_lookup: None,
             steer_delivery: None,
+            steer_fallback: crate::config::SteerFallback::default(),
             identity,
             clock,
         })
@@ -990,6 +1088,11 @@ impl<'a> InboxService<'a> {
 
     pub fn with_steer_delivery(mut self, delivery: &'a SteerDelivery<'a>) -> Self {
         self.steer_delivery = Some(delivery);
+        self
+    }
+
+    pub fn with_steer_fallback(mut self, fallback: crate::config::SteerFallback) -> Self {
+        self.steer_fallback = fallback;
         self
     }
 
@@ -1056,8 +1159,11 @@ impl<'a> InboxService<'a> {
                         self.control_lookup.ok_or(InboxError::OwnerUnavailable)?(&input, &request)?;
                     let support = self.support(&route);
                     let queued_continuation = matches!(input, InboxInput::Steer { .. })
-                        && support.continues()
-                        && self.steer_delivery.is_some();
+                        && route.launch == LaunchKind::Lane
+                        && self.steer_delivery.is_some()
+                        && (support.continues()
+                            || self.steer_fallback
+                                == crate::config::SteerFallback::FreshWithHandoff);
                     // Refused before any side effect, so nothing is recorded.
                     if !queued_continuation && (!support.delivers() || !route.registered) {
                         return Ok(self.control_receipt(&input, &id, &route, support, None));
@@ -1125,6 +1231,8 @@ impl<'a> InboxService<'a> {
                     && support.continues()
                 {
                     Some(AnswerTransport::ProviderContinuation)
+                } else if delivered && matches!(input, InboxInput::Steer { .. }) {
+                    None
                 } else {
                     delivered.then_some(AnswerTransport::FabricMail)
                 },
@@ -1133,10 +1241,20 @@ impl<'a> InboxService<'a> {
                 } else {
                     ControlState::Unsupported
                 },
-                reason: if delivered && support.continues() {
-                    "input is durably saved; Provenant requests an interrupt only after the live adapter validates its session, then resumes that same session only if its identity remains consistent through settlement".into()
+                reason: if delivered
+                    && matches!(input, InboxInput::Steer { .. })
+                    && !support.continues()
+                {
+                    "input is durably saved for a fresh turn under domains.fabric.steer.fallback = fresh_with_handoff; the running attempt is not interrupted".into()
+                } else if delivered && matches!(input, InboxInput::Steer { .. }) {
+                    "input is durably saved for the next turn; the running attempt is not interrupted".into()
                 } else if !delivered && support.continues() {
                     "this owner edge cannot persist continuation input".into()
+                } else if !delivered
+                    && matches!(input, InboxInput::Steer { .. })
+                    && self.steer_fallback == crate::config::SteerFallback::Refuse
+                {
+                    "the route does not support continuation and domains.fabric.steer.fallback is refuse".into()
                 } else {
                     support.reason().into()
                 },
@@ -1146,7 +1264,7 @@ impl<'a> InboxService<'a> {
     }
 
     /// Persist the exact steering text with the run owner. Its shared stream
-    /// decoder requests interruption after validating the live session.
+    /// decoder may retain a session for the next turn.
     fn send_steer(
         &self,
         input: &InboxInput,
@@ -1158,7 +1276,7 @@ impl<'a> InboxService<'a> {
         let InboxInput::Steer { attempt, text, .. } = input else {
             return Err(InboxError::Invalid("control target"));
         };
-        if !support.continues() || route.launch != LaunchKind::Lane {
+        if route.launch != LaunchKind::Lane {
             return Err(InboxError::Invalid("steer continuation route"));
         }
         let message_id = self.steer_delivery.ok_or(InboxError::OwnerUnavailable)?(
@@ -1492,8 +1610,9 @@ impl<'a> InboxService<'a> {
             }
         };
         Ok(InboxResult::Saved {
-            receipt: InboxReceipt {
+            receipt: Box::new(InboxReceipt {
                 extra: Default::default(),
+                queue_control: None,
                 operation_id: operation.clone(),
                 request_id: value.id,
                 revision: value.revision,
@@ -1501,7 +1620,7 @@ impl<'a> InboxService<'a> {
                 answer_id: value.answer_id,
                 work_coverage: value.work_coverage,
                 delivery,
-            },
+            }),
         })
     }
 }

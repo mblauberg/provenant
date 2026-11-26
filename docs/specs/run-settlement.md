@@ -15,7 +15,8 @@ terminal cleanup and remain a worktree-removal fence until reconciled; native in
 uses only committed trees and preserves conflicting native staging or operations
 ([lane Git](run.md#lane-git-and-import)). Each attempt publishes only its private ref; a
 sibling-divergent host tip is merged and published when no conflict exists, and otherwise
-retains both commits with the conflict and setting named.
+retains both commits with the conflict and setting named. A lane rewrite replaces its unchanged,
+custody-pinned launch tip with a warning and a recovery ref. A later host tip is merged or refused, regardless of remote-tracking refs.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
 Settlement decides whether a Git operation is unfinished before it imports objects or
@@ -62,6 +63,28 @@ for explicit reconciliation. A retry deadline overdue by three minutes is flagge
 status reason, and a stalled custody-path refusal names the remedy (replace a symlink or restore a
 path inside the attempt directory).
 - Why: a retained writer must not contend with itself or retry an unchanged failure forever.
+
+A lane's temporary scratch directory is never a child of the attempt record directory:
+it lives at `<state>/attempt-scratch/<attempt id>/tmp`. GC, writer-Git reads, disk
+classification and terminal cleanup resolve that sibling root; no fallback resolves the
+old `attempts/<id>/tmp` path. The lane's `provider-state` and its handoff,
+the prompt and durable output paths remain inside the attempt directory by design, as do
+host-written records. `LaunchPaths::scratch` is a child of the sibling temporary directory,
+so an incidental relative write there does not land in the attempt record directory.
+- Why: a lane could otherwise write the attempt's own settlement records by walking up
+  from its scratch, and a foreign record could not be told from settlement's own
+  (#3844, #3947).
+
+GC holds the settlement driver lease for the entire collection of attempt payloads, so
+claiming a driver and removing its scratch cannot overlap. For a launched attempt GC
+also requires the settlement journal to record completion, including across idle retries;
+unknown ownership or an unreadable journal keeps the payload. A never-launched attempt
+can be collected once its other custody and effects checks pass. The private Git objects
+and review source checkout therefore remain available through import and reconciliation.
+- Why: scratch is outside the attempt record directory, so GC can reach it while
+  settlement still needs it; losing it turns a correct lane into a failed import or
+  a vanished review checkout (#3975).
+- Owner: `crates/run/src/retention.rs`, `crates/run/src/settlement.rs`
 
 A result or handoff a lane leaves group- or other-readable in Provenant's private attempt
 directory is a recoverable condition, not a settlement refusal. Settlement's read of a
@@ -113,11 +136,14 @@ unrooted setting decides only that observation: `warn` and `off` do not override
 so when `lanes.history.rebase = "allow"` and the host branch's history is unrelated to the lane
 tip, publication still refuses with `PublicationUnrelated`. When a lane's history diverged from
 the host lane branch, publication merges the host branch into the lane tip and publishes the merge
-when it is clean. A real conflict names the files; unrelated
-histories, a configured `merge.*.driver` and a branch rewound behind the pinned launch base are
-typed refusals of their own. Each retains the lane's private history, and
-`lanes.history.rebase = "refuse"` retains a diverged history without attempting a merge. A branch
-rewound behind its launch base is judged before the unrooted tip, so it refuses without first
+when it is clean. When the host branch still equals the custody-pinned launch tip and the lane
+rewrote that tip, publication moves the branch to the lane head with a rewritten-history warning.
+This needs no push or remote-tracking ref: neither a stale nor a matching tracking ref proves who
+owns a later host commit. A host tip advanced since launch instead takes the merge path. A real
+conflict names the files; unrelated histories, a configured `merge.*.driver` and a branch rewound
+behind the pinned launch base are typed refusals of their own. Each retains the lane's private
+history, and `lanes.history.rebase = "refuse"` retains a diverged or rewritten history without
+publishing it. A branch rewound behind its launch base is judged before the unrooted tip, so it refuses without first
 warning about a tip that refusal would supersede. When publication displaces a branch tip that is
 not an ancestor of the new tip, the same Git transaction retains it at
 `refs/provenant/recovery/<displaced-oid>`. Every publication refusal is
@@ -179,15 +205,75 @@ handoffs and never count as negative provider-quality evidence.
 - Why: unfinished work must not appear complete or lose its handoff, and all readers need one cause
   for the next decision.
 
-The handoff is the closed `handoff` fence of the final answer, which always wins. Without one, a
-`json` fence that ends the answer and decodes as a handoff is accepted with a warning naming the
-fallback. Adjacent repeated blocks are one declaration (identical copies accepted, differing
-copies settle on the last), each with a warning; prose between blocks or after the last still
-fails. A review's final handoff may be followed by exactly one recognised standalone verdict and
-nothing else; an accepted order tolerance is recorded in the terminal reason.
-- Why: providers drift to `json` fences and repeat blocks, and refusing a complete declaration
-  for its label loses finished work while the warning keeps the drift visible.
+A terminal read-only review holds no Git work, so custody is not uncertain merely because its
+departed guardian left a reservation in the attempt directory. Reconcile and `stop` treat that
+custody as released with a typed warning naming the slot; they do not re-record the same fence on
+every pass. This exception still requires the lock-aware custody release decision: a live custody
+lock remains a fence even when reboot recovery cannot acquire it, and must not clear temporary
+retention. A writer, an unreadable request, and a retained import fence also fail closed.
+After the custody lock is confirmed free, settlement cache cleanup and retention likewise
+allow the terminal read-only reservation with the typed warning; their other exclusion and
+settlement checks still apply.
+- Why: reservations fence commits, staging and imports, which a review does not own, but the custody
+  lock must remain an exclusion boundary during concurrent release (#3844).
+- Owner: `crates/run/src/reader.rs`, `crates/run/src/controls.rs`
+
+The handoff is the closed `handoff` fence that ends the answer, which always wins. When an answer
+contains several blocks, the last one that ends the answer is authoritative: earlier blocks and the
+prose between them are ordinary answer text. Without one, a `json` fence that decodes as a handoff
+and is followed only by ordinary prose is accepted with a warning naming the fallback; a
+verdict-shaped line, a second fence, or a fence nested in a larger block leaves it ordinary content
+(#3941). Adjacent repeated blocks are one declaration (identical copies accepted, differing copies
+settle on the last), each with a warning. When exactly one block closes and only ordinary prose
+follows it (#3928) — including a line over 12 KiB or one that merely mentions a verdict (#3941) —
+the declaration still settles and the output-order tolerance is recorded in the terminal reason.
+Prose after a repeated last block, a fence or near-miss `handoff` opener after the declaration, and
+a truncated or invalid block still fail, with a diagnostic naming the recovery ("end the answer with
+one handoff; retry the node"). With turn boundaries, a turn that ran tool work keeps the strict rule
+until turn ends order tool work against the handoff (#3938). A review's final handoff may be
+followed by exactly one recognised standalone verdict and nothing else; a prose line on either side
+of that verdict keeps the strict rule, and an accepted order tolerance is recorded in the terminal
+reason. The trailing-verdict and trailing-prose tolerances are mutually exclusive and diagnostic
+only: neither changes the handoff's fields or authority; a json fallback warning may accompany the
+trailing-prose note.
+- Why: providers drift to `json` fences and repeat blocks, a late background task can append prose
+  and a corrected handoff, and a finished writer that keeps explaining its work after one complete
+  declaration must not be failed; refusing a complete declaration for its label or trailing prose
+  loses finished work, while the warning and the named recovery keep the drift visible.
 - Owner: `crates/records/src/handoff.rs`, `crates/run/src/completion.rs`
+
+The `<attempt>/handoff.json` snapshot slot is owned by settlement, not the lane. Settlement seals a
+`HandoffResult` envelope derived from captured output; the envelope shape is the provenance, so there
+is no separate tag and no window in which a snapshot exists without its proof. Bytes found in the
+slot at capture that do not decode as that envelope were written by the provider, including files
+left by older launches whose scratch lived under the attempt directory. Settlement keeps those bytes as
+`handoff.provider-written.json`, warns that the file was provider-written, clears the slot and seals
+the envelope from output: a complete answer still settles rather than retrying forever (#3844).
+Only a `HandoffResult` envelope is settlement's snapshot. Before #3078 the slot held a bare
+`Handoff` (or `Option<Handoff>`), which is foreign evidence with no compatibility path: an attempt
+sealed by that build is reconciled by moving its bare snapshot aside as
+`handoff.provider-written.json` and settling from captured output, never by reading it as a sealed
+handoff. Bytes that were read but do not decode as an envelope after settlement settle
+`handoff_malformed` with the typed diagnostic and keep the raw file, instead of retrying an
+unchanging decode. An entry in the slot that cannot be read safely — an oversize file, a symlink, a
+hard link, a directory or another unsafe entry type — was left by a provider that is gone at
+settlement. Capture renames it aside by name without following or reading it, under
+`handoff.provider-written.json` (or the declared `handoff.provider-written.unsafe` when the entry
+is not a regular file), warns that it was provider-written, and seals the envelope from captured
+output. When the preferred evidence name is occupied by a directory, symlink or other non-regular
+entry, capture moves the slot entry to the declared unsafe name instead; only when both declared
+destinations are unusable does capture fail with the typed error. A transient storage IO failure on
+a safe entry is not an unsafe class: it
+keeps its typed, retriable cause and does not settle. The launch prompt tells the lane that the
+harness writes the attempt's own records, including the sealed `handoff.json`, while the progress
+handoff under `provider-state` is the lane's to update throughout the task. Provider scratch and
+`$TMPDIR` live in the sibling scratch root; settlement still validates ownership of its snapshot slot.
+- Why: a lane can discover supervisor records from its scratch and write a bare handoff object that
+  fails the sealed-envelope decode; trusting it, or retrying a decode that can never change, strands
+  a finished attempt. The single sealed publish lets a settlement resume recognise its own record
+  without a second file, and an unchanging unsafe slot is not retried because the provider that
+  left it cannot clear it.
+- Owner: `crates/run/src/completion.rs`, `crates/run/src/artifacts.rs`, `crates/run/src/launch.rs`
 
 `crates/records/src/handoff.rs` owns the fields, decoding and bounds. A valid JSON object keeps
 independently valid and forward fields and drops an invalid declared field whole; the diagnostic
@@ -212,22 +298,30 @@ head, and every read-only lane, keeps the fatal mismatch decision.
 ## Stray lane work
 
 A writer's work is the commits on its bound branch. At settlement, once the terminal check
-passes, the host flags stray work only when (a) the primary checkout now sits on a branch that
+passes, the host observes stray work only when (a) the primary checkout now sits on a branch that
 did not exist at launch, or (b) commits reachable from the primary's HEAD or a new or advanced
 local branch are reachable from none of the launch tips, the current remote-tracking tips that
-existed at launch, or any other linked worktree's HEAD. The attempt then settles `review_required`
-with the `stray_work` signal, failed as a graph outcome so dependants stay held, and the reason
-names the branch or commits, the primary checkout and the bound worktree.
+existed at launch, or any other linked worktree's HEAD. How the lane settles depends on where its
+own work is:
+
+- The bound branch tip differs from the tip sealed at launch: the lane worked in the right place.
+  The primary move is not attributed to it, so settlement warns naming the new primary HEAD and
+  the lane still settles `succeeded`. The move is left intact; no `stray_work` signal is raised.
+- The bound branch stayed at base: the work may be in the primary checkout, so the attempt settles
+  `review_required` with the `stray_work` signal, failed as a graph outcome so dependants stay
+  held. The reason names the branch or commits, the primary checkout and the bound worktree.
 
 Nothing else is reported: a primary that merely moved is no finding, and a missing position record
 or a comparison that cannot run warns while the lane still settles. Only host Git facts decide
 this; handoff prose is never parsed. A lane with uncommitted edits keeps its `uncommitted`
-outcome.
+outcome. The reason text states only observed facts and never claims the bound branch gained no
+commits.
 - Why: settlement must not say `succeeded` for a lane whose work sits on a stray branch in the
-  primary checkout while its bound worktree stays at base, nor blame a lane for a pull the owner
-  ran. Fetched tips and other worktrees' heads account for ordinary moves; an owner commit in the
-  primary during an attempt is still flagged, because Git cannot tell it from a lane's. The check
-  asks for review and never refuses a lane.
+  primary checkout while its bound worktree stays at base, nor fail a lane whose bound branch did
+  advance for a primary move another process made. Git cannot attribute that move to any actor, so
+  the bound-branch tip is the evidence: work there means the lane kept to its scope, and the move
+  is surfaced as a warning for the chair. Fetched tips and other worktrees' heads account for
+  ordinary moves. The check asks for review or warns; it never refuses a lane.
 - Owner: `crates/run/src/writer.rs`, `crates/run/src/holder.rs`
 
 ## Guardian loss proof
@@ -245,9 +339,12 @@ host must also prove worktree non-occupancy under exclusion; unknown or occupied
 read-only attempt has no worktree). A writer checkout removed from disk is censused like any
 other root. Nothing that still exists lies under it, so a process in an existing directory is
 outside; a process path with removed components is inside when it splits at the same nearest
-existing directory, compared by identity, and its removed components start with the root's. An
-unreadable root or a dangling symlink stays undecidable, and the root's owner is its nearest
-existing directory's owner.
+existing directory, compared by identity, and its removed components start with the root's. A path
+that cannot be split, such as one through a directory this user cannot read, is outside when its
+nearest readable directory is none of the root's existing ancestors and no symlink lies below
+that directory. An unreadable root or a
+dangling symlink stays undecidable, and the root's owner is its nearest existing directory's
+owner.
 
 Missing, replaced or unreadable lock evidence never proves loss. Identities are durable before any
 guardian can spawn and are rechecked after the worktree census and before release. The capability
@@ -264,7 +361,16 @@ outcome itself and does not change read-only presence classification.
 `reconcile --abandon` of custody not observed absent, such as a dead guardian with unresolved
 cleanup, first tries the same proof from a fresh census. A proof makes custody quiescent and
 abandonment proceeds; otherwise it refuses and names the blocker, including any live or
-unidentifiable PID or omitted descendants.
+unidentifiable PID or omitted descendants. A terminal writer attempt whose retained fence is
+absent is different: it is still abandonable. Abandon completes the journal, retains the
+worktree and its uncommitted work, and warns with the custody slot that was to hold the fence
+instead of treating the record as corrupt.
+
+Once the loss commits, an absent checkout whose
+registration proves this attempt's lane ownership is pruned by removing only that Git admin
+directory; every other registration, a locked or ambiguous one, and one owned by another
+attempt are left alone and warned about with the exact `git -C <common> worktree prune`
+remedy. Prune never changes the settled outcome.
 
 An unreadable process alone is not an occupant, but only an explicit host policy may free a
 root. Before any excusal the census computes placement evidence for every root from the
@@ -283,8 +389,25 @@ platform-signed (`team_id=platform`) AND its executable is under `/usr/libexec/`
 `/System/Library/` or `/usr/sbin/` AND its cwd was read and placed outside every root by
 directory identity — all three credentials must be owner uids, so a setuid binary launched by
 the owner is not excused, and `/bin`, `/usr/bin`, unreadable cwd and undecidable root identity
-never qualify; and a configured `confinement.census_ignore_unreadable` entry, matched on the
-canonical executable path and team id, which extends these defaults to every unreadable failure
+never qualify; and a configured `confinement.census_ignore_unreadable` entry
+(bundled default `/usr/bin/login`, `team_id = "platform"`,
+`started_before = "root"`), matched on canonical executable path, team id and an
+optional `started_before` floor (stable kernel start time at least two seconds
+before every scoped root's creation time, or, during `reconcile --abandon` on a
+removed checkout, before the earlier of `record.queued_at` and the birth time of
+the checkout's Git registration directory (`<common>/worktrees/<id>`), which
+`git worktree add` creates before it populates the checkout and a reused or repaired checkout keeps, when
+`Service::abandon_writer_creation_floor` proves `retry_of.is_none()`,
+`writer_predecessor.is_none()` and `WorktreeOwner` for that attempt under
+`WorktreeOrigin::Lane`; retries, continuations, unproven trees, a pruned
+registration and an unreported birth time fail closed and leave the attempt
+blocked. Two residuals are accepted: both sides of the comparison are
+wall-clock times, so a backward clock step larger than the interval between the
+registration's creation and a process start inside the tree, plus the two-second
+margin, could excuse that process; and Git accepts an existing empty directory
+as the target, so a process already inside such a directory before
+`git worktree add` predates the registration. Lane checkouts are created at
+paths Provenant allocates), extends these defaults to every unreadable failure
 class. Each excusal raises a typed warning naming the PID and path. Every other unreadable
 process remains Unknown/blocking with its PID named. Unreadable root identity fails closed, and
 a listed uid the kernel will not reveal (for example `launchd`, pid 1) cannot be evaluated, so
@@ -303,8 +426,14 @@ decide custody.
 ## Continuation
 
 A retry starts a fresh attempt with the original authority, not a provider session replay. A
-preparation refusal creates no successor, and uncertain custody never starts another writer.
-- Why: retries must preserve authority and avoid concurrent writers.
+preparation refusal creates no successor, and uncertain custody never starts another writer. A
+finished task creates no automatic follow-up: once an attempt succeeds, queued steering stays
+accepted but resolves as not-continued rather than admitting a second task that would refuse at
+preparation and hide the successful attempt. A preparation refusal after a finished task is a
+typed operation outcome; the graph keeps the successful attempt and its result instead of
+reading as failed.
+- Why: retries must preserve authority and avoid concurrent writers, and a never-launched
+  successor must not replace the work the writer already finished.
 
 A context handoff stops with a typed cause and a fresh graph continuation can receive the
 handoff. A dirty budget boundary takes precedence, and handoff is deferred during budget wrap-up.
@@ -334,8 +463,9 @@ Raw and exported metadata each bind the bytes they describe, and local capture p
 evidence, not publication artifacts.
 - Why: the disclosure policy must not corrupt local evidence.
 
-Reconciliation never replays an uncertain launch. Cleanup does not delete under a reservation or
-follow links, and preserves lock identity.
+Reconciliation never replays an uncertain launch. Cleanup preserves reservation exclusion except
+for released terminal read-only attempts as described above, does not follow links, and preserves
+lock identity.
 - Why: recovery must not disturb live owners or unrelated paths.
 
 Attempt records reject identity mismatches and unsupported store versions without rewriting the

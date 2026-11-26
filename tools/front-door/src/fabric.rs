@@ -22,6 +22,13 @@ mod graph_document;
 pub(crate) mod owner;
 mod peer;
 mod peer_source_binding;
+mod queue_adoption;
+mod queue_controls;
+mod queue_delivery;
+mod queue_dispatch;
+mod queue_registry;
+mod queue_scheduler;
+mod queue_snapshot;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
 mod steer;
@@ -90,7 +97,7 @@ pub(crate) fn scratch_prepare_error(
         delivery_stage: None,
         resource: None,
         input_failure: None,
-        cause,
+        cause: cause.map(Box::from),
         operation: format!("prepare project scratch: {error}"),
         path: Some(".provenant/scratch".into()),
     }
@@ -108,7 +115,7 @@ fn graph_writer_initialisation_error(
         };
     }
     match error {
-        WorktreeError::RegistryLockTimeout => FacadeError::WriterLockBusy,
+        WorktreeError::RegistryLockTimeout { holder } => FacadeError::WriterLockBusy { holder },
         WorktreeError::LockBusy => FacadeError::WriterBusy { holder: None },
         WorktreeError::WriterBusy { holder } => FacadeError::WriterBusy { holder },
         WorktreeError::UnknownWriter => FacadeError::WriterUnknown,
@@ -333,6 +340,18 @@ impl BoundFacade<'_> {
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError> {
         use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
+
+        if let Some(result) = queue_controls::handle_inbox_control(
+            self.factory,
+            input.clone(),
+            host.clone(),
+            budget,
+            cancel,
+        )
+        .map_err(ServiceError::from)?
+        {
+            return Ok(result);
+        }
 
         let ctx = &self.factory.context;
         let Some(host) =

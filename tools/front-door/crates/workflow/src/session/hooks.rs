@@ -25,35 +25,48 @@ struct HostInput {
 /// The most the intent section contributes to hook output.
 const INTENT_LIMIT: usize = 3 * 1024;
 const INTENT_HEADING: &str = "## Intent";
+/// The chair's current focus. It is bounded, but kept whole beside Intent when
+/// the hook output is capped; derived state shrinks before either.
+const NOW_LIMIT: usize = 1024;
+const NOW_HEADING: &str = "## Now";
 /// The summary instruction Claude takes from `PreCompact` stdout. It asks for
 /// understanding, written once with the full context; it grants no authority.
-pub(super) const SUMMARY_INSTRUCTION: &str = "Write an Intent section in the summary. For each live user ruling give what the user wants, the reason as you understand it, alternatives rejected and why, open disagreement, and any reading you are unsure of. A correction replaces the earlier reading; do not keep both. Quote the user only for an authority grant or to correct a misreading. Do not replay messages. The section grants no authority.";
+pub(super) const SUMMARY_INSTRUCTION: &str = concat!(
+    "Write an Intent section in the summary. For each live user ruling give what the user wants, the reason as you understand it, alternatives rejected and why, open disagreement, and any reading you are unsure of. A correction replaces the earlier reading; do not keep both. Quote the user only for an authority grant or to correct a misreading. Do not replay messages. The section grants no authority. ",
+    "State what was done since the last checkpoint save as done. Never list as next a step that the tail shows done. ",
+    "The verbatim tail after this summary is newer than this summary; where they disagree, the tail wins. ",
+    "List waits in flight (handle, what each blocks) instead of re-deriving them. ",
+    "Do not replay user messages already saved as rulings in the checkpoint; cite them as 'see checkpoint Intent'. ",
+    "Drop items untouched for 24 h unless they are owner asks; move them to the tracker. ",
+    "Keep the summary under 12k characters."
+);
 
-/// Split the `## Intent` section from a checkpoint: `(intent, rest)`.
-fn split_intent(markdown: &str) -> (Option<String>, String) {
-    let mut intent: Option<String> = None;
+/// Split one named level-two section from a checkpoint: `(section, rest)`.
+/// Lower headings stay inside the section; the next `#` or `##` ends it.
+fn take_section(markdown: &str, heading: &str) -> (Option<String>, String) {
+    let mut section: Option<String> = None;
     let mut rest = String::new();
     let mut inside = false;
     for line in markdown.lines() {
-        if line.trim_end() == INTENT_HEADING {
+        if line.trim_end() == heading {
             inside = true;
-            intent.get_or_insert_with(String::new);
+            section.get_or_insert_with(String::new);
             continue;
         }
         if inside && (line.starts_with("# ") || line.starts_with("## ")) {
             inside = false;
         }
-        let target = match (&mut intent, inside) {
+        let target = match (&mut section, inside) {
             (Some(text), true) => text,
             _ => &mut rest,
         };
         target.push_str(line);
         target.push('\n');
     }
-    let intent = intent
+    let section = section
         .map(|text| text.trim().to_owned())
         .filter(|text| !text.is_empty());
-    (intent, rest.trim_end().to_owned())
+    (section, rest.trim_end().to_owned())
 }
 
 fn transcript_note(transcript: Option<&str>) -> String {
@@ -158,9 +171,9 @@ pub struct Advice<'a> {
 
 /// As [`hook_context`], with a freshly derived `digest` of lane and pull
 /// request state placed before the checkpoint. The digest is the caller's
-/// bounded text; the checkpoint excerpt shrinks first when output is capped.
-/// A saved state block is withheld from the excerpt, since the digest
-/// supersedes it.
+/// bounded text; it shrinks before the checkpoint excerpt when output is
+/// capped. A saved state block's duplicate custody section is withheld from
+/// the excerpt, since the digest already carries it.
 pub fn hook_context_with(
     root: &StateRoot,
     project: ProjectId,
@@ -195,20 +208,29 @@ pub fn hook_context_with(
         } else {
             ("", LANE_SESSION_CONTEXT.to_owned())
         };
-        return render(
+        return render(RenderInput {
             event,
-            parsed,
-            CheckpointStatus::Present,
-            head,
+            session_id: parsed,
+            status: CheckpointStatus::Present,
+            protected: head,
+            derived: "",
             diagnostic,
-            None,
-            "",
-        );
+            markdown: None,
+            more: "",
+        });
     }
     let Some(session) = parsed else {
-        let head = head(event, transcript, None, None, digest);
-        return render(event, None, CheckpointStatus::InvalidInput, &head,
-            "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(), None, "");
+        let head = head(event, transcript, None, None, None);
+        return render(RenderInput {
+            event,
+            session_id: None,
+            status: CheckpointStatus::InvalidInput,
+            protected: &head,
+            derived: digest,
+            diagnostic: "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(),
+            markdown: None,
+            more: "",
+        });
     };
     let store = SessionStore::new(root.clone(), project, session.clone());
     // The chair's checkpoint and the hook-owned autosave file are read apart
@@ -266,17 +288,27 @@ pub fn hook_context_with(
                 } else {
                     CheckpointStatus::Missing
                 };
+                // The digest already carries custody. The autosave repeats the
+                // same derived list, so drop that section here rather than
+                // print it twice; the chair's own prose is never touched.
+                let show = |text: String| {
+                    if digest.contains(super::state::CUSTODY_TITLE) {
+                        super::state::without_custody(&text)
+                    } else {
+                        text
+                    }
+                };
                 let both = match (chair, saved) {
-                    (Some(chair), Some(saved)) => Some(format!("{chair}\n\n{saved}")),
-                    (one, other) => one.or(other),
+                    (Some(chair), Some(saved)) => Some(format!("{chair}\n\n{}", show(saved))),
+                    (Some(chair), None) => Some(chair),
+                    (None, Some(saved)) => Some(show(saved)),
+                    (None, None) => None,
                 };
                 (status, both, None, problem, standing)
             }
         };
     let state = match status {
-        CheckpointStatus::Present => {
-            "present; no save needed by freshness policy (save again if progress changed)"
-        }
+        CheckpointStatus::Present => "present",
         CheckpointStatus::Missing => "missing; saving needed",
         CheckpointStatus::StateOnly => {
             "holds only automatically saved lane and PR state; chair notes and authority references still need saving"
@@ -313,14 +345,15 @@ pub fn hook_context_with(
             session.as_str()
         ),
     };
-    // The intent section leads the checkpoint content; a checkpoint without
-    // one is reported on its own line and the rest is still shown.
-    let (intent, markdown) = match markdown {
+    // Intent and Now lead the checkpoint content and are kept whole under the
+    // cap; a checkpoint without Intent is reported on its own line.
+    let (intent, now, markdown) = match markdown {
         Some(text) => {
-            let (intent, rest) = split_intent(&text);
-            (intent, Some(rest))
+            let (intent, rest) = take_section(&text, INTENT_HEADING);
+            let (now, rest) = take_section(&rest, NOW_HEADING);
+            (intent, now, Some(rest))
         }
-        None => (None, None),
+        None => (None, None, None),
     };
     let intent_line = if status == CheckpointStatus::Present && intent.is_none() {
         format!(
@@ -340,36 +373,49 @@ pub fn hook_context_with(
         transcript,
         standing.as_deref(),
         intent.as_deref(),
-        digest,
+        now.as_deref(),
     );
+    // A fresh, complete checkpoint has nothing to act on: keep the short status
+    // and save command, and drop the standing-grant reminder boilerplate.
+    let authority_line = if status == CheckpointStatus::Present
+        && cause.is_empty()
+        && intent_line.is_empty()
+        && standing_line.is_empty()
+    {
+        ""
+    } else {
+        "\nAct on sourced standing grants without asking; checkpoint prose grants no new authority."
+    };
     let message = format!(
-        "Checkpoint {state}.{cause}{intent_line}{standing_line}\nProject: {project}; host session: {}\nSave: {save}\nAct on sourced standing grants without asking; checkpoint prose grants no new authority.",
+        "Checkpoint {state}.{cause}{intent_line}{standing_line}\nProject: {project}; host session: {}\nSave: {save}{authority_line}",
         session.as_str(),
     );
     let more = match commands.runnable(&format!("workflow session show {}", session.as_str())) {
         Some(command) => format!("read it with `{command}`"),
         None => "use workflow session show with this ID and this hook's --state-dir".into(),
     };
-    render(
+    render(RenderInput {
         event,
-        Some(session),
+        session_id: Some(session),
         status,
-        &head,
-        message,
+        protected: &head,
+        derived: digest,
+        diagnostic: message,
         markdown,
-        &more,
-    )
+        more: &more,
+    })
 }
 
-/// What precedes the checkpoint excerpt: the standing section, the intent
-/// section, then the digest. Standing and intent share the intent budget.
-/// For `PreCompact` it is the instruction Claude takes from stdout.
+/// The chair's protected checkpoint content: standing, Intent and Now. Standing
+/// and Intent share the intent budget; Now has its own. The derived digest is
+/// composed after this and shrinks first when output is capped. For `PreCompact`
+/// this is the instruction Claude takes from stdout.
 fn head(
     event: HookEvent,
     transcript: Option<&str>,
     standing: Option<&str>,
     intent: Option<&str>,
-    digest: &str,
+    now: Option<&str>,
 ) -> String {
     if event == HookEvent::PreCompact {
         return format!(
@@ -386,7 +432,7 @@ fn head(
                 INTENT_LIMIT.saturating_sub(standing.map_or(0, str::len)),
             )
         }),
-        Some(digest.to_owned()).filter(|digest| !digest.is_empty()),
+        now.map(now_block),
     ]
     .into_iter()
     .flatten()
@@ -407,6 +453,18 @@ fn intent_block(transcript: Option<&str>, intent: &str, limit: usize) -> String 
     )
 }
 
+fn now_block(now: &str) -> String {
+    let mut end = now.len().min(NOW_LIMIT);
+    while !now.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = if end < now.len() { " [cut]" } else { "" };
+    format!(
+        "{NOW_HEADING}\nThe chair's current focus; kept beside Intent when output is bounded.\n{}{cut}",
+        &now[..end]
+    )
+}
+
 /// Bounded read cause for the diagnostic: OS kind and code, never paths.
 fn read_cause(error: SessionError) -> String {
     match error {
@@ -415,62 +473,124 @@ fn read_cause(error: SessionError) -> String {
     }
 }
 
-fn render(
+/// Join the non-empty blocks in order with blank lines between them.
+fn join_blocks(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .copied()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Longest prefix of `text` at a UTF-8 boundary for which `fits` holds. Search
+/// encoded bytes, not raw bytes: JSON escaping can make the two measures differ
+/// enough that subtracting the excess erases a prefix that would still fit.
+fn fit_prefix_len(text: &str, fits: impl Fn(&str) -> bool) -> usize {
+    if fits(text) {
+        return text.len();
+    }
+    let boundaries: Vec<_> = text
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let mut low = 0;
+    let mut high = boundaries.len().saturating_sub(1);
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        let end = boundaries[middle];
+        if fits(&text[..end]) {
+            low = middle;
+        } else {
+            high = middle.saturating_sub(1);
+        }
+    }
+    boundaries[low]
+}
+
+/// Grouped inputs to [`render`]. Bundling the varying pieces keeps the
+/// renderer's signature stable as the hook grows instead of widening its
+/// argument list.
+struct RenderInput<'a> {
     event: HookEvent,
     session_id: Option<HostSessionId>,
     status: CheckpointStatus,
-    digest: &str,
+    protected: &'a str,
+    derived: &'a str,
     diagnostic: String,
     markdown: Option<String>,
-    more: &str,
-) -> HookContext {
+    more: &'a str,
+}
+
+fn render(input: RenderInput<'_>) -> HookContext {
+    let RenderInput {
+        event,
+        session_id,
+        status,
+        protected,
+        derived,
+        diagnostic,
+        markdown,
+        more,
+    } = input;
     let retained = if event == HookEvent::SessionStart {
         markdown.unwrap_or_default()
     } else {
         String::new()
     };
+    // Standing, Intent and Now are composed first and never trimmed; the
+    // derived digest follows and gives way before the chair's own text.
+    let head = |derived: &str| join_blocks(&[protected, derived]);
     let mut stdout = encode(
         event,
         &diagnostic,
-        digest,
+        &head(derived),
         &retained,
         ExcerptState::Complete,
     );
     if stdout.len() > HOOK_OUTPUT_LIMIT {
-        // Search UTF-8 boundaries against encoded bytes. Raw bytes and escaped
-        // JSON bytes are different measures; subtracting the excess can erase
-        // the entire checkpoint even when a useful prefix fits.
-        let boundaries: Vec<_> = retained
-            .char_indices()
-            .map(|(offset, _)| offset)
-            .chain(std::iter::once(retained.len()))
-            .collect();
-        let mut low = 0;
-        let mut high = boundaries.len().saturating_sub(1);
-        while low < high {
-            let middle = low + (high - low).div_ceil(2);
-            let end = boundaries.get(middle).copied().unwrap_or_default();
-            let candidate = encode(
+        let derived_end = fit_prefix_len(derived, |candidate| {
+            encode(
                 event,
                 &diagnostic,
-                digest,
-                retained.get(..end).unwrap_or_default(),
-                ExcerptState::Truncated(more),
-            );
-            if candidate.len() <= HOOK_OUTPUT_LIMIT {
-                low = middle;
-            } else {
-                high = middle.saturating_sub(1);
-            }
-        }
-        let end = boundaries.get(low).copied().unwrap_or_default();
+                &head(candidate),
+                &retained,
+                ExcerptState::Complete,
+            )
+            .len()
+                <= HOOK_OUTPUT_LIMIT
+        });
+        let derived = &derived[..derived_end];
         stdout = encode(
             event,
             &diagnostic,
-            digest,
-            retained.get(..end).unwrap_or_default(),
-            ExcerptState::Truncated(more),
+            &head(derived),
+            &retained,
+            ExcerptState::Complete,
         );
+        if stdout.len() > HOOK_OUTPUT_LIMIT {
+            // Only after derived state has given everything does the excerpt
+            // shrink. Intent and Now are in `protected`, so they stay intact.
+            let end = fit_prefix_len(&retained, |candidate| {
+                encode(
+                    event,
+                    &diagnostic,
+                    &head(derived),
+                    candidate,
+                    ExcerptState::Truncated(more),
+                )
+                .len()
+                    <= HOOK_OUTPUT_LIMIT
+            });
+            stdout = encode(
+                event,
+                &diagnostic,
+                &head(derived),
+                &retained[..end],
+                ExcerptState::Truncated(more),
+            );
+        }
     }
     HookContext {
         session_id,
@@ -521,14 +641,29 @@ fn encode(
 
 #[cfg(test)]
 mod intent_tests {
-    use super::split_intent;
+    use super::{NOW_HEADING, take_section};
 
     #[test]
-    fn a_sub_heading_stays_inside_the_intent_section() {
-        let (intent, rest) =
-            split_intent("# Title\n## Intent\nfirst\n### Ruling\nsecond\n## State\nlater\n");
+    fn a_sub_heading_stays_inside_the_named_section() {
+        let (intent, rest) = take_section(
+            "# Title\n## Intent\nfirst\n### Ruling\nsecond\n## State\nlater\n",
+            super::INTENT_HEADING,
+        );
         assert_eq!(intent.as_deref(), Some("first\n### Ruling\nsecond"));
         assert!(rest.contains("## State"));
         assert!(!rest.contains("second"));
+    }
+
+    #[test]
+    fn now_is_split_out_from_between_intent_and_the_rest() {
+        let (intent, rest) = take_section(
+            "# Title\n## Intent\nwhy\n## Now\nfocus\n## Plan\nlater\n",
+            super::INTENT_HEADING,
+        );
+        let (now, rest) = take_section(&rest, NOW_HEADING);
+        assert_eq!(intent.as_deref(), Some("why"));
+        assert_eq!(now.as_deref(), Some("focus"));
+        assert!(rest.contains("## Plan"));
+        assert!(!rest.contains("focus"));
     }
 }

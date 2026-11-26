@@ -1912,7 +1912,17 @@ mod tests {
         assert!(projected.policy_inputs.is_empty());
         assert!(projected.write_roots.is_empty());
         assert!(projected.write_scope.is_empty());
-        assert!(projected.new_worktree.is_none());
+        // A branch and a base ref are peer-owned provisioning intent, not a
+        // caller path: the receiver creates the worktree in its own clone.
+        assert_eq!(
+            projected.new_worktree,
+            Some(crate::coordination::facade::NewWorktree {
+                extra: Default::default(),
+                default_base: false,
+                base: "HEAD".into(),
+                branch: "lane".into(),
+            })
+        );
         assert!(projected.extra.is_empty());
         assert!(!projected.policy_sealed);
         assert_eq!(projected.launch_policy, Some(sealed.clone()));
@@ -2096,6 +2106,7 @@ mod tests {
             plan: Default::default(),
             implement: Default::default(),
             batch: Default::default(),
+            queue: Default::default(),
             steer: Default::default(),
             limits: crate::config::Limits {
                 body_bytes: 65536,

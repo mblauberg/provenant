@@ -161,19 +161,34 @@ fn collect_store(
             clock: &clock,
             cancel,
         };
-        if let Some(reader) = RunStore::open_read_only(&context, &call)? {
-            // Applied cleanup needs a writable store. Previews stay read-only
-            // and never create a run store just to collect it.
-            let store = if dry_run {
-                reader
-            } else {
+        let reader = RunStore::open_read_only(&context, &call)?;
+        let store = match reader {
+            Some(reader) if dry_run => Some(reader),
+            Some(reader) => {
                 drop(reader);
-                RunStore::open(&context, &call)?
-            };
+                Some(RunStore::open(&context, &call)?)
+            }
+            None if !dry_run && matches!(pass, RetentionPass::ProviderState { .. }) => {
+                // An absent database has no rows. Do not turn an existing but
+                // uninitialised or unreadable database into absence evidence.
+                match directory.metadata_at(std::ffi::OsStr::new("run.sqlite3"), false) {
+                    Err(error) if error.is_not_found() => Some(RunStore::open(&context, &call)?),
+                    Ok(_) => None,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            None => None,
+        };
+        if let Some(store) = store {
             let store = store.with_writer_registry(host.state.as_path());
             let now = clock.wall_now()?;
             match pass {
                 RetentionPass::ProviderState { days, logs_days } => {
+                    if !dry_run {
+                        report
+                            .removed
+                            .extend(store.recover_orphan_reservations(true, &call)?);
+                    }
                     let mut collected = store.gc_provider_state_with_logs(
                         &directory, days, logs_days, now, dry_run, &call, scan,
                     )?;
@@ -185,6 +200,9 @@ fn collect_store(
                     report.removed.append(&mut collected.removed);
                     report.attempt_tmp.append(&mut collected.attempt_tmp);
                     report.partial_tmp.append(&mut collected.partial_tmp);
+                    report
+                        .scratch_deferred
+                        .append(&mut collected.scratch_deferred);
                     report.attempt_logs.append(&mut collected.attempt_logs);
                     report.expired_events += collected.expired_events;
                     report.kept.append(&mut collected.kept);
@@ -213,6 +231,9 @@ fn collect_store(
                     report.removed.append(&mut collected.removed);
                     report.attempt_tmp.append(&mut collected.attempt_tmp);
                     report.partial_tmp.append(&mut collected.partial_tmp);
+                    report
+                        .scratch_deferred
+                        .append(&mut collected.scratch_deferred);
                     report.attempt_logs.append(&mut collected.attempt_logs);
                     report.expired_events += collected.expired_events;
                     report.kept.append(&mut collected.kept);
@@ -625,13 +646,11 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
             .is_some_and(|stored| stored.cancelled)
     );
     drop(store);
-    let temporary = candidate
-        .parent()
-        .ok_or("attempt path")?
-        .parent()
-        .ok_or("attempt path")?
-        .join("tmp");
-    fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+    let temporary = child_path.join(format!("attempt-scratch/{attempt}/tmp"));
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&temporary)?;
     fs::write(temporary.join("payload"), vec![1; 8192])?;
     let preview = collect_provider_state(
         &roots,

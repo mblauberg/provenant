@@ -184,3 +184,164 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
     assert_eq!(reason.as_deref(), Some(TerminalCause::Unrecorded.detail()));
     Ok(())
 }
+
+#[test]
+fn git_setup_preparation_failure_projects_its_reason_and_remedy_to_status()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    const REASON: &str = "launch preparation failed: Git setup: no Git remote is declared and none can be inferred; remotes seen: [\"origin\", \"pr\"]; did you mean origin?";
+    let state = AttemptState::Terminal {
+        extra: Default::default(),
+        terminal_cause: Some(TerminalCause::PreparationRefused),
+        terminal_note: Some(TerminalCause::preparation_note(REASON)),
+        stop: None,
+        outcome: Outcome::Rejected,
+        exit_code: None,
+        finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
+        reason: Some(REASON.into()),
+    };
+    // `provenant status` and `result.md` both read this projection.
+    let (_, status_reason) = LaneRow::state_and_reason(&state);
+    let status_reason = status_reason.ok_or("missing status reason")?;
+    assert!(
+        status_reason.starts_with(TerminalCause::PreparationRefused.detail()),
+        "{status_reason}"
+    );
+    assert!(
+        status_reason.contains("no Git remote is declared"),
+        "{status_reason}"
+    );
+    assert!(
+        status_reason.contains("declare `ports.git.remote` or set the branch's upstream"),
+        "{status_reason}"
+    );
+    assert!(
+        !status_reason.contains("host refused the launch handoff"),
+        "{status_reason}"
+    );
+    assert!(
+        !status_reason.contains("provenant reconcile"),
+        "{status_reason}"
+    );
+    let (_, label) = LaneRow::state_and_label(&state);
+    assert_eq!(
+        label.as_deref(),
+        Some(TerminalCause::PreparationRefused.reason())
+    );
+    // The typed failure and stop keep their own names; a real host handoff
+    // refusal keeps its reconcile remedy.
+    assert_eq!(
+        serde_json::to_value(provenant_records::run::PreparationFailure::GitSetup)?,
+        serde_json::json!("git_setup")
+    );
+    assert_eq!(
+        serde_json::to_value(TerminalCause::PreparationRefused)?,
+        serde_json::json!("preparation_refused")
+    );
+    assert_eq!(
+        provenant_records::StopCause::from(TerminalCause::PreparationRefused),
+        provenant_records::StopCause::PreparationRefused
+    );
+    assert!(
+        !TerminalCause::PreparationRefused
+            .detail()
+            .contains("reconcile")
+    );
+    assert!(
+        TerminalCause::HandoffRefused
+            .detail()
+            .contains("provenant reconcile")
+    );
+    Ok(())
+}
+
+/// The launch withdrawal maps a typed Git-setup preparation refusal to its own
+/// failure and note. Drive the production mapping rather than hand-building a
+/// terminal record, so reverting it cannot leave this green (#3931).
+#[test]
+fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use crate::launch::HandOff;
+    use provenant_records::run::PreparationFailure;
+
+    const MESSAGE: &str = "Git setup: no Git remote is declared and none can be inferred; remotes seen: [\"origin\", \"pr\"]; did you mean origin?";
+    let handoff = HandOff::TypedLocal {
+        message: MESSAGE.into(),
+        cause: TerminalCause::PreparationRefused,
+    };
+    let reason = format!("launch preparation failed: {MESSAGE}");
+    let (failure, note) = crate::launch::handoff_preparation(&handoff, &reason);
+    assert_eq!(failure, Some(PreparationFailure::GitSetup));
+    let note = note.ok_or("missing preparation note")?;
+    assert!(
+        note.contains("declare `ports.git.remote` or set the branch's upstream"),
+        "{note}"
+    );
+    // The status reason reads this same typed note and cause.
+    let state = AttemptState::Terminal {
+        extra: Default::default(),
+        terminal_cause: Some(TerminalCause::PreparationRefused),
+        terminal_note: Some(note),
+        stop: None,
+        outcome: Outcome::Rejected,
+        exit_code: None,
+        finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
+        reason: Some(reason),
+    };
+    let (_, status_reason) = LaneRow::state_and_reason(&state);
+    let status_reason = status_reason.ok_or("missing status reason")?;
+    assert!(
+        status_reason.starts_with(TerminalCause::PreparationRefused.detail()),
+        "{status_reason}"
+    );
+    assert!(
+        status_reason.contains("no Git remote is declared"),
+        "{status_reason}"
+    );
+    assert!(
+        !status_reason.contains("provenant reconcile"),
+        "{status_reason}"
+    );
+
+    // Every other local refusal stays an adapter failure and owns its note;
+    // a boundary never establishes safe preparation for fallback.
+    let local = HandOff::Local("Git setup: some other failure".into());
+    let (failure, note) = crate::launch::handoff_preparation(
+        &local,
+        "launch preparation failed: Git setup: some other failure",
+    );
+    assert_eq!(failure, Some(PreparationFailure::AdapterUnavailable));
+    assert!(note.is_none());
+    // A writer-lineage mismatch is the production typed preparation refusal:
+    // its note names the retained-worktree repair, never a reconcile (#3987).
+    let lineage = HandOff::TypedLocal {
+        message: "writer lineage mismatch: graph predecessor writer or source".into(),
+        cause: TerminalCause::PreparationRefused,
+    };
+    let (failure, note) = crate::launch::handoff_preparation(
+        &lineage,
+        "launch preparation failed: writer lineage mismatch: graph predecessor writer or source",
+    );
+    assert_eq!(failure, Some(PreparationFailure::GitSetup));
+    let note = note.expect("missing lineage note");
+    assert!(note.contains("retained writer worktree"), "{note}");
+    assert!(!note.contains("provenant reconcile"), "{note}");
+    let typed_other = HandOff::TypedLocal {
+        message: "some other typed local refusal".into(),
+        cause: TerminalCause::HandoffRefused,
+    };
+    let (failure, _) = crate::launch::handoff_preparation(
+        &typed_other,
+        "launch preparation failed: some other typed local refusal",
+    );
+    assert_eq!(failure, Some(PreparationFailure::AdapterUnavailable));
+    let boundary = HandOff::Boundary {
+        message: "authority".into(),
+        class: provenant_records::diagnostic::BoundaryClass::Authority,
+        cause: None,
+    };
+    let (failure, note) =
+        crate::launch::handoff_preparation(&boundary, "launch preparation failed: authority");
+    assert_eq!(failure, None);
+    assert!(note.is_none());
+    Ok(())
+}

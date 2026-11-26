@@ -55,9 +55,11 @@ pub(crate) use layout::{
 };
 pub use lifecycle::*;
 pub use owner::{
-    OwnedWorktreeIssue, OwnedWorktreeListing, WorktreeOrigin, WorktreeOwner, branch_ownership,
-    load_owner, owned_worktree_paths, prune_owned, refresh_owner_reference_while_held,
-    save_lane_owner_when_free, save_owner, update_owner_when_unchanged, worktree_owner_index,
+    OrphanRegistrationPrune, OwnedWorktreeIssue, OwnedWorktreeListing, WorktreeOrigin,
+    WorktreeOwner, branch_ownership, load_owner, owned_worktree_paths, prune_orphan_registration,
+    prune_owned, refresh_owner_reference_while_held, save_lane_owner_when_free, save_owner,
+    update_owner_when_unchanged, worktree_owner_for_path, worktree_owner_index,
+    worktree_registration_for_path,
 };
 pub use refs::{RefLedger, RefObservation, RefRecord};
 pub use removal::{
@@ -189,6 +191,19 @@ impl std::fmt::Display for DetachedWorktreeRemedies {
     }
 }
 
+/// Facts for a refused branch with no merge base with its declared base.
+/// Boxed inside [`WorktreeError`] so a wide refusal cannot enlarge every CLI
+/// result that carries the error through `RunError`. The type is public because
+/// it is the payload of a public [`WorktreeError`] variant; its fields stay
+/// private to this module, so the refusal is read only through that error.
+#[derive(Debug)]
+pub struct UnrelatedBaseRefusal {
+    pub(super) branch: String,
+    pub(super) head: GitOid,
+    pub(super) base: String,
+    pub(super) base_oid: GitOid,
+}
+
 #[derive(Debug, Error)]
 pub enum WorktreeError {
     #[error(transparent)]
@@ -205,6 +220,11 @@ pub enum WorktreeError {
         branch: String,
         reason: String,
     },
+    #[error(
+        "base {} at {} has no merge base with branch {} at {}; pass --worktree to use the existing checkout, or merge or rebase the branch onto the intended base before launching",
+        .0.base, .0.base_oid, .0.branch, .0.head
+    )]
+    UnrelatedBase(Box<UnrelatedBaseRefusal>),
     #[error(
         "registered Git project has no verified primary checkout; run `provenant worktree list` from its primary checkout to refresh the layout, then retry"
     )]
@@ -263,8 +283,8 @@ pub enum WorktreeError {
     GitOperationInProgress,
     #[error("worktree writer lock busy")]
     LockBusy,
-    #[error("worktree registry reservation timed out")]
-    RegistryLockTimeout,
+    #[error("worktree registry reservation timed out{}", .holder.as_ref().map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
+    RegistryLockTimeout { holder: Option<AttemptId> },
     #[error("worktree writer is live")]
     LiveWriter,
     #[error(
@@ -412,7 +432,7 @@ impl WorktreeError {
     /// by itself. The caller still owns deadlines and transition policy.
     pub fn admission_cause(&self) -> Option<AdmissionCause> {
         match self {
-            Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
+            Self::RegistryLockTimeout { .. } => Some(AdmissionCause::RegistryLockTimeout),
             Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::CensusUnknown { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::UnknownWriter
@@ -453,7 +473,10 @@ impl WorktreeError {
         Some(match self {
             Self::StaleRegistration => "run `git worktree prune`, then retry",
             Self::WorktreeExists { .. } => {
-                "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree; for a base conflict, omit --base or pick a matching base"
+                "run `provenant worktree list` to inspect the existing checkout, then remove it with `provenant worktree remove NAME` or retry with a matching clean tree"
+            }
+            Self::UnrelatedBase(..) => {
+                "pass --worktree PATH to launch from the existing branch checkout, or merge or rebase the branch onto the intended base before retrying"
             }
             Self::GitEntryHeld { locked: true } => "run `git worktree unlock <path>`, then retry",
             Self::GitEntryHeld { locked: false } => {
@@ -462,7 +485,7 @@ impl WorktreeError {
             Self::LiveProcess(_) => {
                 "stop that process or change its directory out of the tree, then run `provenant worktree list` and retry"
             }
-            Self::RegistryLockTimeout => {
+            Self::RegistryLockTimeout { .. } => {
                 "wait for the worktree registry lock holder to finish, then retry"
             }
             Self::LockBusy | Self::LiveWriter | Self::WriterBusy { .. } => {
@@ -1206,11 +1229,11 @@ mod tests {
     #[test]
     fn admission_causes_keep_transient_observation_distinct_from_custody() {
         assert_eq!(
-            lifecycle::retain_reason(&WorktreeError::RegistryLockTimeout),
+            lifecycle::retain_reason(&WorktreeError::RegistryLockTimeout { holder: None }),
             RetainReason::LockBusy
         );
         assert_eq!(
-            WorktreeError::RegistryLockTimeout.admission_cause(),
+            WorktreeError::RegistryLockTimeout { holder: None }.admission_cause(),
             Some(AdmissionCause::RegistryLockTimeout)
         );
         assert_eq!(

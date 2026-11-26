@@ -162,6 +162,7 @@ Every command exits with the code of its envelope `status`. This tier is stable.
 | `error` | 3 |
 | `unavailable` | 4 |
 | `pending` | 5 |
+| `stalled` | 6 |
 | `waiting` | 0 |
 | `timeout` | 124 |
 | `cancelled` | 130 |

@@ -676,26 +676,38 @@ fn peer_output_length_round_trips_and_rejects_malformed_values() {
 }
 
 #[test]
-fn dirty_writer_refusal_keeps_safe_cause_and_action_on_the_wire() {
+fn dirty_writer_refusal_names_counted_paths_and_keeps_a_safe_action_on_the_wire() {
+    // The typed path summary survives the wire and reaches the operator; a
+    // terminal control in a filename is escaped, not emitted.
+    let paths = "first.rs, src/second.rs and 17 more";
     let error = run_error(provenant_run::RunError::Writer(
-        provenant_confinement::worktrees::WorktreeError::Dirty("TOKEN_SENTINEL".into()),
+        provenant_confinement::worktrees::WorktreeError::Dirty(format!("{paths}\u{1b}")),
     ));
     let decoded: FacadeError =
         serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
     let diagnostic = decoded.diagnostic();
-    assert!(
-        diagnostic
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("uncommitted")
-    );
+    let detail = diagnostic.detail.as_deref().unwrap();
+    assert!(detail.contains("uncommitted"), "{detail}");
+    assert!(detail.contains(paths), "{detail}");
+    assert!(!detail.contains('\u{1b}'), "{detail}");
     assert!(diagnostic.next.as_deref().unwrap().contains("commit"));
-    assert!(
-        !serde_json::to_string(&diagnostic)
-            .unwrap()
-            .contains("TOKEN_SENTINEL")
-    );
+
+    // The free-form reason remains untrusted: it is suppressed even when the
+    // typed fact names the paths.
+    let error = FacadeError::DispatchRefused {
+        fact: Some(
+            provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DirtyWriter {
+                paths: paths.into(),
+            },
+        ),
+        disk: None,
+        reason: "TOKEN_SENTINEL".into(),
+    };
+    let decoded: FacadeError =
+        serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+    let detail = decoded.diagnostic().detail.unwrap();
+    assert!(detail.contains(paths), "{detail}");
+    assert!(!detail.contains("TOKEN_SENTINEL"), "{detail}");
 
     let error = run_error(provenant_run::RunError::Writer(
         provenant_confinement::worktrees::WorktreeError::CheckedOut,
@@ -1266,6 +1278,7 @@ pub(crate) mod peer_tests {
                         title: None,
                         prompt: "reply OK".into(),
                         base: Some(head.to_string()),
+                        fixture: None,
                         pinned_base: None,
                         head: None,
                         profile: Default::default(),
@@ -1376,6 +1389,7 @@ pub(crate) mod peer_tests {
                         title: None,
                         prompt: "reply OK".into(),
                         base: Some(info.head.to_string()),
+                        fixture: None,
                         pinned_base: None,
                         head: None,
                         profile: Default::default(),
@@ -1651,6 +1665,7 @@ pub(crate) mod peer_tests {
                     title: Some("writer".into()),
                     prompt: "implement slice".into(),
                     base: Some(node_source.to_string()),
+                    fixture: None,
                     pinned_base: None,
                     head: Some(node_source.to_string()),
                     profile: Default::default(),
@@ -1893,6 +1908,7 @@ fn fallback_cause_uses_only_unanimous_typed_facts() {
         confinement_guard: None,
         continuation_guard: None,
         cause,
+        offer_mismatch: None,
         detail: "prompt token \u{1b} /private/secret".into(),
     };
     let first = route(Some(Cause::StaleAvailability));

@@ -166,6 +166,17 @@ pub fn owned_worktree_paths(
 /// and no process is observed, so status can join an attempt to its worktree
 /// without a full worktree context.
 pub fn worktree_owner_index(common: &Path) -> Result<Vec<(PathBuf, WorktreeOwner)>, WorktreeError> {
+    Ok(registered_owners(common)?
+        .into_iter()
+        .map(|(path, owner, _)| (path, owner))
+        .collect())
+}
+
+/// Each readable owner record with its checkout path and the path of the Git
+/// registration directory (`<common>/worktrees/<id>`) that holds it.
+fn registered_owners(
+    common: &Path,
+) -> Result<Vec<(PathBuf, WorktreeOwner, PathBuf)>, WorktreeError> {
     let directory = match Directory::open_anchor(common) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(Vec::new()),
@@ -182,6 +193,7 @@ pub fn worktree_owner_index(common: &Path) -> Result<Vec<(PathBuf, WorktreeOwner
             return Err(WorktreeError::InvalidOutput);
         }
         let name = name?;
+        let registration_path = common.join("worktrees").join(&name);
         if registrations.metadata_at(&name, false)?.kind == provenant_os::fs::FileKind::Regular {
             continue;
         }
@@ -205,9 +217,191 @@ pub fn worktree_owner_index(common: &Path) -> Result<Vec<(PathBuf, WorktreeOwner
         }
         let path = marker.parent().ok_or(WorktreeError::InvalidOutput)?;
         let path = path.to_path_buf();
-        index.push((path, owner));
+        index.push((path, owner, registration_path));
     }
     Ok(index)
+}
+
+/// Resolve the ownership record registered in `common` for `worktree` even if
+/// the checkout directory itself was already removed. Uses
+/// `split_at_extant_directory` so symlink/firmlink aliases match by directory
+/// identity and removed suffix; ambiguous matches fail closed (`Ok(None)`).
+pub fn worktree_owner_for_path(
+    common: &Path,
+    worktree: &Path,
+) -> Result<Option<WorktreeOwner>, WorktreeError> {
+    Ok(registration_for_path(common, worktree)?.map(|(owner, _)| owner))
+}
+
+/// The owner registered for `worktree` with the birth time of its Git
+/// registration directory, a lower bound on the checkout's creation that
+/// survives the checkout's removal. `git worktree add` creates
+/// `<common>/worktrees/<id>` before it populates the checkout, refuses a
+/// non-empty target, and `git worktree repair` or reuse keeps the original
+/// registration, so no process can have entered the checkout's contents
+/// before this time (#3914). Git does accept an existing empty directory as
+/// the target, so a process already sitting in such a directory predates the
+/// registration; lane checkouts are created at paths Provenant allocates, and
+/// that residual is accepted. Removal and prune delete the registration. The
+/// birth time is `None` when the filesystem does not report it or the
+/// registration is gone; callers fail closed.
+pub fn worktree_registration_for_path(
+    common: &Path,
+    worktree: &Path,
+) -> Result<Option<(WorktreeOwner, Option<WallTime>)>, WorktreeError> {
+    Ok(
+        registration_for_path(common, worktree)?.map(|(owner, registration)| {
+            let born = super::census_excusal::birth_time(&registration);
+            (owner, born)
+        }),
+    )
+}
+
+fn registration_for_path(
+    common: &Path,
+    worktree: &Path,
+) -> Result<Option<(WorktreeOwner, PathBuf)>, WorktreeError> {
+    let Some(target) = super::census::split_at_extant_directory(worktree) else {
+        return Ok(None);
+    };
+    let mut matched = None;
+    for (path, owner, registration) in registered_owners(common)? {
+        if super::census::split_at_extant_directory(&path).as_ref() == Some(&target) {
+            if matched.is_some() {
+                return Ok(None);
+            }
+            matched = Some((owner, registration));
+        }
+    }
+    Ok(matched)
+}
+
+/// What happened when an abandoned lane tried to clear its own stale Git
+/// registration. `Retained` never fails the abandonment: the caller warns with
+/// the exact remedy instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrphanRegistrationPrune {
+    /// The checkout still exists, or no registration names it.
+    None,
+    /// The one registration that named the removed checkout was cleared.
+    Pruned,
+    /// A registration names the checkout but was not safe to clear here.
+    Retained,
+}
+
+/// Clear one lane registration whose checkout was removed by hand, so its
+/// branch is no longer reported checked out at a missing path. Only the
+/// registration whose backlink names `worktree` and whose owner record proves
+/// `attempt` created it as a lane is removed; every other registration, every
+/// locked registration and every ambiguous or unreadable case is left alone.
+/// This never runs `git worktree prune`, which would touch other registrations.
+pub fn prune_orphan_registration(
+    common: &Path,
+    worktree: &Path,
+    attempt: AttemptId,
+) -> OrphanRegistrationPrune {
+    // A dangling symlink or an unreadable path is not a proven removal; only a
+    // path missing from disk (not a link) may have its registration cleared.
+    if !std::fs::symlink_metadata(worktree)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return OrphanRegistrationPrune::None;
+    }
+    let Some(target) = super::census::split_at_extant_directory(worktree) else {
+        return OrphanRegistrationPrune::Retained;
+    };
+    let directory = match Directory::open_anchor(common) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return OrphanRegistrationPrune::None,
+        Err(_) => return OrphanRegistrationPrune::Retained,
+    };
+    let registrations = match directory.open_verified_directory(OsStr::new("worktrees")) {
+        Ok(registrations) => registrations,
+        Err(error) if error.is_not_found() => return OrphanRegistrationPrune::None,
+        Err(_) => return OrphanRegistrationPrune::Retained,
+    };
+    let entries = match registrations.entries() {
+        Ok(entries) => entries,
+        Err(_) => return OrphanRegistrationPrune::Retained,
+    };
+    let mut matched = None;
+    for (count, name) in entries.enumerate() {
+        if count >= MAX_WORKTREES {
+            return OrphanRegistrationPrune::Retained;
+        }
+        let Ok(name) = name else {
+            return OrphanRegistrationPrune::Retained;
+        };
+        let Ok(metadata) = registrations.metadata_at(&name, false) else {
+            return OrphanRegistrationPrune::Retained;
+        };
+        if metadata.kind == provenant_os::fs::FileKind::Regular {
+            continue;
+        }
+        if metadata.kind != provenant_os::fs::FileKind::Directory {
+            return OrphanRegistrationPrune::Retained;
+        }
+        let Ok(registration) = registrations.open_verified_directory(&name) else {
+            return OrphanRegistrationPrune::Retained;
+        };
+        let Ok(bytes) = read_bounded(&registration, OsStr::new("gitdir"), 4096) else {
+            return OrphanRegistrationPrune::Retained;
+        };
+        let Some(backlink) = crate::repo::parse_git_path(&bytes, b"") else {
+            return OrphanRegistrationPrune::Retained;
+        };
+        let Ok(marker) =
+            crate::repo::resolve_git_path(&common.join("worktrees").join(&name), &backlink)
+        else {
+            return OrphanRegistrationPrune::Retained;
+        };
+        if marker.file_name() != Some(OsStr::new(".git")) {
+            continue;
+        }
+        let Some(path) = marker.parent() else {
+            return OrphanRegistrationPrune::Retained;
+        };
+        if super::census::split_at_extant_directory(path).as_ref() != Some(&target) {
+            continue;
+        }
+        // Path match alone is not licence to delete. The owner record must
+        // prove this attempt created the checkout as a lane, and Git must not
+        // have been asked to hold the registration.
+        let Ok(bytes) = read_bounded(&registration, OsStr::new(OWNER), MAX_STATE_RECORD) else {
+            return OrphanRegistrationPrune::Retained;
+        };
+        let Ok(owner) = serde_json::from_slice::<WorktreeOwner>(&bytes) else {
+            return OrphanRegistrationPrune::Retained;
+        };
+        if validate(&owner).is_err()
+            || owner.attempt_id != Some(attempt)
+            || owner.origin != WorktreeOrigin::Lane
+            || registration
+                .metadata_at(OsStr::new("locked"), false)
+                .is_ok()
+        {
+            return OrphanRegistrationPrune::Retained;
+        }
+        if matched.is_some() {
+            return OrphanRegistrationPrune::Retained;
+        }
+        matched = Some((name, metadata));
+    }
+    let Some((name, metadata)) = matched else {
+        return OrphanRegistrationPrune::None;
+    };
+    // Reverify the entry just before disposal so a replaced registration is
+    // never removed. Only this one admin directory is touched.
+    if !registrations
+        .metadata_at(&name, false)
+        .is_ok_and(|current| metadata.same_identity(&current))
+    {
+        return OrphanRegistrationPrune::Retained;
+    }
+    if std::fs::remove_dir_all(common.join("worktrees").join(&name)).is_err() {
+        return OrphanRegistrationPrune::Retained;
+    }
+    OrphanRegistrationPrune::Pruned
 }
 
 pub fn save_owner(worktree: &VerifiedWorktree, owner: &WorktreeOwner) -> Result<(), WorktreeError> {
@@ -251,7 +445,14 @@ pub fn update_owner_when_unchanged(
             context.clock,
         )
         .map_err(|error| match error {
-            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout {
+                // The owner record is the registry's recorded holder while the
+                // lock serialises its update.
+                holder: load_owner(worktree)
+                    .ok()
+                    .flatten()
+                    .and_then(|owner| owner.attempt_id),
+            },
             other => other.into(),
         })?;
     let tree = verify_worktree(context.repo, worktree.path())?;
@@ -368,7 +569,14 @@ pub fn save_lane_owner_when_free(
             context.clock,
         )
         .map_err(|error| match error {
-            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout {
+                // The owner record is the registry's recorded holder while the
+                // lock serialises its update.
+                holder: load_owner(worktree)
+                    .ok()
+                    .flatten()
+                    .and_then(|owner| owner.attempt_id),
+            },
             other => other.into(),
         })?;
     let tree = verify_worktree(context.repo, worktree.path())?;
