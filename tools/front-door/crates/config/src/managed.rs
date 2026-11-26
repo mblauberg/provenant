@@ -232,9 +232,10 @@ impl HarnessTarget {
     pub fn at(harness: Harness, home: &Path, base: &Path) -> Self {
         let instruction = harness.spec().install.and_then(|install| {
             install
+                .native
                 .instructions
                 .value
-                .then_some(install.instruction)
+                .then_some(install.instruction_file)
                 .flatten()
         });
         Self {

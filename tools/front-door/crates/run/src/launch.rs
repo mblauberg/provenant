@@ -65,7 +65,7 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
     CapturePlan {
         stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. }
             if provenant_records::AdapterSpec::get(provider)
-                .is_some_and(|s| s.stream == provenant_records::StreamContract::Raw))
+                .is_some_and(|s| s.launch.framing == provenant_records::StreamFraming::Raw))
         {
             provenant_supervisor::custody::StreamMode::Tail {
                 limit: provenant_records::COMMAND_OUTPUT_TAIL_BYTES as u64,

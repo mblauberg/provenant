@@ -1895,7 +1895,7 @@ fn absent_default_login_differs_from_directory_integrity_errors()
     let temp = tempfile::tempdir()?;
     let mut spec = *AdapterSpec::get("codex").unwrap();
     spec.identity.name = "fixture";
-    spec.login.login_hint = "fixture login";
+    spec.login.hint = "fixture login";
     let missing = temp.path().join("missing");
     assert!(
         default_directory_error(&spec, &missing, "not found".into(), None)

@@ -2009,7 +2009,7 @@ fn expire(
             let candidate = subdir(&state, name, false)?;
             let provider = candidate_provider(&candidate)?;
             if !provenant_records::AdapterSpec::get(&provider)
-                .is_some_and(|s| s.retention.transcripts.value)
+                .is_some_and(|s| s.retention.transcript_layout.value)
             {
                 // Until an adapter's transcript layout is established, keep
                 // its unclassified payload as history rather than lose it.

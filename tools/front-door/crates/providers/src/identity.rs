@@ -62,7 +62,7 @@ pub fn agy_fingerprint(bytes: &[u8]) -> Option<String> {
     let namespace = provenant_records::Harness::Agy
         .spec()
         .accounts
-        .account_identity_namespace?;
+        .identity_namespace?;
     Some(format!("{namespace}{}", fingerprint(email)?.get(..12)?))
 }
 

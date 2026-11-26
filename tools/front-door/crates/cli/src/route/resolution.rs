@@ -532,7 +532,7 @@ pub(super) fn with_context<T>(
             .filter_map(|record| {
                 let at = record.observed_unix_seconds;
                 let spec = provenant_records::AdapterSpec::get(adapter)?;
-                let observed = match spec.login.login_observation {
+                let observed = match spec.login.observation {
                     provenant_records::LoginObservation::AccountAvailability => true,
                     provenant_records::LoginObservation::Reprobe => {
                         record.fixture_ref == format!("installed/{adapter}/login-status")
@@ -541,7 +541,7 @@ pub(super) fn with_context<T>(
                     provenant_records::LoginObservation::ExecutableOnly => false,
                     provenant_records::LoginObservation::None => false,
                 };
-                observed.then_some(if spec.login.login_check_names_account {
+                observed.then_some(if spec.login.check_names_account {
                     crate::quota::LoginEvidence::Verified(at)
                 } else {
                     crate::quota::LoginEvidence::Unverified(at)
@@ -1224,9 +1224,9 @@ pub fn resolve_review_family(
                             context.readiness.map_or_else(provenant_quota::ReadinessRead::absent, |lookup| lookup(scope, now))
                         });
                         let local = provenant_records::AdapterSpec::get(&selected.adapter)
-                            .filter(|spec| spec.login.local_login);
+                            .filter(|spec| spec.login.local);
                         if let Some(spec) = local {
-                            let key = spec.accounts.local_account.1;
+                            let key = spec.accounts.local_entry.1;
                             let mut scope = provenant_quota::ReadinessScope {
                                 extra: Default::default(),
                                 host: provenant_quota::LOCAL_HOST.into(),
@@ -1251,7 +1251,7 @@ pub fn resolve_review_family(
                             {
                                 recorded.push(RecordedReadiness {
                                     host: scope.host,
-                                    account: spec.accounts.local_account.0.into(),
+                                    account: spec.accounts.local_entry.0.into(),
                                     account_key: key.into(),
                                     model: model.as_str().into(),
                                     observation,

@@ -107,7 +107,8 @@ fn reason(route: &ResolvedRoute) -> Option<&RouteExclusionReason> {
 /// Fixtures derive account plan metadata from the adapter's namespace declaration.
 fn fixture_plan(model: &ModelId) -> Option<String> {
     provenant_records::AdapterSpec::get(model.adapter())?
-        .account_model_plans
+        .accounts
+        .model_plans
         .iter()
         .find(|plan| model.model().starts_with(plan.model_prefix))
         .map(|plan| plan.plan.into())

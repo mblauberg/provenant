@@ -81,9 +81,9 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         skills: None,
         capabilities: provenant_records::Capabilities {
             launch: LaunchCapabilities {
-                write: provenant_records::Declaration::unsupported(
+                write: provenant_records::AdapterFact::unsupported(
                     "fixture has no write",
-                    provenant_records::ROW_SOURCE,
+                    provenant_records::ADAPTER_ROW_SOURCE,
                 ),
                 network: &[NetworkAccess::Provider],
                 ..ADAPTER_SPECS[2].capabilities.launch
@@ -172,7 +172,7 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
 #[test]
 fn a_declared_model_gap_makes_the_candidate_ineligible_and_the_pool_falls_back()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::{AdapterSpec, Declaration, ROW_SOURCE};
+    use provenant_records::{ADAPTER_ROW_SOURCE, AdapterFact, AdapterSpec};
     let catalogue = Catalogue::bundled()?;
     let mut config = RoutingConfig::default();
     config.pools.insert(
@@ -196,7 +196,8 @@ fn a_declared_model_gap_makes_the_candidate_ineligible_and_the_pool_falls_back()
     );
     // A command-style row that declares no model control.
     let mut no_model = *AdapterSpec::get("codex").unwrap();
-    no_model.capabilities.launch.model = Declaration::unsupported("no model control", ROW_SOURCE);
+    no_model.capabilities.launch.model =
+        AdapterFact::unsupported("no model control", ADAPTER_ROW_SOURCE);
     let lookup = |adapter: &str| {
         if adapter == "codex" {
             Some(no_model)
@@ -250,12 +251,12 @@ fn a_declared_model_gap_makes_the_candidate_ineligible_and_the_pool_falls_back()
 #[test]
 fn an_exact_pin_drops_an_undeclared_effort_with_a_sourced_warning()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::{AdapterSpec, Declaration, ROW_SOURCE};
+    use provenant_records::{ADAPTER_ROW_SOURCE, AdapterFact, AdapterSpec};
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let mut no_effort = *AdapterSpec::get("codex").unwrap();
     no_effort.capabilities.launch.effort =
-        Declaration::unsupported("no effort control", ROW_SOURCE);
+        AdapterFact::unsupported("no effort control", ADAPTER_ROW_SOURCE);
     let lookup = |adapter: &str| {
         if adapter == "codex" {
             Some(no_effort)
@@ -280,7 +281,7 @@ fn an_exact_pin_drops_an_undeclared_effort_with_a_sourced_warning()
     let warning = route.diagnostics.effort_warning.ok_or("effort warning")?;
     assert_eq!(warning.requested, "high");
     assert!(warning.applied.is_none());
-    assert_eq!(warning.source, ROW_SOURCE);
+    assert_eq!(warning.source, ADAPTER_ROW_SOURCE);
     assert_eq!(warning.reason, "no effort control");
     Ok(())
 }

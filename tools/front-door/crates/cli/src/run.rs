@@ -1043,7 +1043,7 @@ impl Registry<'_> {
         };
         let model_observation = provenant_records::AdapterSpec::get(adapter.id())
             .map(|spec| spec.capabilities.answering_model.value)
-            .unwrap_or(provenant_records::ModelObservation::Stream);
+            .unwrap_or(provenant_records::AnsweringModelSource::Stream);
         let model = stream_model(route);
         // A caller without a sealed task policy receives the compiled table;
         // there is no host or project layer to overlay in that case.
@@ -1103,7 +1103,7 @@ impl Registry<'_> {
                 .as_deref()
                 .filter(|key| {
                     provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| {
-                        spec.accounts.registered_account && !spec.is_unregistered_local(key)
+                        spec.accounts.registered && !spec.is_unregistered_local(key)
                     })
                 })
                 .map(str::to_owned),
@@ -1201,7 +1201,7 @@ impl Registry<'_> {
             .as_ref()
             .is_none_or(|sandbox| !sandbox.effective);
         let rollout =
-            (model_observation == provenant_records::ModelObservation::Rollout).then(|| {
+            (model_observation == provenant_records::AnsweringModelSource::Rollout).then(|| {
                 outcome
                     .session()
                     .ok_or(provenant_providers::ProviderError::UnknownIdentity)
@@ -1225,7 +1225,7 @@ impl Registry<'_> {
             });
         // OpenCode's stream names no model; its session record does.
         let opencode_model = (model_observation
-            == provenant_records::ModelObservation::SessionDatabase)
+            == provenant_records::AnsweringModelSource::SessionDatabase)
             .then(|| {
                 let session = outcome
                     .session()
@@ -1246,10 +1246,12 @@ impl Registry<'_> {
             None => None,
         };
         let rollout = rollout.and_then(Result::ok);
-        let observed_model = if model_observation == provenant_records::ModelObservation::Rollout {
+        let observed_model = if model_observation
+            == provenant_records::AnsweringModelSource::Rollout
+        {
             // Missing or invalid rollout evidence cannot fall back to another source.
             rollout.as_ref().map(|turn| turn.model.as_str())
-        } else if model_observation == provenant_records::ModelObservation::SessionDatabase {
+        } else if model_observation == provenant_records::AnsweringModelSource::SessionDatabase {
             opencode_model.as_deref()
         } else {
             outcome.model()

@@ -1202,7 +1202,7 @@ pub fn check_go_allowance(
     let floor = config.opencode_go.min_monthly_allowance_usd;
     if floor == 0
         || !provenant_records::AdapterSpec::get(model.adapter())
-            .and_then(|spec| spec.accounts.allowance_prefix)
+            .and_then(|spec| spec.quota.allowance_prefix)
             .is_some_and(|prefix| model.model().starts_with(prefix))
     {
         return Ok(());
@@ -1974,7 +1974,7 @@ impl Catalogue {
                 || row.quota_pool.as_deref().is_some_and(|pool| {
                     !identifier(pool)
                         || !provenant_records::AdapterSpec::get(row.model.adapter())
-                            .is_some_and(|spec| spec.accounts.grouped_quota_pools)
+                            .is_some_and(|spec| spec.quota.grouped_pools)
                 })
                 || row.superseded_by.len() > 16
                 || row.superseded_by.iter().any(|newer| {
@@ -2221,7 +2221,7 @@ impl Catalogue {
 /// Only OpenCode draws on the keyless free allowance, whatever a pool lists.
 pub fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
     provenant_records::AdapterSpec::get(adapter)
-        .and_then(|spec| spec.accounts.free_pool)
+        .and_then(|spec| spec.quota.free_pool)
         .filter(|_| free())
         .map(|pool| vec![pool.to_owned()])
         .unwrap_or_default()

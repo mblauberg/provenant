@@ -24,7 +24,7 @@ fn registrations_for(harnesses: &[Harness], lane: bool) -> Vec<HookRegistration>
         .filter_map(|harness| {
             let spec = harness.spec();
             let install = spec.install?;
-            if !install.hooks.value {
+            if !install.native.hooks.value {
                 return None;
             }
             let protocol = install.hook_protocol?;
@@ -48,7 +48,7 @@ fn registrations_for(harnesses: &[Harness], lane: bool) -> Vec<HookRegistration>
                         if lane && action.is_answer_delivery() {
                             return None;
                         }
-                        if action.is_answer_delivery() && !install.answer_delivery.value {
+                        if action.is_answer_delivery() && !install.native.answer_delivery.value {
                             return None;
                         }
                         if matches!(
@@ -738,7 +738,8 @@ mod tests {
                         action,
                         HookAction::ChairPrompt | HookAction::ChairStart | HookAction::ChairStop
                     ))
-                    || (action.is_answer_delivery() && (lane || !install.answer_delivery.value))
+                    || (action.is_answer_delivery()
+                        && (lane || !install.native.answer_delivery.value))
                 {
                     return None;
                 }
@@ -755,7 +756,7 @@ mod tests {
             let Some(install) = adapter.install else {
                 continue;
             };
-            if !install.hooks.value {
+            if !install.native.hooks.value {
                 continue;
             }
             let native = registrations(&[adapter.id]);

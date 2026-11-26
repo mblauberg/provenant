@@ -493,7 +493,7 @@ mod tests {
         std::fs::create_dir_all(&source)?;
         let install_roots: Vec<_> = provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|spec| spec.launch.skills.is_some())
+            .filter(|spec| spec.launch.skill_location.is_some())
             .flat_map(|spec| {
                 spec.launch
                     .skill_install_roots

@@ -181,7 +181,7 @@ pub(crate) fn observe_codex_rollout(
         .as_deref()
         .ok_or(ProviderError::UnknownIdentity)?;
     if !AdapterSpec::get(provider).is_some_and(|spec| {
-        spec.capabilities.answering_model.value == provenant_records::ModelObservation::Rollout
+        spec.capabilities.answering_model.value == provenant_records::AnsweringModelSource::Rollout
     }) {
         return Err(ProviderError::UnknownIdentity);
     }
@@ -392,7 +392,7 @@ pub(super) fn default_directory_error(
     if unavailable {
         AccountObservationError::AuthRequired(format!(
             "default {} login is missing; run `{}`",
-            spec.identity.name, spec.login.login_hint
+            spec.identity.name, spec.login.hint
         ))
     } else {
         AccountObservationError::Other(detail)
@@ -519,7 +519,7 @@ pub(super) fn observe_account(
     let directory = canonical(&entry.directory)?;
     if directory != entry.directory
         || AdapterSpec::get(&entry.adapter)
-            .and_then(|spec| spec.accounts.account_directory_prefix)
+            .and_then(|spec| spec.accounts.directory_prefix)
             .is_some_and(|prefix| directory != home.join(format!("{prefix}{}", entry.label)))
     {
         return Err(format!(
@@ -530,9 +530,9 @@ pub(super) fn observe_account(
     }
     // Adapters without registered accounts, and an unregistered local login
     // (agy's synthetic `local` entry), have no registered identity to probe.
-    let (detected, org) = if AdapterSpec::get(&entry.adapter).is_none_or(|spec| {
-        !spec.accounts.registered_account || spec.is_unregistered_local(&entry.key)
-    }) {
+    let (detected, org) = if AdapterSpec::get(&entry.adapter)
+        .is_none_or(|spec| !spec.accounts.registered || spec.is_unregistered_local(&entry.key))
+    {
         (entry.key.clone(), None)
     } else {
         provenant_providers::accounts::detect_with_org(

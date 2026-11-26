@@ -921,11 +921,11 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
         if let Some(config) = install.default_home_config {
             host_config_roots.push(host_home.join(config));
         }
-        if let Some(skills) = declared.skills {
+        if let Some(skills) = declared.launch.skill_location {
             host_config_roots.push(host_home.join(skills.fallback).join(skills.suffix));
         }
         host_config_roots.extend(
-            declared
+            declared.launch
                 .skill_install_roots
                 .iter()
                 .map(|root| host_home.join(root)),

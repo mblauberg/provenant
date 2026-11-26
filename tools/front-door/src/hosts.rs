@@ -135,7 +135,8 @@ fn installed_sign_ins(
             let spec = provenant_records::AdapterSpec::get(name)?;
             let executable = executable(spec.identity.binary)?;
             let account_dir = spec
-                .default_account_directory
+                .accounts
+                .default_directory
                 .map(|(env, fallback)| {
                     host_var(env)
                         .map(PathBuf::from)
@@ -143,7 +144,7 @@ fn installed_sign_ins(
                 })
                 .unwrap_or_else(|| home.to_owned());
             let state = provenant_providers::host::local_signin(
-                spec.login.login_reprobe,
+                spec.login.reprobe,
                 executor,
                 &executable,
                 home,

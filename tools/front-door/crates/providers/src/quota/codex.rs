@@ -24,8 +24,7 @@ fn status(
 ) -> QuotaStatus {
     let blocked = codex_credit_blocked(payload) || codex_credits_unspendable(payload);
     let can_use_credits = !blocked
-        && provenant_records::AdapterSpec::get(adapter)
-            .is_some_and(|spec| spec.accounts.quota_credits)
+        && provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.quota.credits)
         && details
             .is_some_and(|details| super::positive_balance(details.credit_balance.as_deref()));
     super::status_from_windows(

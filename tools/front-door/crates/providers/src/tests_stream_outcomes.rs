@@ -230,11 +230,11 @@ fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dy
     for (raw, terminal) in [(fixture!("codex/success.jsonl"), true), ("", false)] {
         let outcome = replay(&codex::Codex, raw, exit)?.1;
         assert_eq!(outcome.status(), OutcomeStatus::Failed);
-        assert_eq!(outcome.terminal(), terminal);
+        assert_eq!(outcome.terminal_event_seen(), terminal);
         assert_eq!(outcome.exit(), exit);
         let record = serde_json::to_value(&outcome)?;
         assert_eq!(
-            record.get("terminal"),
+            record.get("terminal_event_seen"),
             Some(&serde_json::Value::Bool(terminal))
         );
         assert_eq!(record.get("exit"), Some(&serde_json::to_value(exit)?));
@@ -243,9 +243,9 @@ fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dy
 }
 #[test]
 fn settlement_follows_the_declared_terminal_event() -> Result<(), ProviderError> {
-    // The command row declares terminal_event = None: a clean process exit is
+    // The command row declares terminal_event = Absent: a clean process exit is
     // the contract, but no provider terminal event is claimed. The fabricated
-    // terminal for raw output is gone, so `terminal()` is false here.
+    // terminal for raw output is gone, so `terminal_event_seen()` is false here.
     for (exit, expected) in [
         (EXIT, OutcomeStatus::Success),
         (
@@ -266,7 +266,7 @@ fn settlement_follows_the_declared_terminal_event() -> Result<(), ProviderError>
         let outcome = replay(&command::Command, "some output\n", exit)?.1;
         assert_eq!(outcome.status(), expected, "exit={exit:?}");
         assert!(
-            !outcome.terminal(),
+            !outcome.terminal_event_seen(),
             "raw output claims no provider terminal event"
         );
     }
@@ -274,7 +274,7 @@ fn settlement_follows_the_declared_terminal_event() -> Result<(), ProviderError>
     // provider terminal event stays Partial.
     let outcome = replay(&codex::Codex, "{\"type\":\"turn.started\"}\n", EXIT)?.1;
     assert_eq!(outcome.status(), OutcomeStatus::Partial);
-    assert!(!outcome.terminal());
+    assert!(!outcome.terminal_event_seen());
     Ok(())
 }
 #[test]

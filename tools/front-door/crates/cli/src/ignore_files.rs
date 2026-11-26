@@ -93,7 +93,7 @@ pub fn launch_warnings(
     adapter: &AdapterSpec,
     host_state: &Path,
 ) -> Vec<String> {
-    if adapter.ignore_files.is_empty() {
+    if adapter.launch.ignore_files.is_empty() {
         return Vec::new();
     }
     let Ok(relative) = worktree.strip_prefix(checkout) else {

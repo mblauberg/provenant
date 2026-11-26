@@ -1072,7 +1072,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
         } else {
             let error = result.unwrap_err();
             if AdapterSpec::get(adapter).is_some_and(|spec| {
-                spec.capabilities.answering_model.value == provenant_records::ModelObservation::SessionDatabase
+                spec.capabilities.answering_model.value == provenant_records::AnsweringModelSource::SessionDatabase
             }) {
                 assert!(matches!(
                     &error,
@@ -1178,7 +1178,7 @@ fn opencode_host_continuation_uses_the_recorded_host_store_by_session_id()
     // the account identity a continuation must carry.
     let account_key = provenant_records::AdapterSpec::get("opencode")
         .ok_or("opencode adapter spec")?
-        .local_account
+        .accounts.local_entry
         .1;
     let route = ResolvedRoute {
         selection_context: Default::default(),

@@ -351,8 +351,8 @@ pub fn list(
                 }))
                 .chain(
                     provenant_records::AdapterSpec::get(m.model.adapter())
-                        .filter(|s| s.local_login)
-                        .map(|s| s.local_account.1.to_owned()),
+                        .filter(|s| s.login.local)
+                        .map(|s| s.accounts.local_entry.1.to_owned()),
                 )
                 .collect();
             accounts
@@ -858,7 +858,7 @@ fn pacing_policy(catalogue: &Catalogue, config: &RoutingConfig, model: &ModelId)
         return *policy;
     }
     let key = provenant_records::AdapterSpec::get(model.adapter())
-        .and_then(|spec| spec.accounts.pacing_keys)
+        .and_then(|spec| spec.quota.pacing_keys)
         .map_or(model.adapter(), |(free, paid)| {
             if catalogue.is_free_model(model) {
                 free
@@ -959,7 +959,7 @@ fn window_matches(
         PacingWindow::Daily => window.window_seconds == Some(86_400) || name.ends_with("daily"),
         PacingWindow::Rolling => {
             provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                spec.accounts.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                spec.quota.probe == provenant_records::QuotaProbeKind::LocalLedger
             }) && (name.ends_with("five_hour") || name.ends_with("rolling"))
         }
     }
@@ -1147,7 +1147,7 @@ fn pace_snapshot_factor(
             let reset = match window.resets_unix_seconds {
                 Some(reset) if reset > now => reset,
                 None if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                    spec.accounts.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                    spec.quota.probe == provenant_records::QuotaProbeKind::LocalLedger
                 }) && snapshot
                     .details
                     .as_ref()
@@ -1233,7 +1233,7 @@ fn pacing_factor_basis_points(
         expiry.map(|e| format!(" until={e}")).unwrap_or_default()
     );
     let detail = match (
-        provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.grouped_quota_pools),
+        provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.quota.grouped_pools),
         context.catalogue.quota_pool(model),
     ) {
         (true, Some(pool)) => format!("{detail} quota_pool={pool}"),
@@ -1243,7 +1243,7 @@ fn pacing_factor_basis_points(
         _ => detail,
     };
     let detail = if provenant_records::AdapterSpec::get(model.adapter())
-        .and_then(|spec| spec.accounts.allowance_prefix)
+        .and_then(|spec| spec.quota.allowance_prefix)
         .is_some_and(|prefix| model.model().starts_with(prefix))
     {
         let observation = go_quota_observation(model, account, context);
@@ -1664,8 +1664,7 @@ fn pacing_reserve_window(
                 && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
                     || (window.resets_unix_seconds.is_none()
                         && provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                            spec.accounts.quota_probe
-                                == provenant_records::QuotaProbeKind::LocalLedger
+                            spec.quota.probe == provenant_records::QuotaProbeKind::LocalLedger
                         })
                         && snapshot
                             .details
@@ -2171,7 +2170,7 @@ fn model_pool_exhausted(
     pool: Option<&str>,
     now: i64,
 ) -> bool {
-    if !provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.grouped_quota_pools)
+    if !provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.quota.grouped_pools)
     {
         return false;
     }
@@ -2519,7 +2518,7 @@ fn normalised_effort<'e>(
     let dropped = effort.filter(|value| {
         crate::request::effort_valid(value)
             && provenant_records::AdapterSpec::get(model.adapter())
-                .is_some_and(|spec| spec.launch.drop_unsupported_effort)
+                .is_some_and(|spec| spec.launch.drop_unrecorded_effort)
             && context
                 .catalogue
                 .model(model)
@@ -2747,7 +2746,7 @@ fn candidate(
             requested: value.into(),
             applied: effort.map(str::to_owned),
             model: model.as_str().into(),
-            source: "adapter:drop_unsupported_effort".into(),
+            source: "adapter:drop_unrecorded_effort".into(),
             reason: "unsupported model effort dropped".into(),
         });
     } else if let Some((requested, source, reason)) = effort_gap {

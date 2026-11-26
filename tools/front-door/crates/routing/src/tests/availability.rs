@@ -919,7 +919,8 @@ fn registered_opencode_plans_select_independently_of_account_keys()
         .insert("opencode".into(), PacingPolicy::Pace);
     let spec = provenant_records::AdapterSpec::get("opencode").ok_or("adapter")?;
     let records: Vec<_> = spec
-        .account_model_plans
+        .accounts
+        .model_plans
         .iter()
         .enumerate()
         .map(|(index, plan)| AvailabilityRecord {

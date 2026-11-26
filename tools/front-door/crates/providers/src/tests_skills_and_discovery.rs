@@ -714,7 +714,7 @@ fn assert_applied_access(spec: &crate::LaunchSpec, home: &Path) {
 fn applied_access_matches_compiled_profile() -> Result<(), Box<dyn std::error::Error>> {
     for spec in provenant_records::ADAPTER_SPECS
         .iter()
-        .filter(|spec| spec.launch.skills.is_some())
+        .filter(|spec| spec.launch.skill_location.is_some())
     {
         assert_lane_user_skills(spec.identity.name)?;
     }

@@ -1,5 +1,5 @@
 use super::*;
-use provenant_records::ModelObservation;
+use provenant_records::AnsweringModelSource;
 use provenant_records::diagnostic::ContinuationCopyLimit;
 use provenant_records::diagnostic::{
     ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R,
@@ -342,7 +342,7 @@ pub(super) fn continuation_for_policy(
     if let Some(current_root) = opencode_data_root {
         if !AdapterSpec::get(&route.adapter).is_some_and(|spec| {
             spec.capabilities.answering_model.value
-                == provenant_records::ModelObservation::SessionDatabase
+                == provenant_records::AnsweringModelSource::SessionDatabase
         }) || !current_root.is_absolute()
         {
             return Err(ContinuationError::Provider(
@@ -367,7 +367,7 @@ pub(super) fn continuation_for_policy(
     }
     if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
         spec.capabilities.answering_model.value
-            == provenant_records::ModelObservation::SessionDatabase
+            == provenant_records::AnsweringModelSource::SessionDatabase
     }) {
         match super::observation::native_session_location_for_route(
             &prior_state,
@@ -394,7 +394,7 @@ pub(super) fn continuation_for_policy(
     }
     let mut policy = StateCopyPolicy::read(config_root, enforcement);
     let located = if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
-        spec.capabilities.answering_model.value == ModelObservation::SessionDatabase
+        spec.capabilities.answering_model.value == AnsweringModelSource::SessionDatabase
     }) {
         Some(super::observation::find_opencode_session(
             &prior_state,
@@ -437,7 +437,7 @@ pub(super) fn continuation_for_policy(
             &retained,
             private_state,
             policy,
-            AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.retention.copy_sessions_only),
+            AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.retention.sessions_only),
             lane_access,
             enforcement,
         )?,
@@ -471,7 +471,7 @@ pub(super) fn prior_uses_native_session_state(
     let spec = AdapterSpec::get(provider);
     let host_profile_session = spec.is_some_and(|spec| {
         spec.capabilities.answering_model.value
-            == provenant_records::ModelObservation::SessionDatabase
+            == provenant_records::AnsweringModelSource::SessionDatabase
     }) && provider_state.is_some_and(|provider_state| {
         applied
             .model
@@ -500,7 +500,7 @@ pub(super) fn prior_uses_native_session_state(
                 .as_ref()
                 .is_some_and(|receipt| !receipt.access.is_isolated()))
             && !AdapterSpec::get(provider).is_some_and(|spec| {
-                spec.capabilities.answering_model.value == ModelObservation::SessionDatabase
+                spec.capabilities.answering_model.value == AnsweringModelSource::SessionDatabase
             }))
 }
 
@@ -554,9 +554,9 @@ pub(super) fn verify_native_continuation(
     if prior_root != current_root {
         return Err(super::observation::NativeSessionLocationError::Mismatch(F::NativeHome).into());
     }
-    if AdapterSpec::get(&route.adapter)
-        .is_some_and(|spec| spec.capabilities.answering_model.value == ModelObservation::Rollout)
-    {
+    if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
+        spec.capabilities.answering_model.value == AnsweringModelSource::Rollout
+    }) {
         let observed = match provenant_providers::codex_rollout::observe(&prior_root, session) {
             Ok(observed) => observed,
             Err(
