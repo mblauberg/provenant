@@ -20,6 +20,7 @@ use provenant_records::{
 };
 use serde::Serialize;
 use std::ffi::OsStr;
+use std::os::unix::fs::DirBuilderExt;
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
@@ -2253,16 +2254,36 @@ fn installed_destination(targets: &provenant_config::Targets) -> PathBuf {
     targets.bin_dir.join(provenant_config::STABLE_BINARY_NAME)
 }
 
+/// Where the smoke fixture checkout is built. A peer can only name a project
+/// whose canonical common directory is relative to its own home: `ProjectLocator`
+/// strips `$HOME` and hashes that relative path into a cross-host key, so a
+/// fixture under `$TMPDIR` can never be projected and a remote smoke refuses at
+/// the first node. Keep every smoke scratch under a home-relative state path and
+/// create it owner-only, matching the private run-store layout. Factored out so
+/// the projectability invariant can be pinned by a unit test.
+fn smoke_scratch_root(home: &Path) -> Result<PathBuf, String> {
+    let root = home
+        .join(provenant_core::DEFAULT_STATE_SUFFIX)
+        .join("smoke");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)
+        .map_err(|error| format!("cannot prepare the smoke scratch root: {error}"))?;
+    Ok(root)
+}
+
 fn verify_smoke(
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
 ) -> Result<String, String> {
     let runner = runner_for_verify(targets)?;
+    let scratch = smoke_scratch_root(&targets.home)?;
     verify_smoke_with(
         &runner,
         &installed_destination(targets),
         targets.roots.state.as_path(),
-        &std::env::temp_dir(),
+        &scratch,
         args,
     )
 }
@@ -2615,9 +2636,11 @@ fn preview_smoke(
     runner: &UpgradeRunner,
     program: &Path,
     state_dir: &Path,
+    home: &Path,
     args: &cli::Upgrade,
 ) -> Result<Vec<u8>, String> {
-    let project = smoke_project(runner, &std::env::temp_dir())?;
+    let scratch = smoke_scratch_root(home)?;
+    let project = smoke_project(runner, &scratch)?;
     let binding = smoke_project_binding(state_dir, project.path());
     let graph = verify_graph_name();
     let argv = smoke_run_argv(
@@ -2836,7 +2859,13 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             }
         };
         let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("provenant"));
-        let output = preview_smoke(&runner, &program, targets.roots.state.as_path(), &args);
+        let output = preview_smoke(
+            &runner,
+            &program,
+            targets.roots.state.as_path(),
+            &targets.home,
+            &args,
+        );
         return match output {
             Ok(bytes) => {
                 let human = format!(

@@ -2,7 +2,15 @@
   "command": "console search",
   "data": {
     "coverage": {
-      "scope": "local"
+      "artifact_errors": [],
+      "bytes_scanned": 0,
+      "file_limit": 1000,
+      "files_scanned": 0,
+      "peers": "not_searched",
+      "per_artifact_bytes": 65536,
+      "restart": "If the cursor is invalid or stale, restart with the same query and filters without --cursor.",
+      "scope": "local",
+      "total_bytes": 8388608
     },
     "matches": [
       {
@@ -15,7 +23,8 @@
             "graph": "fixture",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "part": "result",
         "snippet": "…regenerated every fixture under tests/fixtures/console…"
@@ -30,7 +39,8 @@
             "graph": "fixture",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "part": "result",
         "snippet": "2 tests failed: fixture drift in board.json"
@@ -40,7 +50,7 @@
     "part": "result",
     "query": "fixture",
     "schema_version": 1,
-    "snapshot": "sha256:x",
+    "snapshot": "sha256:3536f522c7aba8935edc86aefdb256875c59f1f07f3a9510f284b6abf6f648df",
     "truncated": false
   },
   "error": null,

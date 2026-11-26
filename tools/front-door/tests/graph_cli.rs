@@ -2560,7 +2560,7 @@ fn explain_refuses_document_read_roots_outside_the_project() -> Result {
     Ok(())
 }
 
-// Spec: docs/specs/run-launch.md#writer-binding
+// Spec: docs/specs/cli.md#upgrade-verification
 #[test]
 fn upgrade_verify_dry_run_explains_a_scratch_project() -> Result {
     let rig = GraphProject::new()?;
@@ -2588,8 +2588,19 @@ fn upgrade_verify_dry_run_explains_a_scratch_project() -> Result {
         assert_eq!(row["status"], "pending_route", "{row}");
         assert_eq!(row["credential_admission"], "pending_route", "{row}");
         let path = Path::new(row["path"].as_str().ok_or("source path")?);
-        assert!(path.starts_with(scratch.canonicalize()?), "{row}");
-        assert!(!path.starts_with(home.canonicalize()?), "{row}");
+        // Issue #4101: a peer can only name a project relative to its home, so
+        // the smoke scratch moved from $TMPDIR to a home-relative state path.
+        let expected = home
+            .join(provenant_core::DEFAULT_STATE_SUFFIX)
+            .join("smoke");
+        assert!(
+            path.starts_with(expected.canonicalize()?),
+            "smoke scratch must be a home-relative state path: {row}"
+        );
+        assert!(
+            !path.starts_with(scratch.canonicalize()?),
+            "smoke scratch must not sit in the system temporary directory: {row}"
+        );
     }
     Ok(())
 }

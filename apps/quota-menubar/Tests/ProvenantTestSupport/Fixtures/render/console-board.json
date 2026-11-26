@@ -135,7 +135,9 @@
         "wait": {
           "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
           "lane_class": "read_only",
-          "waiting_for": "provider response"
+          "waiting_for": {
+            "kind": "admission"
+          }
         },
         "status": "running",
         "title": "Implement console overview"
@@ -369,7 +371,9 @@
         "wait": {
           "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
           "lane_class": "read_only",
-          "waiting_for": "launch: not yet handed to a guardian"
+          "waiting_for": {
+            "kind": "launch_preparation"
+          }
         },
         "status": "queued",
         "title": "Write the migration notes"

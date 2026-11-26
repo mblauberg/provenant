@@ -178,7 +178,10 @@ launch with no writer skips review with a sourced reason. Supply
 `--set diff_base=BASE` to override the review base; its source is shown in the
 warnings.
 The scratch
-project's host binding is removed when the verification ends, including on
+project is built under a home-relative state path rather than the system
+temporary directory, so a peer can project it as a cross-host project and the
+remote smoke reaches its reader; the `--dry-run` preview uses the same root.
+Its host binding is removed when the verification ends, including on
 failure, so the deleted fixture never
 becomes a registered project. The human view leads with one status line per host
 (`upgraded`, `verified` or `failed - reason`), the smoke host prints its graph
@@ -227,7 +230,9 @@ is still installed and the previous app is left untouched.
 Set `PROVENANT_APPS_DIR` to an absolute directory to keep the app somewhere
 other than `~/Applications`; install, upgrade, doctor and the installer all
 honour it. LaunchServices opens the console by bundle identifier regardless of
-the directory.
+the directory. When the directory moves, the installer warns if a bundle is
+still in `~/Applications`: it never removes the old bundle without the owner's
+say-so, but a leftover can still be launched and may be stale.
 
 ### Test a candidate binary
 

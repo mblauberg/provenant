@@ -262,7 +262,9 @@ sender's graph does not bind or provision a local worktree for that writer; its 
 the peer provisioning intent for replay. A graph reader without an explicit worktree or attempt
 directory uses its selected project as its source; `upgrade --verify` selects a temporary
 committed scratch project for its smoke graph and binds a fixed review range so no lens fails on
-an empty range. A remote reader binds the peer's **own** checkout HEAD, not the sender's pinned
+an empty range. That scratch lives under a home-relative state path so a peer can project it as a
+cross-host project and admit the graph; a fixture in `$TMPDIR` has no cross-host key and refuses
+before submission. A remote reader binds the peer's **own** checkout HEAD, not the sender's pinned
 commit: the sender's head names a commit in its scratch project that the peer clone may never
 have seen, and the source view materialiser refuses an absent commit rather than substituting a
 nearby ref. The peer's HEAD first parent supplies its review base; when Git evidence is missing,
