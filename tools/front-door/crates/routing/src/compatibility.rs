@@ -19,6 +19,19 @@ pub enum CompatibilityStatus {
     Unlisted,
 }
 
+impl CompatibilityStatus {
+    /// The wire spelling, shared by the matrix, `check` and launch warnings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Unsupported => "unsupported",
+            Self::Broken => "broken",
+            Self::VersionUnread => "version_unread",
+            Self::Unlisted => "unlisted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CompatibilityAssessment {
     pub adapter: String,
@@ -29,6 +42,27 @@ pub struct CompatibilityAssessment {
     pub recommended_range: Option<String>,
     #[serde(flatten)]
     pub source: Source,
+}
+
+impl CompatibilityAssessment {
+    /// The policy finding text: adapter, version, status, reason, issue and the
+    /// layer that set the status. `check` and launch preparation both use it.
+    pub fn detail(&self) -> String {
+        let mut detail = format!(
+            "{} {} is {}",
+            self.adapter,
+            self.version.as_deref().unwrap_or("an unreadable version"),
+            self.status.as_str()
+        );
+        if let Some(reason) = self.reason.as_deref() {
+            detail.push_str(&format!(": {reason}"));
+        }
+        if let Some(issue) = self.issue {
+            detail.push_str(&format!("; issue #{issue}"));
+        }
+        detail.push_str(&format!("; source={}", self.source.layer.as_str()));
+        detail
+    }
 }
 
 /// A three-part version. Missing minor and patch parts are zero.

@@ -1,10 +1,5 @@
 use super::*;
 use provenant_records::warning::{Warning, warn};
-use std::sync::OnceLock;
-
-/// Version probes are bounded by executable path, mtime and length for the
-/// life of this process. Source: crates/providers/src/version.rs.
-static VERSIONS: OnceLock<provenant_providers::version::VersionCache> = OnceLock::new();
 
 /// Resolve a provider or named command through the filtered requester PATH.
 pub(super) fn preparation_executable(
@@ -5124,50 +5119,28 @@ pub(super) fn prepare_candidates_inner(
         for warning in overlay_warnings {
             push_launch_warning(&mut route, warning.to_string());
         }
-        let cache = VERSIONS.get_or_init(provenant_providers::version::VersionCache::new);
         // The probe is a per-adapter host setting: when it is off we assess an
         // unreadable version and name the key in the reason, without running
         // the harness binary. The bound comes from the same settings row.
-        let probe_enabled = provider_settings.is_none_or(|settings| settings.version_probe);
-        let version = provider_settings
-            .filter(|settings| settings.version_probe)
-            .and_then(|settings| {
-                cache.read(
-                    &git_executor,
-                    &executable,
-                    &cwd,
-                    settings.version_probe_timeout(adapter.id()),
-                )
-            });
+        let (version, disabled) =
+            match provenant_providers::version::configured(adapter.id(), provider_settings) {
+                Ok(timeout) => (
+                    provenant_providers::version::shared().read(
+                        &git_executor,
+                        &executable,
+                        &cwd,
+                        timeout,
+                    ),
+                    None,
+                ),
+                Err(reason) => (None, Some(reason)),
+            };
         let mut assessment = compatible.assess(adapter.id(), version.as_deref());
-        if !probe_enabled {
-            assessment.reason = Some(format!(
-                "version probe disabled by providers.{}.version_probe",
-                adapter.id()
-            ));
+        if disabled.is_some() {
+            assessment.reason = disabled;
         }
         if let Some(code) = provenant_routing::compatibility::policy_code(assessment.status) {
-            use provenant_routing::compatibility::CompatibilityStatus as Status;
-            let status = match assessment.status {
-                Status::Supported => "supported",
-                Status::Unsupported => "unsupported",
-                Status::Broken => "broken",
-                Status::VersionUnread => "version_unread",
-                Status::Unlisted => "unlisted",
-            };
-            let mut detail = format!(
-                "{} {} is {}",
-                adapter.id(),
-                assessment.version.as_deref().unwrap_or("unknown"),
-                status
-            );
-            if let Some(reason) = &assessment.reason {
-                detail.push_str(&format!(": {reason}"));
-            }
-            if let Some(issue) = assessment.issue {
-                detail.push_str(&format!("; issue #{issue}"));
-            }
-            detail.push_str(&format!("; source={}", assessment.source.layer));
+            let detail = assessment.detail();
             match launch_policy.check(code, provenant_records::policy::Facts::violation(detail)) {
                 provenant_records::policy::Effect::Warn(warning) => {
                     push_launch_warning(&mut route, warning.message);

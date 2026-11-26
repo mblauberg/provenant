@@ -2639,10 +2639,11 @@ mod launch_tests {
             launch.resume,
             launch.write,
         ] {
-            assert!(!declaration.value, "{}", command.name);
+            let name = command.identity.name;
+            assert!(!declaration.value, "{name}");
             let AdapterFact { reason, source, .. } = declaration;
-            assert!(!reason.trim().is_empty(), "{}", command.name);
-            assert!(!source.trim().is_empty(), "{}", command.name);
+            assert!(!reason.trim().is_empty(), "{name}");
+            assert!(!source.trim().is_empty(), "{name}");
         }
         assert_eq!(
             command.capabilities.usage_attribution.value,
@@ -3203,7 +3204,7 @@ mod batch_invariant_tests {
         assert_ne!(fact.reason, ADAPTER_ROW_REASON, "{label}");
         assert!(!fact.reason.trim().is_empty(), "{label}");
         assert!(!fact.source.trim().is_empty(), "{label}");
-        source_exists(fact.source, front_door, label);
+        source_exists(fact.source, front_door, &label);
     }
 
     /// Invariant 1: every absent fact names a reason other than the row default

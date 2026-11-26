@@ -23,7 +23,6 @@ use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 const PROMPT: &str = "Reply with exactly one word: OK. Do not use tools, read files, change files, run commands or perform any other work.";
@@ -542,8 +541,6 @@ fn live(
     }
 }
 
-static VERSIONS: OnceLock<provenant_providers::version::VersionCache> = OnceLock::new();
-
 /// One harness-version finding, from the same assessment and policy check the
 /// launch path uses. The layer names the config row that set the status.
 #[derive(Clone, Debug, Serialize)]
@@ -566,23 +563,13 @@ impl Finding {
             "adapter={} version={} status={} reason={} issue={} source={} policy={}",
             self.adapter,
             self.version.as_deref().unwrap_or("-"),
-            status_text(self.status),
+            self.status.as_str(),
             self.reason.as_deref().unwrap_or("-"),
             self.issue
                 .map_or_else(|| "-".into(), |issue| issue.to_string()),
             self.source.layer.as_str(),
             self.policy.as_deref().unwrap_or("-")
         )
-    }
-}
-
-fn status_text(status: CompatibilityStatus) -> &'static str {
-    match status {
-        CompatibilityStatus::Supported => "supported",
-        CompatibilityStatus::Unsupported => "unsupported",
-        CompatibilityStatus::Broken => "broken",
-        CompatibilityStatus::VersionUnread => "version_unread",
-        CompatibilityStatus::Unlisted => "unlisted",
     }
 }
 
@@ -662,7 +649,6 @@ fn compatibility_findings(
             caveats,
         });
     };
-    let cache = VERSIONS.get_or_init(provenant_providers::version::VersionCache::new);
     let mut findings = Vec::new();
     for spec in provenant_records::ADAPTER_SPECS {
         let Some(executable) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
@@ -672,41 +658,24 @@ fn compatibility_findings(
         else {
             continue;
         };
-        let settings = providers.get(spec.identity.name);
-        let probe_enabled = settings.is_none_or(|settings| settings.version_probe);
-        let version = settings
-            .filter(|settings| settings.version_probe)
-            .and_then(|settings| {
-                cache.read(
-                    &executor,
-                    &executable,
-                    state,
-                    settings.version_probe_timeout(spec.identity.name),
-                )
-            });
+        let (version, disabled) = match provenant_providers::version::configured(
+            spec.identity.name,
+            providers.get(spec.identity.name),
+        ) {
+            Ok(timeout) => (
+                provenant_providers::version::shared().read(&executor, &executable, state, timeout),
+                None,
+            ),
+            Err(reason) => (None, Some(reason)),
+        };
         let mut assessment = table.assess(spec.identity.name, version.as_deref());
-        if !probe_enabled {
-            assessment.reason = Some(format!(
-                "version probe disabled by providers.{}.version_probe",
-                spec.identity.name
-            ));
+        if disabled.is_some() {
+            assessment.reason = disabled;
         }
         let Some(code) = compatibility::policy_code(assessment.status) else {
             continue;
         };
-        let mut detail = format!(
-            "{} {} is {}",
-            assessment.adapter,
-            version.as_deref().unwrap_or("an unreadable version"),
-            status_text(assessment.status)
-        );
-        if let Some(reason) = assessment.reason.as_deref() {
-            detail.push_str(&format!(": {reason}"));
-        }
-        if let Some(issue) = assessment.issue {
-            detail.push_str(&format!("; issue #{issue}"));
-        }
-        detail.push_str(&format!("; source={}", assessment.source.layer.as_str()));
+        let detail = assessment.detail();
         let effect = policy.check(code, Facts::violation(detail));
         let blocks = effect.blocks();
         let policy = effect.message().map(str::to_owned);

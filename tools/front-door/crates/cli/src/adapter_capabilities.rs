@@ -14,7 +14,7 @@ use provenant_records::{
     control::ControlSupport,
     run::{AttemptState, NetworkAccess},
 };
-use provenant_routing::compatibility::{CompatibilityStatus, CompatibilityTable};
+use provenant_routing::compatibility::CompatibilityTable;
 use provenant_run::{LaneQuery, RunStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -275,16 +275,6 @@ fn network_name(value: NetworkAccess) -> &'static str {
     }
 }
 
-fn status_name(value: CompatibilityStatus) -> &'static str {
-    match value {
-        CompatibilityStatus::Supported => "supported",
-        CompatibilityStatus::Unsupported => "unsupported",
-        CompatibilityStatus::Broken => "broken",
-        CompatibilityStatus::VersionUnread => "version_unread",
-        CompatibilityStatus::Unlisted => "unlisted",
-    }
-}
-
 fn native(install: HarnessInstall) -> Value {
     json!({
         "hooks": bool_declaration(install.native.hooks),
@@ -491,7 +481,6 @@ pub fn matrix_with(
         provenant_config::policy::read(state, &project_key, &BTreeMap::new());
     let executor = SystemExecutor::new(1).ok();
     let cwd = project.unwrap_or(state);
-    let cache = provenant_providers::version::VersionCache::new();
     let measured = if settings.measurements.value {
         measurements(store, &settings)
     } else {
@@ -508,36 +497,25 @@ pub fn matrix_with(
             continue;
         }
         let provider_settings = providers.and_then(|map| map.get(spec.identity.name));
-        let configured_probe = provider_settings.is_none_or(|settings| settings.version_probe);
-        let version = if args.probe {
-            provider_settings
-                .filter(|settings| settings.version_probe)
-                .and_then(|settings| {
-                    executor
-                        .as_ref()
-                        .and_then(|executor| {
-                            which(spec.identity.binary).map(|binary| (executor, binary))
-                        })
-                        .and_then(|(executor, binary)| {
-                            cache.read(
-                                executor,
-                                &binary,
-                                cwd,
-                                settings.version_probe_timeout(spec.identity.name),
-                            )
-                        })
-                })
+        let (version, skipped) = if !args.probe {
+            (None, Some("probe skipped by --no-probe".to_owned()))
         } else {
-            None
+            match provenant_providers::version::configured(spec.identity.name, provider_settings) {
+                Ok(timeout) => (
+                    executor.as_ref().and_then(|executor| {
+                        which(spec.identity.binary).and_then(|binary| {
+                            provenant_providers::version::shared()
+                                .read(executor, &binary, cwd, timeout)
+                        })
+                    }),
+                    None,
+                ),
+                Err(reason) => (None, Some(reason)),
+            }
         };
         let mut assessment = table.assess(spec.identity.name, version.as_deref());
-        if !args.probe {
-            assessment.reason = Some("probe skipped by --no-probe".into());
-        } else if !configured_probe {
-            assessment.reason = Some(format!(
-                "version probe disabled by providers.{}.version_probe",
-                spec.identity.name
-            ));
+        if skipped.is_some() {
+            assessment.reason = skipped;
         }
         let effective = spec.with_overlay(&overlay);
         let overlay_block = overlay
@@ -563,7 +541,7 @@ pub fn matrix_with(
             },
             "compatibility": {
                 "version": assessment.version,
-                "status": status_name(assessment.status),
+                "status": assessment.status.as_str(),
                 "reason": assessment.reason,
                 "issue": assessment.issue,
                 "recommended_range": assessment.recommended_range,
@@ -869,15 +847,14 @@ mod tests {
         let resolved = resolve_config(&state, None).expect("config resolves");
         let settings = resolved.providers.get("codex").expect("codex settings");
         assert!(!settings.version_probe);
-        let mut assessment = CompatibilityTable::bundled().assess("codex", None);
-        if !settings.version_probe {
-            assessment.reason =
-                Some("version probe disabled by providers.codex.version_probe".to_owned());
-        }
-        assert_eq!(assessment.status, CompatibilityStatus::VersionUnread);
+        // The matrix, `check` and launch preparation share this decision.
         assert_eq!(
-            assessment.reason.as_deref(),
-            Some("version probe disabled by providers.codex.version_probe")
+            provenant_providers::version::configured("codex", Some(settings)),
+            Err("version probe disabled by providers.codex.version_probe".to_owned())
+        );
+        assert_eq!(
+            CompatibilityTable::bundled().assess("codex", None).status,
+            provenant_routing::compatibility::CompatibilityStatus::VersionUnread
         );
         Ok(())
     }

@@ -244,6 +244,7 @@ fn push_declaration(lines: &mut Vec<String>, label: &str, declaration: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn human_renders_no_values_with_reasons() {
