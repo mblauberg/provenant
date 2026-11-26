@@ -664,12 +664,21 @@ pub(super) fn validate_flat_plan(
         if routes.iter().any(|route| !route_is_bounded(route)) {
             return Err(node_plan_error(node, "route field size"));
         }
-        // Configured aliases resolve model providers, whose registry excludes host-native.
+        // A delegated-agent entry runs on the host's own provider login; every
+        // other adapter runs in its own lane. Read that from the registry row.
+        let delegated = |name: &str| {
+            provenant_records::AdapterSpec::get(name).is_some_and(|spec| {
+                spec.named_entry == provenant_records::NamedEntry::DelegatedAgent
+            })
+        };
         for (index, route) in routes.iter().enumerate() {
-            if route.adapter.as_deref() == Some("host-native")
-                && !routes[index + 1..]
-                    .iter()
-                    .any(|fallback| fallback.adapter.as_deref() != Some("host-native"))
+            if route.adapter.as_deref().is_some_and(delegated)
+                && !routes[index + 1..].iter().any(|fallback| {
+                    fallback
+                        .adapter
+                        .as_deref()
+                        .is_none_or(|name| !delegated(name))
+                })
             {
                 return Err(node_plan_error(
                     node,
@@ -682,7 +691,7 @@ pub(super) fn validate_flat_plan(
                 .adapter
                 .as_deref()
                 .and_then(provenant_records::AdapterSpec::get)
-                && let Err(error) = spec
+                && let Some(refusal) = spec
                     .check_launch(&provenant_records::LaunchRequest {
                         model: route.model.as_deref(),
                         effort: route.effort.as_deref(),
@@ -693,15 +702,9 @@ pub(super) fn validate_flat_plan(
                                 .is_some_and(|spec| !spec.write_roots.is_empty()),
                         ..Default::default()
                     })
-                    .first_as_error()
+                    .refusal()
             {
-                return Err(node_plan_error(
-                    node,
-                    format!(
-                        "{} is not supported by the route's adapter",
-                        error.field.name()
-                    ),
-                ));
+                return Err(node_plan_error(node, refusal.to_string()));
             }
         }
 

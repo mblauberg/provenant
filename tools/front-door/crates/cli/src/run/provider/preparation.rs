@@ -1,5 +1,10 @@
 use super::*;
 use provenant_records::warning::{Warning, warn};
+use std::sync::OnceLock;
+
+/// Version probes are bounded by executable path, mtime and length for the
+/// life of this process. Source: crates/providers/src/version.rs.
+static VERSIONS: OnceLock<provenant_providers::version::VersionCache> = OnceLock::new();
 
 /// Resolve a provider or named command through the filtered requester PATH.
 pub(super) fn preparation_executable(
@@ -237,17 +242,6 @@ fn resolve_pacing_source(
         PacingSettingSource::ShippedDefault
     };
     fact
-}
-
-pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
-    (!attachments.is_empty()
-        && !AdapterSpec::get(adapter)
-            .is_some_and(|spec| spec.capabilities.launch.image_input.value))
-    .then(|| {
-        format!(
-            "warning: adapter {adapter} does not support image_input; attachments remain readable"
-        )
-    })
 }
 
 fn opencode_access_message(access: &provenant_records::LaneAccessReceipt) -> String {
@@ -2151,7 +2145,7 @@ fn prepare_inner(
         && AdapterSpec::get(provider)
             .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::DelegatedAgent)
     {
-        AdapterSpec::get(provider)
+        let check = AdapterSpec::get(provider)
             .ok_or("unknown adapter")?
             .check_launch(&provenant_records::LaunchRequest {
                 resume: resume.is_some(),
@@ -2159,8 +2153,10 @@ fn prepare_inner(
                 network: task.access.network,
                 skill_location: task.profile.require_skill_location,
                 ..Default::default()
-            })
-            .first_as_error()?;
+            });
+        if let Some(decision) = check.refusal() {
+            return Err(PrepareError::Unsupported(decision.clone()));
+        }
         let roots = registry.roots.ok_or("routing context is unavailable")?;
         let config =
             crate::config_reads::read_for(roots, "run").map_err(|error| error.to_string())?;
@@ -4050,10 +4046,10 @@ pub(super) fn prepare_candidates_inner(
             continue;
         }
         if let Some(spec) = AdapterSpec::get(&route.adapter)
-            && let Err(error) = request
+            && let Some(error) = request
                 .intent
                 .check_launch(spec, &route.model, route.effort.as_deref())
-                .first_as_error()
+                .refusal()
         {
             reason_boundaries.insert(
                 reasons.len(),
@@ -5075,6 +5071,50 @@ pub(super) fn prepare_candidates_inner(
                 }
             }
         }
+        // Harness version compatibility is declared data: the bundled table is
+        // overlaid by host and project config, and the policy decides whether a
+        // status warns or blocks. No network fetch; probes are cached by file.
+        let (compatible, overlay_warnings) = provenant_routing::compatibility::Table::effective(
+            roots.state.as_path(),
+            Some(&source),
+        );
+        for warning in overlay_warnings {
+            push_launch_warning(&mut route, warning.to_string());
+        }
+        let cache = VERSIONS.get_or_init(provenant_providers::version::VersionCache::new);
+        let version = cache.read(&git_executor, &executable, &cwd);
+        let assessment = compatible.assess(adapter.id(), version.as_deref());
+        if let Some(code) = provenant_routing::compatibility::policy_code(assessment.status) {
+            use provenant_routing::compatibility::CompatibilityStatus as Status;
+            let status = match assessment.status {
+                Status::Supported => "supported",
+                Status::Unsupported => "unsupported",
+                Status::Broken => "broken",
+                Status::Unknown => "unknown",
+            };
+            let mut detail = format!(
+                "{} {} is {}",
+                adapter.id(),
+                assessment.version.as_deref().unwrap_or("unknown"),
+                status
+            );
+            if let Some(reason) = &assessment.reason {
+                detail.push_str(&format!(": {reason}"));
+            }
+            if let Some(issue) = assessment.issue {
+                detail.push_str(&format!("; issue #{issue}"));
+            }
+            detail.push_str(&format!("; source={}", assessment.source));
+            match launch_policy.check(code, provenant_records::policy::Facts::violation(detail)) {
+                provenant_records::policy::Effect::Warn(warning) => {
+                    push_launch_warning(&mut route, warning.message);
+                }
+                effect if effect.blocks() => {
+                    return Err(effect.message().unwrap_or(code).into());
+                }
+                _ => {}
+            }
+        }
         let credential_roots = plan.permissions().credential_roots.clone();
         let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh)
             && lane_access.access.is_isolated()
@@ -5646,8 +5686,19 @@ pub(super) fn prepare_candidates_inner(
             );
             push_launch_warning(&mut route, warning);
         }
-        if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
-            push_launch_warning(&mut route, warning);
+        let image_input = !task.access.attachments.is_empty();
+        if let Some(spec) = AdapterSpec::get(&route.adapter)
+            && let Some(decision) = spec
+                .check_launch(&provenant_records::LaunchRequest {
+                    image_input,
+                    ..Default::default()
+                })
+                .degraded(provenant_records::LaunchField::ImageInput)
+        {
+            push_launch_warning(
+                &mut route,
+                format!("warning: {decision}; attachments remain readable"),
+            );
         }
         // A read-only lane builds in its scratch by design. No writer launch
         // exports a target; warn if an adapter still points one into the lane's
@@ -6980,12 +7031,33 @@ mod user_skills_tests {
 mod attachment_tests {
     use super::*;
     #[test]
-    fn unsupported_image_input_warns_without_refusing() {
-        let images = vec![PathBuf::from("/outside/image.png")];
-        let warning = image_input_warning("cursor", &images).unwrap();
-        assert!(warning.contains("cursor") && warning.contains("image_input"));
-        assert!(image_input_warning("claude", &images).is_none());
-        assert!(image_input_warning("cursor", &[]).is_none());
+    fn unsupported_image_input_degrades_without_refusing() {
+        let request = provenant_records::LaunchRequest {
+            image_input: true,
+            ..Default::default()
+        };
+        let cursor = AdapterSpec::get("cursor").unwrap();
+        let decision = cursor
+            .check_launch(&request)
+            .degraded(provenant_records::LaunchField::ImageInput)
+            .expect("cursor declares no image input");
+        assert_eq!(decision.action, provenant_records::LaunchAction::Degrade);
+        let warning = format!("warning: {decision}; attachments remain readable");
+        assert!(warning.contains("cursor") && warning.contains("image input"));
+        assert!(warning.contains("source="));
+        let claude = AdapterSpec::get("claude").unwrap();
+        assert!(
+            claude
+                .check_launch(&request)
+                .degraded(provenant_records::LaunchField::ImageInput)
+                .is_none()
+        );
+        assert!(
+            cursor
+                .check_launch(&provenant_records::LaunchRequest::default())
+                .degraded(provenant_records::LaunchField::ImageInput)
+                .is_none()
+        );
     }
 }
 

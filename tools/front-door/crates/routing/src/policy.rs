@@ -997,8 +997,7 @@ mod tests {
             assert_eq!(
                 intent
                     .check_launch(&narrow, "model", None)
-                    .first_as_error()
-                    .err()
+                    .refusal()
                     .map(|e| e.field),
                 expected
             );

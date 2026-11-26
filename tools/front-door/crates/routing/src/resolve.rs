@@ -2217,17 +2217,6 @@ fn admissible<'c>(
         .find(|r| r.adapter.id() == model.adapter())
         .ok_or_else(|| RoutingError::unknown_adapter(model.adapter()))?;
     let entry = context.catalogue.model(model);
-    // Backstop for uncatalogued models; catalogued ones record their own efforts.
-    if let Some(effort) = effort
-        && let Some(spec) = provenant_records::AdapterSpec::get(model.adapter())
-        && !spec.capabilities.launch.effort.value
-    {
-        return Err(RoutingError::UnsupportedEffort {
-            model: model.as_str().to_owned(),
-            effort: effort.to_owned(),
-            support: format!("{} takes no effort control", spec.name),
-        });
-    }
     if entry.is_none()
         && let Some(effort) = effort
     {
@@ -2539,7 +2528,9 @@ fn candidate(
     for_pool: bool,
 ) -> Result<RouteAlternative, RoutingError> {
     check_declared_effort(model, effort, context)?;
-    let (effort, dropped_effort) = normalised_effort(model, effort, context);
+    let (mut effort, dropped_effort) = normalised_effort(model, effort, context);
+    // (requested effort, declaration source, declaration reason)
+    let mut effort_gap: Option<(String, &'static str, &'static str)> = None;
     let entry = admissible(model, effort, context)?;
     #[cfg(test)]
     let spec = context
@@ -2549,10 +2540,25 @@ fn candidate(
     #[cfg(not(test))]
     let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
     if let Some(spec) = spec {
-        intent
-            .check_launch(&spec, model.model(), effort)
-            .first_as_error()
-            .map_err(|error| RoutingError::UnsupportedLaunch(error.to_string()))?;
+        let check = intent.check_launch(&spec, model.model(), effort);
+        // A refusal or a missing model control makes the candidate ineligible:
+        // pools and fallbacks move on, and an exact pin reports the decision.
+        if let Some(decision) = check
+            .refusal()
+            .or_else(|| check.degraded(provenant_records::LaunchField::Model))
+        {
+            return Err(RoutingError::UnsupportedLaunch(decision.to_string()));
+        }
+        // A missing effort control degrades. Pools prefer a fallback; an exact
+        // route drops the selector and records the declaration in the envelope.
+        if let Some(decision) = check.degraded(provenant_records::LaunchField::Effort) {
+            let requested = effort.map(str::to_owned);
+            if for_pool {
+                return Err(RoutingError::UnsupportedLaunch(decision.to_string()));
+            }
+            effort_gap = Some((requested, decision.source, decision.reason));
+            effort = None;
+        }
     }
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
     // Several registered accounts may serve one adapter: take a ready one with
@@ -2734,6 +2740,15 @@ fn candidate(
             model: model.as_str().into(),
             source: "adapter:drop_unsupported_effort".into(),
             reason: "unsupported model effort dropped".into(),
+        });
+    } else if let Some((requested, source, reason)) = effort_gap {
+        diagnostics.effort_warning = Some(EffortWarning {
+            extra: Default::default(),
+            requested,
+            applied: None,
+            model: model.as_str().into(),
+            source: source.into(),
+            reason: reason.into(),
         });
     }
     if availability.is_none()

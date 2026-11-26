@@ -903,9 +903,6 @@ impl LaunchCheck {
             .iter()
             .find(|d| d.field == field && d.action == LaunchAction::Degrade)
     }
-    pub fn first_as_error(self) -> Result<(), LaunchDecision> {
-        self.decisions.into_iter().next().map_or(Ok(()), Err)
-    }
 }
 
 impl AdapterSpec {
@@ -2247,6 +2244,23 @@ mod launch_tests {
                 .decisions
                 .is_empty()
         );
+        let launch = command.capabilities.launch;
+        for declaration in [
+            launch.model,
+            launch.effort,
+            launch.image_input,
+            launch.resume,
+            launch.write,
+        ] {
+            assert!(!declaration.value, "{}", command.name);
+            let Declaration { reason, source, .. } = declaration;
+            assert!(!reason.trim().is_empty(), "{}", command.name);
+            assert!(!source.trim().is_empty(), "{}", command.name);
+        }
+        assert_eq!(
+            command.capabilities.usage_attribution.value,
+            UsageAttribution::Turn
+        );
         for (request, field) in [
             (
                 LaunchRequest {
@@ -2277,7 +2291,10 @@ mod launch_tests {
                 LaunchField::Write,
             ),
         ] {
-            assert_eq!(command.check_launch(&request).decisions[0].field, field);
+            let check = command.check_launch(&request);
+            let decision = &check.decisions[0];
+            assert_eq!(decision.field, field);
+            assert_eq!(decision.action, field.decision());
         }
     }
 
@@ -2367,7 +2384,7 @@ mod launch_tests {
 
     #[test]
     fn refusal_names_the_adapter_and_field() {
-        let error = AdapterSpec::get("command")
+        let decision = AdapterSpec::get("command")
             .unwrap()
             .check_launch(&LaunchRequest {
                 effort: Some("low"),
@@ -2375,12 +2392,20 @@ mod launch_tests {
             })
             .decisions
             .remove(0);
-        assert_eq!(error.adapter, "command");
-        assert_eq!(error.field, LaunchField::Effort);
+        let text = decision.to_string();
+        assert!(
+            text.starts_with("command does not support effort: "),
+            "{text}"
+        );
+        assert!(text.contains(decision.reason), "{text}");
+        assert!(
+            text.contains(&format!("source={}", decision.source)),
+            "{text}"
+        );
     }
 
     #[test]
-    fn declared_unsupported_modes_are_refused_by_field() {
+    fn declared_gaps_decide_by_field() {
         for spec in ADAPTER_SPECS {
             let capabilities = spec.capabilities.launch;
             let cases = [
@@ -2399,6 +2424,14 @@ mod launch_tests {
                     },
                     capabilities.effort.value,
                     LaunchField::Effort,
+                ),
+                (
+                    LaunchRequest {
+                        image_input: true,
+                        ..Default::default()
+                    },
+                    capabilities.image_input.value,
+                    LaunchField::ImageInput,
                 ),
                 (
                     LaunchRequest {
@@ -2427,20 +2460,33 @@ mod launch_tests {
             ];
             for (request, supported, field) in cases {
                 if !supported {
-                    assert_eq!(spec.check_launch(&request).decisions[0].field, field);
+                    let check = spec.check_launch(&request);
+                    let decision = &check.decisions[0];
+                    assert_eq!(decision.field, field, "{}", spec.name);
+                    assert_eq!(decision.action, field.decision(), "{}", spec.name);
+                    let text = decision.to_string();
+                    assert!(
+                        text.starts_with(&format!("{} does not support ", spec.name)),
+                        "{text}"
+                    );
+                    assert!(text.contains(field.name()), "{text}");
+                    assert!(text.contains(decision.reason), "{text}");
+                    assert!(
+                        text.contains(&format!("source={}", decision.source)),
+                        "{text}"
+                    );
                 }
             }
             for network in ALL_NETWORK {
                 if !capabilities.network.contains(network) {
-                    assert_eq!(
-                        spec.check_launch(&LaunchRequest {
+                    let decision = &spec
+                        .check_launch(&LaunchRequest {
                             network: Some(*network),
                             ..Default::default()
                         })
-                        .decisions[0]
-                            .field,
-                        LaunchField::Network
-                    );
+                        .decisions[0];
+                    assert_eq!(decision.field, LaunchField::Network, "{}", spec.name);
+                    assert_eq!(decision.action, LaunchAction::Refuse, "{}", spec.name);
                 }
             }
         }
