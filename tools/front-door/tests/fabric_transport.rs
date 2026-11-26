@@ -1600,7 +1600,12 @@ fn remote_smoke_executes_with_and_without_writer_and_stages_fixture() -> Result 
     let head = support::git(&rig, &["rev-parse", "HEAD"])?;
     assert_ne!(base, head);
     assert_eq!(support::git(&rig, &["merge-base", &base, &head])?, base);
-    std::fs::write(rig.project.join("fixture.txt"), "smoke fixture\n")?;
+    // The fact is carried only by the staged working file: neither tree nor
+    // the bundled template knows this token, so a lane that reconstructs the
+    // answer from the checkout cannot pass the read check below.
+    let nonce = provenant_os::fs::entropy_128()?;
+    let fact = format!("smoke fact {}", provenant_core::hex(&nonce[..8]));
+    std::fs::write(rig.project.join("fixture.txt"), format!("{fact}\n"))?;
 
     let bin = rig.root.join("provider/bin");
     std::fs::create_dir_all(&bin)?;
@@ -1615,7 +1620,7 @@ task=${1#Read the file at }
 task=${task% first and treat its full contents as your task instructions.}
 if grep -q 'Read the supplied fixture' "$task"; then
   fixture=$(sed -n 's/^Supplied fixture for this lane: \(.*\)\. Read it to answer the brief\.$/\1/p' "$task")
-  [ -n "$fixture" ] && [ "$(cat "$fixture")" = 'smoke fixture' ] || exit 3
+  [ -n "$fixture" ] && [ "$(cat "$fixture")" = "$SMOKE_EXPECTED_FACT" ] || exit 3
 fi
 if grep -q 'Review the change at its pinned head through' "$task"; then
   review_base=$(git rev-parse refs/provenant/review/base) || exit 5
@@ -1645,6 +1650,7 @@ printf '%s\n' '{"event":"result","result":{"conversation_id":"fixture","status":
     rig.env
         .push(("SMOKE_EXPECTED_BASE".into(), base.clone().into()));
     rig.env.push(("SMOKE_EXPECTED_HEAD".into(), head.into()));
+    rig.env.push(("SMOKE_EXPECTED_FACT".into(), fact.into()));
     let peer = loopback_peer(&mut rig)?;
     let diff_base = format!("diff_base={base}");
     for (name, writer) in [("smoke-skipped", false), ("smoke-provisioned", true)] {
