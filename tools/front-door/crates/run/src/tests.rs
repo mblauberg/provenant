@@ -2313,6 +2313,68 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
 }
 
 #[test]
+fn lanes_read_first_and_last_output_times_from_supervisor_checkpoint() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let first = WallTime::parse("2026-10-25T00:00:00.000000Z")?;
+    let last = WallTime::parse("2026-10-25T00:00:03.000000Z")?;
+    let directory = store.attempt_dir(input.attempt_id, true)?;
+    artifacts::seal(
+        &directory,
+        "process.json",
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "scope": {"run": input.attempt_id, "attempt": input.attempt_id, "generation": 0},
+            "first_output_at": first,
+            "last_output_at": last,
+            "priority": 15,
+            "publication_pending": false
+        }))?,
+        RECORD_LIMIT,
+    )?;
+    let record = store.record(input.attempt_id, &call)?;
+    assert_eq!(record.first_output_at, Some(first));
+    assert_eq!(record.last_output_at, Some(last));
+    Ok(())
+}
+
+#[test]
+fn absent_first_output_time_decodes_to_none() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let last = WallTime::parse("2026-10-25T00:00:03.000000Z")?;
+    let directory = store.attempt_dir(input.attempt_id, true)?;
+    artifacts::seal(
+        &directory,
+        "process.json",
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "scope": {"run": input.attempt_id, "attempt": input.attempt_id, "generation": 0},
+            "last_output_at": last,
+            "priority": 15,
+            "publication_pending": false
+        }))?,
+        RECORD_LIMIT,
+    )?;
+    let record = store.record(input.attempt_id, &call)?;
+    assert_eq!(record.first_output_at, None);
+    assert_eq!(record.last_output_at, Some(last));
+    Ok(())
+}
+
+#[test]
 fn process_checkpoint_for_another_scope_is_refused() -> TestResult {
     for checkpoint in [
         serde_json::json!({

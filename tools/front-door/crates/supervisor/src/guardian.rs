@@ -1394,6 +1394,7 @@ impl Driver<'_> {
             .is_ok();
         let mut last_output_bytes = 0_u64;
         let mut last_output_at: Option<WallTime> = None;
+        let mut first_output_at: Option<WallTime> = None;
         let mut last_activity_policy_ms: Option<u64> = None;
         let mut census_warning_active = false;
         let mut last_full_census_ms: Option<u64> = None;
@@ -1456,7 +1457,11 @@ impl Driver<'_> {
                 .saturating_add(err.outcome().total_bytes);
             if output_bytes != last_output_bytes {
                 last_output_bytes = output_bytes;
-                last_output_at = wall_now();
+                let observed_at = wall_now();
+                if first_output_at.is_none() {
+                    first_output_at = observed_at;
+                }
+                last_output_at = observed_at;
             }
             if exit.is_none()
                 && last_activity_policy_ms.is_none_or(|last| now.saturating_sub(last) >= 1_000)
@@ -1893,6 +1898,7 @@ impl Driver<'_> {
                     priority: Option<i32>,
                     phase: Phase,
                     last_output_at: Option<WallTime>,
+                    first_output_at: Option<WallTime>,
                     observed_at: Option<WallTime>,
                     publication_pending: bool,
                 }
@@ -1907,6 +1913,7 @@ impl Driver<'_> {
                     priority: child.priority,
                     phase: state.phase(),
                     last_output_at,
+                    first_output_at,
                     observed_at: None,
                     publication_pending: false,
                 };
