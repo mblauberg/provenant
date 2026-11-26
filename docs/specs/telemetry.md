@@ -56,6 +56,27 @@ folded into another, and a provider that reports no cache split is `missing` in
 the cache-read share, never a miss.
 - Why: a partial or zero-filled total reads as a real one.
 
+## Per-window value is measured, never filled in
+
+`telemetry value` is the only producer of plan value, effective rate and token
+totals by account. It joins the usage ledger with quota history: for each
+requested window it reports API-equivalent cost per full window and its trend,
+the value multiple against the plan price in force, the share unused at the last
+reset, a sample count and priced coverage. Credit accounts add a draw-down rate
+and days to exhaustion, or a named unavailable reason. The plan price and the
+window set are stated with the source that supplied them.
+
+An unused share is the last reading before the reset, labelled
+`observed_before_reset` with its timestamp and sample count; a reset with no
+reading before it is named unavailable. A reset, an unpriced bucket and an
+attribution gap are reported as such and never zero-filled: unpriced cost is a
+bound, and a failed optional read names its cause and degrades that field.
+Plan suggestions are expiring recommendations with evidence counts; nothing
+applies them.
+- Why: a full window priced from a partial window, or a guessed zero for an
+  unobserved reset, reads as a measurement that was never made.
+- Owner: `crates/telemetry/src/value.rs`, `crates/cli/src/telemetry_value.rs`
+
 ## Exact money and prices
 
 Cost accumulates in checked integers and rounds once; no floating point. Prices

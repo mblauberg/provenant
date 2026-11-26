@@ -18,9 +18,18 @@ chair session to an account, see [account switching](configuration.md#chair-acco
 - `telemetry stats [--since T]` is the default report, and `--json` carries the
   same summary rows. If a result is too large, narrow the time range.
 - `telemetry cost [TARGET] [--by route|account|model|graph|node]` is small enough
-  to call from inside a lane. `telemetry value` gives one row per account with a
-  quota reading and a configured plan; compare a full billing period before
-  acting on it.
+  to call from inside a lane. The `--by` list is declared once in `CostBy` and
+  checked against this line by a test; a new grouping must change both.
+- `telemetry value [--account LABEL] [--window POOL] [--since T]` gives one row
+  per account with a quota reading and a configured plan. Each requested window
+  carries `cost_per_full_window` (API-equivalent cost scaled from the observed
+  usage), `value_multiple` against the plan price in force, `unused_share_at_reset`
+  with its timestamp and sample count, and `trend` over completed windows. Every
+  figure states its coverage; an unpriced bucket is a named lower bound, never
+  zero. Credit accounts add `credit_runway` (draw-down per day and days to
+  exhaustion), or a named unavailable reason when the readings are missing.
+  `price_source` and `window_source` name where the defaults came from. Compare
+  a full billing period before acting on any of it.
 - `telemetry mileage` is what one quota point costs: it joins quota history with
   ingested usage, so run ingest first. Do not pass `--model`: quota deltas cover
   every model, so a model filter understates mileage.
@@ -75,4 +84,6 @@ added, so resolution is the refresh cadence. `provenant quota history [--account
 LABEL] [--since T] [--limit N]` lists readings.
 
 Record plan prices per account in `domains.accounts.entries.{id}.plans`, with an
-entry for each price change. Nothing converts currencies.
+entry for each price change. Nothing converts currencies. A free plan carries
+`notional_usd` so `telemetry value` can still state a value multiple; the
+multiple uses the notional, not a claim that the plan was paid for.
