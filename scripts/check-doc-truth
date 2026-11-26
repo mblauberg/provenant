@@ -439,25 +439,43 @@ def rust_comments(text):
 
 
 def check_spec_citations(root):
-    """Rust comments point to a living spec section; dangling links always fail."""
+    """Source comments and skill declarations point to a living spec section.
+
+    Rust comments and the `Spec:` lines in bundled skills use the same spelling
+    and the same strict check, so a skill contract cannot drift from the spec
+    that declares it. Dangling links always fail.
+    """
     cache, errors = {}, 0
+
+    def validate(source, line, reference):
+        nonlocal errors
+        target = re.fullmatch(r"(docs/specs/[\w.-]+\.md)#([^#]+)", reference)
+        valid = False
+        if target:
+            path = root / target[1]
+            if path.is_file():
+                if path not in cache:
+                    cache[path] = heading_anchors(path.read_text())
+                valid = unquote(target[2]) in cache[path]
+        if not valid:
+            warn(source, line, "spec citation", reference or "Spec: (missing target)", "error")
+            errors += 1
+
     for source in sorted((root / "tools/front-door").rglob("*.rs")):
         text = source.read_text()
         for offset, comment in rust_comments(text):
             for match in re.finditer(r"(?<![\w:])Spec:(?!:)\s*([^\s*]+)?", comment):
                 reference = (match[1] or "").strip("`.,;()[]{}")
-                target = re.fullmatch(r"(docs/specs/[\w.-]+\.md)#([^#]+)", reference)
-                valid = False
-                if target:
-                    path = root / target[1]
-                    if path.is_file():
-                        if path not in cache:
-                            cache[path] = heading_anchors(path.read_text())
-                        valid = unquote(target[2]) in cache[path]
-                if not valid:
-                    line = text.count("\n", 0, offset + match.start()) + 1
-                    warn(source.relative_to(root), line, "spec citation", reference or "Spec: (missing target)", "error")
-                    errors += 1
+                line = text.count("\n", 0, offset + match.start()) + 1
+                validate(source.relative_to(root), line, reference)
+    for source in sorted((root / "skills").glob("*/SKILL.md")):
+        text = source.read_text()
+        for match in re.finditer(r"(?<![\w:])Spec:(?!:)\s*([^\s`*]+)?", text):
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            if text[line_start:match.start()].count("`") % 2:
+                continue  # an example in inline code, not a declaration
+            reference = (match[1] or "").strip("`.,;()[]{}")
+            validate(source.relative_to(root), text.count("\n", 0, match.start()) + 1, reference)
     return errors
 
 

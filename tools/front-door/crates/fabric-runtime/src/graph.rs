@@ -1508,8 +1508,64 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
     positions: &mut std::collections::BTreeMap<String, usize>,
     observed_ci: &mut std::collections::BTreeSet<String>,
 ) -> Result<GateStep, GraphError<R::Error, J::Error>> {
-    let node = &plan.nodes[node_index];
     let mut replan_error = None;
+    let node = &plan.nodes[node_index];
+    // A split verdict on one head goes to one adjudication node. The patch adds
+    // no round, so the gate waits for the adjudicator instead of failing into a
+    // fresh repair cycle. Only the gate that consumes the split panel admits it.
+    if let Some((parent, revision)) = repair::split_adjudication(&*checkpoint)
+        && node.depends_on.contains(&parent)
+    {
+        let library = template::TemplateLibrary::bundled();
+        let resolvers = Default::default();
+        let change = repair::split_verdict_patch(&parent, revision);
+        let result = (|| -> Result<_, String> {
+            let mut prospective = checkpoint.clone();
+            patch::admit_patch(
+                &mut patch::LiveGraph {
+                    document,
+                    checkpoint: &mut prospective,
+                },
+                Some(&parent),
+                &change,
+                &patch::PatchContext {
+                    catalogue: None,
+                    library: &library,
+                    resolvers: &resolvers,
+                    journal: None,
+                    limits,
+                    worktree_layout: worktree_layout.clone(),
+                },
+            )
+            .map_err(|error| error.message)?;
+            let preview = plans::expand(
+                document,
+                &prospective.extensions,
+                &prospective.expansions,
+                limits,
+            )
+            .map_err(|error| error.to_string())?;
+            let (new_plan, new_positions) = validate_flat_plan(&preview, &plans::generous())
+                .map_err(|error| error.to_string())?;
+            owner
+                .validate_expansion(&preview, &prospective)
+                .map_err(|error| error.to_string())?;
+            Ok((prospective, preview, new_plan, new_positions))
+        })();
+        match result {
+            Ok((prospective, preview, new_plan, new_positions)) => {
+                journal.save(&prospective).map_err(GraphError::Journal)?;
+                *checkpoint = prospective;
+                *expanded = preview;
+                *plan = new_plan;
+                *positions = new_positions;
+                return Ok(GateStep::Reschedule);
+            }
+            Err(error) => {
+                replan_error = Some(format!("split adjudication patch refused: {error}"));
+            }
+        }
+    }
     let reported = repair::growth_in_round(node, &*plan, &*checkpoint, &*positions);
     let mut growth = reported;
     if repair::is_repair_gate(node, &*plan, &*positions) {
@@ -4211,11 +4267,24 @@ fn gate_failure(
             threshold,
             ..
         } => {
+            // A split was resolved by one adjudication node; the gate reads that
+            // single verdict instead of the panel's conflicting reduction.
+            let adjudication = checkpoint.nodes.iter().find_map(|progress| {
+                (progress.id.contains("adjudicate") && progress.state == NodeState::Succeeded)
+                    .then(|| {
+                        progress
+                            .outputs
+                            .as_ref()
+                            .and_then(|outputs| outputs.verdict.clone())
+                    })
+                    .flatten()
+            });
             for input in &node.inputs {
-                if let Some(error) = checkpoint.nodes[positions[&input.node]]
-                    .outputs
-                    .as_ref()
-                    .and_then(|outputs| outputs.verdict_error.as_ref())
+                if adjudication.is_none()
+                    && let Some(error) = checkpoint.nodes[positions[&input.node]]
+                        .outputs
+                        .as_ref()
+                        .and_then(|outputs| outputs.verdict_error.as_ref())
                 {
                     return Some(format!("input {}: {error}", input.node));
                 }
@@ -4224,10 +4293,14 @@ fn gate_failure(
                 .inputs
                 .iter()
                 .filter(|input| {
-                    checkpoint.nodes[positions[&input.node]]
-                        .outputs
-                        .as_ref()
-                        .and_then(|outputs| outputs.verdict.as_ref())
+                    adjudication
+                        .as_deref()
+                        .or_else(|| {
+                            checkpoint.nodes[positions[&input.node]]
+                                .outputs
+                                .as_ref()
+                                .and_then(|outputs| outputs.verdict.as_deref())
+                        })
                         .is_some_and(|actual| {
                             use provenant_records::workflow::ReviewVerdict;
                             match (

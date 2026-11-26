@@ -486,6 +486,23 @@ extension never adds rounds twice.
 - Why: repeated review and repair needs bounded admission and a human decision at
   the bound.
 
+### Fix-round invariants and split-verdict adjudication
+
+A blocking finding names the invariant it breaks in its top-level `class`. A
+finding without one is warned first at settlement; a blocking finding without
+one is refused. A fix round returns invariants, not patched sites: for each
+invariant its `repair_item` carries the sweep query it ran, every site it changed
+and the test that pins the invariant. Round two reviews only the repair delta
+against those named invariants, never a fresh full panel; a lens may raise a new
+invariant, which then follows the same contract. Two distinct findings with the
+same invariant are one shared flaw and route to the principal design continuation.
+A split verdict on one head goes to one adjudication node that returns a single
+verdict; the split itself never starts another round, though an upheld
+changes-request legitimately needs repair.
+- Why: writers patch named sites and repeat a flaw elsewhere unless the invariant
+  is named and swept; lens verdicts drift when a panel re-runs without a shared
+  rubric, and no node resolved a split verdict.
+
 ### Node asks and decide nodes
 
 The inbox owns the question and answer; graph checkpoints link to it, and replay

@@ -60,6 +60,19 @@ changes verdict with the reason on the pull request; a dispute at a real
 boundary or over data loss needs a test or a second lens. After a shared flaw
 or a third round, ask whether the design is wrong.
 
+A blocking finding names the invariant it breaks: set the top-level `class` on
+every finding to that invariant, so a repeated flaw is recognised by cause and
+routes to principal design rather than another patch round. A fix round returns
+invariants, not patched sites: for each invariant the writer sweeps for every
+site, changes them all and reports `sweep`, `sites` and `pin` in its
+`repair_items`, where `pin` names the test that holds the invariant. Round two
+reviews that delta against the named invariants, not a fresh full panel. A
+split verdict on one head goes to one adjudication node and returns one verdict;
+the split does not start another round, though an upheld changes-request still
+needs repair.
+
+Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+
 ## Work without CI
 
 - **Research:** `research` gathers sourced claims, each with a source, a date

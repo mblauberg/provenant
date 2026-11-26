@@ -699,7 +699,7 @@ fn outputs(
             ReviewVerdict::Inconclusive => 2,
             ReviewVerdict::RequestChanges => 3,
         };
-        let verdict = exporting_members(spec, positions)
+        let verdicts: Vec<_> = exporting_members(spec, positions)
             .into_iter()
             .map(|index| &checkpoint.nodes[index])
             .filter(|member| member.state == NodeState::Succeeded)
@@ -718,7 +718,27 @@ fn outputs(
                     })
                     .unwrap_or(ReviewVerdict::Inconclusive)
             })
-            .max_by_key(|verdict| rank(*verdict));
+            .collect();
+        // A split on one head is not a fresh review round: the single
+        // adjudication node resolves it. Flag the split so a reduced verdict
+        // is never silently treated as an agreed changes-request.
+        // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+        let split = verdicts
+            .iter()
+            .any(|verdict| *verdict == ReviewVerdict::RequestChanges)
+            && verdicts.iter().any(|verdict| {
+                matches!(
+                    verdict,
+                    ReviewVerdict::Approve | ReviewVerdict::ApproveWithNits
+                )
+            });
+        if split && selected.warnings.len() < MAX_WARNINGS {
+            selected.warnings.push(bounded(
+                "review_split_verdict: conflicting verdicts on one head go to the adjudicator, not a new round",
+                WARNING_BYTES,
+            ));
+        }
+        let verdict = verdicts.into_iter().max_by_key(|verdict| rank(*verdict));
         selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
         selected.verdict_error = None;
     }

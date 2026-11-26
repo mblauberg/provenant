@@ -213,6 +213,55 @@ pub(super) fn panel_patch(parent: &str, commit: &str, revision: u64) -> patch::P
     }
 }
 
+/// One adjudication node resolves a split verdict on one head. The patch adds
+/// only that node after the panel: no loop, no round, no second panel. An
+/// upheld changes-request still needs repair, which the adjudicator declares.
+/// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+pub(super) fn split_verdict_patch(parent: &str, revision: u64) -> patch::Patch {
+    let adjudicate = serde_json::json!({
+        "id": "adjudicate",
+        "kind": "adjudicate",
+        "access": "read_only",
+        "after": [parent],
+        "inputs": [{"node": parent, "outputs": ["verdict", "findings"]}],
+        "require_findings": true,
+        "required_verdict": "VERDICT: PASS",
+        "prompt": "Read only. The panel above reported conflicting verdicts on one head. Resolve the split once: weigh each finding against the code and the named invariant in its top-level `class`. Return every input finding in the findings block with its id and invariant preserved, then exactly one verdict. Do not re-run a full panel or start another review round. If a blocking finding is upheld, name the invariant it breaks and say that repair is required; an upheld changes-request legitimately needs a repair round, but the split itself does not. Give VERDICT: PASS only when no blocking finding survives adjudication, otherwise VERDICT: FAIL or VERDICT: INCONCLUSIVE."
+    });
+    patch::Patch {
+        schema_version: patch::PATCH_SCHEMA_VERSION,
+        expected_revision: Some(revision),
+        idempotency_key: Some(format!(
+            "split-adjudicate:{}",
+            CanonicalV1::file_digest(parent.as_bytes())
+        )),
+        reason: Some("split verdict on one head".into()),
+        nodes: vec![adjudicate],
+        ..Default::default()
+    }
+}
+
+/// A settled panel that flagged a split and has no adjudication node yet.
+pub(super) fn split_adjudication(checkpoint: &GraphCheckpoint) -> Option<(String, u64)> {
+    if checkpoint
+        .nodes
+        .iter()
+        .any(|node| node.id.contains("adjudicate"))
+    {
+        return None;
+    }
+    let parent = checkpoint.nodes.iter().find(|node| {
+        node.state == NodeState::Succeeded
+            && node.outputs.as_ref().is_some_and(|outputs| {
+                outputs
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with("review_split_verdict:"))
+            })
+    })?;
+    Some((parent.id.clone(), patch::revision(checkpoint)))
+}
+
 pub(super) fn replan_source<'a>(
     node: &PlannedNode,
     checkpoint: &'a GraphCheckpoint,
@@ -500,13 +549,34 @@ fn same_finding(left: &Finding, right: &Finding) -> bool {
         && left.lens == right.lens
 }
 
+/// Two distinct findings that name the same invariant are one shared flaw,
+/// whether or not a reviewer remembered to set the boolean. The named class is
+/// the cause the design path keys on, so a repeated invariant routes to design
+/// even when the boolean was omitted.
+/// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn shared_flaw(findings: &[&Finding]) -> bool {
-    findings.iter().any(|finding| {
+    if findings.iter().any(|finding| {
         finding
             .triage
             .as_ref()
             .is_some_and(|triage| triage.shared_flaw)
-    })
+    }) {
+        return true;
+    }
+    let mut owners: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for finding in findings {
+        let Some(invariant) = finding.named_invariant() else {
+            continue;
+        };
+        if owners
+            .get(invariant)
+            .is_some_and(|owner| *owner != finding.id.as_str())
+        {
+            return true;
+        }
+        owners.entry(invariant).or_insert(finding.id.as_str());
+    }
+    false
 }
 
 fn design_cannot_hold(outputs: &NodeOutputs) -> bool {
@@ -883,5 +953,47 @@ mod tests {
         let patch = panel_patch("review", &"a".repeat(40), 2);
         assert_eq!(patch.nodes[0]["use"], "review-panel");
         assert_eq!(patch.nodes[0]["distinct_strength"], "prefer");
+    }
+    #[test]
+    // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+    fn split_verdict_patch_creates_one_adjudicator_and_no_round() {
+        let patch = split_verdict_patch("panel", 2);
+        assert_eq!(patch.nodes.len(), 1);
+        assert_eq!(patch.nodes[0]["kind"], "adjudicate");
+        assert_eq!(patch.nodes[0]["after"][0], "panel");
+        assert!(patch.nodes[0].get("loop").is_none());
+        assert!(patch.nodes[0].get("repeat").is_none());
+        assert!(patch.idempotency_key.is_some());
+    }
+    #[test]
+    fn split_adjudication_detects_a_flagged_panel_once() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"split","nodes":[
+                {"id":"panel","access":"read_only","prompt":"review","route":{"alias":"fixture"}}
+            ]
+        }))
+        .unwrap();
+        let (plan, _) =
+            validate_flat_plan(&document, &crate::config::GraphLimits::default()).unwrap();
+        let mut checkpoint = transitions::initial_checkpoint(
+            &document,
+            &plan,
+            CanonicalV1::file_digest(b"split").to_string(),
+            None,
+            None,
+            None,
+        );
+        assert!(split_adjudication(&checkpoint).is_none());
+        checkpoint.nodes[0].state = NodeState::Succeeded;
+        checkpoint.nodes[0].outputs = Some(NodeOutputs {
+            warnings: vec!["review_split_verdict: conflicting verdicts on one head".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            split_adjudication(&checkpoint),
+            Some(("panel".into(), patch::revision(&checkpoint)))
+        );
+        checkpoint.nodes[0].id = "panel--adjudicate".into();
+        assert!(split_adjudication(&checkpoint).is_none());
     }
 }

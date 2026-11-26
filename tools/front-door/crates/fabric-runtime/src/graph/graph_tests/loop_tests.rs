@@ -314,8 +314,18 @@ fn loop_admission_counts_every_round_before_any_launch() {
         ..Default::default()
     };
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
-    let error = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap_err();
-    assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+    let error = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        GraphError::Candidate(CandidateError::Structural(_))
+    ));
     assert!(journal.0.is_none());
     assert!(owner.calls.is_empty());
 }
@@ -1072,16 +1082,48 @@ fn loop_default_host_allows_one_to_two_round_extension() {
 #[test]
 fn loop_extension_refusals_keep_the_rule_and_identifier() {
     let mut document = fixture("extend");
-    document.nodes[0].loop_body.as_mut().unwrap().max_extension_rounds = 1;
+    document.nodes[0]
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .max_extension_rounds = 1;
     let limits = crate::config::GraphLimits::default();
     let mut journal = MemoryJournal::default();
-    advance_with_budget(&document, &mut reviews(&["VERDICT: FAIL"]), &mut journal, &limits, &Default::default()).unwrap();
+    advance_with_budget(
+        &document,
+        &mut reviews(&["VERDICT: FAIL"]),
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
     let mut checkpoint = journal.0.clone().unwrap();
     checkpoint.extensions.push("loop.revise.rounds=2".into());
-    for (value, rule) in [("loop.revise.rounds=02", refusal::ExtensionRule::NonIncreasing), ("loop.revise.rounds=4", refusal::ExtensionRule::MaxExtensionRounds)] {
+    for (value, rule) in [
+        (
+            "loop.revise.rounds=02",
+            refusal::ExtensionRule::NonIncreasing,
+        ),
+        (
+            "loop.revise.rounds=4",
+            refusal::ExtensionRule::MaxExtensionRounds,
+        ),
+    ] {
         let before = checkpoint.clone();
-        let error = match admit_candidate(&document, Some(&checkpoint), &[value.into()], &limits, &Default::default(), None) { Ok(_) => panic!("expected refusal"), Err(error) => error };
-        let CandidateError::Extension(cause) = error else { panic!("expected extension refusal") };
+        let error = match admit_candidate(
+            &document,
+            Some(&checkpoint),
+            &[value.into()],
+            &limits,
+            &Default::default(),
+            None,
+        ) {
+            Ok(_) => panic!("expected refusal"),
+            Err(error) => error,
+        };
+        let CandidateError::Extension(cause) = error else {
+            panic!("expected extension refusal")
+        };
         assert_eq!(cause.rule, rule);
         assert_eq!(cause.loop_id.as_deref(), Some("revise"));
         assert!(!cause.next_action().is_empty());
@@ -1104,10 +1146,18 @@ fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
     )
     .unwrap();
     let paused = resume_with_budget(
-        &document, &mut reviews(&[]), &mut journal, &limits,
-        &Default::default(), &["loop.revise.rounds=3".into()],
-    ).unwrap();
-    assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+        &document,
+        &mut reviews(&[]),
+        &mut journal,
+        &limits,
+        &Default::default(),
+        &["loop.revise.rounds=3".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        paused.checkpoint.pause_cause(),
+        Some(PauseCause::StructuralLimit)
+    );
     assert_eq!(journal.0.as_ref(), Some(&paused.checkpoint));
     assert!(paused.checkpoint.extensions.is_empty());
     let accepted = extension(
@@ -2175,8 +2225,15 @@ fn confirmed_should_fix_on_the_default_path_runs_a_repair_writer() {
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
-    let nodes: Vec<_> = owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
-    assert_eq!(nodes, vec!["initial", "repair--r1--fix", "repair--r1--check"]);
+    let nodes: Vec<_> = owner
+        .calls
+        .iter()
+        .map(|call| call.0.node_id.as_str())
+        .collect();
+    assert_eq!(
+        nodes,
+        vec!["initial", "repair--r1--fix", "repair--r1--check"]
+    );
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
             .unwrap()
@@ -2270,6 +2327,41 @@ fn checked_shared_flaw_at_first_round_routes_to_design() {
     let document = review_repair_document();
     let finding = repair_finding(false).replace("\"shared_flaw\":false", "\"shared_flaw\":true");
     let mut owner = repair_reviews(&[&finding, "structural alternative"]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "repair")
+            .unwrap()
+            .gate
+            .as_ref()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("checked findings share a design flaw")
+    );
+
+    // The class is the named invariant: two distinct findings that name the
+    // same invariant are one shared flaw even without the boolean.
+    let shared = |id: &str, file: &str| {
+        serde_json::json!({
+            "id":id,"lens":"correctness","severity":"high","file":file,"line":1,
+            "class":"input boundary","summary":"constraint","status":"open",
+            "evidence":"counterexample","proposed_fix":"repair","design_defect":false,
+            "trigger":{"sequence":"invoke the default operation","reach":"default_path","observed":true},
+            "triage":{"decision":"confirmed","reason":"counterexample reproduced","worth_fixing":true,
+                "root_cause":"constraint","blocking_class":"default_path_defect","shared_flaw":false}
+        })
+    };
+    let report = format!(
+        "```findings\n{}\n```\nVERDICT: FAIL",
+        serde_json::json!({"schema_version":1,"findings":[shared("F1","a.rs"), shared("F2","b.rs")]})
+    );
+    let mut owner = repair_reviews(&[&report, "structural alternative"]);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert!(run.checkpoint.successful());
     assert_eq!(owner.calls.len(), 2);

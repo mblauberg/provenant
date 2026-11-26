@@ -1172,6 +1172,9 @@ pub enum NodeKind {
     Composite,
     Task,
     Synthesise,
+    /// Resolves conflicting per-head review verdicts into one verdict without
+    /// starting another review round.
+    Adjudicate,
     Gate,
     Loop,
     Decide,
@@ -1377,6 +1380,15 @@ pub struct RepairItem {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alternative: Option<String>,
+    /// The sweep query the writer ran to find every site of this invariant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<String>,
+    /// Every site the writer changed while pinning this invariant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sites: Option<Vec<String>>,
+    /// The test that pins this invariant so a recurrence is caught.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1677,6 +1689,15 @@ impl Finding {
 
     pub fn triage(&self) -> Option<FindingTriage> {
         self.triage.clone()
+    }
+
+    /// The named invariant this finding breaks. `class` is the single field
+    /// the review contract uses for the invariant name; it is what shared-flaw
+    /// routing and settlement checks key on.
+    pub fn named_invariant(&self) -> Option<&str> {
+        self.class
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
     }
 
     pub fn boundary_or_data_loss(&self) -> bool {

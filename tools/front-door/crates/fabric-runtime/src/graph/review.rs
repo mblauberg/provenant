@@ -220,6 +220,95 @@ pub(super) fn repair_result_error(
     None
 }
 
+/// Round two and later review the repair delta against the named invariants.
+/// An unnamed finding is flagged first as a warning; a blocking finding with
+/// no invariant is refused at settlement.
+/// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+fn delta_round(node: &PlannedNode) -> bool {
+    node.round.as_ref().is_some_and(|round| round.round >= 2)
+        && (template::review_behaviour(node).is_some() || repair_writer(node))
+}
+
+pub(super) fn invariant_warnings(node: &PlannedNode, outputs: &NodeOutputs) -> Vec<String> {
+    if !delta_round(node) {
+        return Vec::new();
+    }
+    outputs
+        .findings
+        .iter()
+        .filter(|finding| finding.named_invariant().is_none())
+        .map(|finding| {
+            format!(
+                "finding_invariant_missing: {} names no invariant; warn first, refuse when it blocks",
+                finding.id
+            )
+        })
+        .collect()
+}
+
+pub(super) fn invariant_error(
+    node: &PlannedNode,
+    outputs: &NodeOutputs,
+) -> Option<(&'static str, String)> {
+    if !delta_round(node) {
+        return None;
+    }
+    let missing = outputs.findings.iter().find(|finding| {
+        finding.named_invariant().is_none() && repair::blocking_severity(finding)
+    })?;
+    Some((
+        "review_invariant_missing",
+        format!(
+            "blocking finding {} names no invariant; round-2 findings must name the invariant they break",
+            missing.id
+        ),
+    ))
+}
+
+/// A fix round returns, per invariant, the sweep it ran, every site it changed
+/// and the test that pins the invariant. A missing item is flagged at settlement.
+/// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+pub(super) fn repair_return_warnings(node: &PlannedNode, outputs: &NodeOutputs) -> Vec<String> {
+    if !repair_writer(node) {
+        return Vec::new();
+    }
+    let Some(items) = outputs.repair_items.as_ref() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let mut missing = Vec::new();
+            if item
+                .sweep
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                missing.push("sweep");
+            }
+            if item.sites.as_ref().is_none_or(|sites| {
+                sites.is_empty() || sites.iter().any(|site| site.trim().is_empty())
+            }) {
+                missing.push("sites");
+            }
+            if item
+                .pin
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                missing.push("pin");
+            }
+            (!missing.is_empty()).then(|| {
+                format!(
+                    "repair_invariant_return_missing: {} has no {}",
+                    item.id,
+                    missing.join(", ")
+                )
+            })
+        })
+        .collect()
+}
+
 /// A malformed verdict gets one isolated, checkpointed correction. Expansion
 /// history survives resets and restarts, so it is also the retry fence.
 pub(super) fn correct_verdict(
