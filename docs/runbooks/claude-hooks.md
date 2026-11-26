@@ -54,6 +54,15 @@ and `## Now` (up to 1 KiB) remain intact; the rest of the checkpoint excerpt is
 then trimmed with a notice. A fresh checkpoint with nothing actionable omits the
 "no save needed by freshness policy" boilerplate but keeps the save command.
 
+A native subagent carries its own task prompt. When the hook payload includes a
+non-empty `agent_id` or agent transcript path, the chair lifecycle hooks abstain:
+`chair-start` neither consumes a handoff nor records chair attribution, and the
+advisory hooks emit no checkpoint or custody text. `agent_type` alone does not
+mark a subagent because Claude Code also sets it for top-level `--agent` sessions.
+Lanes were already excluded by their lane identity. The guard applies to every
+advisory event, so a subagent's compaction and stop hooks also leave the chair's
+checkpoint alone.
+
 ## Autosave and compaction
 
 - A hook never writes the chair's `checkpoint.md`; "settled since the last chair
