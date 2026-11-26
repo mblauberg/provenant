@@ -276,13 +276,11 @@ replayable authority.
 
 ### Build context
 
-Lanes have no Cargo shims and receive no host build context: they never
-compile, seed or admit a build. The chair's host-owned warm check and
-`provenant verify` tiers use the one `slots` strategy, bounded by
-`[admission.build].slots`; layered `build.*` ports are in
-[state](state.md#configuration). `.worktrees/.cargo/config.toml` is the single
-mechanism that disables lane cargo.
-- Why: one build model keeps lane custody independent of host compilation.
+Lane verification follows the project's `verify.lane` declarations and local
+policy. The chair's host-owned warm check and `provenant verify` tiers use the
+`slots` strategy, bounded by `[admission.build].slots`; layered `build.*` ports
+are in [state](state.md#configuration).
+- Why: one host build model keeps lane custody independent of host compilation.
 - Owner: `src/admit.rs`; `src/verify.rs`; `crates/run/src/build/`
 
 ## Permission policy
@@ -397,9 +395,18 @@ stay read-only to lanes. The host imports verified objects and moves the branch
 by compare-and-swap ([launch custody](run-launch.md#admission-and-custody)). The
 lane Git wrapper binds commands that implicitly target its worktree; commands
 with an explicit repository selector, other repositories and transport endpoints
-pass through unchanged.
-- Why: ordinary Git works in the lane while other lanes' refs and the host's Git
-  behaviour stay protected.
+pass through unchanged. The bound private Git directory is a registration below
+the attempt's private common directory (`worktrees/lane`), with its backlink and
+head, so `--git-dir` differs from `--git-common-dir` and `git worktree list`
+resolves the lane checkout. Tooling that clears `GIT_*` and re-enters through the
+shim still sees an ordinary registered linked worktree; refs, objects and the
+index stay in the attempt's private store. The wrapper unsets `LEFTHOOK` and
+warns then refuses `--no-verify` and `core.hooksPath` overrides before
+forwarding; a trailing value-taking option still reaches Git instead of
+aborting the wrapper.
+- Why: ordinary Git and repository checkout guards work in the lane while
+  hooks cannot be skipped and other lanes' refs and the host's Git behaviour
+  stay protected.
 
 ### Native environment and sandbox tool stores
 

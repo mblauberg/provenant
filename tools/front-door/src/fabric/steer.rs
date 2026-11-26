@@ -261,6 +261,7 @@ pub(super) fn dispatch_pending_steers(
             attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
             text: queued.text.clone(),
             operation_id: Some(queued.operation_id.clone()),
+            now: queued.now,
         };
         let address = Address::new(queued.requester_host, &queued.requester_agent)
             .map_err(|_| FacadeError::StateCorrupt)?;
@@ -309,6 +310,27 @@ pub(super) fn dispatch_pending_steers(
         journal.save(checkpoint)?;
     }
     Ok(warnings)
+}
+
+/// A `--now` steer for a running attempt with no retained session is a terminal
+/// refusal, not temporary custody contention: retrying would queue an intent
+/// nothing can resume. The owner leaves the attempt running.
+pub(super) fn steer_session_unavailable(
+    error: &provenant_fabric_runtime::relay::ServiceError,
+) -> bool {
+    use provenant_fabric_runtime::{inbox::InboxError, relay::ServiceError};
+    fn from_inbox(error: &InboxError) -> bool {
+        match error {
+            InboxError::Mutation { source, .. } => from_inbox(source),
+            InboxError::SteerSessionUnavailable => true,
+            _ => false,
+        }
+    }
+    match error {
+        ServiceError::Mutation { source, .. } => steer_session_unavailable(source),
+        ServiceError::Inbox(error) => from_inbox(error),
+        _ => false,
+    }
 }
 
 pub(super) fn steer_delivery_unavailable(

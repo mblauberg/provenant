@@ -311,12 +311,31 @@ pub struct VerifyPort {
     pub runners: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub affected: VerifyAffectedPort,
+    /// Commands and their scope for a writer lane, declared by the project.
+    #[serde(default)]
+    pub lane: Vec<VerifyLaneCheck>,
     /// Cheap repository checks a writer runs before pushing. They need no
-    /// build, so a lane may run them even though it otherwise only formats.
+    /// build and supplement the declared lane verification commands.
     /// Invalid entries are dropped with a typed warning at the writer preamble,
     /// not refused here: they are advice to the writer, not a launch gate.
     #[serde(default)]
     pub static_checks: Vec<VerifyStaticCheck>,
+}
+
+/// One lane verification command, with its tier and applicability.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyLaneCheck {
+    pub tier: String,
+    pub argv: Vec<String>,
+    pub scope: String,
+}
+
+impl VerifyLaneCheck {
+    pub fn is_valid(&self) -> bool {
+        !self.tier.trim().is_empty()
+            && !self.scope.trim().is_empty()
+            && self.argv.first().is_some_and(|program| !program.is_empty())
+    }
 }
 
 /// One no-build check declared under `verify.static_checks` of a port layer.
