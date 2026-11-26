@@ -1149,7 +1149,7 @@ impl PrepareError {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
-                cause: cause,
+                cause,
                 terminal_note: note,
                 message,
                 host_message: None,

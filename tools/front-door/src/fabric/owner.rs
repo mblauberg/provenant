@@ -5495,7 +5495,7 @@ impl BoundGraphOwner<'_> {
                     ),
                     stop,
                     settlement_class: attempt.settlement_class,
-                    cause: attempt.state.cause(),
+                    cause: attempt.state.cause().map(Box::new),
                 })
             }
             _ => Ok(AttemptObservation::Pending {

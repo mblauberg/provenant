@@ -258,6 +258,10 @@ fn transport(error: &ServiceError) -> bool {
     )
 }
 
+#[allow(
+    clippy::print_stderr,
+    reason = "the declaration command reports validation errors on stderr"
+)]
 fn print_invalid(message: &str, data: &Value) {
     let Some(items) = data.get("dropped").and_then(Value::as_array) else {
         eprintln!("{message}");
@@ -274,6 +278,11 @@ fn print_invalid(message: &str, data: &Value) {
 }
 
 /// Process edge: one declaration, one receipt, no prose fallback.
+#[allow(
+    clippy::print_stderr,
+    clippy::print_stdout,
+    reason = "the declaration command writes diagnostics to stderr and the receipt JSON to stdout"
+)]
 pub fn run(command: DeclareArgs, globals: &crate::Globals) -> u8 {
     let Some(parent) = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID).ok() else {
         eprintln!("{}", DeclarationError::NotInLane);
@@ -318,7 +327,7 @@ pub fn run(command: DeclareArgs, globals: &crate::Globals) -> u8 {
     let mut reply = call.relay_within(&socket, &cancel, timeout);
     // Every retry reuses the same request id, so a replay is idempotent.
     for _ in 1..settings.relay_attempts() {
-        if !reply.as_ref().is_err_and(|error| transport(error)) {
+        if !reply.as_ref().is_err_and(transport) {
             break;
         }
         reply = call.relay_within(&socket, &cancel, timeout);
