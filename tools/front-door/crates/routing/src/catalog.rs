@@ -293,6 +293,10 @@ impl From<FixedDeadline> for String {
 pub struct RoutingConfig {
     #[serde(skip)]
     pub launch_policy: provenant_records::policy::Policy,
+    /// Owner `[[adapter_capabilities]]` entries, applied by the composition
+    /// edge before routing. Routing itself performs no configuration I/O.
+    #[serde(skip)]
+    pub capability_overlay: provenant_records::CapabilityOverlay,
     #[serde(skip, default = "provenant_config::provider_defaults")]
     pub provider_scopes: BTreeMap<String, provenant_config::ProviderSettings>,
     /// Providers whose `models` restriction was supplied by the owner rather
@@ -435,6 +439,7 @@ impl Default for RoutingConfig {
                         .expect("bundled routing defaults are valid");
                 Self {
                     launch_policy: Default::default(),
+                    capability_overlay: Default::default(),
                     provider_scopes: provenant_config::provider_defaults(),
                     explicit_provider_model_scopes: BTreeSet::new(),
                     model_exclusions: asset.model_exclusions,
