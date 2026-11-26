@@ -345,6 +345,27 @@ external action warns and can be retried by adoption.
 
 - Why: a chair acting on a listing must see work still running.
 
+### Run explain reports peer placement
+
+`run --explain` resolves each node's declared host with the same placement rule
+that admits a launch: `local`, `localhost` and this host's id are local, a
+configured peer is remote, and an unknown host is refused. A writer placed on a
+peer carries only a branch and a base ref, so its `source_admission` row names
+the peer (`host`), the worktree that peer will provision from that branch
+(`path`) and `pending_registration`; credential admission stays `pending_route`.
+No caller checkout path is resolved or admitted for that writer, and the
+explanation is not refused for the caller's state root. Local writers keep their
+existing admission check and row shape.
+
+`upgrade --verify --dry-run` builds the `run smoke --explain` preview from the
+same argument builder as the real verify, including the writer's branch and
+base. A preview that named no base would resolve the writer's identity from the
+caller checkout and report a refusal the launch itself does not produce.
+
+- Why: an explanation of a peer launch must describe the peer's writer, not the
+  caller's checkout, and a dry run must show the writer placement it would run.
+- Owner: `tools/front-door/src/fabric/interface.rs`, `tools/front-door/src/install.rs`
+
 ### Output references and bounded tails
 
 `result NAME[/NODE[#N]]` reads current lane evidence in one call, and for a
