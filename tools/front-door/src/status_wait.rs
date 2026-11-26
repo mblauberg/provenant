@@ -2523,7 +2523,6 @@ pub(crate) fn run(
                         deadline,
                         pr_read_timeout,
                         &stop.cancel,
-                        workers,
                     ),
                     &label,
                     complete,
@@ -2586,7 +2585,6 @@ pub(crate) fn run(
                                             deadline,
                                             pr_read_timeout,
                                             &stop.cancel,
-                                            workers,
                                         )
                                     } else {
                                         event
@@ -2601,7 +2599,6 @@ pub(crate) fn run(
                                         deadline,
                                         pr_read_timeout,
                                         &stop.cancel,
-                                        workers,
                                     )
                                 }
                             }
@@ -2627,7 +2624,6 @@ pub(crate) fn run(
                                     deadline,
                                     pr_read_timeout,
                                     &stop.cancel,
-                                    workers,
                                 )
                             }
                             Ok(None) => continue,
@@ -2657,7 +2653,6 @@ pub(crate) fn run(
                                 deadline,
                                 pr_read_timeout,
                                 &stop.cancel,
-                                workers,
                             )
                         }
                     };
