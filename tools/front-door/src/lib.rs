@@ -32,7 +32,7 @@ mod event_delivery;
 mod events;
 mod gc_support;
 mod gc_sweep;
-mod handoff;
+mod session_handoff;
 mod hook_diagnostics;
 mod hook_state;
 mod hook_worktree;
