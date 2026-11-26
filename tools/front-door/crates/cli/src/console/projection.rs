@@ -19,9 +19,9 @@ use serde_json::{Value, json};
 /// One overview lane from an already projected attempt.
 pub fn overview_lane(
     project_id: &Value,
-    project_label: &str,
+    project_label: &impl Serialize,
     key: &Value,
-    task_label: &str,
+    task_label: &impl Serialize,
     attempt: &Value,
     queued_at: &Value,
     attention: bool,
@@ -462,7 +462,7 @@ pub fn search_snapshot(
     query: &str,
     part: &str,
     session: Option<&str>,
-    rows: &[Value],
+    rows: &[(ProjectId, String, u64)],
     scanned: usize,
     scan_bytes: u64,
     truncated: bool,
@@ -474,6 +474,26 @@ pub fn search_snapshot(
     )
     .map(|digest| digest.to_string())
     .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overview_lane_preserves_missing_task_title_as_null() {
+        let lane = overview_lane(
+            &json!("01010101010101010101010101010101"),
+            &"provenant",
+            &json!({"graph":"fixture","node":"task","attempt":1}),
+            &Option::<String>::None,
+            &json!({"attempt_id":"fixture","state":"queued"}),
+            &Value::Null,
+            false,
+        );
+
+        assert_eq!(lane["task_label"], Value::Null);
+    }
 }
 
 /// `output` data for one artifact byte range. The attempt identity and state
