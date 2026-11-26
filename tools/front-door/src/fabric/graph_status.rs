@@ -613,6 +613,10 @@ mod tests {
         use provenant_records::WorkKey;
         use serde_json::json;
 
+        let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "task", 1).unwrap();
+        let rows = vec![json!({"kind":"node", "work_key":key, "state":"waiting", "head":"abc123"})];
+        let digest = super::node_digests(&rows).remove(0);
+        assert!(digest.line.contains("head=abc123/recorded"));
     }
 
     #[test]
