@@ -727,7 +727,7 @@
   "domain_steer_settings": {
     "path": "domains.fabric.steer",
     "settings": {
-      "delivery": {"type": "enum", "allowed": "queued | now", "default": "queued", "effect": "How a steer reaches a running attempt: queued delivers at the next turn boundary without interrupting (the default); now requests a session-preserving restart through --now or this host default. provenant steer --explain shows the effective value and its source."},
+      "delivery": {"type": "enum", "effect": "How a steer reaches a running attempt: queued delivers at the next turn boundary without interrupting (the default); now requests a session-preserving restart through --now or this host default. provenant steer --explain shows the effective value and its source."},
       "fallback": {"type": "enum", "effect": "What to do when a stopped session is unavailable: start fresh with a handoff or refuse."},
       "restart_spacing_ms": {"type": "int", "allowed": "0 to 600000 milliseconds", "min": 0, "max": 600000, "default": "2000", "effect": "Minimum spacing between steer restarts; 0 disables the stagger."}
     }
