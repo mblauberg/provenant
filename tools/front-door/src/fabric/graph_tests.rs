@@ -641,6 +641,88 @@ mod graph_writer_admission_tests {
         assert_eq!(advancements.get(), 1);
     }
 
+    // Spec: docs/specs/cli.md#graph-wait-recovery. The plain `wait` reader must
+    // re-drive the journal-locked advance on a terminal remote reading; a tick
+    // alone cannot settle this graph within the wait's budget.
+    #[test]
+    fn a_terminal_remote_reading_settles_the_wait_without_a_tick()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::HostId;
+        use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus, NodeState};
+        use std::cell::Cell;
+
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"wait-remote-terminal","nodes":[{
+                "id":"writer","access":"worktree_write","worktree":"lane",
+                "prompt":"write code","route":{"adapter":"mock","model":"mock-model"}
+            }]
+        }))?;
+        let mut owner = MockWriterOwner::default();
+        let mut journal = MemoryJournal::default();
+        let settled = advance(&document, &mut owner, &mut journal)?;
+
+        let mut pending = settled.clone();
+        pending.status = GraphStatus::Pending;
+        pending.checkpoint.nodes[0].state = NodeState::Running;
+        let attempt = &mut pending.checkpoint.nodes[0].attempts[0];
+        attempt.state = AttemptState::Starting;
+        attempt.outcome = None;
+        let local_host = HostId::from_bytes([1; 16]);
+        let remote_host = HostId::from_bytes([2; 16]);
+        attempt.attempt_ref = Some(format!("{remote_host}/attempt"));
+
+        let target = super::unified::GraphTarget {
+            graph: pending.checkpoint.graph_id.clone(),
+            node: None,
+            attempt: None,
+        };
+        let mut rows = super::unified::status_rows(&pending, &target);
+        // The peer reading reported a finished attempt while this host's
+        // checkpoint still holds an unsettled node.
+        for row in rows.iter_mut().filter(|row| row["kind"] == "attempt") {
+            row["state"] = serde_json::json!("terminal");
+            row["outcome"] = serde_json::json!("succeeded");
+        }
+
+        let advances = Cell::new(0);
+        let recovered = super::unified::recover_after_remote_terminal(
+            &pending,
+            &target,
+            &mut rows,
+            local_host,
+            None,
+            || {
+                advances.set(advances.get() + 1);
+                Ok(settled.clone())
+            },
+        )?;
+        assert!(recovered, "a terminal remote reading must re-drive the advance");
+        assert_eq!(advances.get(), 1, "one terminal reading advances once");
+        assert_eq!(
+            rows.first().and_then(|row| row["state"].as_str()),
+            Some("complete"),
+            "the wait's next reading now settles the graph"
+        );
+
+        // No terminal remote attempt: the reader stays a reader and never
+        // takes the journal-locked advance path.
+        let mut local_rows = super::unified::status_rows(&pending, &target);
+        let untouched = super::unified::recover_after_remote_terminal(
+            &pending,
+            &target,
+            &mut local_rows,
+            remote_host,
+            None,
+            || {
+                advances.set(advances.get() + 1);
+                Ok(settled.clone())
+            },
+        )?;
+        assert!(!untouched);
+        assert_eq!(advances.get(), 1);
+        Ok(())
+    }
+
     #[test]
     fn submission_wait_names_last_remote_error_at_budget_end() {
         use provenant_core::{Clock, MonoTime, TestClock, WallTime};

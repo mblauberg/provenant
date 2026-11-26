@@ -71,6 +71,84 @@ pub(super) fn innermost_error_text(report: &str) -> (String, String) {
         })
 }
 
+/// Bound on the root cause's message inside a one-line host reason. The graph,
+/// node, code and next command are written after this bound, so a long checker
+/// note cannot clip the parts that tell the operator where to look.
+const SMOKE_CAUSE_BYTES: usize = 140;
+
+/// The root cause of a failed smoke graph, read from a checkpoint envelope in
+/// the failing child's report. A dependant blocked by an upstream node is not
+/// a cause: its `advance_code` is `upstream_blocked` and its `advance_note`
+/// begins `blocked by`. The cause owns a concrete code (prefer the owner's)
+/// and the detail that explains it.
+pub(super) struct SmokeCause {
+    pub graph: String,
+    pub node: String,
+    pub code: String,
+    pub message: String,
+}
+
+/// Select the node that caused a smoke graph to fail, never the blocked
+/// dependant whose own envelope carries the misleading `upstream_blocked`
+/// error. Both `run` and `status` envelopes carry the checkpoint; the newest
+/// one with a cause wins.
+pub(super) fn smoke_root_cause(report: &str) -> Option<SmokeCause> {
+    child_envelopes(report).into_iter().rev().find_map(|value| {
+        let checkpoint = &value["data"]["checkpoint"];
+        let graph = checkpoint["graph_id"].as_str()?;
+        let nodes = checkpoint["nodes"].as_array()?;
+        let is_dependant = |node: &serde_json::Value| {
+            node["advance_code"].as_str() == Some("upstream_blocked")
+                || node["advance_note"]
+                    .as_str()
+                    .is_some_and(|note| note.trim_start().starts_with("blocked by"))
+        };
+        let has_detail = |node: &serde_json::Value| {
+            node["advance_note"]
+                .as_str()
+                .is_some_and(|note| !note.trim().is_empty())
+        };
+        let cause = nodes
+            .iter()
+            .find(|node| {
+                has_detail(node) && node["advance_owner_code"].is_string() && !is_dependant(node)
+            })
+            .or_else(|| {
+                nodes
+                    .iter()
+                    .find(|node| has_detail(node) && !is_dependant(node))
+            })?;
+        let code = cause["advance_owner_code"]
+            .as_str()
+            .or_else(|| cause["advance_code"].as_str())
+            .filter(|code| !code.is_empty())
+            .unwrap_or("unknown");
+        Some(SmokeCause {
+            graph: graph.to_owned(),
+            node: cause["id"].as_str().unwrap_or("unknown").to_owned(),
+            code: code.to_owned(),
+            message: cause["advance_note"]
+                .as_str()
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        })
+    })
+}
+
+/// The one-line verify summary: the graph, the node that actually failed, its
+/// code and message, and the command that reads that graph. The cause is
+/// bounded before assembly so the next command survives the host reason cap.
+pub(super) fn smoke_failure_summary(report: &str) -> Option<String> {
+    let cause = smoke_root_cause(report)?;
+    let message = provenant_cli::bounded_text(&cause.message, SMOKE_CAUSE_BYTES);
+    Some(format!(
+        "smoke graph {} failed at {}: {}: {}; next: `provenant status {}`",
+        cause.graph, cause.node, cause.code, message, cause.graph
+    ))
+}
+
 /// Drop the executor's `Command failed (…): ` wrapper from a plain reason, so
 /// even a non-envelope failure names the cause rather than the exit status.
 pub(super) fn unwrap_command_failure(line: &str) -> &str {
@@ -83,11 +161,18 @@ pub(super) fn unwrap_command_failure(line: &str) -> &str {
 /// and message; otherwise fall back to the first meaningful line with its
 /// executor wrapper removed. Never a `Command failed` chain or a raw envelope.
 pub(super) fn first_error_line(output: &str) -> String {
-    let reason = child_envelopes(output)
-        .into_iter()
-        .filter_map(|value| innermost_error(&value))
-        .next_back()
-        .map(|(code, message)| format!("{code}: {message}"))
+    // A smoke graph checkpoint names the cause, not the dependant whose
+    // `upstream_blocked` envelope is the innermost error in the report. When
+    // the child carried that summary in its own envelope, no checkpoint is
+    // present here and the ordinary innermost reason is the summary already.
+    let reason = smoke_failure_summary(output)
+        .or_else(|| {
+            child_envelopes(output)
+                .into_iter()
+                .filter_map(|value| innermost_error(&value))
+                .next_back()
+                .map(|(code, message)| format!("{code}: {message}"))
+        })
         .unwrap_or_else(|| {
             let line = first_meaningful_line(output);
             unwrap_command_failure(&line).to_owned()
