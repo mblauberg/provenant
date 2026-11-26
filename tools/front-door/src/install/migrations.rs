@@ -31,6 +31,7 @@ const STEPS: &[&dyn Migration] = &[
     &RetireWarningMarkers,
     &ReadSourceLiveSpelling,
     &UsageLedgerV4,
+    &ProjectGrantKeys,
 ];
 
 /// `builtin` was the old spelling of the compiled-default layer. The shared
@@ -46,6 +47,10 @@ const NEW_PORTS_VERSION: u64 = 3;
 const OLD_PROJECT_KEY_LEN: usize = 64;
 /// A ProjectId spelling is the first 16 bytes of that same digest, in hex.
 const PROJECT_ID_HEX_LEN: usize = 32;
+/// The retired project key granted capabilities; the new spelling is `grants`,
+/// which no longer shares a word with what an adapter can do.
+const OLD_GRANTS_KEY: &str = "capabilities";
+const NEW_GRANTS_KEY: &str = "grants";
 
 fn is_old_project_key(name: &str) -> bool {
     name.len() == OLD_PROJECT_KEY_LEN
@@ -567,6 +572,132 @@ impl Migration for ReadSourceLiveSpelling {
     }
 }
 
+/// Rename `domains.lanes.projects.<id>.capabilities` to `grants` in
+/// `<state>/config.toml`. The document is edited structurally, so comments and
+/// unrelated keys survive, and is published atomically at mode 0600 just like
+/// a normal config edit. Returns whether the file changed and the projects
+/// that already hold both keys; those keep both values instead of guessing a
+/// winner, so a later install can retry after the owner resolves the clash.
+fn rewrite_project_grants(state_root: &Path) -> Result<(bool, Vec<String>), MigrationError> {
+    let path = state_root.join("config.toml");
+    let directory = match Directory::open_anchor(state_root) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok((false, Vec::new())),
+        Err(error) => {
+            return Err(MigrationError::new(format!(
+                "{}: {error}",
+                state_root.display()
+            )));
+        }
+    };
+    let bytes = match directory.read_stable(OsStr::new("config.toml"), Limits::CONFIG.max_bytes) {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => return Ok((false, Vec::new())),
+        Err(error) => return Err(MigrationError::new(format!("{}: {error}", path.display()))),
+    };
+    let text = String::from_utf8(bytes).map_err(|error| {
+        MigrationError::new(format!("{}: invalid UTF-8: {error}", path.display()))
+    })?;
+    let mut document: toml_edit::DocumentMut = text.parse().map_err(|error| {
+        MigrationError::new(format!("{}: invalid TOML: {error}", path.display()))
+    })?;
+    let projects = document
+        .get_mut("domains")
+        .and_then(|item| item.get_mut("lanes"))
+        .and_then(|item| item.get_mut("projects"))
+        .and_then(toml_edit::Item::as_table_like_mut);
+    let mut changed = false;
+    let mut conflicts = Vec::new();
+    if let Some(projects) = projects {
+        let names: Vec<String> = projects.iter().map(|(name, _)| name.to_owned()).collect();
+        for name in names {
+            let Some(project) = projects
+                .get_mut(&name)
+                .and_then(toml_edit::Item::as_table_like_mut)
+            else {
+                continue;
+            };
+            if !project.contains_key(OLD_GRANTS_KEY) {
+                continue;
+            }
+            if project.contains_key(NEW_GRANTS_KEY) {
+                conflicts.push(name);
+                continue;
+            }
+            if let Some(old) = project.remove(OLD_GRANTS_KEY) {
+                project.insert(NEW_GRANTS_KEY, old);
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        directory
+            .atomic_write_with_permissions(
+                OsStr::new("config.toml"),
+                ".config-",
+                document.to_string().as_bytes(),
+                0o600,
+                PublishMode::Replace,
+            )
+            .map_err(|error| MigrationError::new(format!("{}: {error}", path.display())))?
+            .require_durable()
+            .map_err(|error| MigrationError::new(format!("{}: {error}", path.display())))?;
+    }
+    Ok((changed, conflicts))
+}
+
+/// The project grant key was `capabilities`; grant resources to writer lanes
+/// under `grants` instead. There is no alias: install rewrites the host config
+/// once, and an unmigrated key warns as unknown rather than being read.
+struct ProjectGrantKeys;
+
+impl Migration for ProjectGrantKeys {
+    fn id(&self) -> &'static str {
+        "project-grant-keys"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        let path = state_root.join("config.toml");
+        match rewrite_project_grants(state_root) {
+            Ok((changed, conflicts)) => {
+                if changed {
+                    report.changed.push(path.display().to_string());
+                }
+                // A clash keeps both keys: neither value was guessed, and the
+                // warning leaves the step pending for the next install.
+                for name in conflicts {
+                    report.warnings.push(
+                        Warning::new(
+                            MIGRATION_STEP_FAILED,
+                            format!(
+                                "{} holds both capabilities and grants for project {name}; neither value was overwritten",
+                                path.display()
+                            ),
+                        )
+                        .subject(path.display().to_string())
+                        .repair(format!(
+                            "keep the value to use under domains.lanes.projects.{name}.grants, remove its capabilities key, then rerun `provenant install`; the step is idempotent"
+                        )),
+                    );
+                }
+            }
+            Err(error) => report.warnings.push(
+                Warning::new(
+                    MIGRATION_STEP_FAILED,
+                    format!("project grant keys could not be migrated: {error}"),
+                )
+                .subject(path.display().to_string())
+                .repair(format!(
+                    "repair {}, then rerun `provenant install`; the step is idempotent",
+                    path.display()
+                )),
+            ),
+        }
+        Ok(report)
+    }
+}
+
 /// Warning dedup moved from per-finding marker files to `warnings.sqlite3`.
 /// Remove only the two retired marker prefixes; leave every other state file.
 struct RetireWarningMarkers;
@@ -768,7 +899,8 @@ fn read_receipt(state_root: &Path) -> Result<Option<InstallReceipt>, String> {
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::{
-        AttemptScratchMove, PortConfigSourceSpellings, PortSourceSpellings, read_receipt, run_steps,
+        AttemptScratchMove, PortConfigSourceSpellings, PortSourceSpellings, ProjectGrantKeys,
+        read_receipt, run_steps,
     };
     use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
     use provenant_records::warning::{MIGRATION_STEP_FAILED, Warning, capture};
@@ -807,6 +939,20 @@ mod tests {
             }));
         }
         assert!(step.apply(root.path()).unwrap().changed.is_empty());
+    }
+
+    /// A merge that keeps only one side's migration silently drops the other's
+    /// state repair. Both colliding steps must stay registered exactly once.
+    #[test]
+    fn read_source_and_project_grant_steps_are_registered_once() {
+        let ids: Vec<&str> = super::STEPS.iter().map(|step| step.id()).collect();
+        for id in ["read-source-live", "project-grant-keys"] {
+            assert_eq!(
+                ids.iter().filter(|registered| **registered == id).count(),
+                1,
+                "{id} must be registered exactly once"
+            );
+        }
     }
 
     /// Spec: docs/specs/run-launch.md#lane-scratch-stays-outside-the-attempt-record
@@ -905,6 +1051,87 @@ mod tests {
         assert_eq!(value["schema_version"], json!(3));
         let again = PortSourceSpellings.apply(root.path()).expect("apply twice");
         assert!(again.changed.is_empty(), "second run must change nothing");
+    }
+
+    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
+    #[test]
+    fn project_grant_keys_are_renamed_once_without_overwriting_a_grant() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = root.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"schema_version = 1
+[domains.lanes.projects.writer]
+capabilities = ["postgres"] # keep this comment
+shared_paths = [".shared"]
+
+[domains.lanes.projects.both]
+capabilities = ["postgres"]
+grants = ["other"]
+
+[domains.lanes.projects.ready]
+grants = ["postgres"]
+"#,
+        )
+        .expect("write config");
+
+        let report = ProjectGrantKeys.apply(root.path()).expect("apply once");
+        assert_eq!(report.id, "project-grant-keys");
+        assert_eq!(report.changed, [config.display().to_string()]);
+        assert_eq!(report.warnings.len(), 1, "{report:?}");
+        assert!(
+            report.warnings[0].message.contains("project both"),
+            "{report:?}"
+        );
+        let text = std::fs::read_to_string(&config).expect("read config");
+        assert!(text.contains("# keep this comment"), "{text}");
+        let document: toml_edit::DocumentMut = text.parse().expect("parse config");
+        let projects = document["domains"]["lanes"]["projects"]
+            .as_table_like()
+            .expect("projects table");
+        let writer = projects
+            .get("writer")
+            .and_then(toml_edit::Item::as_table_like)
+            .expect("writer project");
+        assert!(!writer.contains_key("capabilities"), "{text}");
+        assert_eq!(
+            writer
+                .get("grants")
+                .and_then(toml_edit::Item::as_array)
+                .and_then(|array| array.iter().next())
+                .and_then(toml_edit::Value::as_str),
+            Some("postgres")
+        );
+        assert_eq!(
+            writer
+                .get("shared_paths")
+                .and_then(toml_edit::Item::as_array)
+                .and_then(|array| array.iter().next())
+                .and_then(toml_edit::Value::as_str),
+            Some(".shared")
+        );
+        let both = projects
+            .get("both")
+            .and_then(toml_edit::Item::as_table_like)
+            .expect("both project");
+        assert!(both.contains_key("capabilities"), "clash was kept: {text}");
+        assert_eq!(
+            both.get("grants")
+                .and_then(toml_edit::Item::as_array)
+                .and_then(|array| array.iter().next())
+                .and_then(toml_edit::Value::as_str),
+            Some("other")
+        );
+        assert_eq!(
+            std::fs::metadata(&config).expect("metadata").mode() & 0o777,
+            0o600
+        );
+
+        let again = ProjectGrantKeys.apply(root.path()).expect("apply twice");
+        assert!(again.changed.is_empty(), "second run must change nothing");
+        assert_eq!(again.warnings.len(), 1, "clash stays pending: {again:?}");
     }
 
     /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install

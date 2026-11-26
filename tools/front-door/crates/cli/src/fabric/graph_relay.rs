@@ -2316,6 +2316,13 @@ fn provision_in_context(
             return Err(WorktreeError::IdentityChanged);
         }
         worktrees::require_clean_worktree(context, &mut tree, cancel)?;
+        warn_lane_worktree_prepare(
+            context,
+            &ports,
+            tree.repo().private_dir(),
+            tree.path(),
+            cancel,
+        );
         return Ok(());
     }
     worktrees::create(
@@ -2350,8 +2357,42 @@ fn provision_in_context(
                 .map_err(|_| WorktreeError::RegistrationUnconfirmed)?;
             tree.repo().revalidate_identity()?;
         }
+        let tree = provenant_confinement::verify_worktree(context.repo, &created.path)?;
+        warn_lane_worktree_prepare(
+            context,
+            &ports,
+            tree.repo().private_dir(),
+            tree.path(),
+            cancel,
+        );
         Ok(())
     })
+}
+
+fn warn_lane_worktree_prepare(
+    context: &provenant_confinement::worktrees::WorktreeContext<'_>,
+    ports: &provenant_config::PortTable,
+    private_git: &provenant_os::fs::Directory,
+    path: &std::path::Path,
+    cancel: &CancelToken,
+) {
+    let env = provenant_run::build::prepare::lane_environment(context.home);
+    if let Err(error) = provenant_run::build::prepare::run_if_changed(
+        private_git,
+        &ports.build.prepare,
+        path,
+        &env,
+        WaitBudget::up_to(
+            context.clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(30_000_000),
+        ),
+        cancel,
+        context.clock,
+    ) {
+        provenant_fabric_runtime::custody::warning(format_args!(
+            "lane worktree preparation warning (build.prepare): {error}; worktree provisioning continues"
+        ));
+    }
 }
 
 /// Lane side: send `op` to the host relay of the attempt this lane runs as.
