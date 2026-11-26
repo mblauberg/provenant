@@ -656,8 +656,11 @@ _provenant_git_retryable_lock() {
             *) _provenant_git_cwd=$(pwd -P) || return 1
                _provenant_git_common=$_provenant_git_cwd/$_provenant_git_common ;;
         esac
+        # A bound lane pins GIT_INDEX_FILE in the common dir while its git-dir
+        # is the linked-worktree registration.
         case "$_provenant_git_command:$_provenant_git_lock_path" in
             add:"$_provenant_git_dir"/index.lock|commit:"$_provenant_git_dir"/index.lock) ;;
+            add:"$_provenant_git_common"/index.lock|commit:"$_provenant_git_common"/index.lock) ;;
             update-ref:"$_provenant_git_dir"/refs/*.lock|update-ref:"$_provenant_git_common"/refs/*.lock) ;;
             *) return 1 ;;
         esac
@@ -1187,6 +1190,22 @@ const UNBOUND: [&str; 9] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mirror the host's linked-worktree registration for a private Git store
+    /// that a fixture initialises directly.
+    fn lane_registration(common: &Path, worktree: &Path) -> std::io::Result<()> {
+        let registration = common
+            .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+            .join(provenant_core::LANE_GIT_REGISTRATION);
+        std::fs::create_dir_all(&registration)?;
+        std::fs::copy(common.join("HEAD"), registration.join("HEAD"))?;
+        std::fs::write(registration.join("commondir"), b"../..\n")?;
+        std::fs::write(
+            registration.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )?;
+        Ok(())
+    }
 
     fn test_hooks_path_reader(directory: &Path) -> std::io::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
@@ -1720,6 +1739,7 @@ mod tests {
         };
         init(&repo, false)?;
         init(&scratch.join("git-common"), true)?;
+        lane_registration(&scratch.join("git-common"), &repo)?;
         fs::create_dir_all(scratch.join("git-objects"))?;
         {
             use std::io::Write as _;
@@ -2066,6 +2086,7 @@ mod tests {
             }
         }
         init(&sibling_scratch.join("git-common"), true)?;
+        lane_registration(&sibling_scratch.join("git-common"), &repo)?;
         fs::create_dir_all(sibling_scratch.join("git-objects/info"))?;
         fs::write(
             sibling_scratch.join("git-objects/info/alternates"),

@@ -1190,10 +1190,14 @@ fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
         .compile(&json!({"id":"smoke", "use":"smoke"}))
         .unwrap();
     let composite = node.composite.unwrap();
+    // With no writer the fixture review, which compares the fixture change
+    // against its base, is the graph's result.
     assert_eq!(composite.exports.len(), 1);
     assert_eq!(composite.exports[0].node, "review-fixture");
     let children = composite.nodes;
     let by_id = |id: &str| children.iter().find(|node| node.id == id).unwrap();
+    // The writer runs before review so the review's node source is the smoke
+    // writer's scratch commit, never the caller checkout's commit.
     assert_eq!(
         children
             .iter()

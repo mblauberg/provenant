@@ -27,6 +27,13 @@ fn writer_plan_stages_scratch_missing_auth() -> Result<(), Box<dyn std::error::E
     writer_preparation_fixture(false, "missing")
 }
 
+// Spec: docs/specs/run-launch.md#layered-brief-preamble
+#[test]
+fn prepared_writer_route_receipt_contains_declared_static_checks_and_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(false, "static-checks")
+}
+
 #[test]
 fn writer_plan_stages_scratch_symlink_auth() -> Result<(), Box<dyn std::error::Error>> {
     writer_preparation_fixture(false, "symlink")
@@ -51,6 +58,26 @@ thread_local! {
 /// Record the fixture phase so a bare I/O error names where it came from.
 fn phase(name: &'static str) {
     PHASE.set(name);
+}
+
+/// Mirror the host's linked-worktree registration for a fixture that prepares
+/// its private Git store directly. A lane's `GIT_DIR` names this registration,
+/// so omitting it presents an unregistered worktree root to Git.
+fn prepare_lane_registration(
+    common: &Path,
+    worktree: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let registration = common
+        .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+        .join(provenant_core::LANE_GIT_REGISTRATION);
+    std::fs::create_dir_all(&registration)?;
+    std::fs::copy(common.join("HEAD"), registration.join("HEAD"))?;
+    std::fs::write(registration.join("commondir"), b"../..\n")?;
+    std::fs::write(
+        registration.join("gitdir"),
+        format!("{}\n", worktree.join(".git").display()),
+    )?;
+    Ok(())
 }
 
 fn writer_preparation_fixture(
@@ -111,6 +138,9 @@ fn writer_preparation_steps(
         } else {
             match auth_layout {
                 "missing" => "writer_plan_stages_scratch_missing_auth",
+                "static-checks" => {
+                    "prepared_writer_route_receipt_contains_declared_static_checks_and_source"
+                }
                 "pr-policy" => "pr_policy_mediates_gh_when_publishing_is_disabled",
                 "symlink" => "writer_plan_stages_scratch_symlink_auth",
                 "symlink-xdg" => "writer_plan_stages_scratch_symlink_xdg_auth",
@@ -310,6 +340,46 @@ fn writer_preparation_steps(
         cancel: Some(&cancel),
         repo_facts: Default::default(),
     };
+    if auth_layout == "static-checks" {
+        std::fs::create_dir(project.join(".provenant"))?;
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {"static_checks": [{
+                    "argv": ["scripts/check-extra-fields", "--strict"],
+                    "cwd": "tools",
+                    "timeout_seconds": 30
+                }]}
+            }))?,
+        )?;
+        let launch = prepare_with(
+            &registry,
+            &task,
+            "static checks fixture",
+            &paths,
+            None,
+            |name| {
+                if name == "cursor" {
+                    Ok(executable.clone())
+                } else {
+                    Err("fixture provider unavailable".into())
+                }
+            },
+            None,
+        )?;
+        let route = serde_json::to_value(&launch.route)?;
+        assert_eq!(
+            route["static_checks"]["checks"],
+            serde_json::json!([{
+                "argv": ["scripts/check-extra-fields", "--strict"],
+                "cwd": "tools",
+                "timeout_seconds": 30,
+                "source": "project",
+                "key": ".provenant/ports.json#verify.static_checks"
+            }])
+        );
+        return Ok(());
+    }
     // An exhausted fence wait must never probe the updating CLI,
     // including when the lease map is empty.
     if fence_only {
@@ -961,6 +1031,7 @@ printf 'agy 1.0.0\n'
                 provenant_os::fixture::run_git(&private, &["init", "--bare"])?;
                 std::fs::copy(project.join(".git/config"), private.join("config"))?;
                 std::fs::write(private.join("HEAD"), b"ref: refs/heads/writer\n")?;
+                prepare_lane_registration(&private, worktree)?;
                 std::fs::create_dir_all(paths.temporary.join("candidate-0/git-objects"))?;
                 environment.push(("IDENTITY_PROBE".into(), "writer".into()));
                 environment.push(("EXPECTED_ADMIN".into(), admin.into_os_string()));
@@ -1703,6 +1774,9 @@ printf 'agy 1.0.0\n'
     std::fs::create_dir_all(private_common.join("refs"))?;
     std::fs::write(private_common.join("HEAD"), b"ref: refs/heads/writer\n")?;
     std::fs::copy(project.join(".git/config"), private_common.join("config"))?;
+    // The runtime binds GIT_DIR to the linked-worktree registration, so the
+    // fixture must materialise it like the host does before the shim runs.
+    prepare_lane_registration(&private_common, worktree)?;
     let private_objects = publishing_paths.temporary.join("candidate-0/git-objects");
     std::fs::create_dir_all(private_objects.join("info"))?;
     std::fs::write(

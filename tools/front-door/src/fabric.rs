@@ -52,9 +52,9 @@ use graph_status::{graph_snapshot, graph_status_elapsed};
 pub use peer::{hosts, peer};
 pub(crate) use settlement::advance_live_graph;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 include!("fabric/facade_tests.rs");
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 include!("fabric/graph_tests.rs");
 
 use provenant_cli::fabric::Context;
@@ -453,6 +453,7 @@ impl F3Facade for BoundFacade<'_> {
         let steer = |attempt: provenant_core::AttemptId,
                      operation: &provenant_core::OperationId,
                      text: &str,
+                     now: bool,
                      call: &provenant_fabric_store::Request<'_>| {
             provenant_cli::inbox::deliver_steer(
                 &edge,
@@ -460,6 +461,7 @@ impl F3Facade for BoundFacade<'_> {
                 attempt,
                 operation,
                 text,
+                now,
                 call,
             )
         };

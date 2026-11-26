@@ -114,6 +114,21 @@ fn prepare_refs_from(
     write(&common, "HEAD", head.as_bytes())?;
     directory(&common, OsStr::new("objects"))?;
     directory(&common, OsStr::new("refs"))?;
+    // Git's view of the lane is a registered linked worktree: the private
+    // gitdir sits below the common dir, carries its backlink to the checkout
+    // and keeps the same HEAD. The host prepares it before the lane starts;
+    // refs, objects and the index remain in the common dir and are unchanged.
+    let registry = directory(&common, OsStr::new(provenant_core::LANE_GIT_WORKTREES_DIR))?;
+    let registration = directory(&registry, OsStr::new(provenant_core::LANE_GIT_REGISTRATION))?;
+    write(&registration, "HEAD", head.as_bytes())?;
+    write(&registration, "commondir", b"../..\n")?;
+    let mut gitdir = root_path
+        .join(".git")
+        .as_os_str()
+        .as_encoded_bytes()
+        .to_vec();
+    gitdir.push(b'\n');
+    write(&registration, "gitdir", &gitdir)?;
     // Reader snapshots preserve the source index. Writer indexes start at
     // their own launch tip and never inherit host or sibling staging.
     if branch.is_none() {
@@ -126,7 +141,12 @@ fn prepare_refs_from(
     };
     for name in private_files {
         match source_private.read_stable(OsStr::new(name), 1024 * 1024) {
-            Ok(bytes) => write(&common, name, &bytes)?,
+            // Per-worktree files belong in the private registration as well:
+            // Git reads them there once the lane uses the linked layout.
+            Ok(bytes) => {
+                write(&common, name, &bytes)?;
+                write(&registration, name, &bytes)?;
+            }
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
@@ -236,6 +256,84 @@ struct MergeState {
     blobs: Vec<GitOid>,
 }
 
+/// Merge metadata written by a lane whose private gitdir is a linked
+/// worktree registration. An absent registration is not an error: some launches
+/// select the common dir directly and keep their per-worktree files there.
+fn registered_merge_head(source: &ObjectSource) -> Result<Option<Vec<u8>>> {
+    let Some(registration) = registered_directory(source)? else {
+        return Ok(None);
+    };
+    match registration.read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn registered_directory(source: &ObjectSource) -> Result<Option<Directory>> {
+    let registry = match source
+        .refs
+        .open_verified_directory(OsStr::new(provenant_core::LANE_GIT_WORKTREES_DIR))
+    {
+        Ok(registry) => registry,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    match registry.open_verified_directory(OsStr::new(provenant_core::LANE_GIT_REGISTRATION)) {
+        Ok(registration) => Ok(Some(registration)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A candidate Git operation and the per-worktree directory that owns it.
+pub(crate) struct LocatedGitOperation {
+    pub marker: provenant_confinement::worktrees::GitOperationMarker,
+    pub directory: Directory,
+}
+
+/// Inspect the lane registration first, then the common directory for Git
+/// calls that selected `GIT_DIR` directly instead of the linked-worktree gitdir.
+pub(crate) fn incomplete_git_operation(
+    source: &ObjectSource,
+    expected_merge: Option<&[u8]>,
+) -> Result<Option<LocatedGitOperation>> {
+    if let Some(registration) = registered_directory(source)?
+        && let Some(marker) = provenant_confinement::worktrees::incomplete_git_operation(
+            &registration,
+            expected_merge,
+        )?
+    {
+        return Ok(Some(LocatedGitOperation {
+            marker,
+            directory: registration,
+        }));
+    }
+    let Some(marker) =
+        provenant_confinement::worktrees::incomplete_git_operation(&source.refs, expected_merge)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(LocatedGitOperation {
+        marker,
+        directory: source.refs.try_clone()?,
+    }))
+}
+
+/// Read the branch recorded by a rebase in the lane registration, with common
+/// directory fallback for direct Git calls.
+pub(crate) fn rebase_operation_ref(source: &ObjectSource) -> Result<Option<String>> {
+    if let Some(registration) = registered_directory(source)?
+        && let Some(reference) =
+            provenant_confinement::worktrees::rebase_operation_ref(&registration)
+    {
+        return Ok(Some(reference));
+    }
+    Ok(provenant_confinement::worktrees::rebase_operation_ref(
+        &source.refs,
+    ))
+}
+
 fn merge_state(source: &ObjectSource, repo: &VerifiedRepo) -> Result<Option<MergeState>> {
     let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
     source
@@ -249,13 +347,19 @@ fn merge_state(source: &ObjectSource, repo: &VerifiedRepo) -> Result<Option<Merg
         &args(&["ls-files", "--unmerged", "-z"]),
         None,
     )?;
-    let raw = match source
-        .refs
-        .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)
-    {
-        Ok(raw) => raw,
-        Err(error) if error.is_not_found() && unmerged.is_empty() => return Ok(None),
-        Err(error) => return Err(error.into()),
+    // A shim-bound lane writes per-worktree merge state into its linked
+    // registration. A direct Git call that selects the common dir writes it
+    // there instead; both are legitimate producers of a private merge.
+    let raw = match registered_merge_head(source)? {
+        Some(raw) => raw,
+        None => match source
+            .refs
+            .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)
+        {
+            Ok(raw) => raw,
+            Err(error) if error.is_not_found() && unmerged.is_empty() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        },
     };
     let mut parents = Vec::new();
     for line in std::str::from_utf8(&raw).map_err(|_| invalid())?.lines() {

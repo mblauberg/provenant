@@ -179,9 +179,9 @@ pub enum Command {
     /// Retry a graph, node or attempt
     #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry fix-login"))]
     Retry(Resume),
-    /// Deliver a steering note; resume the session where the provider supports it
+    /// Deliver a steering note; queue by default, interrupt with --now
     #[command(
-        long_about = "Queue a steering note for the next turn without interrupting the running attempt. Settlement resumes the retained session or applies the configured fallback. The default fresh_with_handoff starts fresh with the accepted brief, prior handoff and queued steering text; refuse rejects unsupported routes up front and leaves unavailable sessions without a successor.",
+        long_about = "Queue a steering note for the next turn without interrupting the running attempt. Settlement resumes the retained session or applies the configured fallback. The default fresh_with_handoff starts fresh with the accepted brief, prior handoff and queued steering text; refuse rejects unsupported routes up front and leaves unavailable sessions without a successor. Pass --now to interrupt through custody once the session identity is durable and resume that same session with the text; it refuses a running attempt with no retained session. Delivery defaults to queued from domains.fabric.steer.delivery (queued|now), and --now overrides it for one call. Use --explain to show the effective delivery mode and its source without steering.",
         add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md")
     )]
     Steer(crate::inbox::Steer),

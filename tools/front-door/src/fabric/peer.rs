@@ -1651,8 +1651,6 @@ pub(crate) fn peer_submit_graph(
     // Carry the sender-staged fixture bytes, not a sender path, so the peer
     // places exactly the same fixture in its own candidate scratch.
     document.nodes[0].fixture_bytes = task.fixture.clone();
-    // A reader compares against its own checkout's first parent. A peer-owned
-    // writer starts from its freshly provisioned worktree and has no range.
     document.review_base = if peer_writer {
         None
     } else {

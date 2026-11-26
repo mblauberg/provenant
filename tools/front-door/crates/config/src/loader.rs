@@ -761,6 +761,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         "gc.graph_checkpoint_days",
         "gc.discard_archive_retention",
         "gc.cargo_target_idle",
+        "gc.attempt_scratch_max",
         "gc.free_floor",
         "gc.critical_free",
         "gc.alert_below",

@@ -123,12 +123,9 @@ fn cost_inner(command: &TelemetryCost, edge: &Edge<'_>) -> Output {
         Some(target) if target.attempt.is_some() => {
             let resolved = crate::run::resolve_target(edge, target, crate::target::Want::Work)
                 .map_err(|fail| (fail.kind, fail.message))?;
-            let reference = resolved.attempt_ref.ok_or_else(|| {
-                (
-                    ErrorKind::NotFound,
-                    format!("NOT_FOUND: {target} has not launched"),
-                )
-            })?;
+            let reference = resolved
+                .attempt_ref
+                .ok_or_else(|| (ErrorKind::NotFound, format!("{target} has not launched")))?;
             reference.rsplit('/').next().map(str::to_owned)
         }
         _ => None,

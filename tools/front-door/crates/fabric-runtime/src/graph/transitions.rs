@@ -552,6 +552,11 @@ pub(super) fn apply_attempt_observation(
                         | AttemptOutcome::DeclaredStop
                         | AttemptOutcome::StoppedNoWork
                 );
+                // A done brief plus a commit beyond the input head closes the
+                // writer whatever provisional reason was recorded. In particular
+                // a `failed` reason cannot deny a pushed, finished brief (#4065).
+                // The provider outcome still has to be classifiable below, so a
+                // genuinely failed attempt is never promoted by this escape.
                 let completed_by_evidence = launched
                     && commits_ahead
                     && handoff_done
@@ -561,6 +566,7 @@ pub(super) fn apply_attempt_observation(
                             provenant_records::run::SettlementReason::Completed
                                 | provenant_records::run::SettlementReason::DeclaredStop
                                 | provenant_records::run::SettlementReason::CompletedBeforeBudget
+                                | provenant_records::run::SettlementReason::Failed
                         )
                     );
                 let outcome = if stop_classifiable
@@ -690,6 +696,15 @@ pub(super) fn apply_attempt_observation(
                 ) && node_outcome
                     == provenant_records::run::SettlementNodeOutcome::Failed
                 {
+                    // A successful-looking attempt still has a real precondition
+                    // failure here. Name it instead of reporting bare
+                    // `other_failure`, which hides why the node stayed open.
+                    progress.advance_error_code = Some(
+                        settlement_reason
+                            .map(|reason| reason.as_str())
+                            .unwrap_or("settlement_failed")
+                            .into(),
+                    );
                     AttemptOutcome::OtherFailure
                 } else {
                     outcome
