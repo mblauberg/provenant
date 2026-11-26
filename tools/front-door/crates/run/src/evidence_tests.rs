@@ -125,6 +125,14 @@ fn missing_pin_is_unknown() -> TestResult {
 }
 
 #[test]
+fn read_evidence_is_absent_before_sealing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let dir = Directory::open_anchor(temp.path())?;
+    assert!(read_evidence(&dir)?.is_none());
+    Ok(())
+}
+
+#[test]
 fn sealing_twice_with_same_bytes_keeps_one_record() -> TestResult {
     let temp = tempfile::tempdir()?;
     let dir = Directory::open_anchor(temp.path())?;
