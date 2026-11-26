@@ -1359,6 +1359,7 @@ impl Factory {
                     pull_request: None,
                     integration_pin: None,
                     cancelled: false,
+                    on_stop_defaults: provenant_records::OnStop::default(),
                     cancel_reason: None,
                     pause: None,
                     unknown_usage: Vec::new(),

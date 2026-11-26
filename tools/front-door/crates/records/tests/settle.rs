@@ -42,13 +42,13 @@ fn handoff(status: HandoffStatus, note: &str) -> Handoff {
 }
 
 fn accepted(handoff: Handoff) -> DeclarationEvidence {
-    DeclarationEvidence::Accepted(SealedDeclaration {
+    DeclarationEvidence::Accepted(Box::new(SealedDeclaration {
         schema_version: DECLARATION_SCHEMA,
         sequence: 1,
         request_id: "request".into(),
         digest: CanonicalV1::file_digest(b"payload"),
         handoff,
-    })
+    }))
 }
 
 fn base(lane: LaneRole, outcome: Outcome, cause: Option<CauseKind>) -> SettlementEvidence {

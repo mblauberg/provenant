@@ -175,30 +175,30 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
 
     // 1. Edits left on the worktree are not a success. The census note is the
     // only change to the reason here; slice 5a no longer mutates the host state.
-    if writer && outcome == Outcome::Succeeded {
-        if let Some(git) = &evidence.git
-            && let Some(note) = &git.uncommitted
-        {
-            let action = policy.uncommitted_work.value;
-            let before = outcome;
-            outcome = match action {
-                SignalAction::Fail => Outcome::Failed,
-                SignalAction::Review => Outcome::ReviewRequired,
-                SignalAction::Warn | SignalAction::Off => outcome,
-                SignalAction::Hold => Outcome::Uncommitted,
-            };
-            signals.push(SettlementSignal::UncommittedWork);
-            if action != SignalAction::Off {
-                append(&mut reason, note.clone());
-            }
-            record_action(
-                &mut applied,
-                shipped.uncommitted_work.value,
-                &policy.uncommitted_work,
-                SettlementSignal::UncommittedWork,
-                outcome != before || !classed(action),
-            );
+    if writer
+        && outcome == Outcome::Succeeded
+        && let Some(git) = &evidence.git
+        && let Some(note) = &git.uncommitted
+    {
+        let action = policy.uncommitted_work.value;
+        let before = outcome;
+        outcome = match action {
+            SignalAction::Fail => Outcome::Failed,
+            SignalAction::Review => Outcome::ReviewRequired,
+            SignalAction::Warn | SignalAction::Off => outcome,
+            SignalAction::Hold => Outcome::Uncommitted,
+        };
+        signals.push(SettlementSignal::UncommittedWork);
+        if action != SignalAction::Off {
+            append(&mut reason, note.clone());
         }
+        record_action(
+            &mut applied,
+            shipped.uncommitted_work.value,
+            &policy.uncommitted_work,
+            SettlementSignal::UncommittedWork,
+            outcome != before || !classed(action),
+        );
     }
 
     // 2. A move in the primary checkout is evidence, not an early decision.
@@ -520,7 +520,7 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         TerminalBasis::Unsettled {
             reason: reason
                 .clone()
-                .unwrap_or_else(|| Outcome::Unsettled.diagnostic_reason().to_owned()),
+                .unwrap_or(Outcome::Unsettled.diagnostic_reason().to_owned()),
         }
     } else if outcome == Outcome::Cancelled
         && cause != Some(CauseKind::Steered)
@@ -573,10 +573,10 @@ pub fn settle(evidence: &SettlementEvidence) -> OutcomeFact {
         custody.launched,
     );
     let outcome = settlement_class.rule().terminal_outcome.apply(outcome);
-    let stop = match Stop::sealed(cause, outcome, settlement_class, declaration.clone()) {
-        Ok(stop) => stop,
-        Err(_) => Stop::sealed(cause, outcome, settlement_class, Ok(None)).unwrap_or(None),
-    };
+    let stop =
+        Stop::sealed(cause, outcome, settlement_class, declaration.clone()).unwrap_or_else(|_| {
+            Stop::sealed(cause, outcome, settlement_class, Ok(None)).unwrap_or(None)
+        });
     let stop_cause = stop.as_ref().map(Stop::cause);
     let source = stop_cause.map_or(settlement_class.rule().source, StopCause::source);
     let release: DependantRelease = settlement_class.release(stop_cause);

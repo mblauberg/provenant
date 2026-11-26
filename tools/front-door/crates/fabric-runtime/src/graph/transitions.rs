@@ -888,6 +888,9 @@ pub(super) fn initial_checkpoint(
         pull_request: None,
         schema_version: 2,
         cancelled: false,
+        // The caller resolves the configured defaults once at admission and
+        // stamps them on the checkpoint after this skeleton is returned.
+        on_stop_defaults: provenant_records::OnStop::default(),
         delivery_ci_superseded: Vec::new(),
         cancel_reason: None,
         integration_pin: None,

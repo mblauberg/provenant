@@ -12,7 +12,7 @@ use provenant_config::knob_source;
 use provenant_records::provenance::{Layer, Source, Sourced, warn_ignored};
 use provenant_records::run::HarnessProfile;
 use provenant_records::settlement::policy::{
-    NoWork, RouteSettlement, SETTLEMENT_PRECEDENCE, SettlementPolicy, SignalAction,
+    RouteSettlement, SETTLEMENT_PRECEDENCE, SettlementPolicy,
 };
 use provenant_records::warning::{SETTLEMENT_POLICY_INVALID, Warning, warn};
 use serde::de::DeserializeOwned;
@@ -208,6 +208,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_records::settlement::policy::{NoWork, SignalAction};
     use serde_json::json;
 
     fn value_map(layer: Layer, key: &str, value: Value) -> Vec<Sourced<(String, Value)>> {

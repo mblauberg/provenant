@@ -449,13 +449,15 @@ fn evidence_for(
 
 /// The last accepted line of a declaration journal.
 fn accepted(handoff: Handoff) -> crate::declaration::DeclarationEvidence {
-    crate::declaration::DeclarationEvidence::Accepted(crate::declaration::SealedDeclaration {
-        schema_version: crate::declaration::DECLARATION_SCHEMA,
-        sequence: 1,
-        request_id: "format2".into(),
-        digest: CanonicalV1::file_digest(b"format2"),
-        handoff,
-    })
+    crate::declaration::DeclarationEvidence::Accepted(Box::new(
+        crate::declaration::SealedDeclaration {
+            schema_version: crate::declaration::DECLARATION_SCHEMA,
+            sequence: 1,
+            request_id: "format2".into(),
+            digest: CanonicalV1::file_digest(b"format2"),
+            handoff,
+        },
+    ))
 }
 
 #[test]

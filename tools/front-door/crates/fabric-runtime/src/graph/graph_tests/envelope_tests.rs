@@ -549,6 +549,7 @@ host_refused_before_acceptance: false,
         pull_request: Some(worst(OUTPUT_FIELD_BYTES)),
         integration_pin: Some("1".repeat(64)),
         cancelled: true,
+        on_stop_defaults: envelope::worst_case_on_stop_defaults(),
         delivery_ci_superseded: Vec::new(),
         cancel_reason: Some(worst(MAX_CANCEL_REASON_BYTES)),
         pause: Some(
@@ -619,6 +620,22 @@ fn worst_case_land_checkpoint_fits_its_bound() {
 
 fn assert_fits(document: GraphDocument) {
     assert_fits_with_repair_metadata(document, "substantial", false);
+}
+
+#[test]
+fn envelope_reserves_every_configured_on_stop_default() {
+    // Configured graph-wide defaults are sealed in every checkpoint. Reserving
+    // one entry per cause at the longest wire step keeps the admission bound an
+    // upper bound for any admitted graph, so a later config cannot overflow it.
+    let defaults = envelope::worst_case_on_stop_defaults();
+    let longest = provenant_records::NextStep::SameRoute {
+        continuation: provenant_records::Continuation::Fresh,
+    };
+    assert_eq!(
+        defaults.iter().count(),
+        provenant_records::StopCause::ALL.len()
+    );
+    assert!(defaults.iter().all(|(_, step)| step == longest));
 }
 
 #[test]

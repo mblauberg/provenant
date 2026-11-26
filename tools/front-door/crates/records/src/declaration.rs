@@ -87,7 +87,9 @@ pub struct DeclarationCounts {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeclarationEvidence {
     Missing,
-    Accepted(SealedDeclaration),
+    // Boxed so the closed set stays small: the sealed record is wire-identical,
+    // and a rejected or missing declaration does not pay for a full handoff.
+    Accepted(Box<SealedDeclaration>),
     Rejected { error: crate::handoff::HandoffError },
 }
 

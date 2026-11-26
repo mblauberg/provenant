@@ -3757,6 +3757,21 @@ impl RunStore {
             .map(|writer| crate::evidence::pushed_head(attempt, &writer.worktree))
             .transpose()?
             .flatten();
+        // Resolve the two sealed Git facts in the holder's `Result`, not inside
+        // a `bool::then` closure that returns a plain `GitEvidence`: a missing
+        // pin must refuse assembly, never silently drop the writer's evidence.
+        let git = if task.writer.is_some() {
+            Some(provenant_records::settlement::GitEvidence {
+                input_head: crate::evidence::launch_pin(attempt)?,
+                writer_head: crate::evidence::terminal_head(attempt)?,
+                uncommitted: uncommitted.clone(),
+                uncommitted_paths: uncommitted_paths.clone(),
+                pushed_head,
+                primary,
+            })
+        } else {
+            None
+        };
         let evidence = provenant_records::settlement::SettlementEvidence {
             schema_version: provenant_records::settlement::SETTLEMENT_EVIDENCE_SCHEMA,
             lane,
@@ -3775,14 +3790,7 @@ impl RunStore {
             },
             handoff: declared,
             declarations: declaration_counts,
-            git: (task.writer.is_some()).then(|| provenant_records::settlement::GitEvidence {
-                input_head: crate::evidence::launch_pin(attempt)?,
-                writer_head: crate::evidence::terminal_head(attempt)?,
-                uncommitted: uncommitted.clone(),
-                uncommitted_paths: uncommitted_paths.clone(),
-                pushed_head,
-                primary,
-            }),
+            git,
             custody: provenant_records::settlement::CustodyFacts {
                 launched: !exit.never_spawned,
                 cancelled,

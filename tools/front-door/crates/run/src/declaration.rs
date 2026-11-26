@@ -85,7 +85,7 @@ impl JournalState {
 
     fn evidence(&self) -> DeclarationEvidence {
         if let Some(sealed) = &self.accepted {
-            DeclarationEvidence::Accepted(sealed.clone())
+            DeclarationEvidence::Accepted(Box::new(sealed.clone()))
         } else if let Some(error) = &self.last_error {
             DeclarationEvidence::Rejected {
                 error: error.clone(),

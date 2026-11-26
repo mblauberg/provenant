@@ -77,6 +77,26 @@ pub(super) fn latest() -> provenant_core::WallTime {
 /// `.retry-` and the digits of a u64 generation.
 const RETRY_SUFFIX_BYTES: usize = 27;
 
+/// The largest configurable `on_stop` defaults a checkpoint can seal: one entry
+/// for every cause, each with the longest wire step. Config declares keys from
+/// this closed set only, so the bound stays an upper bound without a config
+/// special case.
+pub(super) fn worst_case_on_stop_defaults() -> provenant_records::OnStop {
+    provenant_records::OnStop::new(
+        provenant_records::StopCause::ALL
+            .into_iter()
+            .map(|cause| {
+                (
+                    cause,
+                    provenant_records::NextStep::SameRoute {
+                        continuation: provenant_records::Continuation::Fresh,
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
 fn ask_bound(ask: &AskRequest) -> usize {
     let link = AskLink {
         extra: Default::default(),
@@ -129,6 +149,7 @@ pub(super) fn checkpoint_bound(
         pull_request: Some(String::new()),
         integration_pin: Some(String::new()),
         cancelled: true,
+        on_stop_defaults: worst_case_on_stop_defaults(),
         delivery_ci_superseded: Vec::new(),
         cancel_reason: Some(String::new()),
         pause: provenant_records::pause::Pause::new(
