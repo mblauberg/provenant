@@ -33,10 +33,6 @@ const READ_BUDGET: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(
-    dead_code,
-    reason = "every status is a wire value; only drift is produced locally"
-)]
 pub(crate) enum GeneratorStatus {
     Clean,
     Drift,
@@ -45,7 +41,6 @@ pub(crate) enum GeneratorStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code, reason = "the manifest is a fixed wire schema")]
 pub(crate) struct GeneratorManifest {
     pub name: String,
     pub status: GeneratorStatus,
@@ -54,7 +49,6 @@ pub(crate) struct GeneratorManifest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code, reason = "the manifest is a fixed wire schema")]
 pub(crate) struct GeneratedManifest {
     pub repo: String,
     pub workflow: String,
@@ -63,6 +57,82 @@ pub(crate) struct GeneratedManifest {
     pub head_sha: GitOid,
     pub generators: Vec<GeneratorManifest>,
     pub patch_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GeneratedPatchMode {
+    Off,
+    #[default]
+    Offer,
+    Apply,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CiSettings {
+    generated_patch: GeneratedPatchMode,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedGeneratedPatch {
+    mode: GeneratedPatchMode,
+    setting: SettingRef,
+}
+
+impl ResolvedGeneratedPatch {
+    fn read(state: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let (settings, keys): (CiSettings, std::collections::BTreeSet<String>) =
+            provenant_config::read_domain_with_keys(state, "ci")?;
+        let source = keys.contains("generated_patch");
+        let value = match settings.generated_patch {
+            GeneratedPatchMode::Off => "off",
+            GeneratedPatchMode::Offer => "offer",
+            GeneratedPatchMode::Apply => "apply",
+        };
+        Ok(Self {
+            mode: settings.generated_patch,
+            setting: SettingRef {
+                key: GENERATED_PATCH_KEY.to_owned(),
+                value: value.to_owned(),
+                layer: if source { Layer::Host } else { Layer::Default },
+                origin: if source {
+                    state.join("config.toml").display().to_string()
+                } else {
+                    "harness-knobs.json".to_owned()
+                },
+            },
+        })
+    }
+
+    fn permits(self, apply: bool) -> Result<Self, PatchError> {
+        let (code, message) = match (self.mode, apply) {
+            (GeneratedPatchMode::Off, _) => (
+                "CI_PATCH_DISABLED",
+                "generated patch handling is disabled by configuration",
+            ),
+            (GeneratedPatchMode::Offer, false) => (
+                "CI_PATCH_APPLY_REQUIRED",
+                "generated patch handling requires --apply under the offer policy",
+            ),
+            _ => return Ok(self),
+        };
+        Err(PatchError::configured(
+            code,
+            message.to_owned(),
+            ErrorSubject {
+                host: None,
+                project: None,
+                graph: None,
+                node: None,
+                attempt: None,
+                item: None,
+                pr: None,
+                head: None,
+            },
+            self.setting,
+        ))
+    }
 }
 
 /// The run facts the artefact must agree with before it is trusted.
@@ -131,18 +201,13 @@ impl PatchError {
         )
     }
 
-    fn configured(code: &str, message: String, subject: ErrorSubject) -> Self {
+    fn configured(code: &str, message: String, subject: ErrorSubject, setting: SettingRef) -> Self {
         Self {
             code: code.to_owned(),
             message: message.into_boxed_str(),
             cause: None,
             class: ErrorClass::Configured,
-            setting: Some(Box::new(SettingRef {
-                key: GENERATED_PATCH_KEY.to_owned(),
-                value: "apply".to_owned(),
-                layer: Layer::Default,
-                origin: "harness-knobs.json".to_owned(),
-            })),
+            setting: Some(Box::new(setting)),
             subject: Some(Box::new(subject)),
             next: vec![NextStep::new(
                 Vec::new(),
@@ -202,7 +267,22 @@ pub(crate) fn verify(
     expected: &RunIdentity,
     worktree_head: GitOid,
     subject: &ErrorSubject,
+    setting: &SettingRef,
 ) -> Result<(), PatchError> {
+    if let Some(failed) = manifest
+        .generators
+        .iter()
+        .find(|generator| generator.status == GeneratorStatus::Failed)
+    {
+        return Err(PatchError::operation(
+            "CI_PATCH_GENERATOR_FAILED",
+            format!(
+                "generated patch is unavailable because generator {} failed",
+                failed.name
+            ),
+            None,
+        ));
+    }
     if manifest.repo != expected.repo {
         return Err(PatchError::operation(
             "CI_PATCH_REPO_MISMATCH",
@@ -241,6 +321,7 @@ pub(crate) fn verify(
                 manifest.head_sha, worktree_head
             ),
             subject.clone(),
+            setting.clone(),
         ));
     }
     let hash = Sha256::digest(patch);
@@ -587,6 +668,7 @@ pub(crate) struct ApplyRequest<'a> {
     pub common_dir: &'a Path,
     pub commit: bool,
     pub subject: ErrorSubject,
+    pub setting: &'a SettingRef,
 }
 
 /// Re-check the head under the runtime, run the destruction guard, then apply
@@ -617,6 +699,7 @@ pub(crate) fn apply_patch(
         request.expected,
         head,
         &request.subject,
+        request.setting,
     )?;
 
     let paths = patch_paths(request.patch).map_err(|error| {
@@ -904,6 +987,15 @@ fn run_for_pr(
         .ok_or_else(|| "no Actions run produced this pull request head".into())
 }
 
+fn run_head_sha(meta: &Value) -> Result<&str, &'static str> {
+    meta["pull_requests"]
+        .as_array()
+        .and_then(|pull_requests| pull_requests.first())
+        .and_then(|pull_request| pull_request["head"]["sha"].as_str())
+        .or_else(|| meta["head_sha"].as_str())
+        .ok_or("run metadata named no head sha")
+}
+
 /// Read the artefact and the run facts it must agree with through the one
 /// sourced forge port.
 fn fetch(
@@ -930,9 +1022,7 @@ fn fetch(
         None,
     )?)?;
     let meta: Value = serde_json::from_slice(&bytes)?;
-    let head = meta["head_sha"]
-        .as_str()
-        .ok_or("run metadata named no head sha")?;
+    let head = run_head_sha(&meta)?;
     let workflow_id = meta["workflow_id"]
         .as_u64()
         .ok_or("run metadata named no workflow id")?;
@@ -1036,7 +1126,14 @@ fn emit_error(error: PatchError, globals: &Globals) -> u8 {
 /// under `--apply` and only after the destruction guard, `git apply --check`
 /// and the head re-check all pass.
 pub(crate) fn run(command: provenant_cli::ci::Patch, globals: &Globals) -> u8 {
-    type FetchedPatch = (GeneratedManifest, Vec<u8>, RunIdentity, PathBuf, PathBuf);
+    type FetchedPatch = (
+        GeneratedManifest,
+        Vec<u8>,
+        RunIdentity,
+        PathBuf,
+        PathBuf,
+        SettingRef,
+    );
     let fetched = (|| -> Result<FetchedPatch, Box<dyn std::error::Error>> {
         let project = crate::roots::selected_project(globals.project.as_deref(), true)?;
         let resolved = crate::roots::resolve(
@@ -1045,6 +1142,7 @@ pub(crate) fn run(command: provenant_cli::ci::Patch, globals: &Globals) -> u8 {
             crate::roots::Product::Optional,
         )?;
         let state = resolved.roots.state.as_path();
+        let policy = ResolvedGeneratedPatch::read(state)?.permits(command.apply)?;
         let request = provenant_config::ports::Request::within(READ_BUDGET);
         let (manifest, patch, identity) = fetch(state, &project, &command.target, &request)?;
         let worktree = command
@@ -1052,9 +1150,16 @@ pub(crate) fn run(command: provenant_cli::ci::Patch, globals: &Globals) -> u8 {
             .as_deref()
             .unwrap_or(project.as_path())
             .to_path_buf();
-        Ok((manifest, patch, identity, worktree, state.to_path_buf()))
+        Ok((
+            manifest,
+            patch,
+            identity,
+            worktree,
+            state.to_path_buf(),
+            policy.setting,
+        ))
     })();
-    let (manifest, patch, identity, worktree, state) = match fetched {
+    let (manifest, patch, identity, worktree, state, setting) = match fetched {
         Ok(fetched) => fetched,
         Err(error) => {
             return crate::fail(
@@ -1114,7 +1219,7 @@ pub(crate) fn run(command: provenant_cli::ci::Patch, globals: &Globals) -> u8 {
                 );
             }
         };
-        if let Err(error) = verify(&manifest, &patch, &identity, head, &subject) {
+        if let Err(error) = verify(&manifest, &patch, &identity, head, &subject, &setting) {
             return emit_error(error, globals);
         }
         let paths = match patch_paths(&patch) {
@@ -1160,6 +1265,7 @@ pub(crate) fn run(command: provenant_cli::ci::Patch, globals: &Globals) -> u8 {
             common_dir: &common,
             commit: command.commit,
             subject,
+            setting: &setting,
         },
     ) {
         Ok(report) => {
@@ -1246,6 +1352,15 @@ mod tests {
         provenant_cli::ci::PatchTarget::Run { id: 123 }
     }
 
+    fn setting_ref() -> SettingRef {
+        SettingRef {
+            key: GENERATED_PATCH_KEY.to_owned(),
+            value: "offer".to_owned(),
+            layer: Layer::Default,
+            origin: "harness-knobs.json".to_owned(),
+        }
+    }
+
     #[test]
     fn manifest_fixture_covers_generated_patch_identity() {
         let manifest: GeneratedManifest = serde_json::from_str(MANIFEST_FIXTURE).unwrap();
@@ -1253,6 +1368,79 @@ mod tests {
         assert_eq!(manifest.run_attempt, 1);
         assert_eq!(manifest.generators[0].status, GeneratorStatus::Drift);
         assert_eq!(manifest.generators[0].files, ["fixtures/a.swift"]);
+    }
+
+    #[test]
+    fn pull_request_run_uses_pr_head_identity_and_falls_back_to_run_head() {
+        let pull_request = serde_json::json!({
+            "head_sha": "merge-sha",
+            "pull_requests": [{"head": {"sha": HEAD}}]
+        });
+        let pr_head = run_head_sha(&pull_request).unwrap();
+        assert_eq!(pr_head, HEAD);
+        let push_run = serde_json::json!({"head_sha": HEAD});
+        let push_head = run_head_sha(&push_run).unwrap();
+        assert_eq!(push_head, HEAD);
+    }
+
+    #[test]
+    fn failed_generator_manifest_is_refused_by_verification() {
+        let (mut manifest, patch, identity, subject) = fixture(HEAD);
+        manifest.generators.push(GeneratorManifest {
+            name: "writer".into(),
+            status: GeneratorStatus::Failed,
+            files: Vec::new(),
+        });
+        let error = verify(
+            &manifest,
+            &patch,
+            &identity,
+            GitOid::parse(HEAD).unwrap(),
+            &subject,
+            &setting_ref(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "CI_PATCH_GENERATOR_FAILED");
+        assert!(error.message.contains("writer"));
+    }
+
+    #[test]
+    fn generated_patch_policy_resolves_configured_value_and_source() {
+        let state = tempfile::tempdir().unwrap();
+        let default = ResolvedGeneratedPatch::read(state.path()).unwrap();
+        assert_eq!(default.mode, GeneratedPatchMode::Offer);
+        assert_eq!(default.setting.layer, Layer::Default);
+
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version = 1\n[domains.ci]\ngenerated_patch = \"apply\"\n",
+        )
+        .unwrap();
+        let configured = ResolvedGeneratedPatch::read(state.path()).unwrap();
+        assert_eq!(configured.mode, GeneratedPatchMode::Apply);
+        assert_eq!(configured.setting.value, "apply");
+        assert_eq!(configured.setting.layer, Layer::Host);
+        assert!(configured.setting.origin.ends_with("config.toml"));
+    }
+
+    #[test]
+    fn generated_patch_policy_off_refuses_and_offer_requires_apply() {
+        let mut policy = ResolvedGeneratedPatch {
+            mode: GeneratedPatchMode::Off,
+            setting: setting_ref(),
+        };
+        policy.setting.value = "off".into();
+        assert_eq!(policy.permits(true).unwrap_err().code, "CI_PATCH_DISABLED");
+
+        let policy = ResolvedGeneratedPatch {
+            mode: GeneratedPatchMode::Offer,
+            setting: setting_ref(),
+        };
+        assert_eq!(
+            policy.clone().permits(false).unwrap_err().code,
+            "CI_PATCH_APPLY_REQUIRED"
+        );
+        assert!(policy.permits(true).is_ok());
     }
 
     #[test]
@@ -1300,13 +1488,14 @@ mod tests {
     #[test]
     fn ci_patch_refuses_head_or_run_mismatch() {
         let (manifest, patch, identity, subject) = fixture(HEAD);
+        let setting = setting_ref();
         let head = GitOid::parse(HEAD).unwrap();
-        assert!(verify(&manifest, &patch, &identity, head, &subject).is_ok());
+        assert!(verify(&manifest, &patch, &identity, head, &subject, &setting).is_ok());
 
         // Head mismatch is a Configured error naming both heads, with a next
         // step and a setting so the error catalogue contract holds.
         let other = GitOid::parse(OTHER).unwrap();
-        let error = verify(&manifest, &patch, &identity, other, &subject).unwrap_err();
+        let error = verify(&manifest, &patch, &identity, other, &subject, &setting).unwrap_err();
         assert_eq!(error.code, "CI_PATCH_HEAD_MISMATCH");
         assert_eq!(error.class, ErrorClass::Configured);
         assert!(error.message.contains(HEAD));
@@ -1320,7 +1509,7 @@ mod tests {
             ..identity.clone()
         };
         assert_eq!(
-            verify(&manifest, &patch, &wrong_repo, head, &subject)
+            verify(&manifest, &patch, &wrong_repo, head, &subject, &setting)
                 .unwrap_err()
                 .code,
             "CI_PATCH_REPO_MISMATCH"
@@ -1330,7 +1519,7 @@ mod tests {
             ..identity.clone()
         };
         assert_eq!(
-            verify(&manifest, &patch, &wrong_workflow, head, &subject)
+            verify(&manifest, &patch, &wrong_workflow, head, &subject, &setting)
                 .unwrap_err()
                 .code,
             "CI_PATCH_WORKFLOW_MISMATCH"
@@ -1340,7 +1529,7 @@ mod tests {
             ..identity
         };
         assert_eq!(
-            verify(&manifest, &patch, &wrong_attempt, head, &subject)
+            verify(&manifest, &patch, &wrong_attempt, head, &subject, &setting)
                 .unwrap_err()
                 .code,
             "CI_PATCH_RUN_MISMATCH"
@@ -1358,12 +1547,14 @@ mod tests {
     #[test]
     fn patch_error_transport_preserves_configured_failure() {
         let (manifest, patch, identity, subject) = fixture(HEAD);
+        let setting = setting_ref();
         let error = verify(
             &manifest,
             &patch,
             &identity,
             GitOid::parse(OTHER).unwrap(),
             &subject,
+            &setting,
         )
         .unwrap_err()
         .into_command_error();
@@ -1434,6 +1625,7 @@ mod tests {
     #[test]
     fn ci_patch_preserves_dirty_and_unrelated_staged() {
         let (manifest, patch, identity, subject) = fixture(HEAD);
+        let setting = setting_ref();
         let tree = Path::new("/worktree");
         let state = Path::new("/state");
         let common = Path::new("/common");
@@ -1452,6 +1644,7 @@ mod tests {
                 common_dir: common,
                 commit: true,
                 subject: subject.clone(),
+                setting: &setting,
             },
         )
         .unwrap_err();
@@ -1474,6 +1667,7 @@ mod tests {
                 common_dir: common,
                 commit: true,
                 subject,
+                setting: &setting,
             },
         )
         .unwrap();
@@ -1497,6 +1691,7 @@ mod tests {
                 common_dir: common,
                 commit: false,
                 subject: query_subject(GitOid::parse(HEAD).unwrap(), &target()),
+                setting: &setting,
             },
         )
         .unwrap_err();
@@ -1507,6 +1702,7 @@ mod tests {
     #[test]
     fn ci_patch_allows_disjoint_live_work_and_refuses_overlap() {
         let (manifest, patch, identity, subject) = fixture(HEAD);
+        let setting = setting_ref();
         let tree = Path::new("/worktree");
         let state = Path::new("/state");
         let common = Path::new("/common");
@@ -1526,6 +1722,7 @@ mod tests {
                 common_dir: common,
                 commit: true,
                 subject: subject.clone(),
+                setting: &setting,
             },
         )
         .unwrap();
@@ -1549,6 +1746,7 @@ mod tests {
                 common_dir: common,
                 commit: true,
                 subject,
+                setting: &setting,
             },
         )
         .unwrap_err();
