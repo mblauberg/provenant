@@ -962,7 +962,11 @@ fn fetch(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "ci.yml".to_owned());
 
-    let scratch = tempfile::tempdir()?;
+    // The binary is built without the `fixture` feature, so the fixture-only
+    // `tempfile` dependency is not linked here. Use the production scratch
+    // directory helper instead: exclusive, owner-only (0700) and auto-removed.
+    let scratch =
+        crate::scratch_dir::ScratchDir::new_in(&std::env::temp_dir(), "provenant-ci-patch-")?;
     let scratch_path = scratch
         .path()
         .to_str()

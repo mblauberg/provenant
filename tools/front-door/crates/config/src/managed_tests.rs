@@ -4780,13 +4780,19 @@ fn install_lock_holder_is_published_and_removed_with_the_lock() {
     let temp = tempfile::tempdir().unwrap();
     let install = temp.path().join("install");
     fs::create_dir(&install).unwrap();
-    let guard = super::publish_install_lock_holder(&install);
+    // A deterministic clock pins the holder's start time to the injected
+    // boundary; ambient wall time would not report this value.
+    let clock = provenant_core::TestClock::new(
+        provenant_core::WallTime::from_unix_seconds(1_700_000_000).unwrap(),
+        provenant_core::MonoTime::from_micros(0),
+    );
+    let guard = super::publish_install_lock_holder(&install, &clock);
     let detail = super::install_lock_holder_detail(&install);
     assert!(
         detail.contains(&format!("pid {}", std::process::id())),
         "{detail}"
     );
-    assert!(detail.contains("started "), "{detail}");
+    assert!(detail.contains("started 1700000000"), "{detail}");
     assert!(detail.contains("version "), "{detail}");
     drop(guard);
     assert!(!super::install_lock_holder_path(&install).exists());

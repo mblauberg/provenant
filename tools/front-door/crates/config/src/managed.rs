@@ -1544,12 +1544,11 @@ fn install_lock_holder_path(install_root: &Path) -> PathBuf {
 }
 
 /// Publish under the lock. A failure is advisory: the install still proceeds.
-fn publish_install_lock_holder(install_root: &Path) -> impl Drop {
+fn publish_install_lock_holder(install_root: &Path, clock: &dyn Clock) -> impl Drop {
     let path = install_lock_holder_path(install_root);
-    let started_at_unix_seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default();
+    // Advisory holder identity: sample wall time at the injected clock boundary,
+    // falling back to zero when the clock cannot be read.
+    let started_at_unix_seconds = clock.try_unix_seconds().unwrap_or(0);
     let holder = InstallLockHolder {
         pid: std::process::id(),
         started_at_unix_seconds,
@@ -1640,7 +1639,7 @@ pub fn install(
             },
             other => InstallError::Fs(other),
         })?;
-    let _holder = publish_install_lock_holder(&install_root);
+    let _holder = publish_install_lock_holder(&install_root, context.clock);
     // Under the lock, an unchanged target is a no-op: report it so the caller
     // can skip straight to verification instead of rewriting owned files.
     if read_receipt(&plan.targets)?.is_some_and(|current| same_install_target(&current, &receipt)) {
