@@ -87,9 +87,9 @@ pub const fn is_canonical_subsequence(layers: &[Layer]) -> bool {
 }
 
 /// Fail during const evaluation when a family declares a non-canonical order.
+#[allow(clippy::panic)] // const evaluation: this fails the build, never a run.
 pub const fn assert_canonical_subsequence(layers: &[Layer]) {
     if !is_canonical_subsequence(layers) {
-        #[allow(clippy::panic)] // const evaluation: this fails the build, never a run.
         panic!("setting precedence must be a canonical layer subsequence");
     }
 }
