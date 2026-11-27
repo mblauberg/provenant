@@ -720,7 +720,7 @@ fn await_pr_ci_with(
 mod tests {
     use super::*;
     use crate::pr::landing::fakes::FakeForge;
-    use crate::pr::landing::ports::{PullRequestInfo, PullRequestState};
+    use crate::pr::landing::ports::{Mergeability, PullRequestInfo, PullRequestState};
     use crate::pr::landing::test_support::LandingFixture;
     use std::cell::Cell;
 
@@ -731,7 +731,7 @@ mod tests {
             base_branch: "main".into(),
             author: "author".into(),
             state: PullRequestState::Open,
-            mergeability: super::ports::Mergeability::Unknown,
+            mergeability: Mergeability::Unknown,
             merged_commit: None,
             stack: None,
             draft: false,
