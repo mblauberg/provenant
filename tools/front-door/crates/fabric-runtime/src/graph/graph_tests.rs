@@ -817,13 +817,110 @@ fn applied_route_retains_metadata_and_warns_without_dropping_it() {
         progress
             .warnings
             .iter()
-            .any(|warning| warning.contains("effort") && warning.contains("256"))
+            .any(|warning| warning.message.contains("effort") && warning.message.contains("256")),
+        "an over-long identifier keeps its typed warning: {:?}",
+        progress.warnings
     );
     assert!(
         progress
             .warnings
             .iter()
-            .any(|warning| warning.contains("tier") && warning.contains("control"))
+            .any(|warning| warning.message.contains("tier") && warning.message.contains("control")),
+        "a control character keeps its typed warning: {:?}",
+        progress.warnings
+    );
+    assert!(
+        progress.warnings.iter().all(|warning| {
+            warning.code.as_ref() == provenant_records::warning::ROUTE_IDENTIFIER_TOO_LONG.as_str()
+                || warning.code.as_ref()
+                    == provenant_records::warning::ROUTE_IDENTIFIER_CONTROL_CHAR.as_str()
+        }),
+        "route warnings carry a dedicated code, not LEGACY_WARNING: {:?}",
+        progress.warnings
+    );
+    assert!(
+        progress
+            .warnings
+            .iter()
+            .all(|warning| !warning.message.contains("future_field")),
+        "extra fields are not identifiers: {:?}",
+        progress.warnings
+    );
+}
+
+#[test]
+fn pool_selection_note_never_warns() {
+    let mut owner = FakeOwner {
+        observations: [done_as("h/pool")].into(),
+        ..Default::default()
+    };
+    let mut progress = advance(
+        &graph(vec![node("lane", route("fixture"))]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap()
+    .checkpoint
+    .nodes
+    .remove(0);
+    progress.warnings.clear();
+
+    let mut applied = route("fixture");
+    let mut receipt = provenant_records::RouteSelectionReceipt {
+        selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
+        considered_exclusions: vec![],
+        exploration: provenant_records::route_selection::Exploration {
+            extra: Default::default(),
+            selected: false,
+            percent: 0,
+            enabled: false,
+            source: "default".into(),
+        },
+        weight_source: provenant_records::route_selection::WeightSource::Config,
+        account_load: None,
+        extra: Default::default(),
+        pool: "principal".into(),
+        candidates: vec![],
+        roll: 0,
+        total_weight: 1,
+        pick: "codex/gpt-6-luna".into(),
+        reason: Some("p".repeat(300)),
+        redraws: vec![],
+    };
+    receipt
+        .extra
+        .insert("note".into(), serde_json::json!("q".repeat(300)));
+    applied.pool_selection = Some(receipt);
+
+    transitions::apply_route(&mut progress, Some(applied.clone()));
+    assert!(
+        progress.warnings.is_empty(),
+        "pool-selection notes are not identifiers: {:?}",
+        progress.warnings
+    );
+    assert_eq!(
+        progress
+            .attempts
+            .last()
+            .unwrap()
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .applied_route
+            .as_ref(),
+        Some(&applied),
+        "the receipt is still retained in the applied route"
+    );
+
+    applied.model = Some("o".repeat(257));
+    transitions::apply_route(&mut progress, Some(applied));
+    assert!(
+        progress.warnings.iter().any(|warning| {
+            warning.code.as_ref() == provenant_records::warning::ROUTE_IDENTIFIER_TOO_LONG.as_str()
+                && warning.message.contains("model")
+        }),
+        "identifier fields still warn: {:?}",
+        progress.warnings
     );
 }
 

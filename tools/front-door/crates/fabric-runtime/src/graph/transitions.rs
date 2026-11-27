@@ -141,43 +141,59 @@ pub(super) fn apply_launch_metadata(
 
 pub(super) fn apply_route(progress: &mut NodeProgress, applied_route: Option<GraphRoute>) {
     if let Some(route) = applied_route {
-        fn warn_value(
+        // Only host identifiers are bounded by HOST_ID_BYTES. A pool-selection
+        // receipt, a peer network or retry limit, and extra note fields are not
+        // identifiers: they are retained verbatim and never produce a warning.
+        fn warn_identifier(
             warnings: &mut Vec<provenant_records::Warning>,
-            field: &str,
-            value: &serde_json::Value,
+            field: &'static str,
+            value: Option<&str>,
         ) {
-            match value {
-                serde_json::Value::String(value) => {
-                    for (bad, reason) in [
-                        (value.len() > HOST_ID_BYTES, "exceeds 256 bytes"),
-                        (
-                            value.chars().any(char::is_control),
-                            "contains control characters",
-                        ),
-                    ] {
-                        let message = format!("route.{field} {reason}");
-                        if bad && !warnings.iter().any(|warning| warning.message == message) {
-                            warnings.push(super::legacy_warning(message));
-                        }
-                    }
+            let Some(value) = value else { return };
+            for (bad, reason, code) in [
+                (
+                    value.len() > HOST_ID_BYTES,
+                    "exceeds 256 bytes",
+                    provenant_records::warning::ROUTE_IDENTIFIER_TOO_LONG,
+                ),
+                (
+                    value.chars().any(char::is_control),
+                    "contains control characters",
+                    provenant_records::warning::ROUTE_IDENTIFIER_CONTROL_CHAR,
+                ),
+            ] {
+                if !bad {
+                    continue;
                 }
-                serde_json::Value::Object(fields) => {
-                    for (key, value) in fields {
-                        warn_value(warnings, &format!("{field}.{key}"), value);
-                    }
+                let message = format!("route.{field} {reason}");
+                if warnings.iter().any(|warning| warning.message == message) {
+                    continue;
                 }
-                serde_json::Value::Array(values) => {
-                    for (index, value) in values.iter().enumerate() {
-                        warn_value(warnings, &format!("{field}[{index}]"), value);
-                    }
-                }
-                _ => {}
+                warnings.push(
+                    provenant_records::Warning::new(
+                        code,
+                        message,
+                        provenant_records::warning::detected_source(code),
+                    )
+                    .subject(format!("route.{field}")),
+                );
             }
         }
-        if let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(&route) {
-            for (field, value) in fields {
-                warn_value(&mut progress.warnings, &field, &value);
-            }
+
+        for (field, value) in [
+            ("adapter", route.adapter.as_deref()),
+            ("name", route.name.as_deref()),
+            ("model", route.model.as_deref()),
+            ("alias", route.alias.as_deref()),
+            ("effort", route.effort.as_deref()),
+            ("account", route.account.as_deref()),
+            ("account_key", route.account_key.as_deref()),
+            ("source", route.source.as_deref()),
+            ("tier", route.tier.as_deref()),
+            ("required_family", route.required_family.as_deref()),
+            ("peer_source_head", route.peer_source_head.as_deref()),
+        ] {
+            warn_identifier(&mut progress.warnings, field, value);
         }
         if let Some(manifest) = progress
             .attempts
