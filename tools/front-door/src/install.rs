@@ -1770,10 +1770,11 @@ fn prune_release_directories(
         let metadata = std::fs::symlink_metadata(&path)?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
+        let digest = name.strip_prefix("sha256:").unwrap_or(name);
         if !metadata.is_dir()
             || metadata.file_type().is_symlink()
-            || name.len() != 64
-            || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
             || !path.join("release.json").is_file()
         {
             continue;

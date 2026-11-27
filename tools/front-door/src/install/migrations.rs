@@ -1017,6 +1017,9 @@ impl Migration for ConfigKnobRewrite {
 
     fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
         let mut report = MigrationReport::new(self.id());
+        if !state_root.exists() {
+            return Ok(report);
+        }
         let mut paths = vec![state_root.join("config.toml")];
         if let Ok(projects) = std::fs::read_dir(state_root.join("projects")) {
             for project in projects {
