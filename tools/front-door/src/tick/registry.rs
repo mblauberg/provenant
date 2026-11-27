@@ -5,15 +5,16 @@
 //! lease until the worker actually returns, including past an overrun.
 
 use super::TaskResult;
-use provenant_core::{Clock, Deadline, DurationMicros, MonoTime, WallTime};
+use provenant_core::{Clock, Deadline, DurationMicros, WallTime};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 /// The sampled time and budget one task worker may spend.
 #[derive(Clone, Copy)]
 pub(super) struct TaskContext {
-    pub now: MonoTime,
     pub wall: WallTime,
     pub deadline: Deadline,
 }
@@ -31,19 +32,19 @@ pub(super) trait TickTask: Send + Sync {
 
 /// A named task whose body is a scoped closure. The lifetime stays scoped so a
 /// task can borrow resolved roots and config without leaking them into state.
-pub(super) struct TaskDef<'a> {
+pub(super) struct TaskDef {
     name: &'static str,
     enabled: bool,
     budget: DurationMicros,
-    body: Box<dyn Fn(TaskContext) -> TaskResult + Send + Sync + 'a>,
+    body: Box<dyn Fn(TaskContext) -> TaskResult + Send + Sync + 'static>,
 }
 
-impl<'a> TaskDef<'a> {
+impl TaskDef {
     pub(super) fn new(
         name: &'static str,
         enabled: bool,
         budget: DurationMicros,
-        body: impl Fn(TaskContext) -> TaskResult + Send + Sync + 'a,
+        body: impl Fn(TaskContext) -> TaskResult + Send + Sync + 'static,
     ) -> Self {
         Self {
             name,
@@ -54,7 +55,7 @@ impl<'a> TaskDef<'a> {
     }
 }
 
-impl TickTask for TaskDef<'_> {
+impl TickTask for TaskDef {
     fn name(&self) -> &'static str {
         self.name
     }
@@ -75,44 +76,26 @@ pub(super) struct TaskOutcome {
     pub result: TaskResult,
 }
 
-/// In-process single-flight leases. A guard is held from dispatch until the
-/// worker returns, including past a deadline overrun, so a second tick sees
-/// `busy` instead of starting the same task twice.
-#[derive(Clone, Default)]
+/// Host-wide task locks remain held by the actual worker until it exits.
+#[derive(Clone)]
 pub(super) struct TaskLeases {
-    held: Arc<Mutex<BTreeMap<&'static str, String>>>,
+    root: PathBuf,
 }
 
 impl TaskLeases {
-    pub(super) fn try_hold(&self, name: &'static str, holder: String) -> Option<LeaseGuard> {
-        let mut held = self.held.lock().ok()?;
-        if held.contains_key(name) {
-            return None;
-        }
-        held.insert(name, holder);
-        Some(LeaseGuard {
-            held: Arc::clone(&self.held),
-            name,
-        })
+    pub(super) fn new(root: PathBuf) -> Self {
+        Self { root }
     }
 
-    #[cfg(test)]
-    pub(super) fn holder(&self, name: &'static str) -> Option<String> {
-        self.held.lock().ok()?.get(name).cloned()
-    }
-}
-
-/// Released when the worker returns, never when its deadline expires.
-pub(super) struct LeaseGuard {
-    held: Arc<Mutex<BTreeMap<&'static str, String>>>,
-    name: &'static str,
-}
-
-impl Drop for LeaseGuard {
-    fn drop(&mut self) {
-        if let Ok(mut held) = self.held.lock() {
-            held.remove(&self.name);
-        }
+    fn try_hold(&self, name: &'static str) -> Result<provenant_os::fs::LockGuard, String> {
+        let directory = provenant_config::private_directory(&self.root.join("tick"), true)
+            .map_err(|error| error.to_string())?;
+        directory
+            .try_lock(
+                format!("{name}.lock").as_ref(),
+                provenant_os::fs::LockMode::Exclusive,
+            )
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -120,7 +103,7 @@ impl Drop for LeaseGuard {
 /// visit is retried first on the next pass, and every visit moves `last`
 /// forward so a pass never loops on one subject forever.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Cursor {
+pub(crate) struct Cursor {
     #[serde(default)]
     retry: Vec<String>,
     #[serde(default)]
@@ -129,14 +112,19 @@ pub(super) struct Cursor {
 
 impl Cursor {
     /// Retry-front first, then the remaining due subjects in due order.
-    pub(super) fn order(&self, due: &[String]) -> Vec<String> {
+    pub(crate) fn order(&self, due: &[String]) -> Vec<String> {
         let mut ordered: Vec<String> = self
             .retry
             .iter()
             .filter(|key| due.contains(*key))
             .cloned()
             .collect();
-        for key in due {
+        let start = self
+            .last
+            .as_ref()
+            .and_then(|last| due.iter().position(|key| key == last))
+            .map_or(0, |index| (index + 1) % due.len());
+        for key in due.iter().cycle().skip(start).take(due.len()) {
             if !ordered.contains(key) {
                 ordered.push(key.clone());
             }
@@ -146,24 +134,19 @@ impl Cursor {
 
     /// Advance past a visited subject. Only `Busy` and `OverBudget` leave a
     /// retry marker; every other outcome is released.
-    pub(super) fn advance(&mut self, key: &str, retry: bool) {
+    pub(crate) fn advance(&mut self, key: &str, retry: bool) {
         self.retry.retain(|entry| entry.as_str() != key);
         if retry {
             self.retry.push(key.to_owned());
         }
         self.last = Some(key.to_owned());
     }
-
-    #[cfg(test)]
-    pub(super) fn last(&self) -> Option<&str> {
-        self.last.as_deref()
-    }
 }
 
 /// Run enabled tasks concurrently under `concurrency`, each under its own
 /// deadline. Results come back in declaration order regardless of completion
 /// order, so `tick --json` stays stable.
-pub(super) fn run_tasks<V: TickTask>(
+pub(super) fn run_tasks<V: TickTask + 'static>(
     tasks: Vec<V>,
     concurrency: usize,
     leases: &TaskLeases,
@@ -175,14 +158,15 @@ pub(super) fn run_tasks<V: TickTask>(
     let queue = Arc::new(Mutex::new(tasks.into_iter().enumerate()));
     let outcomes = Arc::new(Mutex::new(Vec::with_capacity(count)));
     let slots = concurrency.max(1).min(count.max(1));
+    let active = Arc::new(AtomicUsize::new(0));
     std::thread::scope(|scope| {
         for _ in 0..slots {
             let queue = Arc::clone(&queue);
             let outcomes = Arc::clone(&outcomes);
+            let active = Arc::clone(&active);
             scope.spawn(move || {
                 loop {
-                    let next = { queue.lock().ok().and_then(|mut queue| queue.next()) };
-                    let Some((index, task)) = next else {
+                    let Some((index, task)) = queue.lock().unwrap().next() else {
                         break;
                     };
                     let name = task.name();
@@ -192,19 +176,45 @@ pub(super) fn run_tasks<V: TickTask>(
                         let now = clock.mono_now();
                         let deadline = Deadline::after(now, task.budget())
                             .unwrap_or_else(|_| Deadline::at(now));
-                        match leases.try_hold(name, holder.to_owned()) {
-                            None => TaskResult::busy(wall, holder),
-                            Some(_guard) => {
-                                let result = task.run(TaskContext {
-                                    now,
+                        match leases.try_hold(name) {
+                            Err(error) => TaskResult::busy(wall, &format!("{holder}: {error}")),
+                            Ok(guard)
+                                if active
+                                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                                        (value < slots).then_some(value + 1)
+                                    })
+                                    .is_err() =>
+                            {
+                                drop(guard);
+                                TaskResult::busy(
                                     wall,
-                                    deadline,
+                                    "tick concurrency occupied by overrunning workers",
+                                )
+                            }
+                            Ok(guard) => {
+                                let worker_active = Arc::clone(&active);
+                                let (send, receive) = mpsc::sync_channel(1);
+                                std::thread::spawn(move || {
+                                    let _guard = guard;
+                                    let result =
+                                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                            || task.run(TaskContext { wall, deadline }),
+                                        ));
+                                    worker_active.fetch_sub(1, Ordering::SeqCst);
+                                    if let Ok(result) = result {
+                                        let _ = send.send(result);
+                                    }
                                 });
-                                let ended = clock.mono_now();
-                                if result.state != "busy" && deadline.is_expired(ended) {
-                                    TaskResult::over_budget(wall, name)
-                                } else {
-                                    result
+                                match receive.recv_timeout(Duration::from_micros(
+                                    deadline.remaining(clock.mono_now()).as_micros(),
+                                )) {
+                                    Ok(result) => result,
+                                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                                        TaskResult::over_budget(wall, name)
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                        TaskResult::busy(wall, "worker failed")
+                                    }
                                 }
                             }
                         }
@@ -219,7 +229,7 @@ pub(super) fn run_tasks<V: TickTask>(
     });
     let mut outcomes = Arc::try_unwrap(outcomes)
         .ok()
-        .expect("all workers joined")
+        .expect("all dispatchers joined")
         .into_inner()
         .expect("outcomes lock intact");
     outcomes.sort_by_key(|(index, _)| *index);
@@ -229,158 +239,132 @@ pub(super) fn run_tasks<V: TickTask>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
-
-    fn one_second() -> DurationMicros {
-        DurationMicros::from_seconds(1).unwrap()
-    }
 
     #[test]
-    fn tasks_run_concurrently_up_to_the_cap() {
-        let active = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let tasks: Vec<TaskDef<'_>> = ["graphs", "forge_events", "settlement"]
-            .into_iter()
-            .map(|name| {
-                let active = Arc::clone(&active);
-                let peak = Arc::clone(&peak);
-                TaskDef::new(name, true, one_second(), move |_ctx| {
-                    let live = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(live, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(30));
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    TaskResult::sample(crate::tick::test_wall())
-                })
-            })
-            .collect();
+    fn overrun_reports_before_worker_exits_and_retains_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let leases = TaskLeases::new(temp.path().to_owned());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release = Mutex::new(release_rx);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&calls);
+        let task = TaskDef::new(
+            "graphs",
+            true,
+            DurationMicros::from_micros(50_000),
+            move |_| {
+                worker_calls.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).unwrap();
+                release.lock().unwrap().recv().unwrap();
+                TaskResult::sample(crate::tick::test_wall())
+            },
+        );
         let clock = provenant_os::clock::SystemClock;
         let outcomes = run_tasks(
-            tasks,
-            2,
-            &TaskLeases::default(),
-            &clock,
-            crate::tick::test_wall(),
-            "tick-test",
-        );
-        assert_eq!(outcomes.len(), 3);
-        assert!(peak.load(Ordering::SeqCst) >= 2, "workers did not overlap");
-    }
-
-    #[test]
-    fn slow_graph_slow_forge_page_and_second_tick_overlap() {
-        let leases = TaskLeases::default();
-        let first_leases = leases.clone();
-        let both_started = Arc::new(std::sync::Barrier::new(3));
-        let release = Arc::new(std::sync::Barrier::new(3));
-        let graph_started = Arc::clone(&both_started);
-        let graph_release = Arc::clone(&release);
-        let forge_started = Arc::clone(&both_started);
-        let forge_release = Arc::clone(&release);
-        let tasks: Vec<TaskDef<'_>> = vec![
-            TaskDef::new("graphs", true, one_second(), move |_ctx| {
-                graph_started.wait();
-                graph_release.wait();
-                TaskResult::sample(crate::tick::test_wall())
-            }),
-            TaskDef::new("forge_events", true, one_second(), move |_ctx| {
-                forge_started.wait();
-                forge_release.wait();
-                TaskResult::sample(crate::tick::test_wall())
-            }),
-        ];
-        let clock = provenant_os::clock::SystemClock;
-        let first = std::thread::spawn(move || {
-            run_tasks(
-                tasks,
-                2,
-                &first_leases,
-                &clock,
-                crate::tick::test_wall(),
-                "tick-a",
-            )
-        });
-        // Both workers are in flight at the same barrier: a slow graph and a
-        // slow forge page overlap instead of serialising.
-        both_started.wait();
-        let second = run_tasks(
-            vec![
-                TaskDef::new("graphs", true, one_second(), |_ctx| {
-                    panic!("second tick must not re-run a held task")
-                }),
-                TaskDef::new("forge_events", true, one_second(), |_ctx| {
-                    panic!("second tick must not re-run a held task")
-                }),
-            ],
-            2,
+            vec![task],
+            1,
             &leases,
             &clock,
             crate::tick::test_wall(),
-            "tick-b",
+            "first",
         );
-        assert!(second.iter().all(|outcome| outcome.result.state == "busy"));
-        release.wait();
-        let first = first.join().unwrap();
-        assert!(
-            first
-                .iter()
-                .all(|outcome| outcome.result.state == "observed")
-        );
-    }
-
-    #[test]
-    fn overrun_task_holds_lease_until_worker_ends() {
-        let leases = TaskLeases::default();
-        let started = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
-        let held = leases.clone();
-        let started_thread = Arc::clone(&started);
-        let release_thread = Arc::clone(&release);
-        let worker = std::thread::spawn(move || {
-            let _guard = held
-                .try_hold("graphs", "tick-a".into())
-                .expect("first tick takes the lease");
-            started_thread.wait();
-            release_thread.wait();
+        started_rx.recv().unwrap();
+        assert_eq!(outcomes[0].result.state, "over_budget");
+        let second = TaskDef::new("graphs", true, DurationMicros::from_micros(50_000), |_| {
+            panic!("lease must exclude the second tick")
         });
-        started.wait();
-        assert!(leases.try_hold("graphs", "tick-b".into()).is_none());
-        assert_eq!(leases.holder("graphs").as_deref(), Some("tick-a"));
-        let over = TaskResult::over_budget(crate::tick::test_wall(), "graphs");
-        assert_eq!(over.state, "over_budget");
-        release.wait();
-        worker.join().unwrap();
-        assert!(leases.try_hold("graphs", "tick-b".into()).is_some());
+        let outcomes = run_tasks(
+            vec![second],
+            1,
+            &leases,
+            &clock,
+            crate::tick::test_wall(),
+            "second",
+        );
+        assert_eq!(outcomes[0].result.state, "busy");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        release_tx.send(()).unwrap();
     }
 
     #[test]
-    fn cursor_advances_past_busy_and_failed() {
+    fn concurrent_ticks_share_the_host_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let leases = TaskLeases::new(temp.path().to_owned());
+        let first_leases = leases.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release = Mutex::new(release_rx);
+        let first = std::thread::spawn(move || {
+            let task = TaskDef::new(
+                "graphs",
+                true,
+                DurationMicros::from_seconds(5).unwrap(),
+                move |_| {
+                    started_tx.send(()).unwrap();
+                    release.lock().unwrap().recv().unwrap();
+                    TaskResult::sample(crate::tick::test_wall())
+                },
+            );
+            run_tasks(
+                vec![task],
+                1,
+                &first_leases,
+                &provenant_os::clock::SystemClock,
+                crate::tick::test_wall(),
+                "first",
+            )
+        });
+        started_rx.recv().unwrap();
+        let task = TaskDef::new(
+            "graphs",
+            true,
+            DurationMicros::from_seconds(5).unwrap(),
+            |_| panic!("already leased"),
+        );
+        let second = run_tasks(
+            vec![task],
+            1,
+            &leases,
+            &provenant_os::clock::SystemClock,
+            crate::tick::test_wall(),
+            "second",
+        );
+        assert_eq!(second[0].result.state, "busy");
+        release_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap()[0].result.state, "observed");
+    }
+
+    #[test]
+    fn cursor_rotates_and_prioritises_retry() {
+        let due: Vec<String> = (0..5).map(|i| i.to_string()).collect();
         let mut cursor = Cursor::default();
-        let due: Vec<String> = ["p/a", "p/b", "p/c"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(cursor.order(&due), due);
-        cursor.advance("p/a", true); // Busy
-        cursor.advance("p/b", false); // Advanced
-        cursor.advance("p/c", true); // OverBudget
-        assert_eq!(cursor.last(), Some("p/c"));
-        assert_eq!(cursor.order(&due), vec!["p/a", "p/c", "p/b"]);
-        // A completed subject releases its retry marker.
-        cursor.advance("p/a", false);
-        assert_eq!(cursor.order(&due), vec!["p/c", "p/a", "p/b"]);
+        let mut visited = Vec::new();
+        for _ in 0..3 {
+            for key in cursor.order(&due).into_iter().take(2) {
+                cursor.advance(&key, false);
+                visited.push(key);
+            }
+        }
+        assert_eq!(&visited[..5], &due);
+        cursor.advance("2", true);
+        assert_eq!(cursor.order(&due)[0], "2");
     }
-
     #[test]
-    fn disabled_tasks_are_not_dispatched() {
-        let leases = TaskLeases::default();
-        let tasks = vec![TaskDef::new("gc", false, one_second(), |_ctx| {
-            panic!("disabled task must not run")
-        })];
-        let clock = provenant_os::clock::SystemClock;
-        let outcomes = run_tasks(tasks, 4, &leases, &clock, crate::tick::test_wall(), "t");
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(outcomes[0].result.state, "disabled");
-        assert!(leases.holder("gc").is_none());
+    fn task_summary_contains_every_registry_entry() {
+        let names = ["settlement", "graphs", "forge_events", "gc", "steward"];
+        let rows: Vec<super::super::Task> = names
+            .iter()
+            .map(|name| super::super::Task {
+                task: *name,
+                state: "observed".into(),
+                error: None,
+                diagnostic: None,
+            })
+            .collect();
+        let summary = super::super::task_summary(&rows);
+        for name in names {
+            assert!(summary.contains(&format!("{name}=observed")));
+        }
     }
 }

@@ -378,12 +378,18 @@ impl PollProgress {
 
 /// One invocation belongs to the existing host tick. A project lock shares all
 /// subscriptions across concurrent manual/scheduled ticks, never across chairs.
-pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
+pub(crate) fn tick(
+    resolved: &crate::roots::Resolved,
+    deadline: provenant_core::Deadline,
+) -> Result<()> {
     if provenant_cli::fabric::in_lane() {
         return Err("forge ingestion requires host custody".into());
     }
     let mut errors = Vec::new();
     for binding in provenant_config::registered_projects(&resolved.roots)? {
+        if deadline.is_expired(SystemClock.mono_now()) {
+            break;
+        }
         // A vanished checkout or common directory has no forge to poll. Report
         // it once with the unregister command rather than failing every tick.
         if crate::project_root::absent(&binding) {

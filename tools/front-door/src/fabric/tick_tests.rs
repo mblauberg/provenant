@@ -82,7 +82,7 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
         claude_config: None,
         codex_home: None,
     };
-    let report = tick_graphs(&resolved, now, &FreeWorkers)?;
+    let report = tick_graphs(&resolved, now, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert_eq!(report.advanced, 2);
     let due = graph::FileJournal::read_checkpoint(&roots.state, project, "b-due")?
@@ -112,10 +112,10 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
     }
     // Restart picks up a previously busy journal once its existing owner exits.
     drop(busy);
-    let next = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let next = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(next.errors.is_empty(), "{:?}", next.errors);
     assert_eq!(next.advanced, 1);
-    let idle = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let idle = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert_eq!(idle.advanced, 0);
     assert!(idle.errors.is_empty());
     Ok(())
@@ -193,7 +193,7 @@ fn tick_auto_settles_finished_graphs_with_removed_worktrees()
         codex_home: None,
     };
     let clock = SystemClock;
-    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
     assert!(
@@ -224,7 +224,7 @@ fn tick_auto_settles_finished_graphs_with_removed_worktrees()
     assert_eq!(bad_run.outcome, None);
 
     // Auto-settled graphs leave the pending set: no repeated warnings.
-    let again = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let again = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(again.errors.is_empty(), "{:?}", again.errors);
     assert!(again.warnings.is_empty(), "{:?}", again.warnings);
     Ok(())
@@ -275,7 +275,7 @@ fn live_custody_lease_blocks_auto_settlement()
         claude_config: None,
         codex_home: None,
     };
-    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert!(
         report

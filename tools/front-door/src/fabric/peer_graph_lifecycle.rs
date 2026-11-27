@@ -114,7 +114,7 @@ fn tick_reports_unreadable_once_until_bytes_change_and_advances_another_graph()
         claude_config: None,
         codex_home: None,
     };
-    let first = tick_graphs(&resolved, now, &FreeWorkers)?;
+    let first = tick_graphs(&resolved, now, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert_eq!(first.errors.len(), 1, "{:?}", first.errors);
     assert!(first.errors[0].contains("a-bad"));
     assert_eq!(first.advanced, 1);
@@ -124,18 +124,18 @@ fn tick_reports_unreadable_once_until_bytes_change_and_advances_another_graph()
     // Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
     // The same unreadable bytes are reported once; later ticks skip them quietly
     // and the other graph is still visited without error.
-    let second = tick_graphs(&resolved, now, &FreeWorkers)?;
+    let second = tick_graphs(&resolved, now, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(second.errors.is_empty(), "{:?}", second.errors);
     assert_eq!(second.advanced, 0);
-    let third = tick_graphs(&resolved, now, &FreeWorkers)?;
+    let third = tick_graphs(&resolved, now, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(third.errors.is_empty(), "{:?}", third.errors);
     assert_eq!(third.advanced, 0);
     // Changed bytes are a new observation and are reported again, once.
     std::fs::write(directory.join("graph-a-bad.json"), b"invalid json, changed")?;
-    let changed = tick_graphs(&resolved, now, &FreeWorkers)?;
+    let changed = tick_graphs(&resolved, now, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert_eq!(changed.errors.len(), 1, "{:?}", changed.errors);
     assert!(changed.errors[0].contains("a-bad"));
-    let after = tick_graphs(&resolved, now, &FreeWorkers)?;
+    let after = tick_graphs(&resolved, now, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(after.errors.is_empty(), "{:?}", after.errors);
     let good = graph::FileJournal::read_checkpoint(&roots.state, project, "b-good")?
         .ok_or("missing good graph")?;
@@ -212,7 +212,7 @@ fn tick_dispatches_waiting_node_without_a_deadline() -> Result<(), Box<dyn std::
         claude_config: None,
         codex_home: None,
     };
-    let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert_eq!(tick.advanced, 1, "{:?}", tick.errors);
     let factory = Factory {
         context,
@@ -307,7 +307,7 @@ fn tick_dispatches_capacity_waiter_with_future_decision() -> Result<(), Box<dyn 
         claude_config: None,
         codex_home: None,
     };
-    let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert_eq!(tick.advanced, 1, "{:?}", tick.errors);
     let factory = Factory {
         context,
@@ -425,12 +425,12 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
         claude_config: None,
         codex_home: None,
     };
-    let first = tick_graphs(&resolved, now, &FreeWorkers)?;
+    let first = tick_graphs(&resolved, now, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(first.errors.is_empty(), "{:?}", first.errors);
     assert_eq!(first.advanced, 1);
     assert_eq!(first.warnings.len(), 1);
     assert!(first.warnings[0].contains("a-missing"));
-    let second = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let second = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(second.errors.is_empty(), "{:?}", second.errors);
     assert!(second.warnings.is_empty());
     assert_eq!(

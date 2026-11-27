@@ -166,7 +166,7 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
         claude_config: None,
         codex_home: None,
     };
-    let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(tick.advanced > 0);
     let completed = FileJournal::read_checkpoint(
         &fixture.roots.state,
