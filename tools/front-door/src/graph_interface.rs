@@ -7,6 +7,7 @@ use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_runtime::graph::root_cause::is_upstream_blocked;
 use provenant_records::{
     CommandResult, Outcome,
+    lane_contract::{ContextInputs, LaunchMode},
     warning::{Warning, warn},
 };
 use provenant_routing::BareModelError;
@@ -25,7 +26,13 @@ fn decode(text: &str) -> Result<Value, String> {
 }
 fn response_outcome(command: &str, data: &Value) -> Outcome {
     if data["timed_out"] == true {
-        return Outcome::Waiting;
+        // An inline `run` that outlives `--timeout` reports 124 with
+        // `still_running`: the lane keeps its lease and the caller waits.
+        return if command == "run" {
+            Outcome::Timeout
+        } else {
+            Outcome::Waiting
+        };
     }
     if command == "run" && data["named"]["replayed"] != true {
         match data["status"].as_str() {
@@ -120,6 +127,184 @@ fn file_error(
     reason: &str,
 ) -> Box<provenant_records::diagnostic::Diagnostic> {
     cli_input_error(&format!("{flag} {}: {reason}", path.display()))
+}
+
+/// Compiled defaults from `config/harness-knobs.json`. The launch edge reads
+/// the configured value when one is present; these keep fresh-context and
+/// timeout handling deterministic when it is not.
+const CONTEXT_MAX_BYTES: usize = 262_144;
+const RUN_TIMEOUT_SECONDS: u64 = 1800;
+
+/// Read one integer knob at the command edge. An unreadable configuration is
+/// advisory: the compiled default keeps the launch bounded.
+fn knob_u64(globals: &Globals, key: &str, default: u64) -> u64 {
+    crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Directory,
+        crate::roots::Product::Optional,
+    )
+    .ok()
+    .and_then(|resolved| provenant_cli::config_reads::read_for(&resolved.roots, "run").ok())
+    .and_then(|config| config.knobs.get(key).cloned())
+    .and_then(|sourced| {
+        sourced
+            .value
+            .as_u64()
+            .or_else(|| sourced.value.as_str().and_then(|text| text.parse().ok()))
+    })
+    .unwrap_or(default)
+}
+
+fn knob_string(globals: &Globals, key: &str) -> Option<String> {
+    crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Directory,
+        crate::roots::Product::Optional,
+    )
+    .ok()
+    .and_then(|resolved| provenant_cli::config_reads::read_for(&resolved.roots, "run").ok())
+    .and_then(|config| config.knobs.get(key).cloned())
+    .and_then(|sourced| sourced.value.as_str().map(str::to_owned))
+}
+
+/// Resolve inline versus handle launch. An explicit `--wait` or `--no-wait`
+/// wins, then the `lanes.launch.mode` knob, then the template's shape: a leaf
+/// runs inline, a composite or queue returns a handle.
+fn launch_mode(wait: bool, no_wait: bool, knob: Option<&str>, composite: bool) -> LaunchMode {
+    if wait {
+        return LaunchMode::Inline;
+    }
+    if no_wait {
+        return LaunchMode::Handle;
+    }
+    match knob {
+        Some("inline") => LaunchMode::Inline,
+        Some("handle") => LaunchMode::Handle,
+        _ if composite => LaunchMode::Handle,
+        _ => LaunchMode::Inline,
+    }
+}
+
+/// A queue or composite template returns a handle; a leaf runs inline. The
+/// shape is read from the flags and the graph document at this edge, before
+/// the host compiles the template.
+fn is_composite(template: Option<&str>, over: &[String], document_nodes: usize) -> bool {
+    !over.is_empty()
+        || document_nodes > 1
+        || template.is_some_and(|name| {
+            matches!(name, "deliver" | "deliver.batch" | "batch")
+                || name.starts_with("queue")
+                || name.ends_with("-swarm")
+                || name == "review-panel"
+                || name == "review-shape"
+        })
+}
+
+/// Append opt-in context to a brief, cutting the whole result at `limit`
+/// bytes. The brief is written first so a large context file cannot displace
+/// the caller's own instruction. Returns whether text was cut.
+fn bounded_context(brief: &str, sections: &[(String, String)], limit: usize) -> (String, bool) {
+    let mut text = String::new();
+    text.push_str(brief);
+    for (label, body) in sections {
+        if body.trim().is_empty() {
+            continue;
+        }
+        text.push_str("\n\n--- ");
+        text.push_str(label);
+        text.push_str(" ---\n");
+        text.push_str(body);
+    }
+    if text.len() <= limit {
+        return (text, false);
+    }
+    let mut cut = limit;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.truncate(cut);
+    (text, true)
+}
+
+/// Read one named shared-note stream. Notes are advisory context: any failure
+/// leaves the brief untouched and the caller warns once.
+#[allow(clippy::disallowed_methods)]
+fn named_notes(globals: &Globals, name: &str) -> Option<String> {
+    use provenant_core::consumer_env::PARENT_ATTEMPT_ID;
+    use provenant_fabric_runtime::notes::{Host, Input, Scope};
+    let cancel = CancelToken::new();
+    let input = Input::Read {
+        reader: name.to_owned(),
+        scope: Scope::Project,
+        after: Some(0),
+        limit: None,
+    };
+    let page = if std::env::var_os(PARENT_ATTEMPT_ID).is_some() {
+        let attempt = std::env::var(PARENT_ATTEMPT_ID).ok()?.parse().ok()?;
+        provenant_cli::notes::from_lane(attempt, input, &cancel).ok()?
+    } else {
+        let clock = provenant_os::clock::SystemClock::new();
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Project,
+            crate::roots::Product::Optional,
+        )
+        .ok()?;
+        let ctx =
+            provenant_cli::fabric::Context::open(resolved.roots, &resolved.home, &resolved.project)
+                .ok()?;
+        let host = Host::chair(ctx.identity.project, None);
+        provenant_cli::notes::execute_host(&ctx, &host, input, &clock, &cancel).ok()?
+    };
+    let mut lines = Vec::new();
+    for event in page["events"].as_array()? {
+        if let Some(text) = event["detail"]["text"].as_str() {
+            lines.push(text.to_owned());
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn context_warning(detail: String) -> Warning {
+    Warning::new(
+        provenant_records::warning::ARGUMENT_VALUE_SUSPECT,
+        detail,
+        provenant_records::warning::detected_source(
+            provenant_records::warning::ARGUMENT_VALUE_SUSPECT,
+        ),
+    )
+}
+
+/// Gather the opt-in context sections and inline them into the brief under one
+/// bound. A missing context file or an empty note stream is advisory: it warns
+/// and the other layers still launch.
+fn inline_context(
+    brief: &str,
+    files: &[PathBuf],
+    notes: &[String],
+    globals: &Globals,
+) -> (String, bool) {
+    let limit = knob_u64(globals, "lanes.context_max_bytes", CONTEXT_MAX_BYTES as u64) as usize;
+    let mut sections = Vec::new();
+    for path in files {
+        match std::fs::read_to_string(path) {
+            Ok(text) => sections.push((format!("context: {}", path.display()), text)),
+            Err(_) => warn(context_warning(format!(
+                "--context {}: file could not be read",
+                path.display()
+            ))),
+        }
+    }
+    for name in notes {
+        if let Some(text) = named_notes(globals, name) {
+            sections.push((format!("notes: {name}"), text));
+        } else {
+            warn(context_warning(format!(
+                "--notes {name}: no shared notes were read"
+            )));
+        }
+    }
+    bounded_context(brief, &sections, limit)
 }
 
 /// `NAME STATE MODEL WORKTREE`, naming the handle that
@@ -219,6 +404,35 @@ fn refusal_lines(checkpoint: &Value) -> String {
     text
 }
 
+fn format_elapsed(ms: u64) -> String {
+    let seconds = ms / 1000;
+    format!("{}m{:02}s", seconds / 60, seconds % 60)
+}
+
+/// The inline launch footer: one bounded line naming the handle, model,
+/// elapsed wall time, access and read source, and the warning count. A handle
+/// launch omits it because no answer is on this invocation.
+fn run_footer(data: &Value, input: &Value) -> String {
+    let name = data["checkpoint"]["graph_id"]
+        .as_str()
+        .or_else(|| input["name"].as_str())
+        .unwrap_or("-");
+    let model = data["route"]["model"]
+        .as_str()
+        .or_else(|| input["model"].as_str())
+        .unwrap_or("-");
+    let elapsed = data["elapsed_ms"]
+        .as_u64()
+        .map_or_else(|| "-".to_owned(), format_elapsed);
+    let access = input["access"].as_str().unwrap_or("read-only");
+    let source = input["source"].as_str().unwrap_or("checkout");
+    let warnings = data["warnings"].as_array().map_or(0, Vec::len);
+    provenant_cli::bounded_text(
+        &format!("— {name} · {model} · {elapsed} · {access}, {source} · {warnings} warnings"),
+        provenant_cli::limits::SUMMARY_ROW_BYTES,
+    )
+}
+
 /// The compact `run` result: the headline, unless it was already announced,
 /// then the one next command. A refusal before admission adds its own line.
 fn run_human(
@@ -229,11 +443,15 @@ fn run_human(
     let graph = data["checkpoint"]["graph_id"].as_str().unwrap_or_default();
     // The reason comes from the run's own status: a copied command is useful
     // only when the reader knows which state made it the next step.
-    let (rest, why) = match data["status"].as_str() {
-        Some("complete") => (format!("output {graph}"), "the run is complete"),
-        Some("cancelled") => (format!("output {graph}"), "the run was cancelled"),
-        Some("paused") => (format!("status {graph}"), "the run is paused"),
-        _ => (format!("wait {graph}"), "the run is still running"),
+    let (rest, why) = if data["timed_out"] == true {
+        (format!("wait {graph}"), "the inline run is still running")
+    } else {
+        match data["status"].as_str() {
+            Some("complete") => (format!("output {graph}"), "the run is complete"),
+            Some("cancelled") => (format!("output {graph}"), "the run was cancelled"),
+            Some("paused") => (format!("status {graph}"), "the run is paused"),
+            _ => (format!("wait {graph}"), "the run is still running"),
+        }
     };
     let next = provenant_records::command_result::NextStep::from_command(
         &format!("provenant {rest}"),
@@ -270,11 +488,19 @@ fn run_human(
             lanes += &format!("warning: {warning}\n");
         }
     }
+    // A handle launch returns at admission and prints only the handle; an
+    // inline launch carries its final answer and closes with the one-line
+    // footer before the rendered next step.
+    let footer = if input["launch_mode"].as_str() == Some("handle") {
+        String::new()
+    } else {
+        format!("{}\n", run_footer(data, input))
+    };
     if announced {
-        (lanes, next)
+        (format!("{lanes}{footer}"), next)
     } else {
         let headline = run_headline(&data["checkpoint"], status, document, input);
-        (format!("{notice}{headline}\n{lanes}"), next)
+        (format!("{notice}{headline}\n{lanes}{footer}"), next)
     }
 }
 
@@ -285,7 +511,11 @@ fn invoke(
     input: Result<Value, Box<provenant_records::diagnostic::Diagnostic>>,
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
+    timeout_seconds: Option<u64>,
 ) -> u8 {
+    // `--timeout` bounds the whole invocation; nested waits receive what is
+    // left of it through a smaller launch budget.
+    let cap = |seconds: u64| timeout_seconds.map_or(seconds, |timeout| seconds.min(timeout));
     let input = match input {
         Ok(input) => input,
         Err(projection) => {
@@ -313,9 +543,9 @@ fn invoke(
             && std::env::var_os(provenant_core::consumer_env::PARENT_ATTEMPT_ID).is_some()
         {
             let factory = fabric::read_factory(globals, workers)?;
-            let wait_seconds = input["wait_seconds"]
+            let wait_seconds = cap(input["wait_seconds"]
                 .as_u64()
-                .unwrap_or(factory.context.config.graph.launch_wait_seconds);
+                .unwrap_or(factory.context.config.graph.launch_wait_seconds));
             let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
             return Ok(factory.relay_document(&input, budget, &CancelToken::new())?);
         }
@@ -325,10 +555,10 @@ fn invoke(
             fabric::factory(globals, workers)?
         };
         // `run` takes no wait: its launch, including binding a writer, has the
-        // configured launch allowance.
-        let wait_seconds = input["wait_seconds"]
+        // configured launch allowance, bounded by `--timeout`.
+        let wait_seconds = cap(input["wait_seconds"]
             .as_u64()
-            .unwrap_or(factory.context.config.graph.launch_wait_seconds);
+            .unwrap_or(factory.context.config.graph.launch_wait_seconds));
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
         let local_branch = (command == "run" && input["host"].is_null())
             .then(|| input["branch"].as_str().map(str::to_owned))
@@ -409,7 +639,13 @@ fn invoke(
         Ok(result)
     })();
     match result {
-        Ok(data) => {
+        Ok(mut data) => {
+            if command == "run"
+                && data["timed_out"] == true
+                && input["launch_mode"].as_str() != Some("handle")
+            {
+                data["still_running"] = json!(true);
+            }
             let (human, next) = if command == "run"
                 && !globals.full
                 && data["checkpoint"]["graph_id"].is_string()
@@ -425,7 +661,17 @@ fn invoke(
             // A replay reports the graph its input already started; its failure
             // was reported when it happened.
             let replayed = data["named"]["replayed"] == true;
-            let mut result = CommandResult::new(command, response_outcome(command, &data), data);
+            let outcome = if command == "run"
+                && data["timed_out"] == true
+                && input["launch_mode"].as_str() == Some("handle")
+            {
+                // A handle returns at admission; it never reports the inline
+                // timeout outcome even though its launch budget was short.
+                Outcome::Ok
+            } else {
+                response_outcome(command, &data)
+            };
+            let mut result = CommandResult::new(command, outcome, data);
             result.next = next.into_iter().collect();
             if command == "run"
                 && let Some(refusal) = result.data["source_admission"]
@@ -629,11 +875,41 @@ pub(crate) fn run(
             ));
         }
     }
+    let timeout_seconds = request.common.timeout_seconds();
+    let briefs = request.brief_text.clone();
+    if briefs.len() > 1 {
+        // Fan-out: one lane per brief. Each result is printed under a bounded
+        // header and the worst status wins, so a single failed lane is not
+        // hidden by the others. The host runs the lanes concurrently under
+        // its own admission cap; this edge keeps their output ordered.
+        let total = briefs.len();
+        let mut worst = 0u8;
+        for (index, brief) in briefs.into_iter().enumerate() {
+            let mut one = request.clone();
+            one.brief = Some(brief.clone());
+            one.brief_text.clear();
+            one.brief_file = None;
+            let header = format!(
+                "== brief {}/{}: {} ==\n",
+                index + 1,
+                total,
+                provenant_cli::bounded_text(&brief, provenant_cli::limits::SUMMARY_ROW_BYTES)
+            );
+            let _ = std::io::stdout().lock().write_all(header.as_bytes());
+            let input = match catalogue.as_ref() {
+                Ok(cat) => run_input(one, cat, globals),
+                Err(error) => Err(cli_input_error(&error.to_string())),
+            };
+            worst = worst.max(invoke("run", input, globals, workers, timeout_seconds));
+        }
+        return worst;
+    }
     invoke(
         "run",
-        catalogue.and_then(|catalogue| run_input(request, &catalogue)),
+        catalogue.and_then(|catalogue| run_input(request, &catalogue, globals)),
         globals,
         workers,
+        timeout_seconds,
     )
 }
 
@@ -690,8 +966,22 @@ fn implementation_template(name: &str) -> bool {
 fn run_input(
     request: GraphRunArgs,
     catalogue: &provenant_routing::Catalogue,
+    globals: &Globals,
 ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
+        // Capture the native-lane launch flags before the request's other
+        // fields are moved into the graph input.
+        let context_files = request.context.clone();
+        let note_names = request.notes.clone();
+        let strict = request.strict;
+        let checks = request.checks.clone();
+        let isolated = request.isolated;
+        let destination = request.destination.clone();
+        let commit = request.commit.clone();
+        let worktree_sharing = request.worktree_sharing.clone();
+        let wait = request.wait;
+        let no_wait = request.no_wait;
+        let timeout_seconds = request.common.timeout_seconds();
         let plan = request.plan;
         let implementation = request.template.as_deref().is_some_and(|name| {
             implementation_template(name) || name == "deliver" || name == "batch"
@@ -802,8 +1092,25 @@ fn run_input(
             if brief.trim().is_empty() {
                 return Err(cli_input_error("brief is empty"));
             }
+            // Fresh context is the brief plus the standing preamble (carried
+            // on the attempt) and only the explicitly named files and notes.
+            let (brief, truncated) = inline_context(&brief, &context_files, &note_names, globals);
+            if truncated {
+                warn(context_warning(format!(
+                    "context exceeded {} bytes and was cut; --full lists the sources",
+                    CONTEXT_MAX_BYTES
+                )));
+            }
             input["brief"] = json!(brief);
         }
+        input["context_inputs"] = serde_json::to_value(ContextInputs {
+            files: context_files
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            notes: note_names,
+        })
+        .unwrap_or_default();
         if let Some(path) = request.file {
             let text = std::fs::read_to_string(&path).map_err(|_| file_input_error(&path))?;
             if text.trim().is_empty() {
@@ -821,6 +1128,64 @@ fn run_input(
                     ));
                 }
             }
+        }
+        // Launch mode comes from explicit flags, then the knob, then the
+        // template's shape. A composite or queue returns a handle, so its
+        // launch does not block the caller for the whole lane.
+        let over: Vec<String> = input["over"].as_array().map_or_else(Vec::new, |rows| {
+            rows.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        });
+        let composite = !over.is_empty()
+            || input["over"].is_string()
+            || is_composite(
+                input["template"].as_str(),
+                &over,
+                input["document"]["nodes"].as_array().map_or(0, Vec::len),
+            );
+        let mode = launch_mode(
+            wait,
+            no_wait,
+            knob_string(globals, "lanes.launch.mode").as_deref(),
+            composite,
+        );
+        input["launch_mode"] = serde_json::to_value(mode).unwrap_or_default();
+
+        // `--strict`, `--checks` and `--isolated` select launch-layer policy.
+        // The host applies `checks_mode` with `Policy::apply_checks`, which
+        // cannot raise a boundary or operation row.
+        let checks_mode = if strict {
+            Some("strict".to_owned())
+        } else {
+            checks
+                .filter(|value| provenant_records::policy::ChecksMode::from_checks(value).is_some())
+        };
+        if let Some(value) = checks_mode {
+            input["checks_mode"] = json!(value);
+        }
+        if isolated {
+            input["isolated"] = json!(true);
+            input["sandbox"] = json!("on");
+            input["destination"] = json!("new");
+            input["worktree_sharing"] = json!("refuse");
+            input["checks_mode"] = json!("strict");
+        }
+        if let Some(value) = destination {
+            input["destination"] = json!(value);
+        }
+        if let Some(value) = commit {
+            input["commit"] = json!(value);
+        }
+        if let Some(value) = worktree_sharing {
+            input["worktree_sharing"] = json!(value);
+        }
+        let timeout = timeout_seconds
+            .unwrap_or_else(|| knob_u64(globals, "domains.cli.timeouts.run", RUN_TIMEOUT_SECONDS));
+        input["timeout_seconds"] = json!(timeout);
+        if matches!(mode, LaunchMode::Handle) && !wait {
+            input["wait_seconds"] = json!(0);
         }
         Ok(input)
     })()
@@ -875,6 +1240,7 @@ pub(crate) fn edit(request: Edit, globals: &Globals, workers: &'static dyn Worke
         document(&request.file).map(|patch| json!({"op":"edit","id":request.name,"patch":patch})),
         globals,
         workers,
+        None,
     )
 }
 pub(crate) fn templates_summary(
@@ -983,7 +1349,7 @@ pub(crate) fn templates(
         }
         Ok(input)
     })();
-    invoke("templates", input, globals, workers)
+    invoke("templates", input, globals, workers, None)
 }
 #[cfg(test)]
 #[allow(
@@ -997,7 +1363,11 @@ mod tests {
     fn run_input_fixture(
         request: GraphRunArgs,
     ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
-        run_input(request, &provenant_routing::Catalogue::bundled().unwrap())
+        run_input(
+            request,
+            &provenant_routing::Catalogue::bundled().unwrap(),
+            &Globals::default(),
+        )
     }
 
     #[test]
@@ -1328,7 +1698,7 @@ mod tests {
         let mut request = run_request();
         request.model = Some("gpt-9-sol".into());
         assert_eq!(
-            run_input(request, &catalogue).unwrap()["model"],
+            run_input(request, &catalogue, &Globals::default()).unwrap()["model"],
             "codex/gpt-9-sol"
         );
     }
@@ -1622,9 +1992,138 @@ mod tests {
             response_outcome("run", &json!({"document":{}})),
             Outcome::Ok
         );
+        // An inline run past --timeout is a 124 with the lane still running;
+        // other commands keep the bounded-wait outcome.
         assert_eq!(
             response_outcome("run", &json!({"timed_out":true})),
+            Outcome::Timeout
+        );
+        assert_eq!(
+            response_outcome("status", &json!({"timed_out":true})),
             Outcome::Waiting
         );
+    }
+
+    #[test]
+    fn launch_mode_from_template_shape() {
+        // A leaf is inline, a composite or queue is a handle, and an explicit
+        // flag beats both the shape and the knob.
+        assert_eq!(launch_mode(false, false, None, false), LaunchMode::Inline);
+        assert_eq!(launch_mode(false, false, None, true), LaunchMode::Handle);
+        assert_eq!(
+            launch_mode(false, false, Some("handle"), false),
+            LaunchMode::Handle
+        );
+        assert_eq!(
+            launch_mode(false, false, Some("inline"), true),
+            LaunchMode::Inline
+        );
+        assert_eq!(
+            launch_mode(true, false, Some("handle"), true),
+            LaunchMode::Inline
+        );
+        assert_eq!(
+            launch_mode(false, true, Some("inline"), false),
+            LaunchMode::Handle
+        );
+    }
+
+    #[test]
+    fn context_and_notes_are_bounded_and_brief_stays_first() {
+        let sections = vec![
+            ("context: a.md".to_owned(), "A".repeat(60)),
+            ("notes: n".to_owned(), "N".repeat(60)),
+        ];
+        let (full, cut) = bounded_context("do the work", &sections, 4096);
+        assert!(!cut);
+        assert!(full.starts_with("do the work"));
+        assert!(full.contains("context: a.md"));
+        assert!(full.contains("notes: n"));
+
+        let (short, cut) = bounded_context("do the work", &sections, 40);
+        assert!(cut);
+        assert!(short.starts_with("do the work"));
+        assert!(short.len() <= 40);
+        assert!(std::str::from_utf8(short.as_bytes()).is_ok());
+
+        // An empty opt-in section never appears.
+        let empty = vec![("empty".to_owned(), " \n".to_owned())];
+        let (text, _) = bounded_context("brief", &empty, 100);
+        assert_eq!(text, "brief");
+    }
+
+    #[test]
+    fn inline_task_prints_result_and_footer() {
+        let data = json!({
+            "status":"complete",
+            "checkpoint":{"graph_id":"task-3f2","nodes":[]},
+            "route":{"model":"luna"},
+            "elapsed_ms":134000,
+            "warnings":["a","b"],
+        });
+        let inline = json!({"launch_mode":"inline","access":"read_only","source":"checkout"});
+        let (human, _) = run_human(&data, &inline, false);
+        assert!(
+            human.contains("— task-3f2 · luna · 2m14s · read_only, checkout · 2 warnings"),
+            "{human}"
+        );
+        // A handle launch reports only the handle; no inline footer.
+        let handle = json!({"launch_mode":"handle"});
+        let (human, _) = run_human(&data, &handle, false);
+        assert!(!human.contains("warnings\n"));
+        assert!(!human.contains("2m14s"));
+    }
+
+    #[test]
+    fn inline_timeout_is_124_still_running() {
+        let mut data = json!({
+            "status":"pending",
+            "checkpoint":{"graph_id":"task-9","nodes":[]},
+            "timed_out":true,
+        });
+        assert_eq!(response_outcome("run", &data), Outcome::Timeout);
+        assert_eq!(Outcome::Timeout.exit_code(), 124);
+        // The project edge marks the lane as still running on this outcome.
+        if data["timed_out"] == true {
+            data["still_running"] = json!(true);
+        }
+        assert_eq!(data["still_running"], true);
+        let (_, step) = run_human(&data, &json!({"launch_mode":"inline"}), true);
+        assert_eq!(
+            step.argv,
+            vec!["provenant", "wait", "task-9"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(step.why, "the inline run is still running");
+    }
+
+    #[test]
+    fn native_lane_flags_reach_the_graph_input() {
+        let mut request = run_request();
+        request.brief = Some("Review the tree".into());
+        request.strict = true;
+        request.checks = Some("off".into());
+        request.isolated = true;
+        request.destination = Some("parent".into());
+        request.commit = Some("own".into());
+        request.worktree_sharing = Some("refuse".into());
+        let input = run_input_fixture(request).unwrap();
+        // --isolated sets its bundle; the explicit destination and sharing
+        // flags then win for this launch.
+        assert_eq!(input["isolated"], true);
+        assert_eq!(input["checks_mode"], "strict");
+        assert_eq!(input["destination"], "parent");
+        assert_eq!(input["commit"], "own");
+        assert_eq!(input["worktree_sharing"], "refuse");
+        assert_eq!(input["launch_mode"], "inline");
+        assert!(
+            input["timeout_seconds"]
+                .as_u64()
+                .is_some_and(|seconds| seconds > 0)
+        );
+        assert_eq!(input["context_inputs"]["files"], json!([]));
+        assert_eq!(input["context_inputs"]["notes"], json!([]));
     }
 }
