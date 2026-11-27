@@ -9,6 +9,38 @@ pub(super) const MAX_FINDINGS: usize = 32;
 /// Soft per-node budget for inherited disposition descriptions.
 const DISPOSITION_TEXT_TARGET: usize = 64 * 1024;
 
+/// Coverage facts derived from one reviewed node's findings: which lenses
+/// covered which invariant. The finding ledger keeps this map per exact head;
+/// an invariant with no completed lens is uncovered, so the round is
+/// INCONCLUSIVE rather than a silent PASS.
+pub(super) fn finding_coverage(
+    findings: &[Finding],
+) -> (
+    std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    std::collections::BTreeSet<String>,
+) {
+    let mut invariants: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut lenses = std::collections::BTreeSet::new();
+    for finding in findings {
+        let lens = finding
+            .lens
+            .as_deref()
+            .filter(|lens| !lens.trim().is_empty())
+            .map(str::to_owned);
+        if let Some(name) = lens.as_deref() {
+            lenses.insert(name.to_owned());
+        }
+        if let Some(invariant) = finding.named_invariant() {
+            invariants
+                .entry(invariant.to_owned())
+                .or_default()
+                .insert(lens.unwrap_or_else(|| "unknown".to_owned()));
+        }
+    }
+    (invariants, lenses)
+}
+
 /// Canonical JSON bytes of one character inside a string.
 pub(super) fn encoded_char(character: char) -> usize {
     match character {
