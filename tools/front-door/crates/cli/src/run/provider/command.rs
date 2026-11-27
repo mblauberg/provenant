@@ -118,7 +118,9 @@ pub(super) fn prepare_command(
     let fallback_cancel = provenant_core::CancelToken::new();
     let cancel = registry.cancel.unwrap_or(&fallback_cancel);
     let git_executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
-    let isolated = task.access.source_root.is_some() && !task.access.source_live;
+    // A pinned read-only command reads its recorded head's snapshot, even when
+    // no source root was sealed into the access grant.
+    let isolated = task.head.is_some() && !task.access.source_live;
     let cwd = if isolated {
         let assets = registry.assets.ok_or("product assets are unavailable")?;
         super::source_tree::ensure_source_roots(&source, &task.access, assets)?;

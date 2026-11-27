@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
-use support::{Result, TestRig, code, git, json_lines};
+use support::{Result, TestRig, call, code, git, json_lines};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_provenant");
 
@@ -1209,5 +1209,49 @@ fn worktree_remove_preserves_a_tree_with_ignored_output() -> Result {
     assert!(refused.stdout.bytes.is_empty());
     assert!(path.join("target/out.o").is_file());
     assert!(path.is_dir());
+    Ok(())
+}
+
+/// A template-conformant save puts the grant in the typed standing record;
+/// the next SessionStart hook restores it ahead of the prose. The grant must
+/// be sourced and unexpired: warnings alone never grant authority.
+#[test]
+fn a_template_conformant_save_restores_its_grant_in_the_hook() -> Result {
+    let rig = TestRig::new()?;
+    binding(&rig)?;
+    let file = rig.root.join("checkpoint.md");
+    let checkpoint = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"Land the checkpoint work\"\n  grants:\n    - scope: \"Land lane pull requests after green CI\"\n      source: \"rule:GLOBAL-AGENTS.md#git\"\n      expires: none\n  obligations: []\n  waiting_on_owner: []\n---\n# Session checkpoint\n\n## Goal\nLand the checkpoint work.\n\n## Intent\nThe chair keeps the record current.\n\n## Plan\nSave again after each ruling.\n";
+    std::fs::write(&file, checkpoint)?;
+    let saved = call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "grant-session",
+            "--file",
+            &file.to_string_lossy(),
+        ],
+        0,
+    )?;
+    assert!(
+        saved["warnings"].as_array().ok_or("warnings")?.is_empty(),
+        "{saved}"
+    );
+    let output = run_hook(
+        &rig,
+        "session-start",
+        &start(&rig, "grant-session", "startup"),
+    )?;
+    assert_eq!(code(&output), 0);
+    let text = context(&output)?;
+    let standing = text.find("## Standing").ok_or("no restored standing")?;
+    let grant = text
+        .find("Land lane pull requests after green CI")
+        .ok_or("no restored grant")?;
+    assert!(standing < grant, "{text}");
+    assert!(text.contains("rule:GLOBAL-AGENTS.md#git"), "{text}");
+    // The raw typed record and the prose body are not duplicated as YAML.
+    assert!(!text.contains("provenant_standing"), "{text}");
     Ok(())
 }

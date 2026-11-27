@@ -10,6 +10,7 @@ extend-exclude = ["bench/tasks/*.patch", "tools/front-door/crates/cli/src/check/
 
 [default.extend-words]
 # UI terminology, hyphenated prefixes and a cited publication title.
+Serialize = "Serialize"
 dialogs = "dialogs"
 Mis = "Mis"
 Modeling = "Modeling"
