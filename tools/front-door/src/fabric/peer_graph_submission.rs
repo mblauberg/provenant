@@ -734,7 +734,7 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     let node = &run.checkpoint.nodes[0];
     // The fixture has no runnable provider. Admission of the detached reader
     // reaches preparation, whose refusal now has an explicit graph cause.
-    assert_eq!(node.advance_code.as_deref(), Some("preparation_refused"), "{node:#?}");
+    assert_eq!(node.advance_code.as_deref(), Some("access_policy_refused"), "{node:#?}");
     let attempt = node.attempts.first().ok_or("review attempt missing")?;
     assert_eq!(attempt.outcome, Some(provenant_fabric_runtime::graph::GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::AccessPolicyRefused)), "{node:#?}");
     assert!(!attempt.launched, "{node:#?}");

@@ -712,7 +712,9 @@ never switch. A sealed stop cause controls the next step for a pre-launch
 refusal too; the outcome supplies a fallback cause only when no stop was sealed.
 A failed fallback settlement uses the sealed stop cause's advance code whenever
 one is present; without one, it uses the applicable fallback or refusal code.
-The note retains actionable refusal or fallback denial detail.
+The note retains actionable refusal or fallback denial detail. The run receipt and
+refusal detail identify a pre-launch refusal from the latest attempt outcome,
+independently of its advance code.
 When a same-route continuation cause has no next route or explicit `on_stop`
 override, the graph starts a fresh attempt on that route; `fallback_route_pinned`
 is reserved for depleted causes without a sealed stop. An `on_stop` override

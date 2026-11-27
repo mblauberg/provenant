@@ -5348,7 +5348,7 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
             json!({"preparation_refused": "unregistered_account"}),
             "{node}"
         );
-        assert_eq!(node["advance_code"], "preparation_refused", "{node}");
+        assert_eq!(node["advance_code"], "unregistered_account", "{node}");
         assert_eq!(
             node["advance_note"],
             provenant_records::run::CauseKind::UnregisteredAccount.detail(),
