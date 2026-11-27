@@ -88,7 +88,7 @@ pub(crate) struct PatchReport {
 pub(crate) struct PatchError {
     pub code: String,
     pub message: Box<str>,
-    pub cause: Option<String>,
+    pub cause: Option<Box<str>>,
     pub class: ErrorClass,
     pub setting: Option<Box<SettingRef>>,
     pub subject: Option<Box<ErrorSubject>>,
@@ -106,7 +106,7 @@ impl PatchError {
         Self {
             code: code.into(),
             message: message.into().into_boxed_str(),
-            cause,
+            cause: cause.map(String::into_boxed_str),
             class,
             setting: None,
             subject: None,
@@ -155,7 +155,7 @@ impl PatchError {
         Self {
             code: error.code,
             message: error.message.into_boxed_str(),
-            cause: error.cause,
+            cause: error.cause.map(String::into_boxed_str),
             class: error.class,
             setting: error.setting.map(Box::new),
             subject: error.subject.map(Box::new),
@@ -1344,6 +1344,14 @@ mod tests {
                 .code,
             "CI_PATCH_RUN_MISMATCH"
         );
+    }
+
+    #[test]
+    fn patch_error_stays_small_and_preserves_cause() {
+        assert!(std::mem::size_of::<PatchError>() < 128);
+        let error = PatchError::operation("CI_PATCH_FAILED", "failed", Some("detail".into()))
+            .into_command_error();
+        assert_eq!(error.cause.as_deref(), Some("detail"));
     }
 
     #[test]

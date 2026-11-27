@@ -678,87 +678,6 @@ fn output_data_bytes(data: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use std::ffi::OsString;
-
-    #[test]
-    fn session_stream_preserves_json_rows_and_rejects_invalid_rows() {
-        let rows = session_stream_rows(b"{\"id\":1}\n\n{\"id\":2}\n").unwrap();
-        assert_eq!(rows, json!([{ "id": 1 }, { "id": 2 }]));
-        assert!(session_stream_rows(b"{invalid}\n").is_err());
-    }
-
-    #[test]
-    fn parsed_status_all_dispatches_to_per_host_aggregation() {
-        let provenant_cli::ParseOutcome::Invocation(invocation) = provenant_cli::parse(
-            ["status", "--host", "all", "--all", "--limit", "7"].map(OsString::from),
-        ) else {
-            panic!("valid status --host all invocation did not parse");
-        };
-
-        let hosts = vec![
-            HostTarget {
-                name: "alpha".into(),
-                host: None,
-            },
-            HostTarget {
-                name: "beta".into(),
-                host: None,
-            },
-        ];
-        let Some(result) = route_if_selected(&invocation.command, |command, selection| {
-            assert_eq!(selection, provenant_cli::HostSelection::All);
-            let Some((verb, _common, input)) = read_request(command, &invocation.globals) else {
-                panic!("selected status did not produce its typed read request");
-            };
-            assert_eq!(verb, "status");
-            let HostReadInput::Status {
-                targets,
-                all,
-                limit,
-                ..
-            } = &input
-            else {
-                panic!("status dispatch changed the typed host read");
-            };
-            assert!(targets.is_empty());
-            assert!(*all);
-            assert_eq!(*limit, 7);
-
-            let readings = fan_out_host_reads(&input, hosts, |host, input| {
-                let HostReadInput::Status {
-                    targets,
-                    all,
-                    limit,
-                    ..
-                } = input
-                else {
-                    panic!("status host read changed verb");
-                };
-                assert!(targets.is_empty());
-                assert!(*all);
-                assert_eq!(*limit, 7);
-                HostResult::Ok(json!({"host": host.name, "all": all, "limit": limit}))
-            });
-            crate::fabric::peer::aggregate_host_readings(verb, readings)
-        }) else {
-            panic!("explicit status host selection was not dispatched");
-        };
-
-        assert_eq!(result.status, Outcome::Ok);
-        assert!(!result.data.partial);
-        assert_eq!(result.data.hosts.len(), 2);
-        assert_eq!(result.data.hosts[0].host, "alpha");
-        assert!(result.data.hosts[0].data.as_ref().is_some_and(|data| {
-            data["all"].as_bool() == Some(true) && data["limit"].as_u64() == Some(7)
-        }));
-        assert_eq!(result.data.hosts[1].host, "beta");
-    }
-}
-
 pub(crate) fn execute(
     input: &HostReadInput,
     globals: &Globals,
@@ -939,5 +858,86 @@ fn parse_part(part: &str) -> Result<Part, std::io::Error> {
         "receipt" => Ok(Part::Receipt),
         "transcript" => Ok(Part::Transcript),
         _ => Err(std::io::Error::other("invalid output part")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::ffi::OsString;
+
+    #[test]
+    fn session_stream_preserves_json_rows_and_rejects_invalid_rows() {
+        let rows = session_stream_rows(b"{\"id\":1}\n\n{\"id\":2}\n").unwrap();
+        assert_eq!(rows, json!([{ "id": 1 }, { "id": 2 }]));
+        assert!(session_stream_rows(b"{invalid}\n").is_err());
+    }
+
+    #[test]
+    fn parsed_status_all_dispatches_to_per_host_aggregation() {
+        let provenant_cli::ParseOutcome::Invocation(invocation) = provenant_cli::parse(
+            ["status", "--host", "all", "--all", "--limit", "7"].map(OsString::from),
+        ) else {
+            panic!("valid status --host all invocation did not parse");
+        };
+
+        let hosts = vec![
+            HostTarget {
+                name: "alpha".into(),
+                host: None,
+            },
+            HostTarget {
+                name: "beta".into(),
+                host: None,
+            },
+        ];
+        let Some(result) = route_if_selected(&invocation.command, |command, selection| {
+            assert_eq!(selection, provenant_cli::HostSelection::All);
+            let Some((verb, _common, input)) = read_request(command, &invocation.globals) else {
+                panic!("selected status did not produce its typed read request");
+            };
+            assert_eq!(verb, "status");
+            let HostReadInput::Status {
+                targets,
+                all,
+                limit,
+                ..
+            } = &input
+            else {
+                panic!("status dispatch changed the typed host read");
+            };
+            assert!(targets.is_empty());
+            assert!(*all);
+            assert_eq!(*limit, 7);
+
+            let readings = fan_out_host_reads(&input, hosts, |host, input| {
+                let HostReadInput::Status {
+                    targets,
+                    all,
+                    limit,
+                    ..
+                } = input
+                else {
+                    panic!("status host read changed verb");
+                };
+                assert!(targets.is_empty());
+                assert!(*all);
+                assert_eq!(*limit, 7);
+                HostResult::Ok(json!({"host": host.name, "all": all, "limit": limit}))
+            });
+            crate::fabric::peer::aggregate_host_readings(verb, readings)
+        }) else {
+            panic!("explicit status host selection was not dispatched");
+        };
+
+        assert_eq!(result.status, Outcome::Ok);
+        assert!(!result.data.partial);
+        assert_eq!(result.data.hosts.len(), 2);
+        assert_eq!(result.data.hosts[0].host, "alpha");
+        assert!(result.data.hosts[0].data.as_ref().is_some_and(|data| {
+            data["all"].as_bool() == Some(true) && data["limit"].as_u64() == Some(7)
+        }));
+        assert_eq!(result.data.hosts[1].host, "beta");
     }
 }
