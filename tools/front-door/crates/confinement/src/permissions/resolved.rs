@@ -1,5 +1,23 @@
 //! One effective provider policy, shared by admission and enforcement.
-use super::{NetworkAccess, PathGrant, PlanPermissions, PolicySource};
+use super::{NetworkAccess, PathGrant, PlanPermissions};
+use provenant_records::{Layer, Source};
+
+/// A contributor to the effective policy that did not come from a file. The
+/// sealed permission plan is a launch request; the provider adapter's own
+/// restrictions follow the selected route.
+fn launch_source() -> Source {
+    Source {
+        layer: Layer::Launch,
+        origin: None,
+    }
+}
+
+fn provider_source() -> Source {
+    Source {
+        layer: Layer::Route,
+        origin: None,
+    }
+}
 
 /// Authentication is always bounded by the host credential inventory and the
 /// selected mechanism. Disabling it cannot disable the mandatory exclusions.
@@ -30,21 +48,13 @@ impl From<NetworkAccess> for NetworkPolicy {
     }
 }
 
-/// Every contributing restriction retains its owner; defaults confer no
-/// exemption from credential, Git, state or read-only boundaries.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConfinementSource {
-    /// The network selection sealed in the permission plan.
-    Plan,
-    Host(std::path::PathBuf),
-    Provider,
-}
-
+/// Every contributing restriction retains its layer and origin; defaults
+/// confer no exemption from credential, Git, state or read-only boundaries.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResolvedConfinementPolicy {
     authentication: AuthenticationAccess,
     network: NetworkPolicy,
-    sources: Vec<ConfinementSource>,
+    sources: Vec<Source>,
     deny_read: Vec<PathGrant>,
     deny_write: Vec<PathGrant>,
 }
@@ -52,7 +62,7 @@ pub struct ResolvedConfinementPolicy {
 impl ResolvedConfinementPolicy {
     pub fn without_credentials(mut self) -> Self {
         self.authentication = AuthenticationAccess::Disabled;
-        self.record(ConfinementSource::Provider);
+        self.record(provider_source());
         self
     }
 
@@ -60,13 +70,13 @@ impl ResolvedConfinementPolicy {
         if self.authentication != AuthenticationAccess::Disabled {
             self.authentication = AuthenticationAccess::SelectedWithoutKeychain;
         }
-        self.record(ConfinementSource::Provider);
+        self.record(provider_source());
         self
     }
 
     pub fn offline(mut self) -> Self {
         self.network = NetworkPolicy::Offline;
-        self.record(ConfinementSource::Provider);
+        self.record(provider_source());
         self
     }
 
@@ -76,7 +86,7 @@ impl ResolvedConfinementPolicy {
         let mut resolved = self.clone();
         resolved.restrict(plan.network);
         if plan.network != NetworkAccess::Open {
-            resolved.record(ConfinementSource::Plan);
+            resolved.record(launch_source());
         }
         if let Some(policy) = &plan.policy {
             resolved.restrict(policy.optional().network);
@@ -87,9 +97,9 @@ impl ResolvedConfinementPolicy {
             if (policy.optional().network != NetworkAccess::Open
                 || !resolved.deny_read.is_empty()
                 || !resolved.deny_write.is_empty())
-                && let PolicySource::Host(path) = policy.source()
+                && policy.source().layer == Layer::Host
             {
-                resolved.record(ConfinementSource::Host(path.clone()));
+                resolved.record(policy.source().clone());
             }
         }
         resolved
@@ -105,7 +115,7 @@ impl ResolvedConfinementPolicy {
         self.network = super::policy::network_ceiling(current, ceiling).into();
     }
 
-    fn record(&mut self, source: ConfinementSource) {
+    fn record(&mut self, source: Source) {
         if !self.sources.contains(&source) {
             self.sources.push(source);
         }
@@ -115,7 +125,7 @@ impl ResolvedConfinementPolicy {
         self.network
     }
 
-    pub fn sources(&self) -> &[ConfinementSource] {
+    pub fn sources(&self) -> &[Source] {
         &self.sources
     }
 

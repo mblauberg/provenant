@@ -1655,7 +1655,8 @@ writer_writes = []
 #[cfg(test)]
 mod policy_tests {
     use super::*;
-    use crate::permissions::{NetworkAccess, OptionalPolicy, PolicySource};
+    use crate::permissions::{NetworkAccess, OptionalPolicy};
+    use provenant_records::Source;
 
     fn mandatory() -> MandatoryRoots {
         let mut roots = MandatoryRoots::new(
@@ -1688,7 +1689,7 @@ mod policy_tests {
         let state = tempfile::tempdir()?;
         let ambient = RunConfig::read(state.path())?.policy_for_launch(state.path(), mandatory());
         assert_eq!(ambient.optional(), &OptionalPolicy::default());
-        assert_eq!(ambient.source(), &PolicySource::Ambient);
+        assert_eq!(ambient.source(), &Source::default());
         assert!(ambient.warnings().is_empty());
         let mut report = Vec::new();
         ambient.report_launch(&mut report)?;
@@ -1706,7 +1707,10 @@ mod policy_tests {
                 RunConfig::read(state.path())?.policy_for_launch(state.path(), mandatory());
             assert_eq!(
                 configured.source(),
-                &PolicySource::Host(state.path().join("config.toml"))
+                &Source {
+                    layer: Layer::Host,
+                    origin: Some(state.path().join("config.toml").display().to_string()),
+                }
             );
             assert!(configured.warnings().is_empty());
             let mut report = Vec::new();
