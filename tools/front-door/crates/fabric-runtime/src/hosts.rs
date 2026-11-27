@@ -1,4 +1,5 @@
 //! Fixed, bounded SSH peer protocol. No command strings or placement fallback.
+pub mod mirror;
 use crate::{
     config::{FabricConfig, Peer},
     coordination::*,
