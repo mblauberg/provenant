@@ -1,8 +1,9 @@
-//! `config` — show and edit configuration.
+//! `config` — show, explain and edit configuration.
 use crate::commands::{Call, Domain, Verb};
+use crate::roots::{Product, Workspace};
 use provenant_cli::Command;
 use provenant_core::consumer_env::Stability;
-use provenant_records::{CommandError, Outcome};
+use provenant_records::{CommandError, CommandResult, Outcome};
 
 pub static DOMAIN: Domain = Domain {
     name: "config",
@@ -68,11 +69,8 @@ pub static DOMAIN: Domain = Domain {
 fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let command = inv.command.clone();
-    if matches!(
-        &command,
-        Command::Config(provenant_cli::Config::Explain { .. })
-    ) {
-        return crate::commands::not_implemented(inv.leaf);
+    if let Command::Config(provenant_cli::Config::Explain { key }) = &command {
+        return explain(key, globals);
     }
     let status = match command {
         Command::Config(provenant_cli::Config::Ports) => {
@@ -138,4 +136,96 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
         _ => return crate::commands::mismatched(),
     };
     crate::commands::rendered(status)
+}
+
+/// One candidate as a short human line: value, layer, exact origin and the
+/// specificity that decided ties inside a layer.
+fn render_candidate(candidate: &serde_json::Value) -> String {
+    let value = candidate
+        .get("value")
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "null".to_owned());
+    let layer = candidate
+        .get("layer")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("default");
+    let origin = candidate
+        .get("origin")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unspecified");
+    let specificity = candidate
+        .get("specificity")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    format!("{value} — {layer} ({origin}, specificity {specificity})")
+}
+
+fn render_explanation(value: &serde_json::Value) -> String {
+    let key = value
+        .get("key")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("setting");
+    let mut out = format!("{key}\n");
+    if let Some(winner) = value.get("winner").filter(|candidate| !candidate.is_null()) {
+        out.push_str(&format!("  winner: {}\n", render_candidate(winner)));
+    }
+    for (label, field) in [("shadowed", "shadowed"), ("ignored", "ignored")] {
+        if let Some(candidates) = value.get(field).and_then(serde_json::Value::as_array) {
+            for candidate in candidates {
+                out.push_str(&format!("  {label}: {}\n", render_candidate(candidate)));
+            }
+        }
+    }
+    out.push_str("Use `--json` for the full candidate list.\n");
+    out
+}
+
+/// `config explain KEY`: the winner and every candidate it beat, with the
+/// layer, origin and specificity that resolved the setting.
+fn explain(key: &str, globals: &provenant_cli::Globals) -> Result<Outcome, CommandError> {
+    let result = (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let context = crate::roots::resolve(globals, Workspace::Project, Product::Required)?;
+        let explanation = provenant_config::explain(key, &context.roots, Some(&context.project))?;
+        Ok(serde_json::to_value(explanation)?)
+    })();
+    let status = match result {
+        Ok(value) => {
+            let human = render_explanation(&value);
+            crate::emit(
+                &CommandResult::new("config explain", Outcome::Ok, value),
+                globals,
+                &human,
+                true,
+            )
+        }
+        Err(error) => crate::fail(
+            "config explain",
+            Outcome::Invalid,
+            "CONFIG_UNKNOWN_KEY",
+            &error.to_string(),
+            "run `provenant config schema --all` and use a declared key",
+            globals,
+        ),
+    };
+    crate::commands::rendered(status)
+}
+
+#[cfg(test)]
+mod explanation_tests {
+    #[test]
+    fn explanation_human_output_names_every_candidate() {
+        let value = serde_json::json!({
+            "key": "policy.CODE",
+            "winner": {"value": "off", "layer": "launch", "origin": "--checks", "specificity": 1},
+            "shadowed": [
+                {"value": "refuse", "layer": "host", "origin": "config.toml#policy.CODE", "specificity": 3}
+            ],
+            "ignored": []
+        });
+        let human = super::render_explanation(&value);
+        assert!(human.starts_with("policy.CODE\n"));
+        assert!(human.contains("winner: off — launch (--checks, specificity 1)"));
+        assert!(human.contains("shadowed: refuse — host (config.toml#policy.CODE, specificity 3)"));
+        assert!(!human.contains("ignored:"));
+    }
 }
