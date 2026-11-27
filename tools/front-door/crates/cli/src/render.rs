@@ -3,9 +3,9 @@
 //! a published artefact whose pointer keeps the result's original status.
 use crate::limits;
 pub use crate::limits::MAX_RESULT_BYTES;
-use provenant_records::command_result::NextStep;
+use provenant_records::command_result::{NextStep, SettingRef, Subject};
 use provenant_records::warning::{RESULT_TOO_LARGE, Warning};
-use provenant_records::{CommandResult, Outcome};
+use provenant_records::{CommandError, CommandResult, Outcome};
 use provenant_workflow::session::CommandPrefix;
 use serde::Serialize;
 use std::io::{self, Write};
@@ -35,6 +35,12 @@ pub struct CommandSeam {
     pub remember: fn(&[Warning]),
     /// Return undelivered warnings so the edge's guard shows them on exit.
     pub give_back: fn(Vec<Warning>),
+    /// Render human warnings once, collapsed by the shared key. A no-op under
+    /// JSON: those warnings travel in the envelope instead.
+    pub display_warnings: fn(&[Warning]),
+    /// Write the full oversized result to a private report, naming its path in
+    /// the cap warning. The edge resolves the state root; this crate only asks.
+    pub report: fn(&CommandResult<serde_json::Value>) -> Option<String>,
     /// The edge's standard output and error, the only writers a command
     /// surface renders to.
     pub streams: fn() -> Streams,
@@ -65,6 +71,33 @@ pub fn render_command_result<T: Serialize>(
 ) -> Result<Outcome, RenderError> {
     let seam = COMMAND_SEAM.get();
     result.warnings = seam.map(|seam| (seam.take)()).unwrap_or_default();
+    // An oversized result gets a private report beside the published artefact.
+    // The warning naming the path is added before rendering so both the human
+    // line and the JSON array carry it.
+    if let Some(seam) = seam
+        && let Ok(value) = serde_json::to_value(&result.data)
+        && oversized(result, &value)
+    {
+        let envelope = CommandResult {
+            schema_version: result.schema_version,
+            command: result.command.clone(),
+            status: result.status,
+            data: value,
+            error: result.error.clone(),
+            warnings: result.warnings.clone(),
+            next: result.next.clone(),
+        };
+        if let Some(path) = (seam.report)(&envelope) {
+            result.warnings.push(report_warning(&result.command, &path));
+        }
+    }
+    // JSON carries warnings as data; a human reader sees the collapsed set once
+    // through the same seam the binary edge installed.
+    if let Some(seam) = seam
+        && !matches!(mode, RenderMode::Json)
+    {
+        (seam.display_warnings)(&result.warnings);
+    }
     // The one renderer (`render_within`) turns the envelope's typed next steps
     // into human lines for both human and compact modes, so a compact summary
     // cannot drop the line the JSON array carries.
@@ -77,9 +110,13 @@ pub fn render_command_result<T: Serialize>(
     let rendered = render_or_publish(result, mode, &mut out, &mut err, publish, policy);
     drop((out, err));
     if let Some(seam) = seam {
-        if rendered.is_ok() {
+        if rendered.is_ok() && matches!(mode, RenderMode::Json) {
+            // A JSON envelope delivered the warnings; a human rendering already
+            // remembered only the keys it actually showed.
             (seam.remember)(&result.warnings);
-        } else {
+        } else if rendered.is_err() && matches!(mode, RenderMode::Json) {
+            // Human warnings were already displayed once; only an envelope the
+            // reader never received still owes its warnings to the guard.
             (seam.give_back)(std::mem::take(&mut result.warnings));
         }
     }
@@ -166,6 +203,192 @@ pub fn next_steps_text(steps: &[NextStep], prefix: &CommandPrefix) -> String {
         }
     }
     out
+}
+
+/// The JSON envelope keeps at most this many warning instances. Anything past
+/// the bound is counted in `warnings_omitted` rather than dropped silently.
+pub const WARNINGS_ON_WIRE: usize = 64;
+
+/// One collapsed group of repeated warnings, with the first warning kept whole
+/// for its message and subject. Spec: docs/specs/agent-native.md#35-short-output
+#[derive(Clone, Debug)]
+pub struct WarningGroup {
+    pub first: Warning,
+    pub count: usize,
+}
+
+/// A repeated warning is one event: its code, the setting that selected it and
+/// a normalised message template identify the group. A structured subject does
+/// not split a group; the first subject is named in the collapsed line instead.
+pub fn warning_collapse_key(warning: &Warning) -> String {
+    let code = warning.code.as_ref();
+    let setting = warning
+        .setting
+        .as_ref()
+        .map(|setting| setting.key.as_str())
+        .unwrap_or("");
+    format!("{code}\0{setting}\0{}", message_template(&warning.message))
+}
+
+/// Normalise digits and runs of whitespace so two spellings of the same event
+/// collapse without hiding the wording that named the event.
+fn message_template(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut digits = false;
+    let mut space = false;
+    for ch in message.chars() {
+        if ch.is_ascii_digit() {
+            if !digits {
+                out.push('#');
+                digits = true;
+            }
+            continue;
+        }
+        digits = false;
+        if ch.is_whitespace() {
+            if !space {
+                out.push(' ');
+                space = true;
+            }
+            continue;
+        }
+        space = false;
+        out.push(ch);
+    }
+    out
+}
+
+/// Collapse warnings into first-seen order. Every repeat advances `count`;
+/// nothing is weakened or dropped from the group's first warning.
+pub fn collapse_warnings(warnings: &[Warning]) -> Vec<WarningGroup> {
+    let mut groups: Vec<WarningGroup> = Vec::new();
+    let mut positions = std::collections::HashMap::new();
+    for warning in warnings {
+        let key = warning_collapse_key(warning);
+        if let Some(index) = positions.get(&key) {
+            groups[*index].count += 1;
+        } else {
+            positions.insert(key, groups.len());
+            groups.push(WarningGroup {
+                first: warning.clone(),
+                count: 1,
+            });
+        }
+    }
+    groups
+}
+
+/// Whether this result needs the bounded path, measured with warnings so a
+/// warning that pushes the envelope over the cap is not reported as zero bytes.
+pub fn oversized<T: Serialize>(result: &CommandResult<T>, data: &serde_json::Value) -> bool {
+    serde_json::to_vec(&CommandResult {
+        schema_version: result.schema_version,
+        command: result.command.clone(),
+        status: result.status,
+        data,
+        error: result.error.clone(),
+        warnings: result.warnings.clone(),
+        next: result.next.clone(),
+    })
+    .is_ok_and(|bytes| bytes.len() > MAX_RESULT_BYTES)
+}
+
+/// The cap warning naming the private report the edge wrote for the full result.
+pub fn report_warning(command: &str, path: &str) -> Warning {
+    Warning::new(
+        RESULT_TOO_LARGE,
+        format!(
+            "[RESULT_TOO_LARGE] {command} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); full result written to {path}; showing a bounded view"
+        ),
+        provenant_records::warning::detected_source(RESULT_TOO_LARGE),
+    )
+    .repair("narrow it with --since and --until, or read the private report")
+}
+
+/// The subject of a human error, in `graph/node#attempt on host` order. Only
+/// identity fields are shown: messages carry the prose and never repeat them.
+fn subject_text(subject: &Subject) -> String {
+    let mut out = String::new();
+    if let Some(graph) = subject.graph.as_deref() {
+        out.push_str(graph);
+    }
+    if let Some(node) = subject.node.as_deref() {
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(node);
+    }
+    if let Some(attempt) = subject.attempt {
+        out.push('#');
+        out.push_str(&attempt.to_string());
+    }
+    if let Some(item) = subject.item.as_deref() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(item);
+    }
+    if let Some(pr) = subject.pr {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("pr #{pr}"));
+    }
+    if let Some(head) = &subject.head {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&bounded_text(&head.to_string(), 16));
+    }
+    if out.is_empty()
+        && let Some(project) = &subject.project
+    {
+        out.push_str(&bounded_text(
+            &project.to_string(),
+            limits::SUMMARY_ROW_BYTES,
+        ));
+    }
+    if let Some(host) = subject.host.as_deref() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str("on ");
+        out.push_str(&bounded_text(host, limits::SUMMARY_ROW_BYTES));
+    }
+    out
+}
+
+/// The one setting line under a human error: key, value and its exact source.
+fn setting_text(setting: &SettingRef) -> String {
+    let origin = bounded_text(&setting.origin, limits::SUMMARY_ROW_BYTES);
+    if origin.is_empty() {
+        format!(
+            "  setting: {} = {} ({})",
+            bounded_text(&setting.key, limits::SUMMARY_ROW_BYTES),
+            bounded_text(&setting.value, limits::SUMMARY_ROW_BYTES),
+            setting.layer.as_str()
+        )
+    } else {
+        format!(
+            "  setting: {} = {} ({} {})",
+            bounded_text(&setting.key, limits::SUMMARY_ROW_BYTES),
+            bounded_text(&setting.value, limits::SUMMARY_ROW_BYTES),
+            setting.layer.as_str(),
+            origin
+        )
+    }
+}
+
+/// The head line of a human error: a stable code in brackets, the structured
+/// subject when one exists, then the one-sentence message.
+pub fn error_head_text(error: &CommandError) -> String {
+    let subject = error.subject.as_ref().map(subject_text).unwrap_or_default();
+    let message = bounded_text(&error.message, ERROR_CAUSE_BYTES);
+    if subject.is_empty() {
+        format!("error [{}]: {}", error.code, message)
+    } else {
+        format!("error [{}] {}: {}", error.code, subject, message)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -405,6 +628,16 @@ pub enum RenderError {
 pub fn exit_status(outcome: &Outcome) -> u8 {
     outcome.exit_code()
 }
+/// The emitted envelope: the shared result plus one bounded-warning count.
+/// Flatten keeps the canonical wire shape unchanged when nothing was omitted.
+#[derive(Serialize)]
+struct RenderedEnvelope<'a, T: Serialize> {
+    #[serde(flatten)]
+    envelope: &'a CommandResult<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warnings_omitted: Option<usize>,
+}
+
 /// At most cap bytes are retained even if an owner's Serialize floods output.
 struct Buffer {
     bytes: Vec<u8>,
@@ -447,7 +680,7 @@ pub fn render_within<T: Serialize>(
         combined.append(&mut next);
         next = combined;
     }
-    let result = CommandResult {
+    let mut result = CommandResult {
         schema_version: result.schema_version,
         command: result.command.clone(),
         status: result.status,
@@ -456,19 +689,31 @@ pub fn render_within<T: Serialize>(
         warnings: result.warnings.clone(),
         next,
     };
+    // The JSON array is bounded but never silently shortened: the count of
+    // warnings past the bound travels beside it.
+    let warnings_omitted = result.warnings.len().saturating_sub(WARNINGS_ON_WIRE);
+    result.warnings.truncate(WARNINGS_ON_WIRE);
+    let envelope = RenderedEnvelope {
+        envelope: &result,
+        warnings_omitted: (warnings_omitted > 0).then_some(warnings_omitted),
+    };
     let mut buffer = Buffer {
         bytes: Vec::new(),
         overflow: false,
         limit,
     };
     let encoded = match mode {
-        RenderMode::Json => serde_json::to_writer(&mut buffer, &result)
+        RenderMode::Json => serde_json::to_writer(&mut buffer, &envelope)
             .map_err(RenderError::Encode)
             .and_then(|()| buffer.write_all(b"\n").map_err(RenderError::Write)),
         RenderMode::Human { .. } | RenderMode::Compact { .. } => {
             let text = match &result.error {
                 Some(error) => {
-                    let mut text = format!("provenant: {}: {}\n", error.code, error.message);
+                    let mut text = format!("{}\n", error_head_text(error));
+                    if let Some(setting) = &error.setting {
+                        text.push_str(&setting_text(setting));
+                        text.push('\n');
+                    }
                     // A cause is extra evidence, not a second copy of the
                     // message. Owners that set both to the same detail must
                     // not make the operator read it twice.
@@ -896,7 +1141,7 @@ mod tests {
         let mut human = Vec::new();
         render(&result, human_mode(), &mut human)?;
         let text = String::from_utf8(human)?;
-        assert!(text.starts_with("provenant: WORKTREE: doctor:"));
+        assert!(text.starts_with("error [WORKTREE]: doctor:"));
         assert!(
             text.contains("  npm ERR! Cannot find package 'zod'\n"),
             "{text}"
@@ -1237,6 +1482,109 @@ mod tests {
             Err(RenderError::Write(_))
         ));
     }
+
+    fn warning(code: &'static str, message: &str, subject: &str) -> Warning {
+        Warning::new(
+            provenant_records::WarningCode(code),
+            message,
+            provenant_records::warning::detected_source(provenant_records::WarningCode(code)),
+        )
+        .subject(subject)
+    }
+
+    #[test]
+    // Spec: docs/specs/agent-native.md#35-short-output
+    fn warnings_collapse_by_code_setting_and_template() {
+        let setting = SettingRef {
+            key: "domains.cli.collapse_warnings".into(),
+            value: "on".into(),
+            layer: provenant_records::Layer::Host,
+            origin: "config.toml:12".into(),
+        };
+        let first = warning("SHARED", "7 lanes share a tree", "one").setting(setting.clone());
+        let second = warning("SHARED", "9 lanes share a tree", "two").setting(setting.clone());
+        let other = warning("SHARED", "7 lanes share a tree", "three");
+        assert_eq!(warning_collapse_key(&first), warning_collapse_key(&second));
+        assert_ne!(warning_collapse_key(&first), warning_collapse_key(&other));
+        let groups = collapse_warnings(&[first.clone(), second, first, other]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].count, 3);
+        assert_eq!(groups[0].first.message, "7 lanes share a tree");
+    }
+
+    #[test]
+    // Spec: docs/specs/agent-native.md#33-error-and-warning-contract-3777
+    fn error_human_form_names_subject_setting_and_next() -> Result<(), Box<dyn std::error::Error>> {
+        let subject = Subject {
+            host: Some("workshop".into()),
+            project: None,
+            graph: Some("smoke-7f3a".into()),
+            node: Some("task--read".into()),
+            attempt: Some(1),
+            item: None,
+            pr: None,
+            head: None,
+        };
+        let setting = SettingRef {
+            key: "domains.fabric.project_projection".into(),
+            value: "locate".into(),
+            layer: provenant_records::Layer::Project,
+            origin: ".provenant/config.toml:12".into(),
+        };
+        let mut result = CommandResult::new("status", Outcome::Error, ());
+        result.error = Some(
+            provenant_records::CommandError::new(
+                "PEER_PROJECT_UNLOCATABLE",
+                "project is outside the peer's home",
+                None,
+                "provenant run task --brief b",
+            )
+            .with_subject(subject)
+            .with_setting(setting),
+        );
+        let mut bytes = Vec::new();
+        render(
+            &result,
+            RenderMode::Human {
+                text: "",
+                read_only: false,
+                summary: None,
+            },
+            &mut bytes,
+        )?;
+        let text = String::from_utf8(bytes)?;
+        assert!(text.starts_with(
+            "error [PEER_PROJECT_UNLOCATABLE] smoke-7f3a/task--read#1 on workshop: project is outside the peer's home\n"
+        ), "{text}");
+        assert!(text.contains(
+            "  setting: domains.fabric.project_projection = locate (project .provenant/config.toml:12)\n"
+        ), "{text}");
+        assert!(
+            text.contains("  next: provenant run task --brief b\n"),
+            "{text}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/agent-native.md#35-short-output
+    fn json_envelope_bounds_warnings_and_counts_the_rest() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut result = CommandResult::new("lanes", Outcome::Ok, ());
+        for index in 0..70 {
+            result.warnings.push(warning(
+                "TEST",
+                "a typed warning",
+                &format!("subject-{index}"),
+            ));
+        }
+        let mut bytes = Vec::new();
+        render(&result, RenderMode::Json, &mut bytes)?;
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(envelope["warnings"].as_array().map(Vec::len), Some(64));
+        assert_eq!(envelope["warnings_omitted"], 6);
+        Ok(())
+    }
 }
 
 /// Overflow publication is an I/O seam supplied by the composition root. A
@@ -1396,9 +1744,17 @@ pub fn render_or_publish<T: Serialize>(
                         .repair(
                             "Read the published artifact named in data.artifact for the full result; request a smaller page.",
                         );
+                        // An edge that already wrote a private report named its
+                        // path in the cap warning; do not add a second one.
+                        let has_cap_warning = paged
+                            .warnings
+                            .iter()
+                            .any(|warning| warning.code.as_ref() == RESULT_TOO_LARGE.as_str());
                         if matches!(mode, RenderMode::Json) {
-                            paged.warnings.push(notice);
-                        } else {
+                            if !has_cap_warning {
+                                paged.warnings.push(notice);
+                            }
+                        } else if !has_cap_warning {
                             provenant_records::warning::warn(notice);
                         }
                         render(&paged, fallback_mode, writer)?;
