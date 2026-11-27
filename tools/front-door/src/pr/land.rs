@@ -5,8 +5,11 @@ use super::git::{Git, plain_ref};
 use crate::{roots, worktrees};
 use provenant_confinement::worktrees::{ObservedProcess, WorkerObserver};
 use provenant_core::GitOid;
+use provenant_os::fs::Directory;
+use provenant_records::warning::{CUSTODY_CHANGED, Warning, detected_source, warn};
 use serde::{Deserialize, Serialize};
 use std::{
+    ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -592,6 +595,7 @@ fn follow_up(
             } else {
                 steps.push(delete_branch(
                     git,
+                    git.host_state(),
                     cleanup_project,
                     branch,
                     base,
@@ -914,6 +918,7 @@ fn fast_forward(
 /// one locked ref transaction, so a branch moved since the check is kept.
 fn delete_branch(
     git: &Git,
+    host_state: &Path,
     project: &Path,
     branch: &str,
     base: &str,
@@ -973,6 +978,9 @@ fn delete_branch(
             format!("{branch} is {how} at {path}"),
         ));
     }
+    if let Err(detail) = guard_branch_lease(host_state, project, branch) {
+        return Ok(Step::new("branch", Status::Refused, detail));
+    }
     let tip = tip.to_string();
     Ok(
         match git.run(project, &["update-ref", "-d", &local, &tip])? {
@@ -992,6 +1000,76 @@ fn delete_branch(
             ),
         },
     )
+}
+
+/// Consult the slot lease before deleting an unregistered local branch. Only
+/// positive evidence of a live lease refuses; missing or unreadable evidence
+/// warns and proceeds under the batch's ordinary-outcome rule.
+fn guard_branch_lease(host_state: &Path, project: &Path, branch: &str) -> Result<(), String> {
+    let Some(project_id) = provenant_config::project_id_for_path(project) else {
+        warn(
+            Warning::new(
+                CUSTODY_CHANGED,
+                "branch delete proceeds because project custody is unavailable (source: project binding)".to_owned(),
+                detected_source(CUSTODY_CHANGED),
+            )
+            .subject(format!("refs/heads/{branch}")),
+        );
+        return Ok(());
+    };
+    let root = match Directory::open_anchor(host_state) {
+        Ok(root) => root,
+        Err(error) => {
+            warn(
+                Warning::new(
+                    CUSTODY_CHANGED,
+                    format!("branch delete proceeds because state custody could not be opened: {error} (source: state root)"),
+                    detected_source(CUSTODY_CHANGED),
+                )
+                .subject(format!("refs/heads/{branch}")),
+            );
+            return Ok(());
+        }
+    };
+    let worktrees = match root.open_verified_directory(OsStr::new("worktrees")) {
+        Ok(worktrees) => worktrees,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => {
+            warn(
+                Warning::new(
+                    CUSTODY_CHANGED,
+                    format!("branch delete proceeds because worktree custody could not be opened: {error} (source: worktrees state)"),
+                    detected_source(CUSTODY_CHANGED),
+                )
+                .subject(format!("refs/heads/{branch}")),
+            );
+            return Ok(());
+        }
+    };
+    let project_name = project_id.to_string();
+    let project_state = match worktrees.open_verified_directory(OsStr::new(&project_name)) {
+        Ok(state) => state,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => {
+            warn(
+                Warning::new(
+                    CUSTODY_CHANGED,
+                    format!("branch delete proceeds because project custody could not be opened: {error} (source: project state)"),
+                    detected_source(CUSTODY_CHANGED),
+                )
+                .subject(format!("refs/heads/{branch}")),
+            );
+            return Ok(());
+        }
+    };
+    let reference = provenant_confinement::repo::GitRefName::branch(branch)
+        .map_err(|_| "branch name is invalid while checking custody".to_owned())?;
+    provenant_confinement::worktrees::guard_destructive_branch(
+        &project_state,
+        &reference,
+        "branch delete",
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Land a graph node's pull request through the landing owner: the same
@@ -1373,7 +1451,9 @@ pub(crate) fn delete_after_check(
             return Err(format!("the interleaved command failed: {detail}").into());
         }
     }
-    let step = delete_branch(&git, project, "feat", "main", upstream, tip, false)?;
+    let step = delete_branch(
+        &git, host_state, project, "feat", "main", upstream, tip, false,
+    )?;
     let status = serde_json::to_value(step.status)?
         .as_str()
         .unwrap_or_default()

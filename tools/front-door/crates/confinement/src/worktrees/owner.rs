@@ -470,7 +470,7 @@ pub fn update_owner_when_unchanged(
     }
     // A live lease is shared under the policy; only an explicit `refuse`
     // becomes a WriterBusy refusal (slice 35).
-    let _writer = admitted_writer_guard(context, tree.path(), expected.attempt_id)?;
+    let _writer = admitted_writer_guard(context, tree.path())?;
     // Custody also excludes direct owner publications outside owner.lock.
     if load_owner(&tree)?.as_ref() != Some(expected) {
         return Err(WorktreeError::IdentityChanged);

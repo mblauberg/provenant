@@ -710,6 +710,131 @@ impl FileJournal {
         .map_err(|error: JournalError| error.for_graph(&error_graph_id))
     }
 
+    /// Archive a graph and its durable sidecars under the graph lock. The
+    /// caller's finalizer parks queue ownership and releases external leases
+    /// after the archive is durable but before the live checkpoint is cleared.
+    /// If finalization fails, the live graph remains byte-for-byte intact.
+    pub fn retire(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+        finalize: impl FnOnce(&GraphCheckpoint) -> Result<(), Box<dyn Error>>,
+    ) -> Result<Option<std::path::PathBuf>, Box<dyn Error>> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId.for_graph(graph_id).into());
+        }
+        let journal = Self::open(root, project, graph_id, budget, cancel, clock)?;
+        let Some(checkpoint) = journal.load(graph_id)? else {
+            return Ok(None);
+        };
+        let bytes = read_checkpoint_bytes(&journal.directory, graph_id)?
+            .ok_or(JournalError::BadEnvelope)?;
+        let stamp = clock.wall_now()?.as_micros();
+        match journal.directory.mkdir(OsStr::new("retired"), 0o700) {
+            Ok(()) => {}
+            Err(error) if error.is_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let retired = journal
+            .directory
+            .open_verified_directory(OsStr::new("retired"))?;
+        let archive_name = (0..100)
+            .find_map(|attempt| {
+                let name = if attempt == 0 {
+                    format!("{graph_id}-{stamp}")
+                } else {
+                    format!("{graph_id}-{stamp}-{attempt}")
+                };
+                match retired.mkdir(OsStr::new(&name), 0o700) {
+                    Ok(()) => Some(Ok(name)),
+                    Err(error) if error.is_exists() => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .transpose()?
+            .ok_or("could not allocate a unique graph retirement archive")?;
+        let archive = retired.open_verified_directory(OsStr::new(&archive_name))?;
+        archive
+            .atomic_write(
+                &checkpoint_file_name(graph_id),
+                ".graph-retired.",
+                &bytes,
+                PublishMode::NoReplace,
+            )?
+            .require_durable()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        prompt_store::archive(&journal.directory, &archive, graph_id)?;
+
+        for sidecar in [
+            unreadable_marker_name(graph_id),
+            advance_note_name(graph_id),
+            events::name(graph_id),
+            OsString::from(format!("graph-{graph_id}.reserved")),
+            OsString::from(format!("peer-origin-{graph_id}.json")),
+        ] {
+            copy_optional_sidecar(&journal.directory, &archive, &sidecar)?;
+        }
+        let pending = match journal
+            .directory
+            .open_verified_directory(OsStr::new("pending"))
+        {
+            Ok(markers) => Some(markers),
+            Err(error) if error.is_not_found() => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(markers) = pending.as_ref() {
+            let marker = pending_marker_name(graph_id);
+            if let Some(marker_bytes) = optional_sidecar(&markers, &marker)? {
+                match archive.mkdir(OsStr::new("pending"), 0o700) {
+                    Ok(()) => {}
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let archive_markers = archive.open_verified_directory(OsStr::new("pending"))?;
+                archive_markers
+                    .atomic_write(
+                        &marker,
+                        ".graph-retired-pending.",
+                        &marker_bytes,
+                        PublishMode::NoReplace,
+                    )?
+                    .require_durable()
+                    .map_err(JournalError::DurabilityUnconfirmed)?;
+                archive_markers.sync()?;
+            }
+        }
+        archive.sync()?;
+        retired.sync()?;
+
+        // Cross-store finalisation happens only after a complete archive exists.
+        // A failure leaves every live graph file available for a safe retry.
+        finalize(&checkpoint)?;
+
+        journal.directory.unlink(&checkpoint_file_name(graph_id))?;
+        prompt_store::remove(&journal.directory, graph_id)?;
+        for sidecar in [
+            unreadable_marker_name(graph_id),
+            advance_note_name(graph_id),
+            events::name(graph_id),
+            OsString::from(format!("graph-{graph_id}.reserved")),
+            OsString::from(format!("peer-origin-{graph_id}.json")),
+        ] {
+            unlink_optional_sidecar(&journal.directory, &sidecar)?;
+        }
+        if let Some(markers) = pending.as_ref() {
+            remove_pending_marker(&markers, graph_id)?;
+        }
+        journal
+            .directory
+            .sync()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        retired.sync()?;
+        Ok(Some(archive.current_path()?))
+    }
+
     /// Give a hand-built fixture the same plan identity as a real admitted graph.
     /// Production saves never repair or replace an incoming checkpoint digest.
     #[cfg(feature = "fixture")]
@@ -2680,6 +2805,41 @@ pub(super) fn read_checkpoint_bytes(
         return Err(JournalError::TooLarge);
     }
     Ok(Some(bytes))
+}
+
+fn optional_sidecar(directory: &Directory, name: &OsStr) -> Result<Option<Vec<u8>>, JournalError> {
+    match directory.read_bounded(name, MAX_CHECKPOINT_BYTES) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn copy_optional_sidecar(
+    source: &Directory,
+    archive: &Directory,
+    name: &OsStr,
+) -> Result<(), JournalError> {
+    let Some(bytes) = optional_sidecar(source, name)? else {
+        return Ok(());
+    };
+    archive
+        .atomic_write(
+            name,
+            ".graph-retired-sidecar.",
+            &bytes,
+            PublishMode::NoReplace,
+        )?
+        .require_durable()
+        .map_err(JournalError::DurabilityUnconfirmed)
+}
+
+fn unlink_optional_sidecar(directory: &Directory, name: &OsStr) -> Result<(), JournalError> {
+    match directory.unlink(name) {
+        Ok(()) => Ok(()),
+        Err(error) if error.is_not_found() => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]

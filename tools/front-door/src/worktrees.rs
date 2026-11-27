@@ -220,6 +220,14 @@ impl Error {
                 | WorktreeError::ProjectLayoutUnresolved
                 | WorktreeError::PrimaryMoved,
             ) => Outcome::Refused,
+            Self::Worktree(WorktreeError::CustodyCommand(error))
+                if matches!(
+                    &error.class,
+                    provenant_records::command_result::ErrorClass::Configured
+                ) =>
+            {
+                Outcome::Refused
+            }
             Self::Worktree(WorktreeError::Cancelled) => Outcome::Cancelled,
             _ => Outcome::Error,
         }
@@ -228,6 +236,9 @@ impl Error {
     /// The one mapping from a worktree refusal to its transport facts. Used by
     /// the production emit path and by the render tests, so the two cannot drift.
     pub(crate) fn command_error(&self, code: &str) -> provenant_records::CommandError {
+        if let Self::Worktree(WorktreeError::CustodyCommand(error)) = self {
+            return error.clone();
+        }
         // The conflict reason is evidence beside the short refusal: the
         // message names the path and branch, the cause names what clashed.
         let cause = match self {

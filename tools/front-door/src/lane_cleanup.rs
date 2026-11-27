@@ -1184,6 +1184,11 @@ fn remote_outcomes(
                 path: context.repo.root_path().into(),
                 detail,
             })?;
+        worktrees::guard_destructive_branch(
+            context.project_state,
+            &reference,
+            "remote branch delete",
+        )?;
         worktrees::validate_removal_evidence(context, tip, &evidence, &evidence_refs, cancel)
     };
     if let Err(error) = eligible() {

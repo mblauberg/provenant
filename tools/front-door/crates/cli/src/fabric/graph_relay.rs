@@ -16,11 +16,11 @@ use provenant_fabric_runtime::graph::{
 };
 use provenant_fabric_runtime::relay::{FacadeError, ServiceError};
 use provenant_records::custody::{
-    Admit, LeaseObservation, LeaseState, Sharing, Subject as CustodySubject, SubjectKind,
-    WorktreeLease, admit_writer,
+    Sharing, Subject as CustodySubject, SubjectKind, default_sharing, sharing_setting_ref,
 };
 use provenant_records::policy::WORKTREE_SHARED;
 use provenant_records::progress::WakeSubjectRef;
+use provenant_records::provenance::Sourced;
 use provenant_records::warning::{Warning, WarningCode, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,96 +34,38 @@ pub enum GraphRelay {
     Wake { subject: WakeSubjectRef },
 }
 
-/// Emit the shared-work warning from one admission decision. The code is the
-/// declared `WORKTREE_SHARED` code; the message comes from the pure seam so the
-/// holder and its state are named consistently at every caller.
-fn report_admission(admitted: Admit) -> Result<(), ServiceError> {
-    match admitted {
-        Admit::Proceed { warning: None } => Ok(()),
-        Admit::Proceed {
-            warning: Some(message),
-        } => {
-            warn(Warning::new(
-                WarningCode(WORKTREE_SHARED),
-                message,
-                provenant_records::warning::detected_source(WORKTREE_SHARED),
-            ));
-            Ok(())
-        }
-        Admit::Refuse { holder } => Err(ServiceError::Facade(FacadeError::WriterBusy { holder })),
-    }
-}
-
-/// Admit a second live writer under the custody sharing rule. The holder's
-/// attempt state is read fresh, so a lapsed lease needs no flag and only an
-/// explicit `refuse` blocks an otherwise disjoint writer.
-fn admit_held_writer(
-    context: &Context,
-    path: &std::path::Path,
-    holder: Option<provenant_core::AttemptId>,
-) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
-    use provenant_confinement::worktrees::WorktreeError;
-    let tree = CustodySubject::new(SubjectKind::Worktree, path.to_string_lossy().into_owned());
-    let Some(holder) = holder else {
-        return Ok(());
-    };
-    let clock = provenant_os::clock::SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = provenant_run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let execution = provenant_run::ExecutionContext {
-        state_root: context.roots.state.clone(),
-        project_id: context.identity.project,
-        actor_id: context.identity.inbox.actor,
-        read_prompts: false,
-    };
-    let state = provenant_run::RunStore::open_read_only(&execution, &call)
-        .ok()
-        .flatten()
-        .and_then(|store| store.record(holder, &call).ok())
-        .and_then(|record| serde_json::to_value(record.state).ok())
-        .and_then(|value| value["state"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| "running".to_owned());
-    let lapsed = matches!(
-        state.as_str(),
-        "done" | "stopped" | "failed" | "cancelled" | "lost"
-    );
-    let lease_state = if lapsed {
-        LeaseState::Lapsed {
-            attempt_state: state,
-        }
-    } else {
-        LeaseState::Live {
-            attempt_state: state,
+/// Resolve the sharing setting at the host boundary, retaining its source.
+fn configured_sharing(context: &Context) -> Sourced<Sharing> {
+    let config = match provenant_cli::config_reads::read_for(&context.roots, "fabric") {
+        Ok(config) => config,
+        Err(error) => {
+            let fallback = default_sharing();
+            warn(
+                Warning::new(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                    format!(
+                        "{} could not be resolved ({error}); using the default",
+                        provenant_records::custody::WORKTREE_SHARING_KEY
+                    ),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                    ),
+                )
+                .setting(sharing_setting_ref(&fallback)),
+            );
+            return fallback;
         }
     };
-    let since = clock
-        .wall_now()
-        .map_err(|_| WorktreeError::InvalidRequest)?;
-    let observation = LeaseObservation {
-        lease: WorktreeLease {
-            holder,
-            since,
-            sharing: Sharing::Inherit,
-        },
-        state: lease_state,
-    };
-    match admit_writer(&tree, Some(&observation), Sharing::Warn) {
-        Admit::Proceed {
-            warning: Some(message),
-        } => {
-            warn(Warning::new(
-                WarningCode(WORKTREE_SHARED),
-                message,
-                provenant_records::warning::detected_source(WORKTREE_SHARED),
-            ));
-            Ok(())
-        }
-        Admit::Proceed { warning: None } => Ok(()),
-        Admit::Refuse { holder } => Err(WorktreeError::WriterBusy { holder }),
-    }
+    config
+        .knobs
+        .get(provenant_records::custody::WORKTREE_SHARING_KEY)
+        .and_then(|knob| {
+            Some(Sourced {
+                value: knob.value.as_str()?.parse().ok()?,
+                source: knob.source.clone(),
+            })
+        })
+        .unwrap_or_else(default_sharing)
 }
 
 fn refused(code: &str, message: impl Into<String>) -> ServiceError {
@@ -373,6 +315,7 @@ fn provisioning_owner_digest(
 /// active scheduling. A deferred writer must not fall back to host authority.
 fn bind_admitted_provisioning_owners(
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    sharing: &Sourced<Sharing>,
 ) -> Result<(), ServiceError> {
     use provenant_fabric_runtime::graph::{AccessMode, NodeState};
     let writers = checkpoint
@@ -414,14 +357,14 @@ fn bind_admitted_provisioning_owners(
             if row.id == id || row.id == logical || row.worktree.as_deref() == Some(path.as_str()) {
                 if row.provisioned_owner.is_some_and(|prior| prior != owner) {
                     let tree = CustodySubject::new(SubjectKind::Worktree, path.clone());
-                    report_admission(admit_writer(&tree, None, Sharing::Warn))?;
                     warn(Warning::new(
                         WarningCode(WORKTREE_SHARED),
                         format!(
                             "{tree} had an advisory claim from another lane; it now names {owner}"
                         ),
                         provenant_records::warning::detected_source(WORKTREE_SHARED),
-                    ));
+                    )
+                    .setting(sharing_setting_ref(sharing)));
                 }
                 row.provisioned_owner = Some(owner);
             }
@@ -433,6 +376,7 @@ fn bind_admitted_provisioning_owners(
 fn bind_provisioning_owner(
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     node: &str,
+    sharing: &Sourced<Sharing>,
 ) -> Result<(), ServiceError> {
     let path = checkpoint
         .pending_writer_provisioning
@@ -455,14 +399,14 @@ fn bind_provisioning_owner(
             if row.id == node || row.worktree.as_deref() == Some(pending.path.as_str()) {
                 if row.provisioned_owner.is_some_and(|prior| prior != owner) {
                     let tree = CustodySubject::new(SubjectKind::Worktree, pending.path.clone());
-                    report_admission(admit_writer(&tree, None, Sharing::Warn))?;
                     warn(Warning::new(
                         WarningCode(WORKTREE_SHARED),
                         format!(
                             "{tree} had an advisory claim from another lane; it now names {owner}"
                         ),
                         provenant_records::warning::detected_source(WORKTREE_SHARED),
-                    ));
+                    )
+                    .setting(sharing_setting_ref(sharing)));
                 }
                 row.provisioned_owner = Some(owner);
             }
@@ -975,7 +919,7 @@ fn serve_authorised(
                 return Ok(value);
             }
             if nested {
-                bind_admitted_provisioning_owners(&mut checkpoint)?;
+                bind_admitted_provisioning_owners(&mut checkpoint, &configured_sharing(context))?;
             }
             if request.needs_worktree_provisioning()
                 && !skipped_row(&checkpoint, &receipt.node)
@@ -993,7 +937,11 @@ fn serve_authorised(
                 // this point is finished by `recover_provisioning`.
                 relay::fence_provisioning(&mut checkpoint, &receipt.node, path, &source);
                 if nested {
-                    bind_provisioning_owner(&mut checkpoint, &receipt.node)?;
+                    bind_provisioning_owner(
+                        &mut checkpoint,
+                        &receipt.node,
+                        &configured_sharing(context),
+                    )?;
                     bind_shared_writers(context, &mut checkpoint, sealed_parent_worktree)?;
                 }
                 journal.save(&checkpoint).map_err(journal_error)?;
@@ -1091,7 +1039,7 @@ fn serve_authorised(
                 ));
             }
             if nested && !admitted.replayed {
-                bind_admitted_provisioning_owners(&mut checkpoint)?;
+                bind_admitted_provisioning_owners(&mut checkpoint, &configured_sharing(context))?;
                 bind_shared_writers(context, &mut checkpoint, sealed_parent_worktree)?;
             }
             // Leave time to persist a refusal and deliver it to the caller.
@@ -1367,7 +1315,7 @@ fn provision_added_writers(
         }
         relay::fence_provisioning(checkpoint, &owner, path, &source);
         if nested {
-            bind_provisioning_owner(checkpoint, &owner)?;
+            bind_provisioning_owner(checkpoint, &owner, &configured_sharing(context))?;
         }
         fresh.push(owner);
     }
@@ -2225,6 +2173,15 @@ pub fn provision_writer(
 fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) -> ServiceError {
     use provenant_confinement::worktrees::WorktreeError;
     use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+    if let WorktreeError::CustodyCommand(command) = &error {
+        let diagnostic =
+            provenant_run::RunError::Writer(WorktreeError::CustodyCommand(command.clone()))
+                .diagnostic(provenant_records::diagnostic::Destination::Local);
+        return ServiceError::Facade(FacadeError::RecordedRefusal {
+            refusal_code: command.code.clone(),
+            diagnostic: Box::new(diagnostic),
+        });
+    }
     if matches!(&error, WorktreeError::ManagedPathMismatch { .. }) {
         let diagnostic = provenant_run::RunError::Writer(error)
             .diagnostic(provenant_records::diagnostic::Destination::Local);
@@ -2414,11 +2371,12 @@ fn provision_in_context(
         ) {
             return Err(worktrees::custody_refusal(existing.occupancy));
         }
-        let mut tree = provenant_confinement::verify_worktree(context.repo, &existing.path)
-            .map_err(|error| WorktreeError::UnknownOccupancy {
+        let tree = provenant_confinement::verify_worktree(context.repo, &existing.path).map_err(
+            |error| WorktreeError::UnknownOccupancy {
                 path: existing.path.clone(),
                 detail: format!("worktree registration could not be verified: {error}"),
-            })?;
+            },
+        )?;
         if let Some(owner) = owner {
             let receipt = tree
                 .repo()
@@ -2429,24 +2387,7 @@ fn provision_in_context(
                 return Err(WorktreeError::UnknownWriter);
             }
         }
-        // A held slot is a lease observation, not an unconditional refusal.
-        // The custody seam warns and proceeds for a live holder, admits a
-        // lapsed lease, and refuses only under an explicit sharing=refuse.
-        let _writer = match worktrees::cache_writer_guard(context.project_state, tree.path()) {
-            Ok(guard) => Some(guard),
-            Err(worktrees::Occupancy::Held) => {
-                let holder =
-                    worktrees::writer_holder(context.project_state, tree.path()).or_else(|| {
-                        worktrees::load_owner(&tree)
-                            .ok()
-                            .flatten()
-                            .and_then(|owner| owner.attempt_id)
-                    });
-                admit_held_writer(context, tree.path(), holder)?;
-                None
-            }
-            Err(other) => return Err(worktrees::custody_refusal(other)),
-        };
+        let _writer = worktrees::admitted_writer_guard(context, tree.path())?;
         worktrees::check_writer_terminal(tree.repo())?;
         let reference = provenant_confinement::repo::GitRefName::new(expected_branch)
             .map_err(|_| WorktreeError::IdentityChanged)?;

@@ -1,5 +1,9 @@
 //! The format-2 custody contract. Advisory ownership is never a writer lease.
 use crate::ExtraFields;
+use crate::command_result::{CommandError, ErrorClass, SettingRef};
+use crate::policy::{LEASE_HOLDER_UNREACHABLE, WORKTREE_SHARED, WORKTREE_SHARING_REFUSED};
+use crate::provenance::{Layer, Source, Sourced};
+use crate::warning::{Warning, WarningCode, detected_source};
 use provenant_core::{ActorId, AttemptId, GitOid, HostId, ProjectId, WallTime};
 use serde::{Deserialize, Serialize};
 
@@ -177,6 +181,51 @@ pub enum Sharing {
     Refuse,
 }
 
+impl Sharing {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Allow => "allow",
+            Self::Warn => "warn",
+            Self::Refuse => "refuse",
+        }
+    }
+}
+
+impl std::str::FromStr for Sharing {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "inherit" => Ok(Self::Inherit),
+            "allow" => Ok(Self::Allow),
+            "warn" => Ok(Self::Warn),
+            "refuse" => Ok(Self::Refuse),
+            _ => Err(format!("unknown worktree sharing mode: {value}")),
+        }
+    }
+}
+
+pub const WORKTREE_SHARING_KEY: &str = "lanes.worktree.sharing";
+
+/// The compiled sharing default, with provenance for typed admission output.
+pub fn default_sharing() -> Sourced<Sharing> {
+    Sourced {
+        value: Sharing::Warn,
+        source: Source::default(),
+    }
+}
+
+/// Preserve the resolved sharing source in a command or warning record.
+pub fn sharing_setting_ref(sharing: &Sourced<Sharing>) -> SettingRef {
+    SettingRef {
+        key: WORKTREE_SHARING_KEY.to_owned(),
+        value: sharing.value.as_str().to_owned(),
+        layer: sharing.source.layer,
+        origin: sharing.source.origin.clone().unwrap_or_default(),
+    }
+}
+
 /// Durable worktree or branch custody. Whether this lease is live is derived
 /// from the holder's attempt state at read time and is never stored here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,48 +265,86 @@ pub struct LeaseObservation {
 }
 
 /// Outcome of the shared writer-admission policy.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum Admit {
-    Proceed { warning: Option<String> },
-    Refuse { holder: Option<AttemptId> },
+    Proceed { warning: Option<Warning> },
+    Refuse { error: CommandError },
 }
 
 /// Resolve the effect of an already-classified lease and sharing setting.
-/// This pure seam leaves warning/error rendering to the caller. Callers pass
-/// `Lapsed` for a terminal holder and `Live` while its attempt is nonterminal.
-pub fn admit_writer(tree: &Subject, lease: Option<&LeaseObservation>, sharing: Sharing) -> Admit {
+/// Callers pass `Lapsed` for a terminal holder and `Live` while its attempt is
+/// nonterminal. This function creates the typed warning or refusal once.
+pub fn admit_writer(
+    tree: &Subject,
+    lease: Option<&LeaseObservation>,
+    sharing: &Sourced<Sharing>,
+) -> Admit {
+    let effective = lease
+        .map(|observation| observation.lease.sharing)
+        .filter(|owner| *owner != Sharing::Inherit)
+        .map(|owner| Sourced {
+            value: owner,
+            source: Source::at(Layer::Parent, "lease.json#sharing"),
+        })
+        .unwrap_or_else(|| sharing.clone());
+    let effective = if effective.value == Sharing::Inherit {
+        Sourced {
+            value: Sharing::Warn,
+            ..effective
+        }
+    } else {
+        effective
+    };
+    let setting = sharing_setting_ref(&effective);
     let Some(observation) = lease else {
         return Admit::Proceed { warning: None };
     };
-    let effective_sharing = match observation.lease.sharing {
-        Sharing::Inherit => sharing,
-        owner_sharing => owner_sharing,
+    let warning = |code: WarningCode, message: String| {
+        Warning::new(code, message, detected_source(code))
+            .subject(tree.to_string())
+            .setting(setting.clone())
+    };
+    let refusal = || {
+        let holder = observation.lease.holder;
+        let holder_text = holder.to_string();
+        CommandError::new(
+            WORKTREE_SHARING_REFUSED,
+            format!(
+                "{WORKTREE_SHARING_REFUSED}: {tree} is held by live attempt {holder}; wait for the holder or launch with --destination new"
+            ),
+            Some(&holder_text),
+            format!("provenant wait {holder}"),
+        )
+        .with_class(ErrorClass::Configured)
+        .with_setting(setting.clone())
     };
     match &observation.state {
         LeaseState::Lapsed { .. } => Admit::Proceed { warning: None },
-        LeaseState::Live { attempt_state } => match effective_sharing {
+        LeaseState::Live { attempt_state } => match effective.value {
             Sharing::Inherit | Sharing::Warn => Admit::Proceed {
-                warning: Some(format!(
-                    "WORKTREE_SHARED: {tree} is held by attempt {} ({attempt_state})",
-                    observation.lease.holder
+                warning: Some(warning(
+                    WarningCode(WORKTREE_SHARED),
+                    format!(
+                        "WORKTREE_SHARED: {tree} is held by attempt {} ({attempt_state})",
+                        observation.lease.holder
+                    ),
                 )),
             },
             Sharing::Allow => Admit::Proceed { warning: None },
-            Sharing::Refuse => Admit::Refuse {
-                holder: Some(observation.lease.holder),
-            },
+            Sharing::Refuse => Admit::Refuse { error: refusal() },
         },
-        LeaseState::Unreachable { retry_at } => match effective_sharing {
+        LeaseState::Unreachable { retry_at } => match effective.value {
             Sharing::Inherit | Sharing::Warn => Admit::Proceed {
-                warning: Some(format!(
-                    "LEASE_HOLDER_UNREACHABLE: {tree} holder {} is unreachable until {retry_at}",
-                    observation.lease.holder
+                warning: Some(warning(
+                    WarningCode(LEASE_HOLDER_UNREACHABLE),
+                    format!(
+                        "LEASE_HOLDER_UNREACHABLE: {tree} holder {} is unreachable until {retry_at}",
+                        observation.lease.holder
+                    ),
                 )),
             },
             Sharing::Allow => Admit::Proceed { warning: None },
-            Sharing::Refuse => Admit::Refuse {
-                holder: Some(observation.lease.holder),
-            },
+            Sharing::Refuse => Admit::Refuse { error: refusal() },
         },
     }
 }
@@ -1707,28 +1794,48 @@ mod tests {
             },
         };
 
+        let configured = Sourced {
+            value: Sharing::Warn,
+            source: Source::at(Layer::Host, "config.toml#lanes.worktree.sharing"),
+        };
         assert!(matches!(
-            admit_writer(&tree, None, Sharing::Warn),
+            admit_writer(&tree, None, &configured),
             Admit::Proceed { warning: None }
         ));
         let Admit::Proceed {
             warning: Some(warning),
-        } = admit_writer(&tree, Some(&live), Sharing::Warn)
+        } = admit_writer(&tree, Some(&live), &configured)
         else {
             panic!("warn sharing should proceed with a warning");
         };
-        assert!(warning.contains("WORKTREE_SHARED"));
-        assert!(warning.contains(&holder.to_string()));
+        assert_eq!(warning.code.as_ref(), WORKTREE_SHARED);
+        assert!(warning.message.contains(&holder.to_string()));
+        assert_eq!(warning.setting.as_ref().unwrap().layer, Layer::Host);
         assert!(matches!(
-            admit_writer(&tree, Some(&live), Sharing::Allow),
+            admit_writer(
+                &tree,
+                Some(&live),
+                &Sourced {
+                    value: Sharing::Allow,
+                    source: configured.source.clone(),
+                }
+            ),
             Admit::Proceed { warning: None }
         ));
-        assert_eq!(
-            admit_writer(&tree, Some(&live), Sharing::Refuse),
-            Admit::Refuse {
-                holder: Some(holder)
-            }
+        let refusal = admit_writer(
+            &tree,
+            Some(&live),
+            &Sourced {
+                value: Sharing::Refuse,
+                source: configured.source.clone(),
+            },
         );
+        let Admit::Refuse { error } = refusal else {
+            panic!("refuse sharing should return a typed refusal");
+        };
+        assert_eq!(error.code, crate::policy::WORKTREE_SHARING_REFUSED);
+        assert_eq!(error.class, ErrorClass::Configured);
+        assert_eq!(error.setting.unwrap().layer, Layer::Host);
 
         let owner_refuse = LeaseObservation {
             lease: WorktreeLease {
@@ -1737,12 +1844,20 @@ mod tests {
             },
             state: live.state.clone(),
         };
-        assert_eq!(
-            admit_writer(&tree, Some(&owner_refuse), Sharing::Allow),
-            Admit::Refuse {
-                holder: Some(holder)
-            }
+        let owner_refusal = admit_writer(
+            &tree,
+            Some(&owner_refuse),
+            &Sourced {
+                value: Sharing::Allow,
+                source: configured.source.clone(),
+            },
         );
+        let Admit::Refuse { error } = owner_refusal else {
+            panic!("owning-lane refusal should win over configured allow");
+        };
+        let setting = error.setting.unwrap();
+        assert_eq!(setting.layer, Layer::Parent);
+        assert_eq!(setting.origin, "lease.json#sharing");
         let unreachable = LeaseObservation {
             lease: lease.clone(),
             state: LeaseState::Unreachable {
@@ -1751,11 +1866,11 @@ mod tests {
         };
         let Admit::Proceed {
             warning: Some(warning),
-        } = admit_writer(&tree, Some(&unreachable), Sharing::Warn)
+        } = admit_writer(&tree, Some(&unreachable), &configured)
         else {
             panic!("unreachable holder should remain live during its grace period");
         };
-        assert!(warning.contains("LEASE_HOLDER_UNREACHABLE"));
+        assert_eq!(warning.code.as_ref(), LEASE_HOLDER_UNREACHABLE);
         let lapsed = LeaseObservation {
             lease: lease.clone(),
             state: LeaseState::Lapsed {
@@ -1763,13 +1878,100 @@ mod tests {
             },
         };
         assert!(matches!(
-            admit_writer(&tree, Some(&lapsed), Sharing::Refuse),
+            admit_writer(
+                &tree,
+                Some(&lapsed),
+                &Sourced {
+                    value: Sharing::Refuse,
+                    source: configured.source.clone(),
+                }
+            ),
             Admit::Proceed { warning: None }
         ));
 
         assert!(guard_destructive("checkout", &tree, false, None).is_ok());
         let error = guard_destructive("checkout", &tree, true, Some(holder)).unwrap_err();
         assert_eq!(error.code, "DESTROYS_LIVE_WORK");
+    }
+
+    #[test]
+    fn writer_admission_preserves_warning_code_and_setting_layer_for_each_state() {
+        let holder = AttemptId::from_bytes([2; 16]);
+        let tree = Subject::worktree("/fixture/tree", "generation-1");
+        let source = Source::at(
+            Layer::Project,
+            ".provenant/config.toml#lanes.worktree.sharing",
+        );
+        let states = [
+            LeaseState::Live {
+                attempt_state: "running".into(),
+            },
+            LeaseState::Unreachable {
+                retry_at: WallTime::from_micros(10).unwrap(),
+            },
+            LeaseState::Lapsed {
+                attempt_state: "stopped".into(),
+            },
+        ];
+        let settings = [Sharing::Allow, Sharing::Warn, Sharing::Refuse];
+        for state in states {
+            for value in settings {
+                let observation = LeaseObservation {
+                    lease: WorktreeLease {
+                        holder,
+                        since: WallTime::from_micros(1).unwrap(),
+                        sharing: Sharing::Inherit,
+                    },
+                    state: state.clone(),
+                };
+                let setting = Sourced {
+                    value,
+                    source: source.clone(),
+                };
+                match (
+                    state.clone(),
+                    value,
+                    admit_writer(&tree, Some(&observation), &setting),
+                ) {
+                    (LeaseState::Lapsed { .. }, _, Admit::Proceed { warning: None })
+                    | (_, Sharing::Allow, Admit::Proceed { warning: None }) => {}
+                    (
+                        LeaseState::Live { .. },
+                        Sharing::Warn,
+                        Admit::Proceed {
+                            warning: Some(warning),
+                        },
+                    ) => {
+                        assert_eq!(warning.code.as_ref(), WORKTREE_SHARED);
+                        assert_eq!(warning.setting.as_ref().unwrap().layer, Layer::Project);
+                    }
+                    (
+                        LeaseState::Unreachable { .. },
+                        Sharing::Warn,
+                        Admit::Proceed {
+                            warning: Some(warning),
+                        },
+                    ) => {
+                        assert_eq!(warning.code.as_ref(), LEASE_HOLDER_UNREACHABLE);
+                        assert_eq!(warning.setting.as_ref().unwrap().layer, Layer::Project);
+                    }
+                    (_, Sharing::Refuse, Admit::Refuse { error }) => {
+                        assert_eq!(error.code, crate::policy::WORKTREE_SHARING_REFUSED);
+                        assert_eq!(error.setting.unwrap().layer, Layer::Project);
+                    }
+                    (state, sharing, admission) => panic!(
+                        "unexpected admission for {state:?} and {sharing:?}: {}",
+                        match admission {
+                            Admit::Proceed {
+                                warning: Some(warning),
+                            } => warning.code.to_string(),
+                            Admit::Proceed { warning: None } => "proceed".to_owned(),
+                            Admit::Refuse { error } => error.code,
+                        }
+                    ),
+                }
+            }
+        }
     }
 
     #[test]

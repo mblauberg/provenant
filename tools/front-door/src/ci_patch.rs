@@ -15,6 +15,7 @@ use provenant_records::command_result::{
     CommandError, ErrorClass, NextStep, SettingRef, Subject as ErrorSubject,
 };
 use provenant_records::custody::{Subject as CustodySubject, SubjectKind, guard_destructive};
+use provenant_records::warning::{Warning, WarningCode, detected_source, warn};
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -256,22 +257,296 @@ pub(crate) fn verify(
     Ok(())
 }
 
-/// The paths a unified diff touches. Only the `+++ b/...` header names a result
-/// file; `--- a/...` names its input and deletion hunks use `/dev/null`.
-pub(crate) fn patch_paths(patch: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(patch);
+/// Every path a patch can change, including the source of a rename and the
+/// removed side of a deletion. Ambiguous or unsafe paths fail before mutation.
+pub(crate) fn patch_paths(patch: &[u8]) -> Result<Vec<String>, String> {
+    let text = std::str::from_utf8(patch).map_err(|_| "patch headers are not UTF-8")?;
     let mut paths = Vec::new();
+    let mut section: Option<&str> = None;
+    let mut section_has_file_headers = false;
+    let mut hunk_remaining: Option<(usize, usize)> = None;
+    let mut pending_old_path: Option<String> = None;
     for line in text.lines() {
-        let Some(rest) = line.strip_prefix("+++ b/") else {
-            continue;
-        };
-        let path = rest.split('\t').next().unwrap_or(rest);
-        if path.is_empty() || path == "/dev/null" || paths.iter().any(|known| known == path) {
+        if let Some((old_remaining, new_remaining)) = hunk_remaining {
+            if old_remaining == 0 && new_remaining == 0 {
+                hunk_remaining = None;
+            } else {
+                consume_hunk_line(line, &mut hunk_remaining)?;
+                continue;
+            }
+        }
+        if let Some(header) = line.strip_prefix("diff --git ") {
+            if pending_old_path.is_some() {
+                return Err("patch has an unmatched old file header".to_owned());
+            }
+            if !section_has_file_headers {
+                if let Some(header) = section {
+                    add_paths(&mut paths, parse_diff_header_paths(header)?)?;
+                }
+            }
+            section = Some(header);
+            section_has_file_headers = false;
             continue;
         }
-        paths.push(path.to_owned());
+        if line.starts_with("@@@ ") {
+            return Err("combined diff hunks are not supported".to_owned());
+        }
+        if line.starts_with("@@ ") {
+            if pending_old_path.is_some() {
+                return Err("patch has an unmatched old file header".to_owned());
+            }
+            hunk_remaining = Some(parse_hunk_counts(line)?);
+            continue;
+        }
+        if let Some(header) = line.strip_prefix("--- ") {
+            if pending_old_path.is_some() {
+                return Err("patch has consecutive old file headers".to_owned());
+            }
+            pending_old_path = parse_file_header_path(header, b"a/")?;
+            if pending_old_path.is_none() {
+                // `/dev/null` is the old side of an added file, represented
+                // by an empty path while still requiring its paired new side.
+                pending_old_path = Some(String::new());
+            }
+            continue;
+        }
+        if let Some(header) = line.strip_prefix("+++ ") {
+            let Some(old_path) = pending_old_path.take() else {
+                return Err("patch has a new file header without an old header".to_owned());
+            };
+            let new_path = parse_file_header_path(header, b"b/")?;
+            section_has_file_headers = true;
+            let candidates = old_path
+                .is_empty()
+                .then_some(Vec::new())
+                .unwrap_or_else(|| vec![old_path]);
+            add_paths(&mut paths, candidates)?;
+            if let Some(path) = new_path {
+                add_paths(&mut paths, [path])?;
+            }
+        }
     }
-    paths
+    if pending_old_path.is_some() {
+        return Err("patch has an unmatched old file header".to_owned());
+    }
+    if hunk_remaining.is_some_and(|(old, new)| old != 0 || new != 0) {
+        return Err("patch ends before a hunk is complete".to_owned());
+    }
+    if !section_has_file_headers {
+        if let Some(header) = section {
+            add_paths(&mut paths, parse_diff_header_paths(header)?)?;
+        }
+    }
+    if paths.is_empty() && !patch.is_empty() {
+        return Err("patch contains no unambiguous file paths".to_owned());
+    }
+    Ok(paths)
+}
+
+fn parse_hunk_counts(header: &str) -> Result<(usize, usize), String> {
+    let ranges = header
+        .strip_prefix("@@ ")
+        .and_then(|tail| tail.split_once(" @@").map(|(ranges, _)| ranges))
+        .ok_or_else(|| "patch has a malformed hunk header".to_owned())?;
+    let mut ranges = ranges.split_ascii_whitespace();
+    let old = ranges
+        .next()
+        .ok_or_else(|| "patch hunk is missing its old range".to_owned())?;
+    let new = ranges
+        .next()
+        .ok_or_else(|| "patch hunk is missing its new range".to_owned())?;
+    if ranges.next().is_some() {
+        return Err("patch hunk has an unexpected range".to_owned());
+    }
+    Ok((parse_hunk_count(old, b'-')?, parse_hunk_count(new, b'+')?))
+}
+
+fn parse_hunk_count(range: &str, prefix: u8) -> Result<usize, String> {
+    let range = range
+        .as_bytes()
+        .strip_prefix(&[prefix])
+        .ok_or_else(|| "patch hunk has an invalid range prefix".to_owned())?;
+    let count = range
+        .split_once(|byte| *byte == b',')
+        .map_or(&b"1"[..], |(_, count)| count);
+    std::str::from_utf8(count)
+        .ok()
+        .and_then(|count| count.parse::<usize>().ok())
+        .ok_or_else(|| "patch hunk has an invalid line count".to_owned())
+}
+
+fn consume_hunk_line(line: &str, remaining: &mut Option<(usize, usize)>) -> Result<(), String> {
+    let Some((old, new)) = remaining.as_mut() else {
+        return Err("patch hunk state was lost".to_owned());
+    };
+    match line.as_bytes().first() {
+        Some(b' ') if *old > 0 && *new > 0 => {
+            *old -= 1;
+            *new -= 1;
+        }
+        Some(b'-') if *old > 0 => *old -= 1,
+        Some(b'+') if *new > 0 => *new -= 1,
+        Some(b'\\') if line == "\\ No newline at end of file" => {}
+        _ => return Err("patch has an invalid or overlong hunk body".to_owned()),
+    }
+    Ok(())
+}
+
+fn add_paths(
+    paths: &mut Vec<String>,
+    candidates: impl IntoIterator<Item = String>,
+) -> Result<(), String> {
+    for path in candidates {
+        validate_patch_path(&path)?;
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn validate_patch_path(path: &str) -> Result<(), String> {
+    use std::path::Component;
+
+    if path.is_empty()
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+        || Path::new(path).components().any(|component| {
+            matches!(
+                component,
+                Component::CurDir
+                    | Component::ParentDir
+                    | Component::RootDir
+                    | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!(
+            "patch path is not a safe worktree-relative path: {path:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_file_header_path(header: &str, prefix: &[u8]) -> Result<Option<String>, String> {
+    let (bytes, suffix_is_valid) = if header.starts_with('"') {
+        let (path, trailing) = decode_quoted_path(header.as_bytes())?;
+        (path, trailing.is_empty() || trailing.starts_with(b"\t"))
+    } else {
+        let (path, _) = header
+            .split_once('\t')
+            .map_or((header, ""), |(path, trailing)| (path, trailing));
+        (path.as_bytes().to_vec(), true)
+    };
+    if !suffix_is_valid {
+        return Err("patch file header has trailing data".to_owned());
+    }
+    parse_prefixed_path(&bytes, prefix)
+}
+
+fn parse_diff_header_paths(header: &str) -> Result<Vec<String>, String> {
+    let bytes = header.as_bytes();
+    let (old, new) = if bytes.starts_with(b"\"") {
+        let (old, rest) = decode_quoted_path(bytes)?;
+        let Some(new_header) = rest.strip_prefix(b" ") else {
+            return Err("quoted diff header has no second path".to_owned());
+        };
+        if new_header.starts_with(b"\"") {
+            let (new, trailing) = decode_quoted_path(new_header)?;
+            if !trailing.is_empty() {
+                return Err("quoted diff header has trailing data".to_owned());
+            }
+            (old, new)
+        } else {
+            (old, new_header.to_vec())
+        }
+    } else {
+        if !bytes.starts_with(b"a/") {
+            return Err("diff header does not start with a worktree path".to_owned());
+        }
+        let separators = bytes
+            .windows(3)
+            .enumerate()
+            .filter(|(_, window)| *window == b" b/")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if separators.len() != 1 {
+            return Err("unquoted diff header path is ambiguous".to_owned());
+        }
+        let split = separators[0];
+        (bytes[..split].to_vec(), bytes[split + 1..].to_vec())
+    };
+    let mut paths = Vec::new();
+    for (path, prefix) in [(old, b"a/".as_slice()), (new, b"b/".as_slice())] {
+        if let Some(path) = parse_prefixed_path(&path, prefix)? {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+fn parse_prefixed_path(bytes: &[u8], prefix: &[u8]) -> Result<Option<String>, String> {
+    if bytes == b"/dev/null" {
+        return Ok(None);
+    }
+    let Some(path) = bytes.strip_prefix(prefix) else {
+        return Err("patch file header has an unexpected path prefix".to_owned());
+    };
+    let path =
+        String::from_utf8(path.to_vec()).map_err(|_| "patch path is not valid UTF-8".to_owned())?;
+    validate_patch_path(&path)?;
+    Ok(Some(path))
+}
+
+fn decode_quoted_path(input: &[u8]) -> Result<(Vec<u8>, &[u8]), String> {
+    if !input.starts_with(b"\"") {
+        return Err("quoted path does not start with a quote".to_owned());
+    }
+    let mut decoded = Vec::new();
+    let mut index = 1;
+    while let Some(&byte) = input.get(index) {
+        index += 1;
+        match byte {
+            b'"' => return Ok((decoded, &input[index..])),
+            b'\\' => {
+                let Some(&escaped) = input.get(index) else {
+                    return Err("quoted path ends in an escape".to_owned());
+                };
+                index += 1;
+                match escaped {
+                    b'a' => decoded.push(0x07),
+                    b'b' => decoded.push(0x08),
+                    b't' => decoded.push(b'\t'),
+                    b'n' => decoded.push(b'\n'),
+                    b'v' => decoded.push(0x0b),
+                    b'f' => decoded.push(0x0c),
+                    b'r' => decoded.push(b'\r'),
+                    b'\\' | b'"' => decoded.push(escaped),
+                    b'0'..=b'7' => {
+                        let mut value = u16::from(escaped - b'0');
+                        for _ in 0..2 {
+                            if input
+                                .get(index)
+                                .is_some_and(|byte| (b'0'..=b'7').contains(byte))
+                            {
+                                value = value * 8 + u16::from(input[index] - b'0');
+                                index += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        let byte = u8::try_from(value)
+                            .map_err(|_| "quoted path octal escape exceeds one byte".to_owned())?;
+                        decoded.push(byte);
+                    }
+                    _ => return Err("quoted path uses an unknown escape".to_owned()),
+                }
+            }
+            value => decoded.push(value),
+        }
+    }
+    Err("quoted path has no closing quote".to_owned())
 }
 
 /// The filesystem and Git facts `ci patch` needs. The pure verification and
@@ -280,9 +555,27 @@ pub(crate) trait PatchRuntime {
     fn head(&self, tree: &Path) -> Result<String, String>;
     fn apply_check(&self, tree: &Path, patch: &[u8]) -> Result<(), String>;
     fn apply(&self, tree: &Path, patch: &[u8]) -> Result<(), String>;
-    fn commit(&self, tree: &Path, paths: &[String], message: &str) -> Result<(), String>;
-    /// The attempt holding a live lease on this tree, when one is recorded.
-    fn live_holder(&self, state: &Path, common_dir: &Path, tree: &Path) -> Option<AttemptId>;
+    fn commit(
+        &self,
+        tree: &Path,
+        paths: &[String],
+        patch: &[u8],
+        expected: GitOid,
+        message: &str,
+    ) -> Result<(), String>;
+    /// The live lease and dirty paths currently recorded in this worktree.
+    fn live_holder(
+        &self,
+        state: &Path,
+        common_dir: &Path,
+        tree: &Path,
+    ) -> Result<Option<LiveWriter>, String>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LiveWriter {
+    pub holder: AttemptId,
+    pub dirty_paths: Vec<String>,
 }
 
 /// The inputs to one apply, grouped so the operation stays a small seam.
@@ -327,13 +620,62 @@ pub(crate) fn apply_patch(
         &request.subject,
     )?;
 
-    let holder = runtime.live_holder(request.state, request.common_dir, request.worktree);
+    let paths = patch_paths(request.patch).map_err(|error| {
+        PatchError::operation(
+            "CI_PATCH_PATHS_INVALID",
+            "cannot safely identify every path changed by the patch",
+            Some(error),
+        )
+    })?;
+    let (holder, commit_is_safe) = match runtime.live_holder(
+        request.state,
+        request.common_dir,
+        request.worktree,
+    ) {
+        Ok(holder) => (holder, true),
+        Err(error) => {
+            warn(
+                Warning::new(
+                    provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE,
+                    format!(
+                        "{}: could not inspect live writer custody: {error}; applying patch without committing",
+                        provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE.0
+                    ),
+                    detected_source(provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE),
+                )
+                .subject(request.worktree.display().to_string()),
+            );
+            (None, false)
+        }
+    };
     let custody = CustodySubject::new(
         SubjectKind::Worktree,
         request.worktree.display().to_string(),
     );
-    guard_destructive("ci patch apply", &custody, holder.is_some(), holder)
-        .map_err(PatchError::from_command)?;
+    if let Some(holder) = holder {
+        let overlaps = paths.iter().any(|patch_path| {
+            holder
+                .dirty_paths
+                .iter()
+                .any(|dirty_path| paths_overlap(patch_path, dirty_path))
+        });
+        guard_destructive("ci patch apply", &custody, overlaps, Some(holder.holder))
+            .map_err(PatchError::from_command)?;
+        if !overlaps {
+            warn(
+                Warning::new(
+                    WarningCode(provenant_records::policy::WORKTREE_SHARED),
+                    format!(
+                        "{}: applying a generated patch to paths disjoint from live attempt {}",
+                        provenant_records::policy::WORKTREE_SHARED,
+                        holder.holder
+                    ),
+                    detected_source(WarningCode(provenant_records::policy::WORKTREE_SHARED)),
+                )
+                .subject(custody.to_string()),
+            );
+        }
+    }
 
     runtime
         .apply_check(request.worktree, request.patch)
@@ -350,10 +692,16 @@ pub(crate) fn apply_patch(
             PatchError::operation("CI_PATCH_APPLY_FAILED", "cannot apply patch", Some(error))
         })?;
 
-    let paths = patch_paths(request.patch);
-    if request.commit {
+    let committed = request.commit && commit_is_safe;
+    if committed {
         runtime
-            .commit(request.worktree, &paths, COMMIT_MESSAGE)
+            .commit(
+                request.worktree,
+                &paths,
+                request.patch,
+                head,
+                COMMIT_MESSAGE,
+            )
             .map_err(|error| {
                 PatchError::operation(
                     "CI_PATCH_COMMIT_FAILED",
@@ -365,7 +713,7 @@ pub(crate) fn apply_patch(
     Ok(PatchReport {
         head,
         applied: true,
-        committed: request.commit,
+        committed,
         paths,
     })
 }
@@ -374,7 +722,7 @@ pub(crate) fn apply_patch(
 /// so no scratch copy of it is written to the tree being changed.
 pub(crate) struct SystemRuntime;
 
-fn git(cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<String, String> {
+fn git_bytes(cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>, String> {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     let argv: Vec<std::ffi::OsString> = std::iter::once("git")
         .chain(args.iter().copied())
@@ -398,9 +746,47 @@ fn git(cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<String, String
             provenant_core::bounded_line(&String::from_utf8_lossy(&outcome.stderr.bytes), 600)
         ));
     }
-    Ok(String::from_utf8_lossy(&outcome.stdout.bytes)
-        .trim()
-        .to_owned())
+    Ok(outcome.stdout.bytes)
+}
+
+fn git(cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<String, String> {
+    git_bytes(cwd, args, stdin).map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
+}
+
+fn status_dirty_paths(status: &[u8]) -> Result<Vec<String>, String> {
+    let mut fields = status.split(|byte| *byte == 0);
+    let mut paths = Vec::new();
+    for entry in fields.by_ref() {
+        if entry.is_empty() {
+            continue;
+        }
+        if entry.len() < 4 || entry[2] != b' ' {
+            return Err("Git returned a malformed worktree status record".to_owned());
+        }
+        let path = String::from_utf8(entry[3..].to_vec())
+            .map_err(|_| "live writer has a non-UTF-8 dirty path".to_owned())?;
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+        if entry[..2].contains(&b'R') || entry[..2].contains(&b'C') {
+            let original = fields
+                .next()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| "Git omitted a rename source path".to_owned())?;
+            let original = String::from_utf8(original.to_vec())
+                .map_err(|_| "live writer has a non-UTF-8 dirty path".to_owned())?;
+            if !paths.contains(&original) {
+                paths.push(original);
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    let left = Path::new(left);
+    let right = Path::new(right);
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 impl PatchRuntime for SystemRuntime {
@@ -416,21 +802,76 @@ impl PatchRuntime for SystemRuntime {
         git(tree, &["apply"], Some(patch)).map(|_| ())
     }
 
-    fn commit(&self, tree: &Path, paths: &[String], message: &str) -> Result<(), String> {
-        let mut add = vec!["add", "--"];
-        add.extend(paths.iter().map(String::as_str));
-        git(tree, &add, None)?;
-        let mut commit = vec!["commit", "-m", message, "--"];
-        commit.extend(paths.iter().map(String::as_str));
-        git(tree, &commit, None).map(|_| ())
+    fn commit(
+        &self,
+        tree: &Path,
+        paths: &[String],
+        patch: &[u8],
+        expected: GitOid,
+        message: &str,
+    ) -> Result<(), String> {
+        use provenant_core::{CancelToken, ThreadPause};
+        use provenant_os::exec::SystemExecutor;
+
+        let git_dir =
+            provenant_os::git::repository_path(tree, provenant_os::git::RepositoryPath::GitDir)
+                .map_err(|error| error.to_string())?;
+        let ref_name = git(tree, &["symbolic-ref", "--quiet", "HEAD"], None)?;
+        let env = std::env::vars_os()
+            .filter(|(key, _)| key != "GIT_INDEX_FILE")
+            .collect::<Vec<_>>();
+        let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
+        let cancel = CancelToken::new();
+        provenant_run::commit_own_paths(
+            tree,
+            &git_dir,
+            &ref_name,
+            expected,
+            provenant_run::OwnCommitInput::Patch {
+                bytes: patch,
+                paths,
+            },
+            message,
+            2,
+            &env,
+            &executor,
+            &cancel,
+            &ThreadPause,
+            READ_BUDGET,
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     }
 
-    fn live_holder(&self, state: &Path, common_dir: &Path, tree: &Path) -> Option<AttemptId> {
-        let location = provenant_config::ProjectLocation::new(common_dir).ok()?;
+    fn live_holder(
+        &self,
+        state: &Path,
+        common_dir: &Path,
+        tree: &Path,
+    ) -> Result<Option<LiveWriter>, String> {
+        let location = provenant_config::ProjectLocation::new(common_dir)
+            .map_err(|error| error.to_string())?;
         let binding = provenant_config::lookup_project_at_state(state, &location)
-            .ok()
-            .flatten()?;
-        provenant_confinement::worktrees::recorded_writer_holder(state, binding.project_id(), tree)
+            .map_err(|error| error.to_string())?;
+        let Some(binding) = binding else {
+            return Ok(None);
+        };
+        let Some(holder) = provenant_confinement::worktrees::recorded_writer_holder(
+            state,
+            binding.project_id(),
+            tree,
+        ) else {
+            return Ok(None);
+        };
+        let status = git_bytes(
+            tree,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            None,
+        )?;
+        Ok(Some(LiveWriter {
+            holder,
+            dirty_paths: status_dirty_paths(&status)?,
+        }))
     }
 }
 
@@ -672,11 +1113,24 @@ pub(crate) fn run(command: provenant_cli::ci::Patch, globals: &Globals) -> u8 {
         if let Err(error) = verify(&manifest, &patch, &identity, head, &subject) {
             return emit_error(error, globals);
         }
+        let paths = match patch_paths(&patch) {
+            Ok(paths) => paths,
+            Err(error) => {
+                return emit_error(
+                    PatchError::operation(
+                        "CI_PATCH_PATHS_INVALID",
+                        "cannot safely identify every path changed by the patch",
+                        Some(error),
+                    ),
+                    globals,
+                );
+            }
+        };
         let report = PatchReport {
             head,
             applied: false,
             committed: false,
-            paths: patch_paths(&patch),
+            paths,
         };
         let human = format!(
             "ci patch {}: verified {} paths at {head} (not applied)",
@@ -798,6 +1252,48 @@ mod tests {
     }
 
     #[test]
+    fn patch_paths_cover_deletions_renames_and_quoted_names() {
+        let deleted = b"diff --git a/old.txt b/old.txt\n--- a/old.txt\n+++ /dev/null\n";
+        assert_eq!(patch_paths(deleted).unwrap(), ["old.txt"]);
+
+        let renamed = b"diff --git a/old.txt b/new.txt\n--- a/old.txt\n+++ b/new.txt\n";
+        assert_eq!(patch_paths(renamed).unwrap(), ["old.txt", "new.txt"]);
+
+        let quoted = b"diff --git \"a/old\\tname\" \"b/new\\tname\"\n--- \"a/old\\tname\"\n+++ \"b/new\\tname\"\n";
+        assert_eq!(patch_paths(quoted).unwrap(), ["old\tname", "new\tname"]);
+    }
+
+    #[test]
+    fn patch_paths_reject_traversal_and_ambiguous_headers() {
+        let traversal =
+            b"diff --git a/../outside b/../outside\n--- a/../outside\n+++ b/../outside\n";
+        assert!(patch_paths(traversal).is_err());
+
+        let ambiguous = b"diff --git a/foo b/bar b/baz\nold mode 100644\nnew mode 100644\n";
+        assert!(patch_paths(ambiguous).is_err());
+    }
+
+    #[test]
+    fn patch_paths_ignore_header_like_lines_inside_hunks() {
+        let patch = b"diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n--- a/evil.txt\n+++ b/evil.txt\n";
+        assert_eq!(patch_paths(patch).unwrap(), ["src/a.rs"]);
+    }
+
+    #[test]
+    fn dirty_path_status_keeps_leading_status_column_and_rename_source() {
+        let status = b" M src/modified.rs\0R  src/new.rs\0src/old.rs\0?? untracked file\0";
+        assert_eq!(
+            status_dirty_paths(status).unwrap(),
+            [
+                "src/modified.rs",
+                "src/new.rs",
+                "src/old.rs",
+                "untracked file"
+            ]
+        );
+    }
+
+    #[test]
     fn ci_patch_refuses_head_or_run_mismatch() {
         let (manifest, patch, identity, subject) = fixture(HEAD);
         let head = GitOid::parse(HEAD).unwrap();
@@ -853,6 +1349,7 @@ mod tests {
         applied: RefCell<Vec<Vec<u8>>>,
         committed: RefCell<Vec<(Vec<String>, String)>>,
         holder: Option<AttemptId>,
+        dirty_paths: Vec<String>,
     }
 
     impl PatchRuntime for Fake {
@@ -869,14 +1366,24 @@ mod tests {
             self.applied.borrow_mut().push(patch.to_vec());
             Ok(())
         }
-        fn commit(&self, _: &Path, paths: &[String], message: &str) -> Result<(), String> {
+        fn commit(
+            &self,
+            _: &Path,
+            paths: &[String],
+            _: &[u8],
+            _: GitOid,
+            message: &str,
+        ) -> Result<(), String> {
             self.committed
                 .borrow_mut()
                 .push((paths.to_vec(), message.to_owned()));
             Ok(())
         }
-        fn live_holder(&self, _: &Path, _: &Path, _: &Path) -> Option<AttemptId> {
-            self.holder
+        fn live_holder(&self, _: &Path, _: &Path, _: &Path) -> Result<Option<LiveWriter>, String> {
+            Ok(self.holder.map(|holder| LiveWriter {
+                holder,
+                dirty_paths: self.dirty_paths.clone(),
+            }))
         }
     }
 
@@ -887,6 +1394,7 @@ mod tests {
             applied: RefCell::new(Vec::new()),
             committed: RefCell::new(Vec::new()),
             holder: None,
+            dirty_paths: Vec::new(),
         }
     }
 
@@ -944,6 +1452,7 @@ mod tests {
         // A live holder's work refuses before any Git mutation.
         let mut held = fake(HEAD, None);
         held.holder = Some(AttemptId::from_bytes([7; 16]));
+        held.dirty_paths = vec!["src/a.rs".to_owned()];
         let error = apply_patch(
             &held,
             ApplyRequest {
@@ -960,5 +1469,58 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "DESTROYS_LIVE_WORK");
         assert!(held.applied.borrow().is_empty());
+    }
+
+    #[test]
+    fn ci_patch_allows_disjoint_live_work_and_refuses_overlap() {
+        let (manifest, patch, identity, subject) = fixture(HEAD);
+        let tree = Path::new("/worktree");
+        let state = Path::new("/state");
+        let common = Path::new("/common");
+        let holder = AttemptId::from_bytes([8; 16]);
+
+        let mut disjoint = fake(HEAD, None);
+        disjoint.holder = Some(holder);
+        disjoint.dirty_paths = vec!["src/b.rs".to_owned()];
+        let report = apply_patch(
+            &disjoint,
+            ApplyRequest {
+                manifest: &manifest,
+                patch: &patch,
+                expected: &identity,
+                worktree: tree,
+                state,
+                common_dir: common,
+                commit: true,
+                subject: subject.clone(),
+            },
+        )
+        .unwrap();
+        assert!(report.applied && report.committed);
+        assert_eq!(
+            disjoint.committed.borrow()[0].0,
+            vec!["src/a.rs".to_owned()]
+        );
+
+        let mut overlapping = fake(HEAD, None);
+        overlapping.holder = Some(holder);
+        overlapping.dirty_paths = vec!["src/a.rs".to_owned()];
+        let error = apply_patch(
+            &overlapping,
+            ApplyRequest {
+                manifest: &manifest,
+                patch: &patch,
+                expected: &identity,
+                worktree: tree,
+                state,
+                common_dir: common,
+                commit: true,
+                subject,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "DESTROYS_LIVE_WORK");
+        assert!(overlapping.applied.borrow().is_empty());
+        assert!(overlapping.committed.borrow().is_empty());
     }
 }

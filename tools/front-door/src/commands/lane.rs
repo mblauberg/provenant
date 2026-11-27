@@ -15,7 +15,7 @@ use provenant_records::{CommandError, Outcome};
 
 /// The one setting a lane can fix for its own worktree. Keep in step with the
 /// confinement reader of the same key.
-const WORKTREE_SHARING_KEY: &str = "lanes.worktree.sharing";
+const WORKTREE_SHARING_KEY: &str = provenant_records::custody::WORKTREE_SHARING_KEY;
 
 pub static DOMAIN: Domain = Domain {
     name: "lane",
@@ -58,12 +58,9 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
 }
 
 fn parse_sharing(mode: &str) -> Option<Sharing> {
-    match mode {
-        "allow" => Some(Sharing::Allow),
-        "warn" => Some(Sharing::Warn),
-        "refuse" => Some(Sharing::Refuse),
-        _ => None,
-    }
+    mode.parse::<Sharing>()
+        .ok()
+        .filter(|sharing| *sharing != Sharing::Inherit)
 }
 
 fn failure(code: &str, message: impl Into<String>, cause: Option<String>) -> CommandError {

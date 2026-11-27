@@ -27,7 +27,9 @@ mod git_context;
 mod holder;
 mod identity;
 mod launch;
-pub use launch::{LaunchPhase, LaunchTimer, LaunchTimings, OwnCommit, commit_own_paths};
+pub use launch::{
+    LaunchPhase, LaunchTimer, LaunchTimings, OwnCommit, OwnCommitInput, commit_own_paths,
+};
 pub mod worktree_carry;
 pub use worktree_carry::{CarryError, CarrySnapshot, carry};
 pub mod lease_migrate;
@@ -939,6 +941,27 @@ impl RunError {
         }
         use provenant_confinement::{permissions::PermissionError, worktrees::WorktreeError};
         use provenant_records::diagnostic::{Diagnostic, DiagnosticFact, shell_path};
+        if let Self::Writer(WorktreeError::CustodyCommand(error)) = self {
+            let setting = error.setting.as_ref().map_or_else(String::new, |setting| {
+                format!(
+                    "; {} = {} from {} ({})",
+                    setting.key,
+                    setting.value,
+                    setting.layer.as_str(),
+                    setting.origin
+                )
+            });
+            let next = error
+                .next
+                .iter()
+                .map(provenant_records::command_result::NextStep::display_text)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Diagnostic::new(&error.code)
+                .category("configured")
+                .detail(format!("{}{setting}", error.message))
+                .next(next);
+        }
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {

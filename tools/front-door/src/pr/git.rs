@@ -49,6 +49,9 @@ impl Git {
             repositories: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
+    pub(super) fn host_state(&self) -> &Path {
+        &self.host_state
+    }
     /// The full ID of the commit `name` identifies: a full ID as given, or any
     /// object name Git resolves to exactly one commit. Git names an ambiguous
     /// abbreviation, which is refused rather than guessed.

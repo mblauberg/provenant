@@ -796,8 +796,7 @@ fn create_with_default(
     // A held writer lease is a sharing decision, not an unconditional refusal.
     // `admit_writer` proceeds with a typed warning under allow/warn and only
     // refuses under an explicit configured or owner-set `refuse`.
-    let holder = writer_holder(context.project_state, &target);
-    let _writer = admitted_writer_guard(context, &target, holder)?;
+    let _writer = admitted_writer_guard(context, &target)?;
     context.repo.revalidate()?;
     let named_parent =
         open_or_create_layout_directory(&allocation, &parent_relative, false, layout_device)?;

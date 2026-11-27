@@ -64,8 +64,8 @@ pub use owner::{
 pub use refs::{RefLedger, RefObservation, RefRecord};
 pub use removal::{
     Artefact, ArtefactClass, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out,
-    created_branch, delete_ref_leased, delete_ref_leased_when, has_commit, landing_in_repo,
-    ref_tip,
+    created_branch, delete_ref_leased, delete_ref_leased_when, guard_destructive_branch,
+    has_commit, landing_in_repo, ref_tip,
 };
 pub use stranded::{EditStats, edit_stats};
 
@@ -253,6 +253,10 @@ pub enum WorktreeError {
         cause: Option<String>,
         holder: Option<AttemptId>,
     },
+    /// A typed refusal from the shared custody policy, preserved to the
+    /// command result boundary with its setting source and next step.
+    #[error("error [{0}] {1}", .0.code, .0.message)]
+    CustodyCommand(provenant_records::CommandError),
     #[error(
         "writer lease held by attempt {holder} (branch {branch}, worktree {}, reservation age {age}, live: {live})",
         .worktree.display(), live = .live.map_or("unknown", |live| if live { "true" } else { "false" })
