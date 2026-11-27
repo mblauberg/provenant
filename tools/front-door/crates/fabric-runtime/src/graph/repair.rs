@@ -331,7 +331,7 @@ pub(super) fn split_verdict_patch(
             "outputs": ["verdict", "findings"]
         })).collect::<Vec<_>>(),
         "require_findings": true,
-        "prompt": "Read only. The review panels above reported conflicting verdicts on one head. Resolve the split once: weigh every finding against the code and the named invariant in its top-level `class`. Return every input finding in the findings block with its id and invariant preserved, then exactly one verdict. Do not re-run a full panel or start another review round. If a blocking finding is upheld, name the invariant it breaks and say that repair is required; an upheld changes-request legitimately needs a repair round, but the split itself does not. Give VERDICT: PASS only when no blocking finding survives adjudication, otherwise VERDICT: FAIL or VERDICT: INCONCLUSIVE."
+        "prompt": "Read only. The review panels above reported conflicting verdicts on one head. Resolve the split once: weigh every finding against the code and the named invariant in its top-level `class`. Return every input finding in the findings block with its id and invariant preserved and a non-empty top-level disposition for each, then exactly one verdict. Do not re-run a full panel or start another review round. If a blocking finding is upheld, name the invariant it breaks and say that repair is required; an upheld changes-request legitimately needs a repair round, but the split itself does not. Give VERDICT: PASS only when no blocking finding survives adjudication, otherwise VERDICT: FAIL or VERDICT: INCONCLUSIVE."
     });
     if let Some(head) = head {
         adjudicate["source"] = serde_json::json!({"type": "commit", "commit": head});

@@ -404,22 +404,6 @@ fn each_split_panel_uses_its_own_adjudicator_on_its_pinned_head() {
     let answer = |verdict: &str| format!(
         "```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: {verdict}\n"
     );
-    let prior_findings: Vec<_> = (0..10)
-        .map(|index| {
-            serde_json::json!({
-                "id": format!("ADJ-F{index}"),
-                "severity": "high",
-                "file": "src/prior.rs",
-                "line": index + 1,
-                "summary": format!("prior disposition snapshot {index} {}", "x".repeat(900)),
-                "status": "resolved",
-                "disposition": "accepted",
-                "evidence": "The prior adjudicator reviewed this source finding",
-                "proposed_fix": "Retain the recorded disposition"
-            })
-        })
-        .collect();
-    let prior_adjudication = answer("PASS", serde_json::json!(prior_findings));
     let panel = |id: &str, dependency: Option<&str>, head: &str| {
         let lens = |name: &str| serde_json::json!({
             "id": name, "access": "read_only", "review_lens": name,
@@ -635,6 +619,22 @@ fn later_same_head_split_continues_one_adjudicator_and_replays_its_union() {
     let answer = |verdict: &str| format!(
         "```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: {verdict}\n"
     );
+    let prior_findings: Vec<_> = (0..10)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("ADJ-F{index}"),
+                "severity": "high",
+                "file": "src/prior.rs",
+                "line": index + 1,
+                "summary": format!("prior disposition snapshot {index} {}", "x".repeat(900)),
+                "status": "resolved",
+                "disposition": "accepted",
+                "evidence": "The prior adjudicator reviewed this source finding",
+                "proposed_fix": "Retain the recorded disposition"
+            })
+        })
+        .collect();
+    let prior_adjudication = format!("```findings\n{}\n```\nVERDICT: PASS\n", serde_json::json!({"schema_version": 1, "findings": prior_findings}));
     let head = "e".repeat(40);
     let panel = |id: &str, depends_on: &[&str]| {
         let lens = |name: &str| serde_json::json!({
