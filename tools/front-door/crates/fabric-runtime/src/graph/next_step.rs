@@ -852,6 +852,27 @@ pub(super) fn settlement_fallback_decision(
     launched: bool,
     evidence: FallbackEvidence<'_>,
 ) -> SettlementFallback {
+    // Choose the failure identity once, after every fallback and limit decision.
+    // Keep the decision's note so it can explain a separate denial.
+    let decision =
+        settlement_fallback_decision_inner(node, route_index, outcome, stop, launched, evidence);
+    match (decision, stop) {
+        (SettlementFallback::Fail { message, .. }, Some(cause)) => SettlementFallback::Fail {
+            code: Some(cause.advance_code()),
+            message,
+        },
+        (decision, _) => decision,
+    }
+}
+
+fn settlement_fallback_decision_inner(
+    node: &PlannedNode,
+    route_index: usize,
+    outcome: GraphAttemptOutcome,
+    stop: Option<provenant_records::StopCause>,
+    launched: bool,
+    evidence: FallbackEvidence<'_>,
+) -> SettlementFallback {
     let FallbackEvidence {
         preparation: fallback_evidence,
         unreadable: evidence_unreadable,
