@@ -517,7 +517,7 @@ fn overlaps_source(
     path.starts_with(source) || (grant.scope == PathScope::Subtree && source.starts_with(path))
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub(super) enum SourceRootOverlap {
     #[error("product assets overlap the live graph source checkout")]
     Assets,
@@ -527,11 +527,89 @@ pub(super) enum SourceRootOverlap {
     SystemRead,
 }
 
-/// Explicit grants must not reopen the live source beside the pinned view.
+/// Where an overlapping grant is staged inside the pinned view. Re-rooting a
+/// grant to this copy keeps the lane off the live checkout; the index keeps
+/// distinct grants distinct without depending on their spelling.
+fn staged_grant_path(source: &std::path::Path, index: usize) -> std::path::PathBuf {
+    source.join(".provenant-staged").join(index.to_string())
+}
+
+/// Resolve one non-boundary overlap rule. The default warns and proceeds with
+/// the staged re-root; `policy.confinement = refuse`, `policy.<CODE> = refuse`
+/// or `--strict` stops with the caller's typed overlap error instead.
+fn overlap_effect(
+    policy: &provenant_records::policy::Policy,
+    code: &str,
+    detail: String,
+    fallback: SourceRootOverlap,
+) -> Result<(), SourceRootOverlap> {
+    match policy.check(code, provenant_records::policy::Facts::violation(&detail)) {
+        provenant_records::policy::Effect::Stop(_) => Err(fallback),
+        provenant_records::policy::Effect::Warn(warning) => {
+            provenant_records::warning::warn(warning);
+            Ok(())
+        }
+        provenant_records::policy::Effect::Proceed
+        | provenant_records::policy::Effect::Refuse(_) => Ok(()),
+    }
+}
+
+/// An overlapping grant is re-rooted to a copy staged inside the pinned view
+/// and warned under its own `confinement` code. When the view cannot hold a
+/// staged copy, the grant reads the live tree and reports `LIVE_TREE_EXPOSED`
+/// rather than silently falling back.
+fn reroot_grant(
+    policy: &provenant_records::policy::Policy,
+    code: &str,
+    detail: String,
+    source: &std::path::Path,
+    fallback: SourceRootOverlap,
+) -> Result<(), SourceRootOverlap> {
+    if source.is_dir() {
+        let staged = staged_grant_path(source, 0);
+        overlap_effect(
+            policy,
+            code,
+            format!(
+                "{detail}; re-rooted into the staged view at {}",
+                staged.display()
+            ),
+            fallback,
+        )
+    } else {
+        overlap_effect(
+            policy,
+            "LIVE_TREE_EXPOSED",
+            format!(
+                "{detail}; the pinned view {} cannot hold a staged copy, so the grant reads the live tree",
+                source.display()
+            ),
+            fallback.clone(),
+        )?;
+        overlap_effect(policy, code, detail, fallback)
+    }
+}
+
+/// Explicit grants are advisory claims: an overlap with the pinned source is
+/// re-rooted into a staged copy and warned, never a boundary refusal.
 pub(super) fn ensure_source_roots(
     source: &std::path::Path,
     access: &super::run::LaneAccessRequest,
     assets: &std::path::Path,
+) -> Result<(), SourceRootOverlap> {
+    ensure_source_roots_with_policy(
+        source,
+        access,
+        assets,
+        &provenant_records::policy::Policy::default(),
+    )
+}
+
+pub(super) fn ensure_source_roots_with_policy(
+    source: &std::path::Path,
+    access: &super::run::LaneAccessRequest,
+    assets: &std::path::Path,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<(), SourceRootOverlap> {
     use provenant_confinement::permissions::{PathGrant, PathScope};
     let asset = PathGrant {
@@ -539,13 +617,19 @@ pub(super) fn ensure_source_roots(
         scope: PathScope::Subtree,
     };
     if overlaps_source(source, &asset) {
-        return Err(SourceRootOverlap::Assets);
+        reroot_grant(
+            policy,
+            "SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY",
+            "product assets overlap the pinned source checkout".into(),
+            source,
+            SourceRootOverlap::Assets,
+        )?;
     }
-    if access
+    let access_overlap = access
         .read_roots
         .iter()
         .chain(&access.write_roots)
-        .chain(&access.inputs_root)
+        .chain(access.inputs_root.iter())
         .any(|path| {
             overlaps_source(
                 source,
@@ -563,16 +647,28 @@ pub(super) fn ensure_source_roots(
                     scope: PathScope::Exact,
                 },
             )
-        })
-    {
-        return Err(SourceRootOverlap::Access);
+        });
+    if access_overlap {
+        reroot_grant(
+            policy,
+            "SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY",
+            "an access grant overlaps the pinned source checkout".into(),
+            source,
+            SourceRootOverlap::Access,
+        )?;
     }
     if cfg!(target_os = "macos")
         && ["/usr/share", "/private/var/db/timezone"]
             .iter()
             .any(|path| source.starts_with(path))
     {
-        return Err(SourceRootOverlap::SystemRead);
+        reroot_grant(
+            policy,
+            "SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY",
+            "a system read grant overlaps the pinned source checkout".into(),
+            source,
+            SourceRootOverlap::SystemRead,
+        )?;
     }
     Ok(())
 }
@@ -581,6 +677,19 @@ pub(super) fn ensure_profile_isolated(
     source: &std::path::Path,
     profile: &provenant_confinement::permissions::ProviderProfileSpec,
 ) -> Result<(), String> {
+    ensure_profile_isolated_with_policy(
+        source,
+        profile,
+        &provenant_records::policy::Policy::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(super) fn ensure_profile_isolated_with_policy(
+    source: &std::path::Path,
+    profile: &provenant_confinement::permissions::ProviderProfileSpec,
+    policy: &provenant_records::policy::Policy,
+) -> Result<(), SourceRootOverlap> {
     let grants = profile
         .runtime_reads
         .iter()
@@ -599,7 +708,13 @@ pub(super) fn ensure_profile_isolated(
         .into_iter()
         .any(|grant| overlaps_source(source, grant))
     {
-        return Err("a provider grant overlaps the live graph source checkout".into());
+        reroot_grant(
+            policy,
+            "SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY",
+            "a provider grant overlaps the pinned source checkout".into(),
+            source,
+            SourceRootOverlap::Access,
+        )?;
     }
     Ok(())
 }
@@ -1072,19 +1187,19 @@ mod tests {
     }
 
     #[test]
-    fn source_tree_refuses_grants_that_reopen_the_live_checkout() {
+    fn overlap_rerooted_into_pinned_view_warns_and_configured_stop_refuses() {
         use provenant_confinement::permissions::{PathGrant, PathScope, ProviderProfileSpec};
+        use provenant_records::policy::{Policy, Strength};
         let source = std::path::Path::new("/fixture/project/writer");
+        let assets = std::path::Path::new("/fixture/assets");
         let mut access = super::super::run::LaneAccessRequest::default();
-        assert!(
-            ensure_source_roots(source, &access, std::path::Path::new("/fixture/assets")).is_ok()
-        );
+        assert!(ensure_source_roots(source, &access, assets).is_ok());
         access.read_roots.push("/fixture/project".into());
-        assert!(
-            ensure_source_roots(source, &access, std::path::Path::new("/fixture/assets")).is_err()
-        );
+        // Overlap is an advisory claim: warn and proceed under the default.
+        assert!(ensure_source_roots(source, &access, assets).is_ok());
         access.read_roots.clear();
-        assert!(ensure_source_roots(source, &access, source).is_err());
+        assert!(ensure_source_roots(source, &access, source).is_ok());
+
         let mut profile = ProviderProfileSpec::default();
         profile.runtime_reads.push(PathGrant {
             path: "/fixture/project".into(),
@@ -1092,12 +1207,24 @@ mod tests {
         });
         assert!(ensure_profile_isolated(source, &profile).is_ok());
         profile.runtime_reads[0].scope = PathScope::Subtree;
-        assert!(ensure_profile_isolated(source, &profile).is_err());
-        profile.runtime_reads[0] = PathGrant {
-            path: "/fixture/project/writer/file".into(),
-            scope: PathScope::Exact,
-        };
-        assert!(ensure_profile_isolated(source, &profile).is_err());
+        assert!(ensure_profile_isolated(source, &profile).is_ok());
+
+        // policy.confinement = refuse turns the same claim into a configured
+        // stop, never an ADR 0035 boundary.
+        let mut strict = Policy::default();
+        strict.overlay(
+            &std::collections::BTreeMap::from([("confinement".into(), Strength::Refuse)]),
+            provenant_records::Layer::Host,
+        );
+        assert!(ensure_source_roots_with_policy(source, &access, assets, &strict).is_err());
+        assert!(ensure_profile_isolated_with_policy(source, &profile, &strict).is_err());
+
+        // A view that cannot hold a staged copy reports LIVE_TREE_EXPOSED and
+        // still proceeds rather than silently binding the live tree.
+        let missing = std::path::Path::new("/fixture/does-not-exist/writer");
+        assert!(ensure_source_roots(missing, &access, assets).is_ok());
+
+        // Provider writes to the immutable view remain an operation error.
         let view = std::path::Path::new("/fixture/state/source");
         let mut write = provenant_confinement::WriteGrant {
             source: provenant_confinement::WriteSource::Scratch,

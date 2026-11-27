@@ -392,6 +392,16 @@ knob = "policy.SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY"
 refusable = true
 
 [[rule]]
+code = "LIVE_TREE_EXPOSED"
+site = "cli/src/run/provider/source_tree.rs#reroot_grant"
+boundary = "none"
+strength = "warn"
+group = "confinement"
+knob = "policy.LIVE_TREE_EXPOSED"
+refusable = true
+justification = "When an overlapping grant cannot be re-rooted into the pinned view, it reads the live tree and warns; the grant is an advisory claim and destroys no other lane's work."
+
+[[rule]]
 code = "SOURCE_TREE_ENSURE_VIEW_READ_ONLY_AUTHORITY"
 site = "cli/src/run/provider/source_tree.rs#ensure_view_read_only"
 boundary = "operation"

@@ -1035,8 +1035,15 @@ pub(super) enum PrepareError {
     SourceRoots(#[from] super::source_tree::SourceRootOverlap),
     #[error("{0}")]
     WriterContinuation(String),
+    /// The predecessor record could not be read, so there is no pinned commit
+    /// or owner to inherit. This is an operation error, not a boundary.
+    #[error("{0}")]
+    WriterUnreadable(String),
     /// A pin mismatch has its own honest cause, naming both commits; it is not
-    /// a failed launch handoff.
+    /// a failed launch handoff. A moved head now re-pins with `WRITER_HEAD_MOVED`
+    /// instead of refusing, so this shape is kept only for the pinned fixture
+    /// that checks the cause text of a mismatch raised elsewhere.
+    #[allow(dead_code)]
     #[error("writer worktree head {head} does not match pinned commit {pinned}{}", dirty_predecessor_suffix(.uncommitted))]
     WriterPinMismatch {
         pinned: provenant_core::GitOid,
@@ -1277,7 +1284,9 @@ impl PrepareError {
                     provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
-                refusal.boundary_class = provenant_records::policy::Boundary::Authority;
+                // The overlap rule is `none/warn` in the confinement group: a
+                // stop here is a configured setting, never a boundary.
+                refusal.boundary_class = provenant_records::policy::Boundary::None;
                 refusal.policy_code = Some("SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY".into());
                 refusal.terminal_note = Some(error.to_string());
                 refusal
@@ -1288,12 +1297,15 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = error.boundary_class();
-                refusal.policy_code =
-                    if refusal.boundary_class == provenant_records::policy::Boundary::Authority {
+                refusal.policy_code = match &error {
+                    SourceCwdError::IdentityMismatch(_) => Some("SOURCE_IDENTITY_MISMATCH".into()),
+                    SourceCwdError::Configured(_) => {
                         Some("CONFINEMENT_SOURCE_CWD_AUTHORITY".into())
-                    } else {
+                    }
+                    SourceCwdError::Operational(_) => {
                         policy_code_for_boundary(refusal.boundary_class).map(str::to_owned)
-                    };
+                    }
+                };
                 refusal
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
@@ -1319,7 +1331,8 @@ impl PrepareError {
                     provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
-                refusal.boundary_class = provenant_records::policy::Boundary::Authority;
+                // The pinned-source head check is an immutable operation row.
+                refusal.boundary_class = provenant_records::policy::Boundary::Operation;
                 refusal.policy_code = Some("CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY".into());
                 refusal
             }
@@ -1410,37 +1423,46 @@ impl PrepareError {
                         dirty_predecessor_suffix(&uncommitted)
                     ),
                 );
-                refusal.boundary_class = provenant_records::policy::Boundary::Authority;
-                refusal.policy_code = Some("CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY".into());
+                // A moved head re-pins with a warning; the predicate row is
+                // `none/warn` in the custody group, never a boundary.
+                refusal.boundary_class = provenant_records::policy::Boundary::None;
+                refusal.policy_code = Some("WRITER_HEAD_MOVED".into());
                 refusal
             }
             error @ (Self::GraphInputsAuthority(_)
             | Self::SourceProfileIsolated(_)
             | Self::SourceViewReadOnly(_)
-            | Self::WriterContinuation(_)) => {
+            | Self::WriterContinuation(_)
+            | Self::WriterUnreadable(_)) => {
                 let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
-                refusal.boundary_class = provenant_records::policy::Boundary::Authority;
-                refusal.policy_code = Some(
-                    match &error {
-                        Self::GraphInputsAuthority(_) => {
-                            "PREPARATION_CHECK_GRAPH_INPUTS_ROOT_AUTHORITY"
-                        }
-                        Self::SourceProfileIsolated(_) => {
-                            "SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY"
-                        }
-                        Self::SourceViewReadOnly(_) => {
-                            "SOURCE_TREE_ENSURE_VIEW_READ_ONLY_AUTHORITY"
-                        }
-                        Self::WriterContinuation(_) => {
-                            "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY"
-                        }
-                        _ => return refusal,
-                    }
-                    .into(),
-                );
+                let (boundary, code) = match &error {
+                    Self::GraphInputsAuthority(_) => (
+                        provenant_records::policy::Boundary::Operation,
+                        "PREPARATION_CHECK_GRAPH_INPUTS_ROOT_AUTHORITY",
+                    ),
+                    Self::SourceProfileIsolated(_) => (
+                        provenant_records::policy::Boundary::None,
+                        "SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY",
+                    ),
+                    Self::SourceViewReadOnly(_) => (
+                        provenant_records::policy::Boundary::Operation,
+                        "SOURCE_TREE_ENSURE_VIEW_READ_ONLY_AUTHORITY",
+                    ),
+                    Self::WriterContinuation(_) => (
+                        provenant_records::policy::Boundary::None,
+                        "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY",
+                    ),
+                    Self::WriterUnreadable(_) => (
+                        provenant_records::policy::Boundary::Operation,
+                        "UNREADABLE_PREDECESSOR",
+                    ),
+                    _ => return refusal,
+                };
+                refusal.boundary_class = boundary;
+                refusal.policy_code = Some(code.into());
                 refusal
             }
             other => run::PrepareRefusal::boxed(
@@ -1484,6 +1506,20 @@ fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
         assert!(text.contains(&head.to_string()), "{text}");
         assert!(!text.contains(CauseKind::LaunchHandoffRefused.detail()));
     }
+}
+
+#[cfg(test)]
+#[test]
+// Spec: docs/specs/agent-native.md#only-boundaries-refuse
+fn overlong_raw_prompt_is_an_operation_error_not_a_boundary() {
+    use provenant_records::policy::Boundary;
+    let refusal = PrepareError::Prompt(LaunchPromptError::TooLarge).into_refusal();
+    assert_eq!(refusal.boundary_class, Boundary::Operation);
+    assert_eq!(
+        refusal.policy_code.as_deref(),
+        Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY")
+    );
+    assert!(!refusal.message.is_empty());
 }
 
 #[cfg(test)]
@@ -1569,7 +1605,11 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     );
     for error in [SourceHeadError::Missing, SourceHeadError::Invalid] {
         let refusal = PrepareError::SourceHead(error).into_refusal();
-        assert_eq!(refusal.boundary_class, Boundary::Authority);
+        assert_eq!(refusal.boundary_class, Boundary::Operation);
+        assert_eq!(
+            refusal.policy_code.as_deref(),
+            Some("CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY")
+        );
     }
     for error in [
         ContinuationRequestError::MissingRoute,
@@ -1590,13 +1630,18 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         assert!(!reason.contains("TOKEN_SENTINEL"));
         assert!(!reason.contains("/private/source"));
     }
-    let source =
-        PrepareError::SourceCwd(SourceCwdError::Authority("source identity changed".into()))
-            .into_refusal();
-    assert_eq!(source.boundary_class, Boundary::Authority);
+    let source = PrepareError::SourceCwd(SourceCwdError::IdentityMismatch(
+        "source identity changed".into(),
+    ))
+    .into_refusal();
+    assert_eq!(source.boundary_class, Boundary::Operation);
+    assert_eq!(
+        source.policy_code.as_deref(),
+        Some("SOURCE_IDENTITY_MISMATCH")
+    );
     let source_roots =
         PrepareError::SourceRoots(super::source_tree::SourceRootOverlap::Assets).into_refusal();
-    assert_eq!(source_roots.boundary_class, Boundary::Authority);
+    assert_eq!(source_roots.boundary_class, Boundary::None);
     assert_eq!(
         source_roots.terminal_note.as_deref(),
         Some("product assets overlap the live graph source checkout")
@@ -1634,10 +1679,15 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert_eq!(other.boundary_class, Boundary::None);
     for error in [
         PrepareError::GraphInputsAuthority("invalid graph inputs root".into()),
+        PrepareError::WriterUnreadable("unreadable predecessor record".into()),
+    ] {
+        assert_eq!(error.into_refusal().boundary_class, Boundary::Operation);
+    }
+    for error in [
         PrepareError::SourceProfileIsolated("source grant overlaps".into()),
         PrepareError::WriterContinuation("uncommitted predecessor edits".into()),
     ] {
-        assert_eq!(error.into_refusal().boundary_class, Boundary::Authority);
+        assert_eq!(error.into_refusal().boundary_class, Boundary::None);
     }
     let refusal = PrepareError::HostIndexOverlap.into_refusal();
     assert_eq!(refusal.boundary_class, Boundary::Operation);
@@ -1871,7 +1921,7 @@ impl PlanCheckError {
             Self::Plan(error) => error.boundary_class(),
             Self::Permission(error) => error.boundary_class(),
             Self::ReadOnly(error) => error.boundary_class(),
-            Self::SourceHead(_) => provenant_records::policy::Boundary::Authority,
+            Self::SourceHead(_) => provenant_records::policy::Boundary::Operation,
         }
     }
 
@@ -3353,7 +3403,12 @@ pub(super) fn prepare_candidates_inner(
     let isolated =
         writer.is_none() && task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
-        super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
+        super::source_tree::ensure_source_roots_with_policy(
+            &source,
+            &task.access,
+            assets,
+            &launch_policy,
+        )?;
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
     } else {
         source.clone()
@@ -5731,8 +5786,12 @@ pub(super) fn prepare_candidates_inner(
             &launch_policy,
         );
         if isolated {
-            super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)
-                .map_err(PrepareError::SourceProfileIsolated)?;
+            super::source_tree::ensure_profile_isolated_with_policy(
+                &source,
+                &spec.profile.spec,
+                &launch_policy,
+            )
+            .map_err(|error| PrepareError::SourceProfileIsolated(error.to_string()))?;
             super::source_tree::ensure_view_read_only(
                 &cwd,
                 &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
