@@ -38,7 +38,15 @@ pub(crate) fn read_handover(
     else {
         return Ok(None);
     };
-    crate::db::decode(&raw).map(Some)
+    provenant_records::decode(
+        raw.as_slice(),
+        provenant_records::Limits {
+            max_bytes: crate::RECORD_LIMIT,
+            ..Default::default()
+        },
+    )
+    .map(Some)
+    .map_err(Into::into)
 }
 
 /// Launch writes the one worktree-slot lease confinement reads. Only the

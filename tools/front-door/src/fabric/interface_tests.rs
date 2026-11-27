@@ -4319,7 +4319,7 @@ fn explain_plans_peer_writer_on_peer() -> Result {
     let relative = factory
         .context
         .port_table
-        .managed_writer_path("smoke/verify")
+        .managed_writer_path("smoke/peer")
         .map_err(|error| format!("managed writer path: {error}"))?;
     let planned = PathBuf::from("workshop").join(relative);
     assert_eq!(writer["path"], json!(planned), "{preview}");

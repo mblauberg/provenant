@@ -267,11 +267,11 @@ and the head and what to do.
 
 A steer successor re-pins the same way: when the retained writer committed after its
 predecessor was sealed, the successor adopts that descendant head, keeps the original
-source pin and warns with both ids. Launch still requires the head to come from the same
-lane-owned writer and descend from the sealed head. Admission checks that ownership before
-adopting a changed head; an adopted or unowned checkout cannot authorise that re-pin. A head
-that moved elsewhere is a typed continuation refusal, so the graph pauses for retry instead of failing and the queued steering
-text stays recorded. A route without a resumable session continues the lane through
+source pin and warns with both ids. Launch verifies the same writer tree and requires the
+current head to descend from the sealed head; ownership origin alone does not block a
+re-pin. A head that moved elsewhere is a typed continuation refusal, so the graph pauses for
+retry instead of failing and the queued steering text stays recorded. A route without a
+resumable session continues the lane through
 `fresh_with_handoff` (the default), re-pinned from the same retained worktree.
 - Why: an interrupt must not turn the lane's own commits into a failed graph, and the
   operator must not lose a queued instruction when the head advanced under its custody.

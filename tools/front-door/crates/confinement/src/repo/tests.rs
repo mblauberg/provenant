@@ -711,13 +711,14 @@ fn alternates_warn_and_proceed_without_refusing() {
 
 #[test]
 fn stale_gitdir_repairs_only_own_backlink() {
-    let Some((temp, project, lane)) = git_fixture() else {
+    let Some((temp, project, old_lane)) = git_fixture() else {
         return;
     };
     let repo = stub_repo(&project);
+    let lane = temp.path().join("moved-lane");
+    fs::rename(&old_lane, &lane).unwrap();
     let backlink = project.join(".git/worktrees/lane/gitdir");
-    let stale = format!("{}\n", temp.path().join("gone/.git").display());
-    fs::write(&backlink, &stale).unwrap();
+    let stale = fs::read(&backlink).unwrap();
 
     let (result, warnings) = provenant_records::warning::capture(|| verify_worktree(&repo, &lane));
     assert!(
@@ -732,11 +733,7 @@ fn stale_gitdir_repairs_only_own_backlink() {
         "repair must warn under its none/git row, got {warnings:?}"
     );
     let repaired = fs::read(&backlink).unwrap();
-    assert_ne!(
-        repaired,
-        stale.into_bytes(),
-        "repair must rewrite the backlink"
-    );
+    assert_ne!(repaired, stale, "repair must rewrite the backlink");
     // Git canonicalises the worktree path (on macOS /var resolves to
     // /private/var) before it writes the backlink.
     let canonical_marker = fs::canonicalize(&lane).unwrap().join(".git");
@@ -749,13 +746,14 @@ fn stale_gitdir_repairs_only_own_backlink() {
 
 #[test]
 fn gitdir_held_by_live_lane_refuses() {
-    let Some((temp, project, lane)) = git_fixture() else {
+    let Some((temp, project, old_lane)) = git_fixture() else {
         return;
     };
     let repo = stub_repo(&project);
+    let lane = temp.path().join("moved-lane");
+    fs::rename(&old_lane, &lane).unwrap();
     let backlink = project.join(".git/worktrees/lane/gitdir");
-    let stale = format!("{}\n", temp.path().join("gone/.git").display());
-    fs::write(&backlink, &stale).unwrap();
+    let stale = fs::read(&backlink).unwrap();
 
     let error = verify_worktree_with(
         &repo,
@@ -772,7 +770,7 @@ fn gitdir_held_by_live_lane_refuses() {
     );
     assert_eq!(
         fs::read(&backlink).unwrap(),
-        stale.into_bytes(),
+        stale,
         "a live lease must not be rewritten"
     );
 }

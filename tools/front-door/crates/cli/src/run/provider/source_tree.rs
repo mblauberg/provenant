@@ -1196,21 +1196,44 @@ mod tests {
         assert!(ensure_source_roots(source, &access, assets).is_ok());
         access.read_roots.push("/fixture/project".into());
         // Overlap is an advisory claim: warn and proceed under the default.
-        assert!(ensure_source_roots(source, &access, assets).is_ok());
+        let (result, warnings) =
+            provenant_records::warning::capture(|| ensure_source_roots(source, &access, assets));
+        assert!(result.is_ok());
+        assert!(warnings.iter().any(|warning| {
+            warning.code.as_ref() == "SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY"
+        }));
         access.read_roots.clear();
-        assert!(ensure_source_roots(source, &access, source).is_ok());
+        let (result, warnings) =
+            provenant_records::warning::capture(|| ensure_source_roots(source, &access, source));
+        assert!(result.is_ok());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code.as_ref() == "LIVE_TREE_EXPOSED")
+        );
 
         let mut profile = ProviderProfileSpec::default();
         profile.runtime_reads.push(PathGrant {
             path: "/fixture/project".into(),
             scope: PathScope::Exact,
         });
-        assert!(ensure_profile_isolated(source, &profile).is_ok());
+        let (result, warnings) =
+            provenant_records::warning::capture(|| ensure_profile_isolated(source, &profile));
+        assert!(result.is_ok());
+        assert!(!warnings.iter().any(|warning| {
+            warning.code.as_ref() == "SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY"
+        }));
         profile.runtime_reads[0].scope = PathScope::Subtree;
-        assert!(ensure_profile_isolated(source, &profile).is_ok());
+        let (result, warnings) =
+            provenant_records::warning::capture(|| ensure_profile_isolated(source, &profile));
+        assert!(result.is_ok());
+        assert!(warnings.iter().any(|warning| {
+            warning.code.as_ref() == "SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY"
+        }));
 
         // policy.confinement = refuse turns the same claim into a configured
         // stop, never an ADR 0035 boundary.
+        access.read_roots.push("/fixture/project".into());
         let mut strict = Policy::default();
         strict.overlay(
             &std::collections::BTreeMap::from([("confinement".into(), Strength::Refuse)]),
@@ -1221,8 +1244,15 @@ mod tests {
 
         // A view that cannot hold a staged copy reports LIVE_TREE_EXPOSED and
         // still proceeds rather than silently binding the live tree.
-        let missing = std::path::Path::new("/fixture/does-not-exist/writer");
-        assert!(ensure_source_roots(missing, &access, assets).is_ok());
+        let missing = std::path::Path::new("/fixture/project/does-not-exist/writer");
+        let (result, warnings) =
+            provenant_records::warning::capture(|| ensure_source_roots(missing, &access, assets));
+        assert!(result.is_ok());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code.as_ref() == "LIVE_TREE_EXPOSED")
+        );
 
         // Provider writes to the immutable view remain an operation error.
         let view = std::path::Path::new("/fixture/state/source");
