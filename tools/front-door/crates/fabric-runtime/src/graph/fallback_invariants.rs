@@ -94,7 +94,7 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
 #[test]
 fn sealed_chair_only_preparation_stop_never_advances_to_another_route() {
     use provenant_records::StopCause;
-    use provenant_records::run::{PreparationFailure, TerminalCause};
+    use provenant_records::run::{CauseKind, PreparationFailure};
 
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"g", "nodes":[{
@@ -107,7 +107,7 @@ fn sealed_chair_only_preparation_stop_never_advances_to_another_route() {
     let decision = next_step::settlement_fallback_decision(
         &plan.nodes[0],
         0,
-        AttemptOutcome::PreparationRefused(TerminalCause::UnsupportedPlatform),
+        GraphAttemptOutcome::PreparationRefused(CauseKind::UnsupportedPlatform),
         Some(StopCause::UnsupportedPlatform),
         false,
         FallbackEvidence {
@@ -158,7 +158,7 @@ fn a_recoverable_stop_keeps_its_code_and_never_reports_auth_required() {
         let decision = next_step::settlement_fallback_decision(
             node,
             0,
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             Some(cause),
             true,
             FallbackEvidence {
@@ -177,7 +177,7 @@ fn a_recoverable_stop_keeps_its_code_and_never_reports_auth_required() {
     let pinned = next_step::settlement_fallback_decision(
         node,
         0,
-        AttemptOutcome::AuthRequired,
+        GraphAttemptOutcome::AuthRequired,
         Some(provenant_records::StopCause::AuthRequired),
         true,
         FallbackEvidence {

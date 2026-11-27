@@ -656,7 +656,9 @@ observed history: it adds no refusal and changes no landing decision.
 
 `wait --pr NUMBER` is the one way to block on a pull request. A failed check
 settles it at once; `--until complete` waits for every observed check and every
-active Actions run of the head. A head with no Actions run yet cannot settle a
+active Actions run of the head. A merged pull request settles successfully and a
+closed unmerged pull request settles unsuccessfully before pending checks are
+considered. A head with no Actions run yet cannot settle a
 wait, because a push's workflows start after the push: a reading that would
 settle stays pending for `domains.wait.actions_grace_seconds`, though a failure
 still settles a default wait at once. `--head SHA` pins the wait to one head:

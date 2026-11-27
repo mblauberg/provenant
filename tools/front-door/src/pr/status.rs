@@ -266,7 +266,10 @@ impl Line {
     }
     /// Complete waits retain failures as pending until the other checks finish.
     pub(crate) fn wait_verdict(&self, complete: bool) -> Option<bool> {
-        if complete && (self.checks_pending.unwrap_or(0) > 0 || self.active_workflows == Some(true))
+        if self.state != "OPEN" {
+            self.verdict()
+        } else if complete
+            && (self.checks_pending.unwrap_or(0) > 0 || self.active_workflows == Some(true))
         {
             None
         } else {
@@ -613,14 +616,14 @@ pub(super) fn ci_completion(
         .iter()
         .filter(|check| !is_review_gate_context(&check.name, review_gate_contexts))
         .collect();
-    if checks.iter().any(|check| check.head != head) {
-        return CiCompletion::Unavailable;
-    }
     if state == "MERGED" {
         return CiCompletion::Green;
     }
     if state != "OPEN" {
         return CiCompletion::Failed;
+    }
+    if checks.iter().any(|check| check.head != head) {
+        return CiCompletion::Unavailable;
     }
     let selected: Vec<&CiCheck> = checks
         .iter()
@@ -1247,24 +1250,21 @@ fn status_line_with(
     Line {
         number,
         checks_passed: count(&["pass", "skipping"]),
-        checks_total: checks.map(<[_]>::len),
+        checks_total: checks.map(|_| observed.len()),
         checks_failed: count(&["fail", "cancel"]),
         checks_pending: count(&["pending"]),
         active_workflows: None,
-        failing_checks: checks
-            .unwrap_or(&[])
+        failing_checks: observed
             .iter()
             .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
             .map(|check| display_check_name(&check.name))
             .collect(),
-        pending_checks: checks
-            .unwrap_or(&[])
+        pending_checks: observed
             .iter()
             .filter(|check| check.bucket == "pending")
             .map(|check| display_check_name(&check.name))
             .collect(),
-        failed_check_details: checks
-            .unwrap_or(&[])
+        failed_check_details: observed
             .iter()
             .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
             .map(|check| FailedCheck {
@@ -1291,6 +1291,29 @@ fn status_line_with(
         batch_detail: None,
         batch_uncertain: None,
     }
+}
+
+#[cfg(test)]
+pub(super) fn line_for(
+    number: u64,
+    state: &str,
+    head: &str,
+    checks: Option<&[super::observer::Check]>,
+    review_gate_contexts: &[String],
+) -> Line {
+    status_line(
+        number,
+        View {
+            state: state.to_owned(),
+            head: head.to_owned(),
+            merge: "CLEAN".into(),
+            review: None,
+            draft: false,
+            url: format!("https://github.com/owner/repo/pull/{number}"),
+        },
+        checks,
+        review_gate_contexts,
+    )
 }
 
 /// The `pr status` class of an open, approved pull request whose head has

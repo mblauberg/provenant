@@ -182,7 +182,7 @@ fn fixture() -> Result<TestRig> {
 #[test]
 fn chair_start_worker_supplies_the_usage_that_mileage_prices() -> Result {
     let rig = fixture()?;
-    let messages = stored(&rig)?
+    let messages = stored_rows(&rig)?
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|row| row["message"].as_str().map(str::to_owned))
@@ -194,7 +194,7 @@ fn chair_start_worker_supplies_the_usage_that_mileage_prices() -> Result {
 #[test]
 fn chair_start_ingest_is_recorded_before_mileage_reads_it() -> Result {
     let rig = fixture()?;
-    let rows: Vec<Value> = stored(&rig)?
+    let rows: Vec<Value> = stored_rows(&rig)?
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect();

@@ -731,6 +731,7 @@ mod tests {
             base_branch: "main".into(),
             author: "author".into(),
             state: PullRequestState::Open,
+            mergeability: super::ports::Mergeability::Unknown,
             merged_commit: None,
             stack: None,
             draft: false,
