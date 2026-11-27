@@ -93,11 +93,15 @@ trigger; `provenant tick` takes the same path.
 ### Project bindings
 
 - A registered project whose common directory is gone protects nothing. Launch
-  confinement, tick settlement and forge polling skip its binding, and GC
-  retires the binding once its record has been idle for `gc.idle` (or the
-  `--idle` override); `gc --dry-run` names the bindings it would retire. The
-  private host-project directory stays, so a checkout that returns reuses its
-  ports and settings.
+  confinement, tick settlement and forge polling skip its binding. A registered
+  project whose verified primary checkout has vanished while its common
+  directory survives is skipped by settlement and forge polling, which warn
+  once with `PROJECT_ROOT_VANISHED` and the `provenant gc --apply` unregister
+  command instead of failing every tick. GC retires either binding once its
+  record has been idle for `gc.idle` (or the `--idle` override), including a
+  vanished temporary checkout whose separate Git common directory survives;
+  `gc --dry-run` names the bindings it would retire. The private host-project
+  directory stays, so a checkout that returns reuses its ports and settings.
 - A registered project that still exists but whose layout cannot be read warns
   at launch and protects that project's whole root instead of refusing an
   unrelated launch.

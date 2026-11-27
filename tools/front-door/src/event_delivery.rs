@@ -384,8 +384,10 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
     }
     let mut errors = Vec::new();
     for binding in provenant_config::registered_projects(&resolved.roots)? {
-        // A binding whose common directory is gone has no forge to poll.
-        if !binding.common_dir_present() {
+        // A vanished checkout or common directory has no forge to poll. Report
+        // it once with the unregister command rather than failing every tick.
+        if crate::project_root::absent(&binding) {
+            crate::project_root::warn_vanished(&binding);
             continue;
         }
         let result = (|| -> Result<()> {
@@ -1298,6 +1300,77 @@ mod tests {
             codex_home: None,
         };
         tick(&resolved)?;
+        Ok(())
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn forge_tick_warns_once_and_skips_a_project_whose_checkout_vanished() -> Result<()> {
+        if crate::fabric::peer_tests::host_test(
+            "event_delivery::tests::forge_tick_warns_once_and_skips_a_project_whose_checkout_vanished",
+        )? {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let project = base.join("project");
+        let state = base.join("state");
+        let common = base.join("common.git");
+        for path in [&home, &project, &state] {
+            std::fs::create_dir(path)?;
+        }
+        provenant_os::fixture::private_state_dir(&state)?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_os::fixture::run_git(
+            &project,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                common.to_str().ok_or("common path")?,
+            ],
+        )?;
+        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                common.canonicalize()?,
+                project.canonicalize()?,
+            )?,
+        )?;
+        // Delete only the checkout: the separate Git common directory survives.
+        std::fs::remove_dir_all(&project)?;
+        assert!(binding.common_dir_present());
+        assert!(!binding.primary_checkout_present());
+
+        let resolved = crate::roots::Resolved {
+            assets: base.join("assets"),
+            home,
+            project,
+            roots,
+            claude_config: None,
+            codex_home: None,
+        };
+        let (result, warnings) = provenant_records::warning::capture(|| tick(&resolved));
+        result?;
+        let warned = warnings
+            .iter()
+            .filter(|warning| {
+                warning.code.as_ref() == provenant_records::warning::PROJECT_ROOT_VANISHED.0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(warned.len(), 1, "reported once: {warnings:?}");
+        assert!(
+            warned[0]
+                .repair
+                .as_deref()
+                .is_some_and(|repair| repair.contains("provenant gc --apply")),
+            "the warning names the unregister command: {:?}",
+            warned[0]
+        );
         Ok(())
     }
 

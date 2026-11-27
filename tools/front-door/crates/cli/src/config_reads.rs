@@ -173,6 +173,8 @@ pub fn capability_overlay(roots: &Roots) -> provenant_records::CapabilityOverlay
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::DirBuilderExt;
+
     fn roots(temp: &tempfile::TempDir) -> Roots {
         let mut input =
             provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("assets"));
@@ -181,6 +183,15 @@ mod tests {
             .resolve(&provenant_os::fs::SystemPathResolver)
             .unwrap()
     }
+
+    fn private_state_dir(roots: &Roots) {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(roots.state.as_path())
+            .unwrap();
+    }
+
     fn command_paths(command: &clap::Command, parent: &str, paths: &mut Vec<String>) {
         let path = if parent.is_empty() {
             String::new()
@@ -205,7 +216,7 @@ mod tests {
     fn capability_overlay_warnings_carry_a_structured_source() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
-        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        private_state_dir(&roots);
         std::fs::write(
             roots.state.as_path().join("config.toml"),
             "[[adapter_capabilities]]\nadapter = \"no-such-adapter\"\ndisable = [\"model\"]\n",
@@ -229,7 +240,7 @@ mod tests {
     fn every_command_declares_its_config_and_unrelated_domains_cannot_refuse_it() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
-        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        private_state_dir(&roots);
         let mut commands = Vec::new();
         command_paths(&crate::command_model(), "", &mut commands);
         commands.extend(READS.iter().map(|row| row.command.to_owned()));
@@ -295,7 +306,7 @@ mod tests {
     fn run_reader_recognises_every_cli_domain() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
-        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        private_state_dir(&roots);
         let mut config = String::from("schema_version = 1\n");
         for section in crate::domains::SECTIONS.entries {
             config.push_str(&format!("[domains.{}]\n", section.name));
@@ -314,7 +325,7 @@ mod tests {
     fn optional_wait_settings_do_not_block_context_observation() {
         let temporary = tempfile::tempdir().unwrap();
         let roots = roots(&temporary);
-        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        private_state_dir(&roots);
         std::fs::write(
             roots.state.as_path().join("config.toml"),
             "schema_version=1\n[domains.wait]\nlocal_interval_ms=0\n",
@@ -338,7 +349,7 @@ mod tests {
     fn invalid_capability_overlay_entry_warns_with_its_layer_and_key_without_refusing() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
-        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        private_state_dir(&roots);
         std::fs::write(
             roots.state.as_path().join("config.toml"),
             "schema_version = 1\n\
@@ -369,7 +380,7 @@ mod tests {
     fn scoped_edit_preserves_unrelated_broken_settings() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
-        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        private_state_dir(&roots);
         let path = roots.state.as_path().join("config.toml");
         std::fs::write(&path, "schema_version=1\n[domains]\nsteward='broken'\n").unwrap();
         provenant_config::edit_config(

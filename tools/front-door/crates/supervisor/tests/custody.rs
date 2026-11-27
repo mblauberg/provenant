@@ -641,10 +641,24 @@ fn byte(stream: &mut UnixStream, expected: u8) -> Result<()> {
     );
     Ok(())
 }
+/// A single native process read can be transiently `Unknown` on macOS, and a
+/// just-spawned process can miss the first read. Wait for an observable fact
+/// rather than treating one read as proof of identity (#4125).
 fn process_identity(pid: i64) -> Result<ProcessIdentity> {
-    match fixture::RecordedBootObserver.observe(pid) {
-        ProcessObservation::Present(fact) => Ok(fact.identity),
-        other => Err(io::Error::other(format!("process identity unavailable: {other:?}")).into()),
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match fixture::RecordedBootObserver.observe(pid) {
+            ProcessObservation::Present(fact) => return Ok(fact.identity),
+            _ if Instant::now() < deadline => {
+                wait_step(deadline);
+            }
+            other => {
+                return Err(io::Error::other(format!(
+                    "process identity {pid} unavailable: {other:?}"
+                ))
+                .into());
+            }
+        }
     }
 }
 fn read_pid_line(stream: &mut UnixStream) -> Result<i64> {
@@ -2955,10 +2969,10 @@ fn orphan_with_removed_writer_state(
     drop(owner_stream);
     drop(provider_stream);
     wait_for_identity_absence(&provider)?;
-    assert!(
-        matches!(fixture::RecordedBootObserver.observe(guardian.pid),
-        ProcessObservation::Present(fact) if fact.identity == guardian)
-    );
+    // The guardian must still be the recorded process once the owner is gone.
+    // Derive its identity through the bounded wait so a transient native read
+    // cannot fail this invariant, then assert the identity the reservation gave.
+    assert_eq!(process_identity(guardian.pid)?, guardian);
     if !remove_lock {
         assert!(
             Directory::open_anchor(&writer)?

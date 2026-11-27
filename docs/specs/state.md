@@ -194,8 +194,10 @@ diagnostic; malformed bindings and filesystem errors keep their own causes, and
 lookup never repairs state. First publication, hint replacement and removal share
 a binding lock; contended readers, including GC, retry under its shared side.
 A binding record can be forgotten when its common
-directory is gone: the smoke verifier cleans up its scratch binding at exit, and
-GC retires a vanished binding once its record has been idle for `gc.idle`. The
+directory or verified primary checkout is gone: the smoke verifier cleans up its
+scratch binding at exit, and GC retires a vanished binding once its record has
+been idle for `gc.idle`, so `provenant gc --apply` unregisters a vanished
+temporary checkout whose separate Git common directory survives. The
 private host-project directory stays for a later bind. Peer status and events
 replace local paths in a terminal cause with a safe reason and remedy, taken
 from the event's own recorded cause, and disclose remote paths only through an
