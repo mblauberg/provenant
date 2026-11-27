@@ -1,0 +1,101 @@
+diff --git a/tools/front-door/crates/cli/src/run/provider/tests_continuation_and_checkout.rs b/tools/front-door/crates/cli/src/run/provider/tests_continuation_and_checkout.rs
+index 59ba1b8745..5d54342797 100644
+--- a/tools/front-door/crates/cli/src/run/provider/tests_continuation_and_checkout.rs
++++ b/tools/front-door/crates/cli/src/run/provider/tests_continuation_and_checkout.rs
+@@ -319,0 +320,96 @@ fn read_only_checkout_warning_measures_the_selected_checkout_against_origin_defa
++#[test]
++fn read_only_source_ref_names_the_fetched_upstream_head_of_a_behind_checkout()
++-> Result<(), Box<dyn std::error::Error>> {
++    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
++
++    fn git(
++        executor: &SystemExecutor,
++        executable: &Path,
++        repo: &Path,
++        env: &[(std::ffi::OsString, std::ffi::OsString)],
++        args: &[&str],
++    ) -> Result<String, Box<dyn std::error::Error>> {
++        let argv: Vec<_> = std::iter::once(executable.as_os_str().to_owned())
++            .chain(args.iter().map(std::ffi::OsString::from))
++            .collect();
++        let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(10));
++        options.env = Some(env);
++        let output = executor.execute(options)?;
++        if output.termination != Termination::Exit(0) {
++            return Err(format!(
++                "git {args:?} failed: {}",
++                String::from_utf8_lossy(&output.stderr.bytes)
++            )
++            .into());
++        }
++        Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
++    }
++
++    let temp = tempfile::tempdir()?;
++    let root = temp.path();
++    let state = root.join("state");
++    std::fs::create_dir_all(&state)?;
++    let executable = provenant_os::git::git_executable().ok_or("git unavailable")?;
++    let executor = SystemExecutor::new(1)?;
++    let env: Vec<_> = std::env::vars_os()
++        .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
++        .chain(provenant_os::fixture::fixture_git_settings())
++        .collect();
++    let run = |repo: &Path, args: &[&str]| git(&executor, &executable, repo, &env, args);
++
++    run(root, &["init", "-q", "--bare", "remote.git"])?;
++    run(
++        &root.join("remote.git"),
++        &["symbolic-ref", "HEAD", "refs/heads/master"],
++    )?;
++    let seed = root.join("seed");
++    std::fs::create_dir_all(&seed)?;
++    run(&seed, &["init", "-q", "-b", "master"])?;
++    for args in [
++        ["config", "user.name", "Test"],
++        ["config", "user.email", "test@example.invalid"],
++    ] {
++        run(&seed, &args)?;
++    }
++    let stale = {
++        std::fs::write(seed.join("file"), "one\n")?;
++        run(&seed, &["add", "file"])?;
++        run(&seed, &["commit", "-q", "-m", "one"])?;
++        run(&seed, &["rev-parse", "HEAD"])?
++    };
++    let default = {
++        std::fs::write(seed.join("file"), "two\n")?;
++        run(&seed, &["add", "file"])?;
++        run(&seed, &["commit", "-q", "-m", "two"])?;
++        run(&seed, &["rev-parse", "HEAD"])?
++    };
++    run(&seed, &["push", "-q", "../remote.git", "master"])?;
++    run(root, &["clone", "-q", "remote.git", "checkout"])?;
++    let checkout = root.join("checkout");
++    run(&checkout, &["reset", "-q", "--hard", &stale])?;
++
++    // The selected tree is the fetched upstream head, named by its ref, and
++    // the stale local head is kept in the advisory warning.
++    let selected = confinement::read_only_source_ref(&state, &checkout)
++        .ok_or("behind checkout did not resolve an upstream source")?;
++    assert_eq!(selected.commit, provenant_core::GitOid::parse(&default)?);
++    assert_eq!(selected.head, provenant_core::GitOid::parse(&stale)?);
++    assert_eq!(selected.behind, 1);
++    assert!(
++        selected.reference.contains("origin"),
++        "{}",
++        selected.reference
++    );
++    let warning = crate::run::read_only_source_warning(&checkout, &selected);
++    assert!(warning.contains(&selected.reference), "{warning}");
++    assert!(warning.contains(&default), "{warning}");
++    assert!(warning.contains(&stale), "{warning}");
++
++    // Level with or ahead of the default keeps the local tree: no pin.
++    run(&checkout, &["reset", "-q", "--hard", &default])?;
++    assert!(confinement::read_only_source_ref(&state, &checkout).is_none());
++    run(&checkout, &["commit", "-q", "--allow-empty", "-m", "three"])?;
++    assert!(confinement::read_only_source_ref(&state, &checkout).is_none());
++    Ok(())
++}
++

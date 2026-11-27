@@ -1,0 +1,9 @@
+diff --git a/tools/front-door/crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs b/tools/front-door/crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs
+index d09bb1d010..206dcda6ef 100644
+--- a/tools/front-door/crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs
++++ b/tools/front-door/crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs
+@@ -357 +357,3 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
+-    assert_eq!(state(&checkpoint, "active"), Some(NodeState::Blocked));
++    // The upstream hold is still running, so its composite is running until
++    // that dependency settles; the later checkpoint must become blocked.
++    assert_eq!(state(&checkpoint, "active"), Some(NodeState::Running));

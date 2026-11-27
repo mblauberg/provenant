@@ -1,0 +1,32 @@
+diff --git a/tools/front-door/src/worktrees/gc_preview_tests.rs b/tools/front-door/src/worktrees/gc_preview_tests.rs
+index 20d3f2d913..68f4de1f2b 100644
+--- a/tools/front-door/src/worktrees/gc_preview_tests.rs
++++ b/tools/front-door/src/worktrees/gc_preview_tests.rs
+@@ -764 +764 @@ fn gc_default_output_aggregates_routine_rows_and_keeps_exceptions() {
+-fn stopped_gc_budgets_return_exit_three_with_actionable_output()
++fn gc_budget_stop_exits_zero_partial_with_actionable_output()
+@@ -773 +773,19 @@ fn stopped_gc_budgets_return_exit_three_with_actionable_output()
+-        assert_eq!(result.status.exit_code(), 3);
++        // A budget stop saved a cursor: it is progress, not an error.
++        assert_eq!(result.status.exit_code(), 0);
++        assert!(result.error.is_none());
++        assert_eq!(
++            serde_json::to_value(&result.data)?["partial"],
++            serde_json::json!(true)
++        );
++        assert!(!result.next.is_empty(), "a partial result resumes");
++        let warning = result
++            .warnings
++            .iter()
++            .find(|warning| warning.code.as_str() == "GC_BUDGET_STOP")
++            .expect("a partial result names its budget");
++        assert!(warning.message.contains(setting), "{warning:?}");
++        assert_eq!(
++            warning.setting.as_ref().map(|setting| setting.key.as_str()),
++            Some(setting)
++        );
++        assert!(!warning.next.is_empty(), "the warning carries a next step");
+@@ -785,2 +803 @@ fn stopped_gc_budgets_return_exit_three_with_actionable_output()
+-        assert!(output.contains(setting), "{output}");
+-        assert!(output.contains("raise"), "{output}");
++        assert!(output.contains("resume"), "{output}");

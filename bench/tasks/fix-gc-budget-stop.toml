@@ -1,0 +1,7 @@
+repo = "mblauberg/provenant"
+parent_sha = "2303ea9b6e38d50bead5b6cac4fefe17aacbb9d2"
+merge_sha = "2ec9cb766b4a594b146bc9263727251c33830a12"
+prompt = "Make a gc budget stop a partial success with a resumable cursor instead of exit 3, as in slice 24 (E1)."
+hidden_test_command = "cargo test --manifest-path tools/front-door/Cargo.toml --lib gc_budget_stop_exits_zero_partial_with_actionable_output"
+split = "acceptance"
+family = "fix"
