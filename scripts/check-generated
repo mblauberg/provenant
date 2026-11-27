@@ -3,16 +3,18 @@
 
 The registry lives in ``config/ports.json`` under ``generated``. Each tracked
 entry declares an argv, a working directory and the output globs it owns. Every
-generator runs, even after one fails. Afterwards all declared outputs are
-staged in a *single scratch* index (GIT_INDEX_FILE) seeded from HEAD and diffed
-against HEAD once. The diff therefore includes additions, modifications and
-removals, never duplicates a change, and never touches the repository index.
+generator runs, even after one fails. Afterwards successful generators' outputs
+are staged in a *single scratch* index (GIT_INDEX_FILE) seeded from HEAD and
+diffed against HEAD once. Failed generators' outputs are removed from that
+index, even when another generator's glob overlaps them. The diff therefore
+includes additions, modifications and removals, never duplicates a change, and
+never touches the repository index.
 
 A failed generator is recorded as ``failed``; the patch and a manifest are
 written so CI can upload both even when the check fails.
 
 Usage:
-    scripts/check-generated [--root DIR] [--ports FILE] [--out DIR]
+    scripts/check-generated [--root DIR] [--ports FILE] [--out DIR] --head-sha SHA
 """
 
 from __future__ import annotations
@@ -109,16 +111,12 @@ def owns(patterns: list[str], path: str) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
-def head_sha(root: Path) -> str:
-    result = git(root, "rev-parse", "HEAD")
-    return result.stdout.strip() if result.returncode == 0 else "0" * 40
-
-
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT, help="repository root")
     parser.add_argument("--ports", type=Path, help="ports registry (default <root>/config/ports.json)")
     parser.add_argument("--out", type=Path, help="directory for patch and manifest.json")
+    parser.add_argument("--head-sha", required=True, help="workflow head identity for the manifest")
     return parser.parse_args(argv)
 
 
@@ -154,7 +152,12 @@ def main(argv: list[str] | None = None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="provenant-generated-") as scratch_name:
         index = Path(scratch_name) / "index"
-        outputs = [str(pattern) for entry in tracked for pattern in entry.get("outputs", [])]
+        outputs = [
+            str(pattern)
+            for entry, result in zip(tracked, generators)
+            if result["status"] != "failed"
+            for pattern in entry.get("outputs", [])
+        ]
         problem = stage_outputs(root, outputs, index)
         if problem is not None:
             print(f"generated: failed: {problem}", file=sys.stderr)
@@ -164,9 +167,32 @@ def main(argv: list[str] | None = None) -> int:
             print(f"generated: failed: {problem}", file=sys.stderr)
             return 2
 
+        failed_paths = sorted(
+            {
+                path
+                for _, path in rows
+                if any(
+                    result["status"] == "failed"
+                    and owns(list(entry.get("outputs", [])), path)
+                    for entry, result in zip(tracked, generators)
+                )
+            }
+        )
+        if failed_paths:
+            reset = git(root, "reset", "HEAD", "--", *failed_paths, env=dict(os.environ, GIT_INDEX_FILE=str(index)))
+            if reset.returncode != 0:
+                print(f"generated: failed: cannot exclude failed generator outputs: {reset.stderr.strip()}", file=sys.stderr)
+                return 2
+            patch, rows, problem = capture_drift(root, index)
+            if problem is not None:
+                print(f"generated: failed: {problem}", file=sys.stderr)
+                return 2
+
     for word, path in rows:
         owners = [item for entry, item in zip(tracked, generators) if owns(list(entry.get("outputs", [])), path)]
         for item in owners:
+            if item["status"] == "failed":
+                continue
             item["status"] = "drift"
             item["files"].append(path)
         print(f"{', '.join(item['name'] for item in owners) or 'unowned'}: {word} {path}", file=sys.stderr)
@@ -176,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         "workflow": os.environ.get("GENERATED_WORKFLOW", "ci.yml"),
         "run_id": int(os.environ.get("GITHUB_RUN_ID", "0")),
         "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
-        "head_sha": os.environ.get("GITHUB_SHA", head_sha(root)),
+        "head_sha": args.head_sha,
         "generators": generators,
         "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
     }

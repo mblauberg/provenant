@@ -60,6 +60,13 @@ def failed_generator_does_not_stop_others() -> None:
             "from pathlib import Path\n"
             "Path('reference-marker').write_text('rendered')\n",
         )
+        failed_with_output = make_generator(
+            root,
+            "gen_failed_output.py",
+            "from pathlib import Path\n"
+            "Path('out/failed.json').write_text('{\"v\": 9}\\n')\n"
+            "raise SystemExit('failed after writing')\n",
+        )
         registry = {
             "generated": [
                 {
@@ -70,6 +77,7 @@ def failed_generator_does_not_stop_others() -> None:
                     "tracked": True,
                 },
                 {"name": "drift", "generate": drift, "cwd": ".", "outputs": ["out/*.json"], "tracked": True},
+                {"name": "failed-output", "generate": failed_with_output, "cwd": ".", "outputs": ["out/failed.json"], "tracked": True},
                 {"name": "late", "generate": late, "cwd": ".", "outputs": ["out/*.json"], "tracked": True},
                 {
                     "name": "reference",
@@ -83,8 +91,10 @@ def failed_generator_does_not_stop_others() -> None:
         (root / "config").mkdir()
         (root / "config" / "ports.json").write_text(json.dumps(registry))
 
+        pull_request_event = {"pull_request": {"head": {"sha": "b" * 40}}}
+        workflow_head_sha = pull_request_event["pull_request"]["head"]["sha"]
         result = subprocess.run(
-            [str(CHECK), "--root", str(root), "--ports", str(root / "config/ports.json"),
+            [str(CHECK), "--root", str(root), "--ports", str(root / "config/ports.json"), "--head-sha", workflow_head_sha,
              "--out", str(root / "artifacts")],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -101,16 +111,20 @@ def failed_generator_does_not_stop_others() -> None:
         assert statuses == {
             "failing": "failed",
             "drift": "drift",
+            "failed-output": "failed",
             "late": "drift",
         }, statuses
         assert "boom" in combined, combined
+        assert "failed after writing" in combined, combined
         assert not (root / "reference-marker").exists(), "untracked generator must not run"
         assert git(root, "diff", "--cached", "--name-only") == "", "real index must stay clean"
 
         patch = (root / "artifacts" / "patch").read_text()
         for expected in ("added.json", "modified.json", "removed.json", "late.json"):
             assert expected in patch, f"{expected} missing from patch:\n{patch}"
+        assert "failed.json" not in patch, f"failed generator output entered patch:\n{patch}"
         assert len(manifest["patch_sha256"]) == 64
+        assert manifest["head_sha"] == workflow_head_sha
 
 
 def reference_render_job_unchanged() -> None:
@@ -119,7 +133,9 @@ def reference_render_job_unchanged() -> None:
     assert "scripts/generate-reference --strict" in workflow
     assert "name: contract-reference" in workflow
     assert "\n  generated:\n" in workflow
-    assert "generated-${{ github.sha }}" in workflow
+    assert "github.event.pull_request.head.sha || github.sha" in workflow
+    assert 'scripts/check-generated --head-sha "$GENERATED_HEAD_SHA"' in workflow
+    assert 'name: generated-${{ github.event.pull_request.head.sha || github.sha }}' in workflow
     assert "scripts/check-generated" in workflow
     assert "check-swift-fixtures" not in workflow
     status = workflow.split("\n  ci-status:\n", 1)[1]

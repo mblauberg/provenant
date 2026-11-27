@@ -146,12 +146,13 @@ jobs:
       - name: Check generated artefacts
         env:
           GENERATED_WORKFLOW: ci.yml
-        run: scripts/check-generated --out "$RUNNER_TEMP/generated"
+          GENERATED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: scripts/check-generated --head-sha "$GENERATED_HEAD_SHA" --out "$RUNNER_TEMP/generated"
       - name: Upload generated patch and manifest
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: generated-${{ github.sha }}
+          name: generated-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/generated/
           if-no-files-found: warn
           retention-days: 7
