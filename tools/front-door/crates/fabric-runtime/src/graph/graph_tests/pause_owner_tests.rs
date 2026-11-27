@@ -66,4 +66,27 @@ fn every_pause_writer_sets_owner() {
     let saved = journal.0.as_ref().unwrap();
     assert_eq!(saved.pause_cause(), Some(PauseCause::StructuralLimit));
     assert!(!has_active_expansion(saved));
+
+    // The steer handoff refusal writes a Stop pause through the same owner, so
+    // it yields an active expansion pause too rather than disagreeing with it.
+    let mut checkpoint = saved.clone();
+    checkpoint.nodes[0].expansion_pause = Some("expansion".into());
+    checkpoint.nodes[0].expansion_cause = Some(NodeDecisionCause::PlanExpansionPaused {
+        active: true,
+        fallback: false,
+        fragment_error: None,
+        structural_limit: None,
+    });
+    assert!(has_active_expansion(&checkpoint));
+    checkpoint.set_graph_pause_owner(
+        PauseCause::Stop(provenant_records::StopCause::LaunchHandoffRefused),
+        "steer successor preparation was refused",
+    );
+    assert_eq!(
+        checkpoint.pause_cause(),
+        Some(PauseCause::Stop(
+            provenant_records::StopCause::LaunchHandoffRefused
+        ))
+    );
+    assert!(!has_active_expansion(&checkpoint));
 }
