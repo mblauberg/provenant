@@ -485,43 +485,73 @@ fn read(
             repository,
             watch_head,
             complete,
-        } => match repository {
-            Ok(repository) => match crate::pr::status::wait_line_observed(
-                edge.cwd,
-                edge.roots.state.as_path(),
-                repository,
-                *number,
-                &forge_request(deadline, cancel, pr_read_timeout),
-                // Spec: docs/specs/cli.md#ci-observations — the PR path reads
-                // through the one observer and its one sourced retry family.
-                crate::pr::observer::retry(edge.roots).poll.value,
-            ) {
-                Ok(line) => {
-                    let mut line = gate_line(line, watch_head.as_deref());
-                    line.attach_failure_digest(
-                        edge.roots.state.as_path(),
-                        edge.cwd,
-                        &forge_request(deadline, cancel, pr_read_timeout),
+        } => {
+            // A PR reader wakes the queue item bound to that PR. This is a
+            // read-class advance: the host owns custody and grants no resume,
+            // retry or landing authority. Without a bound item the read stays
+            // a pure snapshot.
+            if !provenant_cli::fabric::in_lane() {
+                if let Ok(context) = provenant_cli::fabric::Context::open_read_only(
+                    edge.roots.clone(),
+                    edge.home,
+                    edge.cwd,
+                ) {
+                    use provenant_core::Clock as _;
+                    let now = provenant_os::clock::SystemClock::new().mono_now();
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    let micros = left.as_micros().min(u64::MAX as u128) as u64;
+                    let wake_deadline = provenant_core::Deadline::at(
+                        now.checked_add(provenant_core::DurationMicros::from_micros(micros))
+                            .unwrap_or(now),
                     );
-                    Reading {
-                        settle: match line.wait_verdict(*complete) {
-                            Some(true) => Settle::Succeeded,
-                            Some(false) => Settle::Unsuccessful,
-                            None => Settle::Pending,
-                        },
-                        line: format!(
-                            "{label} {}{} head={}",
-                            line.class(),
-                            line.cause_suffix(),
-                            watched_head(&line)
-                        ),
-                        data: json!(line),
-                    }
+                    let _ = crate::fabric::unified::wake_pr_item(
+                        edge,
+                        context.identity.project,
+                        *number,
+                        wake_deadline,
+                        cancel,
+                        workers,
+                    );
                 }
-                Err(error) => Reading::unavailable(&label, &error.to_string()),
-            },
-            Err(error) => Reading::unavailable(&label, error),
-        },
+            }
+            match repository {
+                Ok(repository) => match crate::pr::status::wait_line_observed(
+                    edge.cwd,
+                    edge.roots.state.as_path(),
+                    repository,
+                    *number,
+                    &forge_request(deadline, cancel, pr_read_timeout),
+                    // Spec: docs/specs/cli.md#ci-observations — the PR path reads
+                    // through the one observer and its one sourced retry family.
+                    crate::pr::observer::retry(edge.roots).poll.value,
+                ) {
+                    Ok(line) => {
+                        let mut line = gate_line(line, watch_head.as_deref());
+                        line.attach_failure_digest(
+                            edge.roots.state.as_path(),
+                            edge.cwd,
+                            &forge_request(deadline, cancel, pr_read_timeout),
+                        );
+                        Reading {
+                            settle: match line.wait_verdict(*complete) {
+                                Some(true) => Settle::Succeeded,
+                                Some(false) => Settle::Unsuccessful,
+                                None => Settle::Pending,
+                            },
+                            line: format!(
+                                "{label} {}{} head={}",
+                                line.class(),
+                                line.cause_suffix(),
+                                watched_head(&line)
+                            ),
+                            data: json!(line),
+                        }
+                    }
+                    Err(error) => Reading::unavailable(&label, &error.to_string()),
+                },
+                Err(error) => Reading::unavailable(&label, error),
+            }
+        }
     }
 }
 

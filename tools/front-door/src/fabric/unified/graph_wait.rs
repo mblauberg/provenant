@@ -288,9 +288,8 @@ pub(crate) fn recover_after_remote_terminal(
     }
     let terminal =
         super::super::interface::observation::remote_status_reading(&remote_rows, peer_error)?;
-    let advanced = super::super::interface::observation::advance_after_remote_terminal(
-        run, terminal, advance,
-    )?;
+    let advanced =
+        super::super::interface::observation::wake_after_remote_terminal(run, terminal, advance)?;
     // Only a settled checkpoint replaces the peer-enriched reading: a partial
     // advance that merely relaunched work is reread on the waiter's next poll,
     // keeping this reading's digests and peer facts intact.
@@ -398,6 +397,248 @@ pub(super) fn missing_graph_context(error: &(dyn std::error::Error + 'static)) -
     )
 }
 
+/// Resolve the graph a queue item is bound to. A reader never creates the
+/// graph: the item's claimed graph is the subject a wake can advance.
+fn queue_item_graph(
+    state: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    queue: &str,
+    item: &str,
+) -> Option<String> {
+    use super::super::queue_registry::QueueRegistry;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let registry = QueueRegistry::open(state.as_path()).ok()?;
+    let queues = registry
+        .queues(WaitBudget::nonblocking(clock.mono_now()), &cancel, &clock)
+        .ok()?;
+    queues
+        .into_iter()
+        .find(|record| record.project == project.to_string() && record.queue_id == queue)?
+        .items
+        .into_iter()
+        .find(|candidate| candidate.identity.item == item)
+        .map(|candidate| candidate.graph_id)
+}
+
+/// A `wait --pr N` reader also wakes the queue item bound to that PR, so an
+/// adopted item advances even before its graph exists. Best effort: a reader
+/// without a bound item stays a pure snapshot.
+pub(crate) fn wake_pr_item(
+    edge: &provenant_cli::run::Edge<'_>,
+    project: provenant_core::ProjectId,
+    pr: u64,
+    deadline: provenant_core::Deadline,
+    cancel: &CancelToken,
+    workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
+) -> crate::fabric::progress::WakeOutcome {
+    use super::super::queue_registry::QueueRegistry;
+    use crate::fabric::progress::WakeSubject;
+    let clock = SystemClock::new();
+    let registry = match QueueRegistry::open(edge.roots.state.as_path()) {
+        Ok(registry) => registry,
+        Err(_) => return crate::fabric::progress::WakeOutcome::Idle,
+    };
+    let queues = match registry.queues(WaitBudget::nonblocking(clock.mono_now()), cancel, &clock) {
+        Ok(queues) => queues,
+        Err(_) => return crate::fabric::progress::WakeOutcome::Idle,
+    };
+    let graph_id = queues
+        .into_iter()
+        .filter(|record| record.project == project.to_string())
+        .flat_map(|record| record.items)
+        .find_map(|item| {
+            let adopted = item.adoption.as_ref()?;
+            (adopted["pull_request"].as_u64() == Some(pr)).then_some(item.graph_id)
+        });
+    let Some(graph_id) = graph_id else {
+        return crate::fabric::progress::WakeOutcome::Idle;
+    };
+    let now = clock.mono_now();
+    let budget = WaitBudget::up_to(
+        now,
+        provenant_core::DurationMicros::from_micros(
+            deadline.remaining(now).as_micros().min(u64::MAX as u128) as u64,
+        ),
+    );
+    let factory = Factory {
+        project_attribution: crate::usage::attribution_enabled(edge.roots),
+        context: match Context::open(edge.roots.clone(), edge.home, edge.cwd) {
+            Ok(context) => context,
+            Err(_) => {
+                return crate::fabric::progress::WakeOutcome::Skipped {
+                    code: "WAKE_PR_CONTEXT_UNAVAILABLE".into(),
+                };
+            }
+        },
+        clock: SystemClock::new(),
+        backoff: ThreadPause,
+        executor: match SystemExecutor::new(1) {
+            Ok(executor) => executor,
+            Err(_) => {
+                return crate::fabric::progress::WakeOutcome::Skipped {
+                    code: "WAKE_PR_EXECUTOR_UNAVAILABLE".into(),
+                };
+            }
+        },
+        home: edge.home.to_path_buf(),
+        cwd: edge.cwd.to_path_buf(),
+        assets: edge.assets.to_path_buf(),
+        host_launch: None,
+        workers,
+    };
+    wake_in_host(
+        &factory,
+        budget,
+        cancel,
+        WakeSubject::Graph {
+            project,
+            id: graph_id,
+        },
+        crate::fabric::progress::WakeReason::PullRequest,
+    )
+}
+
+/// Host-side wake. The reader owns the subject's host context, so it drives
+/// the shared coordinator with a subject-scoped advance that reuses the
+/// graph's existing recovery path. The frame grants no mutation authority.
+fn wake_in_host(
+    factory: &Factory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    subject: crate::fabric::progress::WakeSubject,
+    reason: crate::fabric::progress::WakeReason,
+) -> crate::fabric::progress::WakeOutcome {
+    use crate::fabric::progress::{WakeClaim, WakeOutcome, WakeReason, WakeSource, wake_subject};
+    use provenant_fabric_runtime::graph::{FileJournal, patch};
+
+    let project = factory.context.identity.project;
+    let graph_id = match &subject {
+        crate::fabric::progress::WakeSubject::Graph { id, .. } => id.clone(),
+        crate::fabric::progress::WakeSubject::QueueItem { queue, item, .. } => {
+            match queue_item_graph(&factory.context.roots.state, project, queue, item) {
+                Some(graph) => graph,
+                None => {
+                    return WakeOutcome::Skipped {
+                        code: "WAKE_QUEUE_ITEM_NO_GRAPH".into(),
+                    };
+                }
+            }
+        }
+    };
+
+    struct HostWake<'a> {
+        factory: &'a Factory,
+        budget: WaitBudget,
+        cancel: &'a CancelToken,
+        graph_id: String,
+        before: usize,
+    }
+    impl WakeSource for HostWake<'_> {
+        fn reconcile(
+            &mut self,
+            _subject: &crate::fabric::progress::WakeSubject,
+            _reason: WakeReason,
+        ) -> Result<(), WakeOutcome> {
+            Ok(())
+        }
+        fn claim(
+            &mut self,
+            _subject: &crate::fabric::progress::WakeSubject,
+            _deadline: provenant_core::Deadline,
+        ) -> WakeClaim {
+            let root = &self.factory.context.roots.state;
+            let project = self.factory.context.identity.project;
+            // A held journal lock is the single-flight lease: report Busy now.
+            if let Err(error) = FileJournal::try_open(root, project, &self.graph_id) {
+                return if error.is_lock_timeout() {
+                    WakeClaim::Busy {
+                        holder: self.graph_id.clone(),
+                    }
+                } else {
+                    WakeClaim::Skipped {
+                        code: "WAKE_JOURNAL_UNAVAILABLE".into(),
+                    }
+                };
+            }
+            match FileJournal::read_checkpoint(root, project, &self.graph_id) {
+                Ok(Some(checkpoint)) => {
+                    self.before = checkpoint
+                        .nodes
+                        .iter()
+                        .filter(|node| node.state.settled())
+                        .count();
+                    if checkpoint.nodes.iter().all(|node| node.state.settled()) {
+                        WakeClaim::Idle
+                    } else {
+                        WakeClaim::Ready {
+                            revision: patch::revision(&checkpoint),
+                        }
+                    }
+                }
+                Ok(None) => WakeClaim::Idle,
+                Err(_) => WakeClaim::Skipped {
+                    code: "WAKE_CHECKPOINT_UNREADABLE".into(),
+                },
+            }
+        }
+        fn live_revision(&self, _subject: &crate::fabric::progress::WakeSubject) -> u64 {
+            match FileJournal::read_checkpoint(
+                &self.factory.context.roots.state,
+                self.factory.context.identity.project,
+                &self.graph_id,
+            ) {
+                Ok(Some(checkpoint)) => patch::revision(&checkpoint),
+                _ => u64::MAX,
+            }
+        }
+        fn advance(
+            &mut self,
+            _subject: &crate::fabric::progress::WakeSubject,
+            _reason: WakeReason,
+            _deadline: provenant_core::Deadline,
+        ) -> WakeOutcome {
+            match self.factory.graph(
+                GraphInput::Resume {
+                    extra: Default::default(),
+                    document: self.graph_id.clone().into(),
+                    extend: Vec::new(),
+                },
+                self.budget,
+                self.cancel,
+            ) {
+                Ok(next) => {
+                    let after = next
+                        .checkpoint
+                        .nodes
+                        .iter()
+                        .filter(|node| node.state.settled())
+                        .count();
+                    WakeOutcome::Advanced {
+                        transitions: after.saturating_sub(self.before),
+                    }
+                }
+                Err(error) => WakeOutcome::Skipped {
+                    code: error.code().to_owned(),
+                },
+            }
+        }
+    }
+
+    wake_subject(
+        subject,
+        reason,
+        budget.deadline(),
+        &mut HostWake {
+            factory,
+            budget,
+            cancel,
+            graph_id,
+            before: 0,
+        },
+    )
+}
+
 // Stdin's bounded I/O API takes a real-time deadline at this transport edge.
 #[allow(
     clippy::disallowed_methods,
@@ -458,6 +699,35 @@ pub(crate) fn read_lane_graph(
         }
         if budget.remaining(factory.clock.mono_now()).as_micros() == 0 {
             return Err(FacadeError::Timeout.into());
+        }
+        // Wake is a read-class frame. The relay has already applied the
+        // sibling-session authorisation; the host runs one custody-checked
+        // advance and grants no resume, retry or landing authority.
+        if input["op"] == "wake" {
+            let wire: provenant_cli::fabric::graph_relay::WakeSubjectRef =
+                serde_json::from_value(input["subject"].clone())?;
+            let subject = match wire {
+                provenant_cli::fabric::graph_relay::WakeSubjectRef::Graph { project, id } => {
+                    crate::fabric::progress::WakeSubject::Graph { project, id }
+                }
+                provenant_cli::fabric::graph_relay::WakeSubjectRef::QueueItem {
+                    project,
+                    queue,
+                    item,
+                } => crate::fabric::progress::WakeSubject::QueueItem {
+                    project,
+                    queue,
+                    item,
+                },
+            };
+            return Ok(wake_in_host(
+                &factory,
+                budget,
+                cancel,
+                subject,
+                crate::fabric::progress::WakeReason::Lane,
+            )
+            .to_value());
         }
         if input["op"] == "prepare_child" {
             return Ok(serde_json::to_value(

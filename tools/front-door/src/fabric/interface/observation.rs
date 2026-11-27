@@ -1,20 +1,67 @@
 use super::*;
 
-pub(in crate::fabric) fn advance_after_remote_terminal(
+/// Fold a terminal remote reading into one wake. The wake coordinator owns the
+/// fixed claim/lock/revision order; this helper only decides whether the
+/// reading justifies an advance and maps the injected subject-scoped driver's
+/// run back to the caller. No separate recovery path remains.
+pub(in crate::fabric) fn wake_after_remote_terminal(
     run: &provenant_fabric_runtime::graph::GraphRun,
     remote_terminal: bool,
     advance: impl FnOnce() -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
 ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
-    if remote_terminal
-        && run
-            .checkpoint
-            .nodes
-            .iter()
-            .any(|node| !node.state.settled())
-    {
-        advance()
-    } else {
-        Ok(run.clone())
+    use crate::fabric::progress::{WakeOutcome, WakeReason, WakeSubject, wake_with};
+    let pending = run
+        .checkpoint
+        .nodes
+        .iter()
+        .any(|node| !node.state.settled());
+    if !remote_terminal || !pending {
+        return Ok(run.clone());
+    }
+    let before = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter(|node| node.state.settled())
+        .count();
+    let mut advanced = None;
+    let mut failure = None;
+    let _outcome = wake_with(
+        WakeSubject::Graph {
+            // Inert for an injected driver: the driver has already been
+            // claimed by the reader that owns this subject's host context.
+            project: provenant_core::ProjectId::from_bytes([0; 16]),
+            id: run.checkpoint.graph_id.clone(),
+        },
+        WakeReason::Wait,
+        // The injected driver enforces the caller's wait budget; the
+        // coordinator's deadline only bounds steps it does not perform here.
+        provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)),
+        |_subject, _reason, _deadline| match advance() {
+            Ok(next) => {
+                let after = next
+                    .checkpoint
+                    .nodes
+                    .iter()
+                    .filter(|node| node.state.settled())
+                    .count();
+                advanced = Some(next);
+                WakeOutcome::Advanced {
+                    transitions: after.saturating_sub(before),
+                }
+            }
+            Err(error) => {
+                failure = Some(error);
+                WakeOutcome::Skipped {
+                    code: "WAKE_REMOTE_ADVANCE_FAILED".into(),
+                }
+            }
+        },
+    );
+    match (advanced, failure) {
+        (Some(next), _) => Ok(next),
+        (None, Some(error)) => Err(error),
+        (None, None) => Err(FacadeError::io("wake remote advance")),
     }
 }
 
@@ -66,7 +113,7 @@ impl Factory {
         // status path only reads a checkpoint, so it cannot settle a node whose
         // earlier advancement failed while the home endpoint was unavailable.
         let remote_terminal = remote_status_reading(&rows, peer_error)?;
-        let advanced = advance_after_remote_terminal(run, remote_terminal, || {
+        let advanced = wake_after_remote_terminal(run, remote_terminal, || {
             self.graph(
                 GraphInput::Resume {
                     extra: Default::default(),
