@@ -159,6 +159,14 @@ fn plan_boundary_error(code: &str, error: PlanError) -> PlanError {
     Policy::default().boundary_error(code, Facts::violation(detail), error)
 }
 
+fn warn_plan_root_overlap(detail: impl Into<String>) -> Result<(), PlanError> {
+    Policy::default().warn_or(
+        "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
+        Facts::violation(detail.into()),
+        |_| PlanError::InvalidRoots,
+    )
+}
+
 fn plan_permission_error(error: PermissionError) -> PlanError {
     use PermissionError as E;
     let code = match &error {
@@ -261,10 +269,10 @@ impl ConfinedPlan {
         }
         for grant in &p.write_roots {
             if let Some(policy) = &p.policy {
-                policy
-                    .mandatory()
-                    .validate_extra_write(grant)
-                    .map_err(|error| {
+                if let Err(error) = policy.mandatory().validate_extra_write(grant) {
+                    if matches!(&error, PermissionError::ProtectedOverlap) {
+                        warn_plan_root_overlap("extra write grant overlaps a protected root")?;
+                    } else {
                         let code = match &error {
                             PermissionError::CredentialRoot
                             | PermissionError::CredentialRootAt { .. }
@@ -275,10 +283,11 @@ impl ConfinedPlan {
                             PermissionError::InvalidPath(_)
                             | PermissionError::BroadRoot
                             | PermissionError::NonUtf8Path => "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
-                            _ => "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
+                            _ => return Err(error.into()),
                         };
-                        plan_boundary_error(code, error.into())
-                    })?;
+                        return Err(plan_boundary_error(code, error.into()));
+                    }
+                }
             }
             validate_noncredential_for_plan(grant, p).map_err(|error| {
                 plan_permission_error(error.with_credential_path(&grant.path, None))
@@ -295,10 +304,9 @@ impl ConfinedPlan {
                 .chain(&p.private_state)
                 .any(|root| grant.overlaps(root))
             {
-                return Err(plan_boundary_error(
-                    "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
-                    PlanError::InvalidRoots,
-                ));
+                warn_plan_root_overlap(
+                    "extra write grant overlaps protected data or private state",
+                )?;
             }
         }
         for grant in &p.read_roots {
@@ -328,16 +336,20 @@ impl ConfinedPlan {
             validate_noncredential_for_plan(private, p).map_err(|error| {
                 plan_permission_error(error.with_credential_path(&private.path, None))
             })?;
-            if private.scope != PathScope::Subtree
-                || p.read_roots
-                    .iter()
-                    .chain(&p.protected_roots)
-                    .any(|g| private.overlaps(g))
-            {
+            if private.scope != PathScope::Subtree {
                 return Err(plan_boundary_error(
-                    "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
+                    "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
                     PlanError::InvalidRoots,
                 ));
+            }
+            if p.read_roots
+                .iter()
+                .chain(&p.protected_roots)
+                .any(|g| private.overlaps(g))
+            {
+                warn_plan_root_overlap(
+                    "scratch or private state overlaps a read or protected root",
+                )?;
             }
             if p.secret_roots.iter().any(|secret| private.overlaps(secret)) {
                 return Err(plan_boundary_error(
@@ -350,10 +362,7 @@ impl ConfinedPlan {
             .as_ref()
             .is_some_and(|g| g.overlaps(&p.scratch))
         {
-            return Err(plan_boundary_error(
-                "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
-                PlanError::InvalidRoots,
-            ));
+            warn_plan_root_overlap("private state overlaps scratch")?;
         }
         let agy_home = input
             .agy_state
@@ -372,10 +381,9 @@ impl ConfinedPlan {
                     )
                 })?;
                 if selected.overlaps(private) || selected.overlaps(&p.scratch) {
-                    return Err(plan_boundary_error(
-                        "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
-                        PlanError::InvalidRoots,
-                    ));
+                    warn_plan_root_overlap(
+                        "selected Agy source overlaps private state or scratch",
+                    )?;
                 }
                 if p.secret_roots
                     .iter()
@@ -390,10 +398,7 @@ impl ConfinedPlan {
                     .iter()
                     .any(|protected| selected.overlaps(protected))
                 {
-                    return Err(plan_boundary_error(
-                        "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
-                        PlanError::InvalidRoots,
-                    ));
+                    warn_plan_root_overlap("selected Agy source overlaps a protected root")?;
                 }
                 // Fixed allowlist only. No credential files, executable helpers,
                 // extensions, config or arbitrary home entries are mirrored.

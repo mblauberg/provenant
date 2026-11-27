@@ -2306,6 +2306,7 @@ pub(crate) fn pr_land_deletes_an_unregistered_branch_only_at_the_merged_head() -
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods)] // A real guardian proves native lease liveness.
 pub(crate) fn pr_land_refuses_branch_deletion_for_a_live_slot_lease() -> Result {
     use provenant_core::{AttemptId, Clock, WaitBudget};
     use provenant_os::fs::Directory;
@@ -2342,13 +2343,38 @@ pub(crate) fn pr_land_refuses_branch_deletion_for_a_live_slot_lease() -> Result 
     };
     let clock = provenant_os::clock::SystemClock;
     let cancel = provenant_core::CancelToken::new();
-    let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+    // A prepared reservation has no live holder. Publish a real, observable
+    // guardian so the destructive guard is exercised with positive evidence.
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut command = std::process::Command::new("/bin/sleep");
+    command.arg("60");
+    provenant_os::sys::fixture_session_on_exec(&mut command);
+    let child = Child(command.spawn()?);
+    let guardian = match provenant_supervisor::census::SystemProcessObserver
+        .observe(i64::from(child.0.id()))
+    {
+        provenant_supervisor::census::ProcessObservation::Present(fact) => fact.identity,
+        observation => return Err(format!("guardian was not observable: {observation:?}").into()),
+    };
+    let mut lease = provenant_supervisor::custody::acquire_writer(
         Directory::open_anchor(&slot)?,
         scope,
         binding,
         WaitBudget::nonblocking(clock.mono_now()),
         &cancel,
         &clock,
+    )?;
+    provenant_supervisor::fixture::record_spawned_provider(
+        &mut lease,
+        &Directory::open_anchor(&slot)?,
+        guardian.clone(),
+        guardian,
     )?;
     fs::write(
         slot.join("lease.json"),

@@ -243,11 +243,11 @@ fn admitted_subject_records_the_resolved_origin() -> Result {
     let head = git(&rig, &["rev-parse", "HEAD"])?;
     let factory = factory(&rig)?;
     let cancel = CancelToken::new();
-    // The default `auto` source pins the up-to-date checkout HEAD; `live`
-    // records the same HEAD but follows the working tree locally.
+    // `auto` pins the up-to-date checkout HEAD; `live` records the same HEAD
+    // but follows the working tree locally. The default is `live`.
     for (input, policy, read) in [
         (
-            json!({"op":"run"}),
+            json!({"op":"run", "source":"auto"}),
             provenant_records::subject::SubjectPolicy::Pinned,
             super::super::subject::ReadPlan::Pinned,
         ),

@@ -828,8 +828,8 @@ fn writer_preparation_steps(
     std::fs::remove_file(readiness_path)?;
     std::fs::remove_file(attempt.join("availability.json"))?;
 
-    // A clean writer that moved after graph source preparation must be
-    // refused before provider probing or any launch artefact is written.
+    // An unresolved head reference must be refused before provider probing or
+    // any launch artefact is written.
     let mut stale_source = task.clone();
     stale_source.head = Some("a".repeat(40));
     let error = prepare_with(
@@ -846,7 +846,7 @@ fn writer_preparation_steps(
     assert!(
         error
             .to_string()
-            .contains("does not match pinned commit"),
+            .contains("invalid Git base"),
         "{error}"
     );
     assert!(error.to_string().contains(&"a".repeat(40)), "{error}");

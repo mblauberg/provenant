@@ -3317,9 +3317,8 @@ impl RunStore {
         )?;
         self.check_writer_lineage(&prior, &launch.worktree, call)
     }
-    /// Whether a successor head is the writer's own descendant of its pinned
-    /// head. Only a lane-owned writer may advance the pin this way; the git
-    /// probe is bounded to the verified worktree and reads no untrusted input.
+    /// Whether a successor head descends from its pinned head. The git probe
+    /// is bounded to the verified worktree and reads no untrusted input.
     fn repinned_head_descends(
         tree: &provenant_confinement::VerifiedWorktree,
         pinned: provenant_core::GitOid,
@@ -3380,7 +3379,7 @@ impl RunStore {
         let previous = self.record(prior, call)?;
         // Take the lease for the launching attempt, not the predecessor: the
         // handover fact is sealed in the successor's record.
-        let owner = self.check_writer_lineage(record, tree, call)?;
+        self.check_writer_lineage(record, tree, call)?;
         let request = self.request(previous.attempt_id, call)?;
         let previous_task = request.task;
         let source = previous_task
@@ -3433,10 +3432,7 @@ impl RunStore {
         // A head that moved on from the pin is not destruction: the successor
         // re-pins to the current head and reports WRITER_HEAD_MOVED. Only a
         // foreign lineage stays a typed operation error.
-        let lane_owned = owner.is_some_and(|owner| {
-            owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
-        });
-        if !lane_owned || !Self::repinned_head_descends(tree, pinned, current) {
+        if !Self::repinned_head_descends(tree, pinned, current) {
             return Err(RunError::Validation("graph predecessor writer or source"));
         }
         Self::warn_head_moved(&previous, pinned, current);

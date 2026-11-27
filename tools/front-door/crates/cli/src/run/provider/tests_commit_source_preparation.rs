@@ -433,23 +433,14 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
     use provenant_records::policy::Boundary;
     for (plan_error, boundary) in [
         ("credential_root", Boundary::Credentials),
-        ("invalid_roots", Boundary::Authority),
         ("resolver", Boundary::Credentials),
     ] {
         let mut fixture = CommitSourcePreparation::new()?;
-        if plan_error == "invalid_roots" {
-            fixture
-                .task
-                .access
-                .read_roots
-                .push(fixture.paths.scratch.clone());
-        } else {
-            fixture
-                .task
-                .access
-                .write_roots
-                .push(fixture.home.join(".ssh"));
-        }
+        fixture
+            .task
+            .access
+            .write_roots
+            .push(fixture.home.join(".ssh"));
         if plan_error == "resolver" {
             std::fs::write(
                 fixture.state.join("config.toml"),
@@ -482,15 +473,23 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
                 refusal.terminal_note.as_deref(),
                 Some("route resolver classification: family_separation"),
             );
-            // A denied adapter check cannot reclassify a separate router error.
+            // A denied adapter check cannot reclassify a separate router
+            // error; its preselection diagnostic remains attached.
             assert_eq!(refusal.boundary_class, Boundary::None);
         } else {
             assert_eq!(refusal.boundary_class, boundary);
         }
         if plan_error == "resolver" {
-            // A route-resolution refusal precedes candidate preparation, so
-            // it carries no candidate-level credential diagnostic.
-            assert!(refusal.skipped_routes.is_empty(), "{refusal:?}");
+            let skipped = refusal
+                .skipped_routes
+                .iter()
+                .find(|route| route.route.starts_with("cursor"))
+                .ok_or("route refusal discarded the preselection permission diagnostic")?;
+            assert_eq!(skipped.guard_boundary, Some(Boundary::Credentials));
+            assert_eq!(
+                skipped.plan_error,
+                Some(provenant_records::diagnostic::PlanFailure::CredentialRoot)
+            );
             continue;
         }
         let skipped = refusal
@@ -510,11 +509,7 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
                 .detail
                 .contains(fixture.paths.scratch.to_str().ok_or("scratch encoding")?)
         );
-        let failure = if plan_error == "invalid_roots" {
-            provenant_records::diagnostic::PlanFailure::InvalidRoots
-        } else {
-            provenant_records::diagnostic::PlanFailure::CredentialRoot
-        };
+        let failure = provenant_records::diagnostic::PlanFailure::CredentialRoot;
         assert_eq!(skipped.plan_error, Some(failure));
         assert_eq!(
             skipped.cause,
@@ -526,11 +521,7 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
         );
         assert_eq!(
             skipped.confinement_guard,
-            Some(if plan_error == "invalid_roots" {
-                provenant_records::diagnostic::ConfinementGuard::InvalidPlanRoots
-            } else {
-                provenant_records::diagnostic::ConfinementGuard::CredentialRootRefused
-            }),
+            Some(provenant_records::diagnostic::ConfinementGuard::CredentialRootRefused),
         );
     }
     Ok(())

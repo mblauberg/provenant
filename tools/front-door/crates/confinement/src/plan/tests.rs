@@ -128,7 +128,7 @@ fn private_state_cannot_expose_credentials_or_alias_the_source() {
 }
 
 #[test]
-fn write_roots_stay_clear_of_credentials_and_private_roots() {
+fn write_roots_warn_on_private_overlaps_and_refuse_credentials() {
     let temp = fixture();
     let root = fs::canonicalize(temp.path()).unwrap();
     let credential_home = root.join("credential-home");
@@ -145,6 +145,16 @@ fn write_roots_stay_clear_of_credentials_and_private_roots() {
         ConfinedPlan::new(input)
     };
     assert!(with_write(root.join("repo/.agent-run")).is_ok());
+
+    let rule = Policy::default()
+        .rule("PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY")
+        .rule
+        .clone();
+    assert_eq!(rule.boundary, Boundary::None);
+    assert_eq!(rule.group.as_deref(), Some("confinement"));
+    assert_eq!(rule.strength, Strength::Warn);
+    assert!(rule.refusable);
+
     for credential in credentials.entries() {
         assert!(
             with_write(credential.path.clone()).is_err(),
@@ -152,11 +162,33 @@ fn write_roots_stay_clear_of_credentials_and_private_roots() {
             credential.path.display()
         );
     }
-    for refused in [root.join("scratch/locks"), root.join("provider-state")] {
+
+    let scratch_overlap = root.join("scratch/locks");
+    let (plan, warnings) = warning::capture(|| with_write(scratch_overlap.clone()));
+    let plan = plan.expect("overlapping extra write grant proceeds");
+    assert_eq!(plan.permissions().write_roots[0].path, scratch_overlap);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0].code.as_ref(),
+        "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY"
+    );
+
+    let private_overlap = root.join("provider-state");
+    let (plan, warnings) = warning::capture(|| with_write(private_overlap.clone()));
+    let plan = plan.expect("private state overlap proceeds");
+    assert_eq!(plan.permissions().write_roots[0].path, private_overlap);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0].code.as_ref(),
+        "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY"
+    );
+
+    for refused in [
+        credential_home.clone(),
+        credential_home.parent().unwrap().to_owned(),
+    ] {
         assert!(with_write(refused).is_err());
     }
-    assert!(with_write(credential_home.clone()).is_err());
-    assert!(with_write(credential_home.parent().unwrap().to_owned()).is_err());
     assert!(with_write(std::path::PathBuf::from("/Users/alice")).is_err());
 }
 
