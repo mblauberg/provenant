@@ -68,6 +68,7 @@ pub use forge::{
 };
 pub mod ports;
 mod project_binding;
+mod project_fence;
 pub use ports::{
     Adapter, BuildClean, BuildOffload, BuildOverflow, BuildPort, BuildPriority, BuildSoakPort,
     BuildStrategyName, BuildTargetKey, CommandExitCodes, DEFAULT_BUILD_TARGET_KEYS,
@@ -122,13 +123,15 @@ pub use loader::{
 };
 pub use presets::Profile;
 pub use project_binding::{
-    GcProjectSelection, GcProjectStatus, ProjectBinding, ProjectLocation, ProjectPresence,
-    Retirement, bind_host, bind_project, classify_project_presence, forget_project,
-    forget_project_at_state, host_project_dir, lookup_gc_project, lookup_host, lookup_project,
-    lookup_project_at_state, project_binding_dir, registered_gc_project_selection,
+    GcProjectSelection, GcProjectStatus, PROJECT_RETRY_SECONDS, ProjectBinding, ProjectIncarnation,
+    ProjectLocation, ProjectPresence, Retirement, bind_host, bind_project,
+    classify_project_presence, forget_project, forget_project_at_state, host_project_dir,
+    lookup_gc_project, lookup_host, lookup_project, lookup_project_at_state, project_binding_dir,
+    project_id_for_path, project_presence, registered_gc_project_selection,
     registered_gc_project_selection_with_progress, registered_gc_projects, registered_projects,
     retire_vanished_projects, transient_location,
 };
+pub use project_fence::{fence_project, project_is_retired, unfence_project};
 pub use provenant_records::{Finding, Layer};
 pub use schema::{
     DEDICATED_COMMANDS, DeclaredEnum, SCHEMA_PRECEDENCE, Schema, SchemaField, apply_edit,

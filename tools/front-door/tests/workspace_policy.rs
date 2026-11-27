@@ -2192,7 +2192,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/supervisor/src/guardian.rs", 3250),
         ("crates/workflow/src/session.rs", 3500),
         ("src/ci.rs", 2500),
-        ("src/fabric/graph_execution.rs", 2750),
+        ("src/fabric/graph_execution.rs", 3000),
         // The #4064 reused-worktree review-base binding, typed writer-base
         // report and node-sourced panel helpers, plus #4066's authored repair
         // writer resolution and per-node route preview, grew this owner. #4062

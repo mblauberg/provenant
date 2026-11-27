@@ -1,6 +1,6 @@
 //! Host-local project identity indexed by the canonical Git common directory.
 use crate::ConfigError;
-use provenant_core::{Clock, ProjectId, Roots, WaitBudget, WallTime};
+use provenant_core::{Clock, DurationMicros, ProjectId, Roots, WaitBudget, WallTime};
 use provenant_os::fs::{
     Directory, DirectoryPosition, FileKind, LockMode, Metadata, PublishMode, effective_uid,
 };
@@ -46,8 +46,66 @@ pub fn classify_project_presence(
     }
 }
 
-const PROJECTS_DIR: &str = "projects";
-const RECORD: &str = "project.json";
+/// The stable identity of one project registration.
+///
+/// A condition about a project's checkout is reported once per incarnation:
+/// this key changes only when the registration record is replaced, so a
+/// transient permission error is not reported on every tick, but a recreated
+/// registration is reported again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProjectIncarnation {
+    /// Device of the host-project registration record.
+    pub device: u64,
+    /// Inode of the host-project registration record.
+    pub inode: u64,
+    /// Registration time of that record, in nanoseconds.
+    pub registered_ns: i128,
+}
+
+impl ProjectIncarnation {
+    /// Stable dedup key for a once-per-incarnation warning.
+    pub fn key(&self) -> String {
+        format!("{}:{}:{}", self.device, self.inode, self.registered_ns)
+    }
+}
+
+/// How long an unreachable checkout is skipped before it is probed again. The
+/// retry is bounded so a restored checkout is rediscovered promptly while a
+/// persistently unreadable one is not re-probed on every tick.
+pub const PROJECT_RETRY_SECONDS: u64 = 60;
+
+/// The single presence classification settlement, forge and graph scheduling
+/// read for a registered project.
+///
+/// A permission or I/O failure is `Unreachable` with a bounded retry time,
+/// never a false `Present`. The returned incarnation identifies this
+/// registration so callers report the condition once per incarnation.
+pub fn project_presence(
+    roots: &Roots,
+    binding: &ProjectBinding,
+    now: WallTime,
+    retry_after: DurationMicros,
+) -> Result<(ProjectPresence, ProjectIncarnation), ConfigError> {
+    let state = Directory::open_anchor(roots.state.as_path())?;
+    let projects = state.open_verified_directory(OsStr::new(PROJECTS_DIR))?;
+    let name = OsString::from(binding.project_id().to_string());
+    let directory = projects.open_verified_directory(&name)?;
+    let registration = directory.metadata_at(OsStr::new(RECORD), false)?;
+    let incarnation = ProjectIncarnation {
+        device: registration.device,
+        inode: registration.inode,
+        registered_ns: registration.modified_ns,
+    };
+    let presence = classify_project_presence(
+        std::fs::metadata(binding.common_dir()),
+        now,
+        now.checked_add(retry_after).unwrap_or(WallTime::MAX),
+    );
+    Ok((presence, incarnation))
+}
+
+pub(crate) const PROJECTS_DIR: &str = "projects";
+pub(crate) const RECORD: &str = "project.json";
 const STAGE_PREFIX: &str = ".project-stage-";
 const RECORD_LIMIT: u64 = 20 * 1024;
 const MAX_PROJECTS: usize = 16_384;
@@ -205,6 +263,14 @@ pub fn bind_project(
         Some(root) => update_primary_checkout_hint(&projects, &projects_path, binding, root),
         None => Ok(binding),
     }
+}
+
+/// The deterministic project ID for a checkout path, derived from its
+/// canonical Git common directory. `None` when the path has no usable marker.
+pub fn project_id_for_path(path: &Path) -> Option<ProjectId> {
+    let marker = provenant_os::git::repository_marker(path)?;
+    let common_dir = marker.common_dir?;
+    Some(binding_id(&std::fs::canonicalize(common_dir).ok()?))
 }
 
 /// Lookup only: hooks never allocate identities or create state.
@@ -1174,7 +1240,7 @@ fn open_or_create_projects(state: &Directory) -> Result<Directory, ConfigError> 
     }
 }
 
-fn verify_directory(directory: &Directory, path: &Path) -> Result<(), ConfigError> {
+pub(crate) fn verify_directory(directory: &Directory, path: &Path) -> Result<(), ConfigError> {
     let metadata = directory.metadata()?;
     if metadata.kind != FileKind::Directory {
         return Err(ConfigError::InvalidProjectBinding);
@@ -2330,5 +2396,59 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[test]
+    fn permission_error_is_unreachable_not_present() {
+        let now = WallTime::from_unix_seconds(1_700_000_000).unwrap();
+        let retry_at = now
+            .checked_add(DurationMicros::from_seconds(PROJECT_RETRY_SECONDS).unwrap())
+            .unwrap();
+
+        // A permission or I/O failure is scheduled for a bounded retry, not
+        // read as a false `Present` that keeps a vanished checkout on the tick.
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert_eq!(
+            classify_project_presence(Err(denied), now, retry_at),
+            ProjectPresence::Unreachable {
+                error: "denied".to_owned(),
+                retry_at,
+            }
+        );
+        let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        assert_eq!(
+            classify_project_presence(Err(missing), now, retry_at),
+            ProjectPresence::Absent { since: now }
+        );
+    }
+
+    #[test]
+    fn absent_project_warns_once_per_incarnation() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let common = canonical_base(&temp).join("repository/.git");
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let binding = bind_project(&roots, ProjectLocation::new(common.clone()).unwrap()).unwrap();
+        let now = WallTime::from_unix_seconds(1_700_000_000).unwrap();
+        let retry = DurationMicros::from_seconds(PROJECT_RETRY_SECONDS).unwrap();
+        let (_, incarnation) = project_presence(&roots, &binding, now, retry).unwrap();
+
+        // An absent checkout is reported with the same key on every
+        // observation, so a once-per-change warning sink shows it once.
+        fs::remove_dir_all(&common).unwrap();
+        let (absent, second) = project_presence(&roots, &binding, now, retry).unwrap();
+        assert_eq!(absent, ProjectPresence::Absent { since: now });
+        assert_eq!(incarnation.key(), second.key());
+
+        // Replacing the registration record produces a new incarnation and a
+        // new report for the same path.
+        let record = project_binding_dir(roots.state.as_path(), binding.project_id()).join(RECORD);
+        fs::File::open(&record)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(123))
+            .unwrap();
+        let (_, third) = project_presence(&roots, &binding, now, retry).unwrap();
+        assert_ne!(incarnation.key(), third.key());
     }
 }

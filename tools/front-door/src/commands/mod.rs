@@ -51,6 +51,7 @@ mod process_tree;
 mod quota;
 mod reconcile;
 mod result;
+mod retire;
 mod retry;
 mod root;
 mod route;
@@ -109,6 +110,7 @@ pub static DOMAINS: &[&Domain] = &[
     &process_tree::DOMAIN,
     &quota::DOMAIN,
     &reconcile::DOMAIN,
+    &retire::DOMAIN,
     &result::DOMAIN,
     &retry::DOMAIN,
     &root::DOMAIN,
