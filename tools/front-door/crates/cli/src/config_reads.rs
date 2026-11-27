@@ -161,13 +161,9 @@ pub fn capability_overlay(roots: &Roots) -> provenant_records::CapabilityOverlay
         Some(roots.checkout()),
     );
     for warning in warnings {
-        provenant_records::warning::warn(provenant_records::warning::Warning::new(
-            provenant_records::warning::CONFIG_KEY_IGNORED,
-            warning.to_string(),
-            provenant_records::warning::detected_source(
-                provenant_records::warning::CONFIG_KEY_IGNORED,
-            ),
-        ));
+        provenant_records::warning::warn(
+            warning.into_typed(provenant_records::warning::CONFIG_KEY_IGNORED),
+        );
     }
     overlay
 }
@@ -371,9 +367,10 @@ mod tests {
         let (_, warnings) =
             provenant_records::warning::capture(|| super::capability_overlay(&roots));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].source.layer, provenant_records::Layer::Host);
         assert_eq!(
             warnings[0].source.origin.as_deref(),
-            Some("warning:CONFIG_KEY_IGNORED"),
+            Some("adapter_capabilities[no-such-adapter]"),
             "{warnings:?}"
         );
     }

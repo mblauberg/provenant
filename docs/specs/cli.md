@@ -181,6 +181,8 @@ passing `--project PATH` as the repair.
 A warning is a typed value: a stable UPPER_SNAKE code from one of the two
 declared catalogues, a one-sentence message, a required structured source, and
 optional subject and repair.
+An ignored adapter capability overlay entry names its configuration layer and
+key in the structured source.
 Library code never writes a warning itself: one function routes each warning to
 the innermost thread-local capture on this thread, then to the command's process
 sink, then retains it for the caller when neither is installed. A sink guard
