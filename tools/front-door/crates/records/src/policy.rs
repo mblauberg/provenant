@@ -355,9 +355,9 @@ impl Default for Policy {
             rules: table()
                 .iter()
                 .cloned()
-                .map(|rule| EffectiveRule {
-                    rule,
-                    source: layer_source(Layer::Default, &rule.code),
+                .map(|rule| {
+                    let source = layer_source(Layer::Default, &rule.code);
+                    EffectiveRule { rule, source }
                 })
                 .collect(),
             settings: Settings::default(),
@@ -1000,5 +1000,28 @@ mod tests {
             resolve_strength("WRITE_SCOPE", None, &Settings::default());
         assert_eq!(resolved.source.layer, Layer::Default);
         assert!(resolved.source.origin.is_some());
+    }
+
+    /// Every default rule gets its provenance from the compiled table. The
+    /// source is read from the rule before the rule moves into the entry, so
+    /// no field is borrowed after the move.
+    #[test]
+    fn default_rules_carry_the_compiled_table_source() {
+        let policy = Policy::default();
+        assert_eq!(policy.rules.len(), table().len());
+        for effective in &policy.rules {
+            assert_eq!(
+                effective.source.layer,
+                Layer::Default,
+                "{}",
+                effective.rule.code
+            );
+            assert_eq!(
+                effective.source.origin.as_deref(),
+                Some("compiled policy table"),
+                "{}",
+                effective.rule.code
+            );
+        }
     }
 }
