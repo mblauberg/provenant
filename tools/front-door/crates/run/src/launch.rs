@@ -6,7 +6,10 @@ use crate::{
     db::decode,
     *,
 };
-use provenant_core::{ActorId, AttemptId, OperationId};
+use provenant_core::{ActorId, AttemptId, DurationMicros, OperationId, Pause};
+use provenant_os::exec::{ExecOptions, Executor, Termination};
+use provenant_records::CommandError;
+use provenant_records::command_result::ErrorClass;
 use provenant_records::custody::Scope;
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation,
@@ -15,7 +18,531 @@ use rusqlite::params;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    time::Duration,
 };
+
+/// A `--commit own` commit: only the claimed paths, staged in a private index,
+/// with a compare-and-swap update of the lane branch.
+///
+/// Spec: docs/specs/agent-native.md#4-a-lane-as-a-native-sub-agent (#3453)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnCommit {
+    pub head: provenant_core::GitOid,
+    pub ref_name: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CommitOwnError {
+    #[error("git executable unavailable")]
+    GitUnavailable,
+    #[error("git {operation} failed: {detail}")]
+    Git {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("git {operation} timed out")]
+    TimedOut { operation: &'static str },
+    #[error("invalid git object id: {0}")]
+    InvalidOid(String),
+    #[error("command failed: {0}")]
+    Exec(#[from] provenant_os::exec::ExecError),
+}
+
+/// Remove a private index on every exit path, including an early error.
+struct PrivateIndex(PathBuf);
+impl Drop for PrivateIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn git_own(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(OsString, OsString)],
+    executor: &dyn Executor,
+    cancel: &provenant_core::CancelToken,
+    timeout: Duration,
+    operation: &'static str,
+) -> Result<crate::worktree_carry::GitOutput, CommitOwnError> {
+    let out =
+        crate::worktree_carry::git(cwd, args, env, executor, cancel, timeout).map_err(|error| {
+            match error {
+                crate::worktree_carry::CarryError::GitUnavailable => CommitOwnError::GitUnavailable,
+                crate::worktree_carry::CarryError::Exec(source) => CommitOwnError::Exec(source),
+                other => CommitOwnError::Git {
+                    operation,
+                    detail: other.to_string(),
+                },
+            }
+        })?;
+    if out.timed_out {
+        return Err(CommitOwnError::TimedOut { operation });
+    }
+    Ok(out)
+}
+
+fn index_contention(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("index.lock") || lower.contains("unable to create")
+}
+
+fn cas_mismatch(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("cannot lock ref") || lower.contains("is at") || lower.contains("expected")
+}
+
+fn retry_error(retries: u32, detail: &str) -> CommandError {
+    CommandError::new(
+        "INDEX_LOCK_RETRY_EXHAUSTED",
+        format!("commit could not complete after {retries} index-lock/compare-and-swap retries"),
+        Some(detail),
+        "provenant wait the holder, then retry the launch",
+    )
+    .with_class(ErrorClass::Transient { retry_at: None })
+}
+
+/// Commit only `paths` from `worktree`, using a private index so a co-writer's
+/// index lock is not touched. The branch moves only through a compare-and-swap
+/// `update-ref`; a lost race or an index-lock conflict is retried up to
+/// `retries` times with a cancellable backoff, then reported as `Transient`.
+pub fn commit_own_paths(
+    worktree: &Path,
+    git_dir: &Path,
+    ref_name: &str,
+    expected: provenant_core::GitOid,
+    paths: &[PathBuf],
+    message: &str,
+    retries: u32,
+    env: &[(OsString, OsString)],
+    executor: &dyn Executor,
+    cancel: &provenant_core::CancelToken,
+    pause: &dyn Pause,
+    timeout: Duration,
+) -> Result<OwnCommit, CommandError> {
+    let to_error = |error: CommitOwnError| -> CommandError {
+        match error {
+            CommitOwnError::GitUnavailable => CommandError::new(
+                "GIT_UNAVAILABLE",
+                "git executable unavailable",
+                None,
+                "install git, then retry the launch",
+            ),
+            CommitOwnError::TimedOut { operation } => CommandError::new(
+                "COMMIT_TIMEOUT",
+                format!("git {operation} timed out"),
+                None,
+                "retry with a longer --timeout",
+            )
+            .with_class(ErrorClass::Transient { retry_at: None }),
+            other => CommandError::new(
+                "COMMIT_OWN_FAILED",
+                "could not commit the lane's own paths",
+                Some(other.to_string().as_str()),
+                "inspect the worktree, then retry the launch",
+            ),
+        }
+    };
+    if paths.is_empty() {
+        return Ok(OwnCommit {
+            head: expected,
+            ref_name: ref_name.to_owned(),
+            paths: Vec::new(),
+        });
+    }
+    let mut expected = expected;
+    let mut attempt = 0_u32;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(CommandError::new(
+                "LAUNCH_CANCELLED",
+                "commit cancelled before completion",
+                None,
+                "relaunch the lane",
+            )
+            .with_class(ErrorClass::Transient { retry_at: None }));
+        }
+        let tag = format!("{}-{attempt}", std::process::id());
+        let private = PrivateIndex(crate::worktree_carry::private_index_path(git_dir, &tag));
+        let mut index_env = env.to_vec();
+        index_env.push((
+            OsString::from("GIT_INDEX_FILE"),
+            private.0.as_os_str().to_owned(),
+        ));
+
+        let read = git_own(
+            worktree,
+            &["read-tree", expected.as_str()],
+            &index_env,
+            executor,
+            cancel,
+            timeout,
+            "read-tree",
+        )
+        .map_err(to_error)?;
+        if !read.ok {
+            if index_contention(&read.stderr) {
+                attempt += 1;
+                if attempt > retries {
+                    return Err(retry_error(retries, &read.stderr));
+                }
+                pause.wait(
+                    DurationMicros::from_micros(5_000_u64 * u64::from(attempt)),
+                    cancel,
+                );
+                continue;
+            }
+            return Err(to_error(CommitOwnError::Git {
+                operation: "read-tree",
+                detail: read.stderr,
+            }));
+        }
+
+        let path_strings: Vec<String> = paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        let path_refs: Vec<&str> = path_strings.iter().map(String::as_str).collect();
+        let mut add_args = vec!["add", "--"];
+        add_args.extend(path_refs.iter().copied());
+        let add = git_own(
+            worktree, &add_args, &index_env, executor, cancel, timeout, "add",
+        )
+        .map_err(to_error)?;
+        if !add.ok {
+            if index_contention(&add.stderr) {
+                attempt += 1;
+                if attempt > retries {
+                    return Err(retry_error(retries, &add.stderr));
+                }
+                pause.wait(
+                    DurationMicros::from_micros(5_000_u64 * u64::from(attempt)),
+                    cancel,
+                );
+                continue;
+            }
+            return Err(to_error(CommitOwnError::Git {
+                operation: "add",
+                detail: add.stderr,
+            }));
+        }
+
+        let tree = git_own(
+            worktree,
+            &["write-tree"],
+            &index_env,
+            executor,
+            cancel,
+            timeout,
+            "write-tree",
+        )
+        .map_err(to_error)?;
+        if !tree.ok {
+            return Err(to_error(CommitOwnError::Git {
+                operation: "write-tree",
+                detail: tree.stderr,
+            }));
+        }
+        let tree_oid = tree.stdout.trim().to_owned();
+
+        let mut commit_args = vec![
+            "commit-tree",
+            &tree_oid,
+            "-p",
+            expected.as_str(),
+            "-m",
+            message,
+        ];
+        let made = git_own(
+            worktree,
+            &commit_args,
+            env,
+            executor,
+            cancel,
+            timeout,
+            "commit-tree",
+        )
+        .map_err(to_error)?;
+        if !made.ok {
+            return Err(to_error(CommitOwnError::Git {
+                operation: "commit-tree",
+                detail: made.stderr,
+            }));
+        }
+        let new = provenant_core::GitOid::parse(made.stdout.trim())
+            .map_err(|_| to_error(CommitOwnError::InvalidOid(made.stdout.trim().to_owned())))?;
+
+        let update = git_own(
+            worktree,
+            &["update-ref", ref_name, new.as_str(), expected.as_str()],
+            env,
+            executor,
+            cancel,
+            timeout,
+            "update-ref",
+        )
+        .map_err(to_error)?;
+        if update.ok {
+            return Ok(OwnCommit {
+                head: new,
+                ref_name: ref_name.to_owned(),
+                paths: path_strings,
+            });
+        }
+        if cas_mismatch(&update.stderr) || index_contention(&update.stderr) {
+            attempt += 1;
+            if attempt > retries {
+                return Err(retry_error(retries, &update.stderr));
+            }
+            pause.wait(
+                DurationMicros::from_micros(5_000_u64 * u64::from(attempt)),
+                cancel,
+            );
+            let head = git_own(
+                worktree,
+                &["rev-parse", ref_name],
+                env,
+                executor,
+                cancel,
+                timeout,
+                "rev-parse",
+            )
+            .map_err(to_error)?;
+            if !head.ok {
+                return Err(to_error(CommitOwnError::Git {
+                    operation: "rev-parse",
+                    detail: head.stderr,
+                }));
+            }
+            expected = provenant_core::GitOid::parse(head.stdout.trim())
+                .map_err(|_| to_error(CommitOwnError::InvalidOid(head.stdout.trim().to_owned())))?;
+            continue;
+        }
+        return Err(to_error(CommitOwnError::Git {
+            operation: "update-ref",
+            detail: update.stderr,
+        }));
+    }
+}
+
+/// Timing breakdown for one lane launch, in milliseconds.
+///
+/// Spec: docs/specs/agent-native.md#4-a-lane-as-a-native-sub-agent (#3348)
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LaunchTimings {
+    pub admission_ms: u64,
+    pub census_ms: u64,
+    pub git_ms: u64,
+    pub worktree_ms: u64,
+    pub prepare_ms: u64,
+    pub total_ms: u64,
+}
+
+/// One phase a launch records a duration for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchPhase {
+    Admission,
+    Census,
+    Git,
+    Worktree,
+    Prepare,
+}
+
+/// Accumulates caller-sampled phase durations. The caller owns the monotonic
+/// clock, so no ambient time is read inside the run crate.
+#[derive(Debug, Default)]
+pub struct LaunchTimer {
+    timings: LaunchTimings,
+}
+
+impl LaunchTimer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one phase's elapsed time.
+    pub fn record(&mut self, phase: LaunchPhase, elapsed: DurationMicros) {
+        let millis = elapsed.as_micros() / 1_000;
+        match phase {
+            LaunchPhase::Admission => self.timings.admission_ms += millis,
+            LaunchPhase::Census => self.timings.census_ms += millis,
+            LaunchPhase::Git => self.timings.git_ms += millis,
+            LaunchPhase::Worktree => self.timings.worktree_ms += millis,
+            LaunchPhase::Prepare => self.timings.prepare_ms += millis,
+        }
+    }
+
+    /// The recorded breakdown with the total recomputed from its phases.
+    pub fn finish(&self) -> LaunchTimings {
+        let mut timings = self.timings.clone();
+        timings.total_ms = timings
+            .admission_ms
+            .saturating_add(timings.census_ms)
+            .saturating_add(timings.git_ms)
+            .saturating_add(timings.worktree_ms)
+            .saturating_add(timings.prepare_ms);
+        timings
+    }
+}
+
+#[cfg(test)]
+mod commit_own_tests {
+    use super::*;
+    use provenant_core::CancelToken;
+    use provenant_os::exec::SystemExecutor;
+    use std::fs;
+
+    struct NoPause;
+    impl Pause for NoPause {
+        fn wait(&self, _delay: DurationMicros, _cancel: &CancelToken) {}
+    }
+
+    fn test_env() -> Vec<(OsString, OsString)> {
+        let mut env = provenant_os::fixture::git_env();
+        if let Some(git) = provenant_os::git::resolve_git_executable(None) {
+            env.push((OsString::from("PROVENANT_GIT"), git.into_os_string()));
+        }
+        env
+    }
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let out = provenant_os::fixture::run_git(cwd, args).expect("git");
+        String::from_utf8(out).expect("utf8").trim().to_owned()
+    }
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        repo: PathBuf,
+        head: provenant_core::GitOid,
+    }
+
+    impl Fixture {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            let temp = tempfile::tempdir()?;
+            let repo = temp.path().join("lane");
+            fs::create_dir(&repo)?;
+            git(&repo, &["init", "-q", "-b", "main"]);
+            fs::write(repo.join("base.txt"), "base\n")?;
+            git(&repo, &["add", "base.txt"]);
+            git(&repo, &["commit", "-qm", "initial"]);
+            let head = provenant_core::GitOid::parse(&git(&repo, &["rev-parse", "HEAD"]))?;
+            Ok(Self {
+                _temp: temp,
+                repo,
+                head,
+            })
+        }
+
+        fn git_dir(&self) -> PathBuf {
+            self.repo.join(".git")
+        }
+
+        fn commit(
+            &self,
+            expected: provenant_core::GitOid,
+            retries: u32,
+        ) -> Result<OwnCommit, CommandError> {
+            let env = test_env();
+            let executor = SystemExecutor::new(4).map_err(|e| {
+                CommandError::new("EXECUTOR", "executor unavailable", None, e.to_string())
+            })?;
+            let cancel = CancelToken::new();
+            commit_own_paths(
+                &self.repo,
+                &self.git_dir(),
+                "refs/heads/main",
+                expected,
+                &[self.repo.join("own.txt")],
+                "lane: own paths",
+                retries,
+                &env,
+                &executor,
+                &cancel,
+                &NoPause,
+                Duration::from_secs(30),
+            )
+        }
+    }
+
+    #[test]
+    fn commit_own_stages_only_claimed_paths_and_cas_updates_the_branch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.repo.join("own.txt"), "own\n")?;
+        fs::write(fixture.repo.join("other.txt"), "other\n")?;
+        let committed = fixture
+            .commit(fixture.head, 0)
+            .map_err(|e| std::io::Error::other(e.message))?;
+        assert_eq!(committed.ref_name, "refs/heads/main");
+        assert_eq!(committed.paths, ["own.txt"]);
+        let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+        assert_eq!(committed.head.to_string(), head);
+        let files = git(
+            &fixture.repo,
+            &["show", "--pretty=format:", "--name-only", &head],
+        );
+        assert!(files.contains("own.txt"), "{files}");
+        assert!(!files.contains("other.txt"), "{files}");
+        assert!(!files.contains("base.txt"), "{files}");
+        let subject = git(&fixture.repo, &["log", "-1", "--pretty=format:%s"]);
+        assert_eq!(subject, "lane: own paths");
+        Ok(())
+    }
+
+    #[test]
+    fn commit_own_cas_retries_on_race() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        // Move the branch on from `fixture.head`, so a CAS against the stale
+        // head loses the race exactly once.
+        fs::write(fixture.repo.join("moved.txt"), "moved\n")?;
+        git(&fixture.repo, &["add", "moved.txt"]);
+        git(&fixture.repo, &["commit", "-qm", "moved"]);
+        let current = git(&fixture.repo, &["rev-parse", "HEAD"]);
+        fs::write(fixture.repo.join("own.txt"), "own\n")?;
+        let committed = fixture
+            .commit(fixture.head, 1)
+            .map_err(|e| std::io::Error::other(e.message))?;
+        assert_ne!(committed.head.to_string(), current);
+        let parent = git(&fixture.repo, &["rev-parse", "HEAD^"]);
+        assert_eq!(parent, current);
+        Ok(())
+    }
+
+    #[test]
+    fn index_lock_race_retries_then_transient() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.repo.join("own.txt"), "own\n")?;
+        // Pre-lock the private index for both attempts. The first two
+        // `git add` calls fail on the lock and the third exceeds retries.
+        for attempt in 0..=1 {
+            let tag = format!("{}-{attempt}", std::process::id());
+            let lock = crate::worktree_carry::private_index_path(&fixture.git_dir(), &tag);
+            let lock = lock.with_extension("index.lock");
+            fs::write(lock, "held by another process")?;
+        }
+        let error = fixture
+            .commit(fixture.head, 1)
+            .expect_err("must exhaust retries");
+        assert_eq!(error.code, "INDEX_LOCK_RETRY_EXHAUSTED");
+        assert!(matches!(error.class, ErrorClass::Transient { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn launch_timer_sums_phases() {
+        let mut timer = LaunchTimer::new();
+        timer.record(LaunchPhase::Admission, DurationMicros::from_micros(1_500));
+        timer.record(LaunchPhase::Census, DurationMicros::from_micros(2_000));
+        timer.record(LaunchPhase::Git, DurationMicros::from_micros(3_000));
+        timer.record(LaunchPhase::Worktree, DurationMicros::from_micros(4_000));
+        timer.record(LaunchPhase::Prepare, DurationMicros::from_micros(5_000));
+        let timings = timer.finish();
+        assert_eq!(timings.admission_ms, 1);
+        assert_eq!(timings.census_ms, 2);
+        assert_eq!(timings.total_ms, 15);
+    }
+}
 
 fn sandbox_mode_receipt(
     mode: &provenant_confinement::run_config::SandboxMode,
