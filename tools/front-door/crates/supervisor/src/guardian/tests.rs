@@ -2058,11 +2058,14 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
             "GUARDIAN_LANE_PORT_ALLOCATION_NONE".into(),
             provenant_records::policy::Strength::Off,
         )]),
-        provenant_records::policy::Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     assert_eq!(
-        off_policy.rule("GUARDIAN_LANE_PORT_ALLOCATION_NONE").source,
-        provenant_records::policy::Source::Dispatch
+        off_policy
+            .rule("GUARDIAN_LANE_PORT_ALLOCATION_NONE")
+            .source
+            .layer,
+        provenant_records::Layer::Route
     );
     let (_, warning) =
         lane_port_allocation(&off_policy, Some(&unavailable)).map_err(std::io::Error::other)?;
@@ -2104,7 +2107,7 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         error.fact(),
         provenant_records::diagnostic::ResourceFact::LanePorts {
             blocks: 1,
-            origin: provenant_records::diagnostic::PortSettingSource::Configuration
+            origin: provenant_records::Layer::Host
         }
     );
     // The automatic port range is a convenience, never an implicit writer cap.
@@ -2231,7 +2234,7 @@ fn strict_port_policy() -> provenant_records::policy::Policy {
             "PORT_BLOCKS".into(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     policy
 }

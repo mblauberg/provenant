@@ -1,6 +1,9 @@
 //! One executable policy table, shared by enforcement and presentation.
+use crate::command_result::SettingRef;
 use crate::provenance::{CANONICAL_ORDER, Layer, Source as ProvenanceSource, Sourced};
-use crate::warning::{self, CONFIG_KEY_IGNORED, CONFIG_MALFORMED, Warning, WarningCode};
+use crate::warning::{
+    self, CHECK_NOT_OVERRIDABLE, CONFIG_KEY_IGNORED, CONFIG_MALFORMED, Warning, WarningCode,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
@@ -12,7 +15,7 @@ pub const PATH_CLAIM_OVERLAP: &str = "PATH_CLAIM_OVERLAP";
 pub const DESTROYS_LIVE_WORK: &str = "DESTROYS_LIVE_WORK";
 pub const LEASE_HOLDER_UNREACHABLE: &str = "LEASE_HOLDER_UNREACHABLE";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Boundary {
     /// Credentials and secrets never reach a lane, provider or output not granted them.
@@ -26,6 +29,7 @@ pub enum Boundary {
     /// no override because proceeding cannot work.
     Operation,
     /// Not a boundary: a mechanism or default that warns and proceeds.
+    #[default]
     None,
 }
 
@@ -57,45 +61,61 @@ impl Strength {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// What a launch's `--strict` and `--checks` flags select for `policy.default`.
+/// `On` leaves the layered configuration alone; the other two modes insert a
+/// launch-layer default, so they can never raise a boundary or operation row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Source {
-    CompiledDefault,
-    Host,
-    Project,
-    Dispatch,
+pub enum ChecksMode {
+    #[default]
+    On,
+    Warn,
+    Strict,
+    Off,
 }
-impl Source {
-    /// The shared provenance layer for this policy layer. A dispatch override
-    /// arrives with the resolved route's policy.
-    pub const fn layer(self) -> crate::Layer {
-        match self {
-            Self::CompiledDefault => crate::Layer::Default,
-            Self::Host => crate::Layer::Host,
-            Self::Project => crate::Layer::Project,
-            Self::Dispatch => crate::Layer::Route,
+
+impl ChecksMode {
+    /// Parse the launch `--checks` values. `strict` is accepted as the
+    /// spelling of `--strict` for callers that pass one combined value.
+    pub fn from_checks(value: &str) -> Option<Self> {
+        match value {
+            "on" => Some(Self::On),
+            "warn" => Some(Self::Warn),
+            "off" => Some(Self::Off),
+            "refuse" | "strict" => Some(Self::Strict),
+            _ => None,
         }
     }
 }
 
-impl Source {
-    /// The provenance a warning from this effective rule carries, so a
-    /// consumer can see which layer set the rule that warned. The code names
-    /// the exact knob or table row; the layer uses the shared vocabulary.
-    pub fn provenance(self, code: &str) -> ProvenanceSource {
-        let (layer, origin) = match self {
-            Self::CompiledDefault => (Layer::Default, "compiled policy table".to_owned()),
-            Self::Host => (Layer::Host, format!("config.toml#policy.{code}")),
-            Self::Project => (
-                Layer::Project,
-                format!(".provenant/policy.toml#policy.{code}"),
-            ),
-            Self::Dispatch => (Layer::Launch, format!("dispatch#policy.{code}")),
-        };
-        ProvenanceSource {
-            layer,
-            origin: Some(origin),
-        }
+/// The provenance of one policy candidate. A dispatch override arrives with
+/// the resolved route's policy; a `--strict` / `--checks` default arrives at
+/// the launch layer, which outranks every host and project `policy.<CODE>`.
+fn layer_source(layer: Layer, key: &str) -> ProvenanceSource {
+    let origin = match layer {
+        Layer::Default => "compiled policy table".to_owned(),
+        Layer::Host => format!("config.toml#policy.{key}"),
+        Layer::Project => format!(".provenant/policy.toml#policy.{key}"),
+        Layer::Route => format!("dispatch#policy.{key}"),
+        Layer::Launch => format!("--checks/--strict#policy.{key}"),
+        other => format!("{}#policy.{key}", other.as_str()),
+    };
+    ProvenanceSource {
+        layer,
+        origin: Some(origin),
+    }
+}
+
+/// The setting that selected an effect, for the error and warning contract.
+fn setting_ref(key: &str, strength: Strength, source: &ProvenanceSource) -> SettingRef {
+    SettingRef {
+        key: key.to_owned(),
+        value: strength_name(strength).to_owned(),
+        layer: source.layer,
+        origin: source
+            .origin
+            .clone()
+            .unwrap_or_else(|| "compiled policy table".to_owned()),
     }
 }
 
@@ -118,7 +138,7 @@ pub struct Rule {
 
 /// Policy setting candidates grouped by their fully qualified key, for
 /// example `policy.CODE` or `policy.default`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     pub candidates: BTreeMap<String, Vec<Sourced<Strength>>>,
 }
@@ -130,18 +150,24 @@ impl Settings {
     }
 }
 
-/// Resolve a rule's setting by layer first, then key specificity. The exact
-/// `policy.CODE` key wins ties against `policy.GROUP`, which wins ties against
-/// `policy.default`. A row's compiled strength is the final fallback.
+/// Resolve a rule's setting by layer first, then key specificity, and report
+/// the winning key so a warning can name the exact candidate that selected it.
+/// `policy.CODE` wins ties against `policy.GROUP`, which wins ties against
+/// `policy.default`; a higher layer wins across keys. A row's compiled
+/// strength is the final fallback.
 #[allow(clippy::expect_used)] // callers resolve codes from the compiled policy table
-pub fn resolve_strength(code: &str, group: Option<&str>, settings: &Settings) -> Sourced<Strength> {
+pub fn resolve_setting(
+    code: &str,
+    group: Option<&str>,
+    settings: &Settings,
+) -> (String, Sourced<Strength>) {
     let mut keys = vec![(format!("policy.{code}"), 3usize)];
     if let Some(group) = group {
         keys.push((format!("policy.{group}"), 2));
     }
     keys.push(("policy.default".to_owned(), 1));
 
-    let mut winner: Option<(usize, usize, Sourced<Strength>)> = None;
+    let mut winner: Option<(usize, usize, String, Sourced<Strength>)> = None;
     for (key, specificity) in keys {
         let Some(candidates) = settings.candidates.get(&key) else {
             continue;
@@ -151,32 +177,39 @@ pub fn resolve_strength(code: &str, group: Option<&str>, settings: &Settings) ->
                 .iter()
                 .position(|layer| *layer == candidate.source.layer)
                 .expect("candidate layer is canonical");
-            let should_replace = winner
-                .as_ref()
-                .is_none_or(|(best_layer, best_specificity, _)| {
-                    layer_rank > *best_layer
-                        || (layer_rank == *best_layer && specificity >= *best_specificity)
-                });
+            let should_replace =
+                winner
+                    .as_ref()
+                    .is_none_or(|(best_layer, best_specificity, _, _)| {
+                        layer_rank > *best_layer
+                            || (layer_rank == *best_layer && specificity >= *best_specificity)
+                    });
             if should_replace {
-                winner = Some((layer_rank, specificity, candidate.clone()));
+                winner = Some((layer_rank, specificity, key.clone(), candidate.clone()));
             }
         }
     }
-    if let Some((_, _, winner)) = winner {
-        return winner;
+    if let Some((_, _, key, winner)) = winner {
+        return (key, winner);
     }
 
     let rule = table()
         .iter()
         .find(|rule| rule.code == code)
         .expect("policy code in table");
-    Sourced {
-        value: rule.strength,
-        source: ProvenanceSource {
-            layer: Layer::Default,
-            origin: Some("crates/run/assets/policy.toml".to_owned()),
+    (
+        format!("policy.{code}"),
+        Sourced {
+            value: rule.strength,
+            source: layer_source(Layer::Default, &rule.code),
         },
-    }
+    )
+}
+
+/// Resolve a rule's effective strength. See [`resolve_setting`] when the
+/// winning key and layer are needed for a setting reference.
+pub fn resolve_strength(code: &str, group: Option<&str>, settings: &Settings) -> Sourced<Strength> {
+    resolve_setting(code, group, settings).1
 }
 impl Rule {
     pub fn supports(&self, strength: Strength) -> bool {
@@ -223,12 +256,18 @@ impl Rule {
 pub struct EffectiveRule {
     #[serde(flatten)]
     pub rule: Rule,
-    pub source: Source,
+    /// The provenance layer and origin that last set this row's strength.
+    pub source: ProvenanceSource,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
     pub rules: Vec<EffectiveRule>,
+    /// All policy setting candidates, keyed by their fully qualified key, so
+    /// a `none` row resolves from `policy.<CODE>`, `policy.<GROUP>` and
+    /// `policy.default` with the layer rule shared by every setting family.
+    #[serde(default)]
+    pub settings: Settings,
 }
 
 /// A heuristic finding identifies its field and rule without retaining matched values.
@@ -302,6 +341,14 @@ fn rule_warning_code(code: &str) -> WarningCode {
     WarningCode(rule.code.as_str())
 }
 
+/// Position of a layer in the canonical precedence order.
+fn layer_rank(layer: Layer) -> usize {
+    CANONICAL_ORDER
+        .iter()
+        .position(|candidate| *candidate == layer)
+        .unwrap_or_default()
+}
+
 impl Default for Policy {
     fn default() -> Self {
         Self {
@@ -310,17 +357,38 @@ impl Default for Policy {
                 .cloned()
                 .map(|rule| EffectiveRule {
                     rule,
-                    source: Source::CompiledDefault,
+                    source: layer_source(Layer::Default, &rule.code),
                 })
                 .collect(),
+            settings: Settings::default(),
         }
     }
 }
 impl Policy {
-    /// Apply layers in increasing precedence: host, project, then dispatch.
-    /// Boundary rules have no knob, so these overlays cannot grant authority.
-    pub fn overlay(&mut self, values: &BTreeMap<String, Strength>, source: Source) {
+    /// Apply one layer's policy candidates. Only a `none` row accepts an
+    /// explicit `policy.<CODE>`; a boundary or operation code warns with
+    /// `CHECK_NOT_OVERRIDABLE` and keeps its compiled strength. The bare key
+    /// `default` and any declared group name set `policy.default` or
+    /// `policy.<GROUP>` instead: they name no row, so they never raise that
+    /// warning and `--checks off` emits no storm of them.
+    pub fn overlay(&mut self, values: &BTreeMap<String, Strength>, layer: Layer) {
         for (code, strength) in values {
+            let source = layer_source(layer, code);
+            let key = format!("policy.{code}");
+            if code == "default"
+                || table()
+                    .iter()
+                    .any(|rule| rule.group.as_deref() == Some(code.as_str()))
+            {
+                self.settings.insert(
+                    key,
+                    Sourced {
+                        value: *strength,
+                        source,
+                    },
+                );
+                continue;
+            }
             let Some(effective) = self.rules.iter_mut().find(|value| value.rule.code == *code)
             else {
                 warning::warn(
@@ -330,26 +398,31 @@ impl Policy {
                         crate::warning::detected_source(CONFIG_KEY_IGNORED),
                     )
                     .subject(code.as_str())
-                    .source(source.provenance(code))
+                    .source(source)
                     .repair("use a rule code from the compiled policy table"),
                 );
                 continue;
             };
-            if source < effective.source {
-                continue;
-            }
-            if effective.rule.knob.is_none() {
+            if effective.rule.boundary != Boundary::None {
                 warning::warn(
                     Warning::new(
-                        CONFIG_KEY_IGNORED,
+                        CHECK_NOT_OVERRIDABLE,
                         format!(
-                            "policy override {code} ignored: boundary and operation rules have no override"
+                            "policy.{code} is not overridable: {:?} rules are immutable",
+                            effective.rule.boundary
                         ),
-                     crate::warning::detected_source(CONFIG_KEY_IGNORED))
+                        crate::warning::detected_source(CHECK_NOT_OVERRIDABLE),
+                    )
                     .subject(code.as_str())
-                    .source(source.provenance(code))
-                    .repair("remove the override; boundary and operation rules have no knob"),
+                    .source(source.clone())
+                    .setting(setting_ref(&key, *strength, &source))
+                    .repair(format!(
+                        "remove policy.{code}; only none-row checks are configurable"
+                    )),
                 );
+                continue;
+            }
+            if layer_rank(layer) < layer_rank(effective.source.layer) {
                 continue;
             }
             if !effective.rule.supports(*strength) {
@@ -367,19 +440,50 @@ impl Policy {
                             "policy override {code}={}: unsupported; supported strengths: {supported}; retaining {} from {:?}",
                             strength_name(*strength),
                             strength_name(effective.rule.strength),
-                            effective.source
+                            effective.source.layer
                         ),
-                     crate::warning::detected_source(CONFIG_MALFORMED))
+                        crate::warning::detected_source(CONFIG_MALFORMED),
+                    )
                     .subject(code.as_str())
-                    .source(source.provenance(code))
+                    .source(source)
                     .repair(format!("use one of: {supported}")),
                 );
                 continue;
             }
+            self.settings.insert(
+                key,
+                Sourced {
+                    value: *strength,
+                    source: source.clone(),
+                },
+            );
             effective.rule.strength = *strength;
             effective.source = source;
         }
     }
+
+    /// Set `policy.default` at a layer. `--strict` uses `Refuse` and `--checks
+    /// off` uses `Off`, both at the launch layer so they outrank any host
+    /// `policy.<CODE>` while still affecting only `refusable` `none` rows.
+    pub fn set_default(&mut self, strength: Strength, layer: Layer) {
+        self.overlay(&BTreeMap::from([("default".to_owned(), strength)]), layer);
+    }
+
+    /// Translate a launch's `--strict` / `--checks` selection. `On` removes a
+    /// launch-layer default so the layered configuration applies again.
+    pub fn apply_checks(&mut self, mode: ChecksMode) {
+        match mode {
+            ChecksMode::On => {
+                if let Some(candidates) = self.settings.candidates.get_mut("policy.default") {
+                    candidates.retain(|candidate| candidate.source.layer != Layer::Launch);
+                }
+            }
+            ChecksMode::Warn => self.set_default(Strength::Warn, Layer::Launch),
+            ChecksMode::Strict => self.set_default(Strength::Refuse, Layer::Launch),
+            ChecksMode::Off => self.set_default(Strength::Off, Layer::Launch),
+        }
+    }
+
     #[allow(clippy::expect_used)] // Enforcement callers use table-owned static codes.
     pub fn rule(&self, code: &str) -> &EffectiveRule {
         self.rules
@@ -393,18 +497,40 @@ impl Policy {
         }
         let effective = self.rule(code);
         let rule = &effective.rule;
-        if rule.strength == Strength::Off {
+        if rule.boundary.is_immutable() {
+            // A boundary or operation row never reads a setting and never
+            // cites the ADR that defines the three boundaries: proceeding
+            // cannot produce a valid result, or the held authority is absent.
+            let message = format!(
+                "[{code}] {} (boundary={:?}, immutable; no override)",
+                facts.detail, rule.boundary
+            );
+            return Effect::Refuse(Box::new(
+                crate::diagnostic::Diagnostic::new(code).detail(message),
+            ));
+        }
+        let (key, resolved) = resolve_setting(code, rule.group.as_deref(), &self.settings);
+        // --strict raises only refusable rows; an observational row keeps its
+        // compiled strength even when `policy.default` is set to refuse.
+        let strength = if resolved.value == Strength::Refuse && !rule.refusable {
+            rule.strength
+        } else {
+            resolved.value
+        };
+        if strength == Strength::Off {
             return Effect::Proceed;
         }
+        let setting = setting_ref(&key, strength, &resolved.source);
         let message = format!(
-            "[{}] {} (strength={:?}, source={:?}, knob={})",
-            rule.code,
+            "[{code}] {} (strength={}, source={:?}, {}={}, knob={})",
             facts.detail,
-            rule.strength,
-            effective.source,
+            strength_name(strength),
+            resolved.source.layer,
+            key,
+            setting.value,
             rule.knob.as_deref().unwrap_or("immutable; no override")
         );
-        match rule.strength {
+        match strength {
             Strength::Off => Effect::Proceed,
             Strength::Warn => Effect::Warn(
                 Warning::new(
@@ -413,16 +539,14 @@ impl Policy {
                     crate::warning::detected_source(rule_warning_code(code)),
                 )
                 .subject(code.to_owned())
-                .source(effective.source.provenance(code))
+                .source(resolved.source)
+                .setting(setting)
                 // Observational rules warn and proceed: one notice per
                 // state change is enough for a person, while the JSON
                 // envelope keeps every warning as data.
                 .once_per_change(),
             ),
-            Strength::Refuse if rule.boundary == Boundary::None => Effect::Stop(Box::new(
-                crate::diagnostic::Diagnostic::new(code).detail(message),
-            )),
-            Strength::Refuse => Effect::Refuse(Box::new(
+            Strength::Refuse => Effect::Stop(Box::new(
                 crate::diagnostic::Diagnostic::new(code).detail(message),
             )),
         }
@@ -472,24 +596,40 @@ impl Policy {
             }
         }
     }
-    /// Presentation and lane guidance use exactly the resolved enforcement rows.
+    /// Presentation and lane guidance use exactly the resolved enforcement
+    /// rows, including a `policy.default` set by `--strict` or `--checks`.
     pub fn render(&self) -> String {
         self.rules
             .iter()
             .map(|value| {
+                let (resolved, source) = if value.rule.boundary == Boundary::None {
+                    let (_, sourced) = resolve_setting(
+                        &value.rule.code,
+                        value.rule.group.as_deref(),
+                        &self.settings,
+                    );
+                    (sourced.value, sourced.source)
+                } else {
+                    (value.rule.strength, value.source.clone())
+                };
+                let strength = if resolved == Strength::Refuse && !value.rule.refusable {
+                    value.rule.strength
+                } else {
+                    resolved
+                };
                 format!(
                     "{} boundary={:?} strength={:?} effect={} source={:?} knob={} supported={}\n",
                     value.rule.code,
                     value.rule.boundary,
-                    value.rule.strength,
-                    match (value.rule.boundary, value.rule.strength) {
+                    strength,
+                    match (value.rule.boundary, strength) {
                         (_, Strength::Off) => "proceed",
                         (_, Strength::Warn) => "warn",
                         (Boundary::None, Strength::Refuse) => "configured_stop",
                         (Boundary::Operation, Strength::Refuse) => "operation_error",
                         (_, Strength::Refuse) => "boundary_refusal",
                     },
-                    value.source,
+                    source,
                     value.rule.knob.as_deref().unwrap_or("none"),
                     value
                         .rule
@@ -598,7 +738,7 @@ mod tests {
         assert!(policy.warn_or(code, fact(), |_| ()).is_ok());
         policy.overlay(
             &BTreeMap::from([(code.into(), Strength::Refuse)]),
-            Source::Project,
+            Layer::Project,
         );
         let diagnostic = policy
             .warn_or(code, fact(), |diagnostic| diagnostic)
@@ -657,11 +797,11 @@ mod tests {
         let mut overlaid = Policy::default();
         overlaid.overlay(
             &BTreeMap::from([("WRITER_CENSUS".into(), Strength::Off)]),
-            Source::Host,
+            Layer::Host,
         );
         overlaid.overlay(
             &BTreeMap::from([("WRITER_CENSUS".into(), Strength::Warn)]),
-            Source::Project,
+            Layer::Project,
         );
         let Effect::Warn(warning) =
             overlaid.check("WRITER_CENSUS", Facts::violation("census incomplete"))
@@ -683,7 +823,7 @@ mod tests {
         assert!(policy.warn_or("PR_ATTEMPT_STATE", fact(), |_| ()).is_ok());
         policy.overlay(
             &BTreeMap::from([("PR_ATTEMPT_STATE".into(), Strength::Refuse)]),
-            Source::Host,
+            Layer::Host,
         );
         assert!(policy.warn_or("PR_ATTEMPT_STATE", fact(), |_| ()).is_err());
     }
@@ -692,19 +832,19 @@ mod tests {
     fn overlays_report_source_and_do_not_change_boundary_authority() {
         let mut policy = Policy::default();
         for (source, strength) in [
-            (Source::Host, Strength::Off),
-            (Source::Project, Strength::Warn),
-            (Source::Dispatch, Strength::Refuse),
+            (Layer::Host, Strength::Off),
+            (Layer::Project, Strength::Warn),
+            (Layer::Route, Strength::Refuse),
         ] {
             policy.overlay(&BTreeMap::from([("WRITE_SCOPE".into(), strength)]), source);
-            assert_eq!(policy.rule("WRITE_SCOPE").source, source);
+            assert_eq!(policy.rule("WRITE_SCOPE").source.layer, source);
             assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, strength);
         }
         policy.overlay(
             &BTreeMap::from([("WRITE_SCOPE".into(), Strength::Off)]),
-            Source::Host,
+            Layer::Host,
         );
-        assert_eq!(policy.rule("WRITE_SCOPE").source, Source::Dispatch);
+        assert_eq!(policy.rule("WRITE_SCOPE").source.layer, Layer::Route);
         assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, Strength::Refuse);
         let Effect::Stop(diagnostic) =
             policy.check("WRITE_SCOPE", Facts::violation("outside scope"))
@@ -718,9 +858,147 @@ mod tests {
         {
             policy.overlay(
                 &BTreeMap::from([(rule.code.clone(), Strength::Off)]),
-                Source::Dispatch,
+                Layer::Route,
             );
             assert_eq!(policy.rule(&rule.code).rule.strength, Strength::Refuse);
         }
+    }
+
+    fn sourced(value: Strength, layer: Layer) -> Sourced<Strength> {
+        Sourced {
+            value,
+            source: ProvenanceSource {
+                layer,
+                origin: Some(format!("test#{layer}")),
+            },
+        }
+    }
+
+    #[test]
+    fn higher_layer_beats_more_specific_key() {
+        let mut settings = Settings::default();
+        // A launch default outranks a host `policy.CODE`, even though the code
+        // key is more specific.
+        settings.insert("policy.default", sourced(Strength::Off, Layer::Launch));
+        settings.insert("policy.GRANT_COUNT", sourced(Strength::Refuse, Layer::Host));
+        let (key, resolved) = resolve_setting("GRANT_COUNT", None, &settings);
+        assert_eq!(key, "policy.default");
+        assert_eq!(resolved.value, Strength::Off);
+        assert_eq!(resolved.source.layer, Layer::Launch);
+
+        // Within one layer, code beats group beats default.
+        let mut settings = Settings::default();
+        settings.insert("policy.default", sourced(Strength::Refuse, Layer::Host));
+        settings.insert("policy.custody", sourced(Strength::Off, Layer::Host));
+        settings.insert("policy.WRITE_SCOPE", sourced(Strength::Warn, Layer::Host));
+        let (key, resolved) = resolve_setting("WRITE_SCOPE", Some("custody"), &settings);
+        assert_eq!(key, "policy.WRITE_SCOPE");
+        assert_eq!(resolved.value, Strength::Warn);
+        let (key, resolved) = resolve_setting("WRITER_CENSUS", Some("custody"), &settings);
+        assert_eq!(key, "policy.custody");
+        assert_eq!(resolved.value, Strength::Off);
+    }
+
+    #[test]
+    fn strict_raises_only_refusable_rows() {
+        let mut policy = Policy::default();
+        policy.apply_checks(ChecksMode::Strict);
+        let refusable = table()
+            .iter()
+            .find(|rule| rule.boundary == Boundary::None && rule.refusable)
+            .expect("a refusable row");
+        assert!(matches!(
+            policy.check(&refusable.code, Facts::violation("observed")),
+            Effect::Stop(_)
+        ));
+        let observational = table()
+            .iter()
+            .find(|rule| rule.boundary == Boundary::None && !rule.refusable)
+            .expect("an observational row");
+        assert!(!matches!(
+            policy.check(&observational.code, Facts::violation("observed")),
+            Effect::Stop(_)
+        ));
+    }
+
+    #[test]
+    fn checks_off_emits_no_not_overridable_storm() {
+        let mut policy = Policy::default();
+        policy.apply_checks(ChecksMode::Off);
+        let ((), warnings) = crate::warning::capture(|| {
+            for rule in table()
+                .iter()
+                .filter(|rule| rule.boundary == Boundary::None)
+            {
+                assert!(matches!(
+                    policy.check(&rule.code, Facts::violation("observed")),
+                    Effect::Proceed
+                ));
+            }
+        });
+        assert!(
+            warnings
+                .iter()
+                .all(|warning| warning.code.as_ref() != CHECK_NOT_OVERRIDABLE.as_str()),
+            "{warnings:?}"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn code_on_boundary_row_warns_not_overridable() {
+        let mut policy = Policy::default();
+        let code = table()
+            .iter()
+            .find(|rule| rule.boundary == Boundary::Authority)
+            .map(|rule| rule.code.clone())
+            .expect("an authority row");
+        let compiled = policy.rule(&code).rule.strength;
+        let ((), warnings) = crate::warning::capture(|| {
+            policy.overlay(
+                &BTreeMap::from([(code.clone(), Strength::Off)]),
+                Layer::Host,
+            );
+        });
+        assert_eq!(policy.rule(&code).rule.strength, compiled);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code.as_ref() == CHECK_NOT_OVERRIDABLE.as_str()),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|warning| warning.setting.is_some()),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn every_refuse_row_maps_to_three_boundaries_or_operation() {
+        for rule in table() {
+            if rule.strength == Strength::Refuse {
+                assert!(rule.boundary.is_immutable(), "{}", rule.code);
+            }
+        }
+    }
+
+    #[test]
+    fn operation_rows_never_cite_adr_0035() {
+        for rule in table()
+            .iter()
+            .filter(|rule| rule.boundary == Boundary::Operation)
+        {
+            assert!(!rule.justification.contains("0035"), "{}", rule.code);
+        }
+    }
+
+    #[test]
+    fn sourced_settings_use_provenance_layer() {
+        // Resolution returns the shared provenance type, not a family-local
+        // source enum, so every layer has the same spelling and precedence.
+        let resolved: Sourced<Strength> =
+            resolve_strength("WRITE_SCOPE", None, &Settings::default());
+        assert_eq!(resolved.source.layer, Layer::Default);
+        assert!(resolved.source.origin.is_some());
     }
 }

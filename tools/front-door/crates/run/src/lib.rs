@@ -910,10 +910,10 @@ impl RunError {
 
     /// A generic code can wrap multiple guards; classify the typed cause rather
     /// than assigning an unrelated hard boundary to every confinement error.
-    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass as B;
+    pub fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary as B;
         match self {
-            Self::WriterHeadNotLaneBranch | Self::WriterSourceMismatch { .. } => B::LaneGit,
+            Self::WriterHeadNotLaneBranch | Self::WriterSourceMismatch { .. } => B::OtherWork,
             Self::WriterLineage(_) => B::Authority,
             Self::DeliveryPrepare {
                 refusal: Some(DeliveryPrepareRefusal::CredentialHelper(safety)),
@@ -1376,7 +1376,8 @@ mod error_size_tests {
 #[cfg(test)]
 mod diagnostic_projection_tests {
     use super::*;
-    use provenant_records::diagnostic::{BoundaryClass, Destination};
+    use provenant_records::diagnostic::Destination;
+    use provenant_records::policy::Boundary;
     use std::path::PathBuf;
 
     #[test]
@@ -1711,7 +1712,7 @@ mod diagnostic_projection_tests {
             );
             assert_eq!(
                 ErrorKind::from(&error).boundary_class(),
-                BoundaryClass::Credentials
+                Boundary::Credentials
             );
             for destination in [Destination::Local, Destination::Remote] {
                 let diagnostic = error.diagnostic(destination);

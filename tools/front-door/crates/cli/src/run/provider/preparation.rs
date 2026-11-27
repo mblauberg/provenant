@@ -168,8 +168,8 @@ pub(super) fn fresh_scratch_directory(
 
 fn uniform_candidate_boundary(
     count: usize,
-    boundaries: &std::collections::BTreeMap<usize, provenant_records::diagnostic::BoundaryClass>,
-) -> Option<provenant_records::diagnostic::BoundaryClass> {
+    boundaries: &std::collections::BTreeMap<usize, provenant_records::policy::Boundary>,
+) -> Option<provenant_records::policy::Boundary> {
     if count == 0 || boundaries.len() != count {
         return None;
     }
@@ -192,7 +192,7 @@ fn uniform_candidate_resource(
 
 fn attach_candidate_guard_facts(
     reasons: &mut [SkippedRoute],
-    boundaries: &std::collections::BTreeMap<usize, provenant_records::diagnostic::BoundaryClass>,
+    boundaries: &std::collections::BTreeMap<usize, provenant_records::policy::Boundary>,
     resources: &std::collections::BTreeMap<usize, provenant_records::diagnostic::ResourceFact>,
 ) -> Result<(), PrepareError> {
     for (index, reason) in reasons.iter_mut().enumerate() {
@@ -211,7 +211,7 @@ fn resolve_pacing_source(
     adapter: &str,
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
 ) -> provenant_records::diagnostic::ResourceFact {
-    use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
+    use provenant_records::diagnostic::{PacingReserveSetting, ResourceFact};
     let ResourceFact::PacingReserve {
         setting,
         origin,
@@ -221,7 +221,7 @@ fn resolve_pacing_source(
     else {
         return fact;
     };
-    if *origin != PacingSettingSource::Unresolved {
+    if *origin != Layer::Default {
         return fact;
     }
     let field = match setting {
@@ -235,9 +235,9 @@ fn resolve_pacing_source(
         origins.get(&key),
         Some(provenant_config::Origin::User { .. })
     ) {
-        PacingSettingSource::Configuration
+        Layer::Host
     } else {
-        PacingSettingSource::ShippedDefault
+        Layer::Default
     };
     fact
 }
@@ -1053,7 +1053,7 @@ pub(super) enum PrepareError {
     Candidates {
         message: String,
         plans: Vec<provenant_confinement::PlanError>,
-        candidate_boundary: Option<provenant_records::diagnostic::BoundaryClass>,
+        candidate_boundary: Option<provenant_records::policy::Boundary>,
         candidate_resource: Option<provenant_records::diagnostic::ResourceFact>,
         skipped_routes: Vec<SkippedRoute>,
         fallback_outcome: Option<provenant_records::run::PreparationFailure>,
@@ -1093,14 +1093,12 @@ fn candidate_refusal_message(
     Some(reasons.join("; "))
 }
 
-fn policy_code_for_boundary(
-    class: provenant_records::diagnostic::BoundaryClass,
-) -> Option<&'static str> {
-    use provenant_records::diagnostic::BoundaryClass as B;
+fn policy_code_for_boundary(class: provenant_records::policy::Boundary) -> Option<&'static str> {
+    use provenant_records::policy::Boundary as B;
     match class {
         B::Credentials => Some("PREPARATION_PREPARE_WITH_CREDENTIALS"),
-        B::LaneGit => Some("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"),
-        B::Integrity => Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"),
+        B::OtherWork => Some("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"),
+        B::Operation => Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"),
         B::Authority => Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY"),
         B::None => None,
     }
@@ -1166,7 +1164,7 @@ impl PrepareError {
                 note,
                 fallback_outcome,
             } => Box::new(run::PrepareRefusal {
-                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                boundary_class: provenant_records::policy::Boundary::None,
                 policy_code: None,
                 resource: None,
                 cause,
@@ -1200,8 +1198,7 @@ impl PrepareError {
                 let mut refusal = run::PrepareRefusal::boxed(cause, detail.clone());
                 refusal.terminal_note = Some(detail);
                 if binding_refusal {
-                    refusal.boundary_class =
-                        provenant_records::diagnostic::BoundaryClass::Authority;
+                    refusal.boundary_class = provenant_records::policy::Boundary::Authority;
                     let mut skipped = skip(
                         "project binding state",
                         SkipKind::Refused,
@@ -1236,10 +1233,10 @@ impl PrepareError {
                     let mut classes = plans.iter().map(|error| error.boundary_class());
                     match classes.next() {
                         Some(first) if classes.all(|class| class == first) => first,
-                        _ => provenant_records::diagnostic::BoundaryClass::None,
+                        _ => provenant_records::policy::Boundary::None,
                     }
                 } else {
-                    provenant_records::diagnostic::BoundaryClass::None
+                    provenant_records::policy::Boundary::None
                 };
                 let continuation_rule = skipped_routes.first().and_then(|first| {
                     let rule = first.continuation_guard?.rule;
@@ -1280,7 +1277,7 @@ impl PrepareError {
                     provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
-                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.boundary_class = provenant_records::policy::Boundary::Authority;
                 refusal.policy_code = Some("SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY".into());
                 refusal.terminal_note = Some(error.to_string());
                 refusal
@@ -1291,13 +1288,12 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = error.boundary_class();
-                refusal.policy_code = if refusal.boundary_class
-                    == provenant_records::diagnostic::BoundaryClass::Authority
-                {
-                    Some("CONFINEMENT_SOURCE_CWD_AUTHORITY".into())
-                } else {
-                    policy_code_for_boundary(refusal.boundary_class).map(str::to_owned)
-                };
+                refusal.policy_code =
+                    if refusal.boundary_class == provenant_records::policy::Boundary::Authority {
+                        Some("CONFINEMENT_SOURCE_CWD_AUTHORITY".into())
+                    } else {
+                        policy_code_for_boundary(refusal.boundary_class).map(str::to_owned)
+                    };
                 refusal
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
@@ -1311,7 +1307,7 @@ impl PrepareError {
                     provenant_records::run::CauseKind::AccessPolicyRefused,
                     guard.to_string(),
                 );
-                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.boundary_class = provenant_records::policy::Boundary::Authority;
                 refusal.policy_code = Some(guard.rule.code().into());
                 refusal
                     .skipped_routes
@@ -1323,7 +1319,7 @@ impl PrepareError {
                     provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
-                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.boundary_class = provenant_records::policy::Boundary::Authority;
                 refusal.policy_code = Some("CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY".into());
                 refusal
             }
@@ -1376,15 +1372,15 @@ impl PrepareError {
                     _ => None,
                 };
                 if let Some(policy_code) = policy_code {
-                    refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::None;
+                    refusal.boundary_class = provenant_records::policy::Boundary::None;
                     refusal.policy_code = Some(policy_code);
                     refusal.cause = provenant_records::run::CauseKind::AccessPolicyRefused;
                 } else {
                     refusal.boundary_class = match &error {
                         LaunchPromptError::TooLarge => {
-                            provenant_records::diagnostic::BoundaryClass::Integrity
+                            provenant_records::policy::Boundary::Operation
                         }
-                        _ => provenant_records::diagnostic::BoundaryClass::None,
+                        _ => provenant_records::policy::Boundary::None,
                     };
                     refusal.policy_code =
                         policy_code_for_boundary(refusal.boundary_class).map(str::to_owned);
@@ -1397,7 +1393,7 @@ impl PrepareError {
                     provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
-                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
+                refusal.boundary_class = provenant_records::policy::Boundary::Operation;
                 refusal.policy_code =
                     Some("CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY".into());
                 refusal
@@ -1414,7 +1410,7 @@ impl PrepareError {
                         dirty_predecessor_suffix(&uncommitted)
                     ),
                 );
-                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.boundary_class = provenant_records::policy::Boundary::Authority;
                 refusal.policy_code = Some("CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY".into());
                 refusal
             }
@@ -1426,7 +1422,7 @@ impl PrepareError {
                     provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
-                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.boundary_class = provenant_records::policy::Boundary::Authority;
                 refusal.policy_code = Some(
                     match &error {
                         Self::GraphInputsAuthority(_) => {
@@ -1536,24 +1532,24 @@ fn anchor_mismatch_at_refusal_names_path_and_stage() {
 #[test]
 // Spec: docs/specs/fabric.md#session-ready-steering
 fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     let error = run::RunError::Confinement(
         provenant_confinement::permissions::PermissionError::CredentialRoot,
     );
     let refusal = PrepareError::Run(error).into_refusal();
-    assert_eq!(refusal.boundary_class, BoundaryClass::Credentials);
+    assert_eq!(refusal.boundary_class, Boundary::Credentials);
     let permission = PrepareError::Permission(
         provenant_confinement::permissions::PermissionError::GitWriteAuthorityMissing,
     )
     .into_refusal();
-    assert_eq!(permission.boundary_class, BoundaryClass::LaneGit);
+    assert_eq!(permission.boundary_class, Boundary::OtherWork);
     assert_eq!(
         permission.skipped_routes[0].plan_error,
         Some(provenant_records::diagnostic::PlanFailure::Permission)
     );
     assert_eq!(
         permission.skipped_routes[0].guard_boundary,
-        Some(BoundaryClass::LaneGit)
+        Some(Boundary::OtherWork)
     );
     assert!(permission.terminal_note.is_some());
     let prompt = PrepareError::Prompt(LaunchPromptError::Provider(
@@ -1563,17 +1559,17 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         },
     ))
     .into_refusal();
-    assert_eq!(prompt.boundary_class, BoundaryClass::None);
+    assert_eq!(prompt.boundary_class, Boundary::None);
     assert_eq!(prompt.policy_code.as_deref(), Some("ARGV_PROMPT"));
     assert_eq!(
         PrepareError::Prompt(LaunchPromptError::TooLarge)
             .into_refusal()
             .boundary_class,
-        BoundaryClass::Integrity
+        Boundary::Operation
     );
     for error in [SourceHeadError::Missing, SourceHeadError::Invalid] {
         let refusal = PrepareError::SourceHead(error).into_refusal();
-        assert_eq!(refusal.boundary_class, BoundaryClass::Authority);
+        assert_eq!(refusal.boundary_class, Boundary::Authority);
     }
     for error in [
         ContinuationRequestError::MissingRoute,
@@ -1584,7 +1580,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     ] {
         let guard = error.guard();
         let refusal = PrepareError::ContinuationRequest(error).into_refusal();
-        assert_eq!(refusal.boundary_class, BoundaryClass::Authority);
+        assert_eq!(refusal.boundary_class, Boundary::Authority);
         assert_eq!(refusal.policy_code.as_deref(), Some(guard.rule.code()));
         assert_eq!(refusal.skipped_routes[0].continuation_guard, Some(guard));
         let error = run::RunError::ContinuationRefused { refusal };
@@ -1597,10 +1593,10 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     let source =
         PrepareError::SourceCwd(SourceCwdError::Authority("source identity changed".into()))
             .into_refusal();
-    assert_eq!(source.boundary_class, BoundaryClass::Authority);
+    assert_eq!(source.boundary_class, Boundary::Authority);
     let source_roots =
         PrepareError::SourceRoots(super::source_tree::SourceRootOverlap::Assets).into_refusal();
-    assert_eq!(source_roots.boundary_class, BoundaryClass::Authority);
+    assert_eq!(source_roots.boundary_class, Boundary::Authority);
     assert_eq!(
         source_roots.terminal_note.as_deref(),
         Some("product assets overlap the live graph source checkout")
@@ -1608,7 +1604,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     let unavailable =
         PrepareError::SourceCwd(SourceCwdError::Operational("cwd unavailable".into()))
             .into_refusal();
-    assert_eq!(unavailable.boundary_class, BoundaryClass::None);
+    assert_eq!(unavailable.boundary_class, Boundary::None);
     let unsupported = PrepareError::Unsupported(provenant_records::LaunchGap {
         adapter: "fixture",
         field: provenant_records::LaunchField::Write,
@@ -1619,12 +1615,12 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         action_source: provenant_records::Source::default(),
     })
     .into_refusal();
-    assert_eq!(unsupported.boundary_class, BoundaryClass::None);
+    assert_eq!(unsupported.boundary_class, Boundary::None);
     let home = PlanCheckError::Plan(provenant_confinement::PlanError::Home(
         provenant_os::home::HomeError::UnsupportedState,
     ))
     .into_refusal();
-    assert_eq!(home.boundary_class, BoundaryClass::None);
+    assert_eq!(home.boundary_class, Boundary::None);
     assert!(home.policy_code.is_none());
     assert_eq!(
         home.cause,
@@ -1632,22 +1628,19 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     );
     let extensions =
         PlanCheckError::Plan(provenant_confinement::PlanError::UnconfinedExtensions).into_refusal();
-    assert_eq!(extensions.boundary_class, BoundaryClass::Authority);
+    assert_eq!(extensions.boundary_class, Boundary::Authority);
     assert!(extensions.policy_code.is_some());
     let other = PrepareError::Other("TOKEN_SENTINEL".into()).into_refusal();
-    assert_eq!(other.boundary_class, BoundaryClass::None);
+    assert_eq!(other.boundary_class, Boundary::None);
     for error in [
         PrepareError::GraphInputsAuthority("invalid graph inputs root".into()),
         PrepareError::SourceProfileIsolated("source grant overlaps".into()),
         PrepareError::WriterContinuation("uncommitted predecessor edits".into()),
     ] {
-        assert_eq!(
-            error.into_refusal().boundary_class,
-            BoundaryClass::Authority
-        );
+        assert_eq!(error.into_refusal().boundary_class, Boundary::Authority);
     }
     let refusal = PrepareError::HostIndexOverlap.into_refusal();
-    assert_eq!(refusal.boundary_class, BoundaryClass::Integrity);
+    assert_eq!(refusal.boundary_class, Boundary::Operation);
     assert!(refusal.message.contains("overlap"));
     let candidate = || {
         let mut route = skip("fixture/model", SkipKind::Unavailable, "plan refused");
@@ -1667,12 +1660,12 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     };
     assert_eq!(
         aggregate(vec![candidate()]).boundary_class,
-        BoundaryClass::Authority
+        Boundary::Authority
     );
     let unrelated = skip("other/model", SkipKind::Unavailable, "not available");
     assert_eq!(
         aggregate(vec![candidate(), unrelated]).boundary_class,
-        BoundaryClass::None
+        Boundary::None
     );
     let guard = provenant_records::diagnostic::ContinuationGuard {
         rule: provenant_records::diagnostic::ContinuationRule::RetainedRoute,
@@ -1685,13 +1678,13 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert!(refused.message.contains(guard.rule.code()));
     assert!(refused.message.contains(guard.field.name()));
     let mut boundaries = std::collections::BTreeMap::new();
-    boundaries.insert(0, BoundaryClass::Authority);
+    boundaries.insert(0, Boundary::Authority);
     assert_eq!(
         uniform_candidate_boundary(1, &boundaries),
-        Some(BoundaryClass::Authority)
+        Some(Boundary::Authority)
     );
     assert_eq!(uniform_candidate_boundary(2, &boundaries), None);
-    boundaries.insert(1, BoundaryClass::Credentials);
+    boundaries.insert(1, Boundary::Credentials);
     assert_eq!(uniform_candidate_boundary(2, &boundaries), None);
     let mut resources = std::collections::BTreeMap::new();
     let fact = provenant_records::diagnostic::ResourceFact::ArgvPromptLimit {
@@ -1787,12 +1780,13 @@ impl From<&str> for PrepareError {
 #[test]
 fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::diagnostic::{BoundaryClass, Layer, ResourceFact};
+    use provenant_records::diagnostic::{Layer, ResourceFact};
+    use provenant_records::policy::Boundary;
     let mut reasons = vec![
         skip("a", SkipKind::Refused, "TOKEN_SENTINEL"),
         skip("b", SkipKind::Refused, "TOKEN_SENTINEL"),
     ];
-    let boundaries = [(0, BoundaryClass::Credentials)].into_iter().collect();
+    let boundaries = [(0, Boundary::Credentials)].into_iter().collect();
     let resources = [(
         1,
         ResourceFact::ArgvPromptLimit {
@@ -1803,7 +1797,7 @@ fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
     .into_iter()
     .collect();
     attach_candidate_guard_facts(&mut reasons, &boundaries, &resources)?;
-    assert_eq!(reasons[0].guard_boundary, Some(BoundaryClass::Credentials));
+    assert_eq!(reasons[0].guard_boundary, Some(Boundary::Credentials));
     assert!(
         reasons[0]
             .diagnostic()
@@ -1872,12 +1866,12 @@ impl PlanCheckError {
         Some(format!("{detail} at {display} ({stage})"))
     }
 
-    fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+    fn boundary_class(&self) -> provenant_records::policy::Boundary {
         match self {
             Self::Plan(error) => error.boundary_class(),
             Self::Permission(error) => error.boundary_class(),
             Self::ReadOnly(error) => error.boundary_class(),
-            Self::SourceHead(_) => provenant_records::diagnostic::BoundaryClass::Authority,
+            Self::SourceHead(_) => provenant_records::policy::Boundary::Authority,
         }
     }
 
@@ -1885,7 +1879,7 @@ impl PlanCheckError {
         use provenant_confinement::{PlanError, permissions::PermissionError};
         // A policy code must describe an established boundary, not manufacture
         // one for an ordinary capability, resource or private-home error.
-        if self.boundary_class() == provenant_records::diagnostic::BoundaryClass::None {
+        if self.boundary_class() == provenant_records::policy::Boundary::None {
             return None;
         }
         let permission = match self {
@@ -1913,19 +1907,19 @@ impl PlanCheckError {
                     "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY_2"
                 }
                 _ => match permission.boundary_class() {
-                    provenant_records::diagnostic::BoundaryClass::Credentials => {
+                    provenant_records::policy::Boundary::Credentials => {
                         "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"
                     }
-                    provenant_records::diagnostic::BoundaryClass::LaneGit => {
+                    provenant_records::policy::Boundary::OtherWork => {
                         "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
                     }
-                    provenant_records::diagnostic::BoundaryClass::Integrity => {
+                    provenant_records::policy::Boundary::Operation => {
                         "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
                     }
-                    provenant_records::diagnostic::BoundaryClass::Authority => {
+                    provenant_records::policy::Boundary::Authority => {
                         "PREPARATION_PREPARE_CANDIDATES_AUTHORITY"
                     }
-                    provenant_records::diagnostic::BoundaryClass::None => {
+                    provenant_records::policy::Boundary::None => {
                         return None;
                     }
                 },
@@ -1991,7 +1985,7 @@ impl PlanCheckError {
     fn into_refusal(self) -> Box<run::PrepareRefusal> {
         let skipped = self.skipped("preparation");
         let boundary = self.boundary_class();
-        let cause = if boundary == provenant_records::diagnostic::BoundaryClass::None {
+        let cause = if boundary == provenant_records::policy::Boundary::None {
             provenant_records::run::CauseKind::LaunchHandoffRefused
         } else {
             provenant_records::run::CauseKind::AccessPolicyRefused
@@ -2669,7 +2663,7 @@ mod stale_readiness_tests {
         assert_eq!(diagnostic.category.as_deref(), Some("warning"));
         assert_eq!(
             run::ErrorKind::StaleReadiness.boundary_class(),
-            provenant_records::diagnostic::BoundaryClass::None
+            provenant_records::policy::Boundary::None
         );
         assert!(
             diagnostic
@@ -4121,7 +4115,7 @@ pub(super) fn prepare_candidates_inner(
             {
                 reason_boundaries.insert(
                     reasons.len(),
-                    provenant_records::diagnostic::BoundaryClass::Authority,
+                    provenant_records::policy::Boundary::Authority,
                 );
                 reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                 continue;
@@ -4139,7 +4133,7 @@ pub(super) fn prepare_candidates_inner(
         if !model_policy.permits(request.intent) {
             reason_boundaries.insert(
                 reasons.len(),
-                provenant_records::diagnostic::BoundaryClass::Authority,
+                provenant_records::policy::Boundary::Authority,
             );
             reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
             continue;
@@ -4156,7 +4150,7 @@ pub(super) fn prepare_candidates_inner(
         {
             reason_boundaries.insert(
                 reasons.len(),
-                provenant_records::diagnostic::BoundaryClass::Authority,
+                provenant_records::policy::Boundary::Authority,
             );
             reasons.push(offer_mismatch_skip(&route, mismatch));
             continue;
@@ -4176,7 +4170,7 @@ pub(super) fn prepare_candidates_inner(
         {
             reason_boundaries.insert(
                 reasons.len(),
-                provenant_records::diagnostic::BoundaryClass::Authority,
+                provenant_records::policy::Boundary::Authority,
             );
             reasons.push(offer_mismatch_skip(
                 &route,
@@ -4772,7 +4766,7 @@ pub(super) fn prepare_candidates_inner(
                 }
                 Err(error) => {
                     let class = error.boundary_class();
-                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                    if class != provenant_records::policy::Boundary::None {
                         reason_boundaries.insert(reasons.len(), class);
                     }
                     if let Some(fact) = error.resource_fact() {
@@ -4871,11 +4865,12 @@ pub(super) fn prepare_candidates_inner(
             &lane_access,
             &launch_policy,
         ) {
-            use provenant_records::diagnostic::{BoundaryClass, ConfinementGuard, PlanFailure};
-            reason_boundaries.insert(reasons.len(), BoundaryClass::Credentials);
+            use provenant_records::diagnostic::{ConfinementGuard, PlanFailure};
+            use provenant_records::policy::Boundary;
+            reason_boundaries.insert(reasons.len(), Boundary::Credentials);
             let mut refused = skip(&label, SkipKind::Refused, error);
             refused.plan_error = Some(PlanFailure::CredentialRoot);
-            refused.guard_boundary = Some(BoundaryClass::Credentials);
+            refused.guard_boundary = Some(Boundary::Credentials);
             refused.confinement_guard = Some(ConfinementGuard::CredentialRootRefused);
             refused.set_cause(provenant_records::RouteExclusionReason::ConfinementUnavailable);
             reasons.push(refused);
@@ -5227,7 +5222,7 @@ pub(super) fn prepare_candidates_inner(
                     previous_outcome = provenant_routing::FallbackOutcome::Other;
                     reason_boundaries.insert(
                         reasons.len(),
-                        provenant_records::diagnostic::BoundaryClass::Credentials,
+                        provenant_records::policy::Boundary::Credentials,
                     );
                     reasons.push(skip(&label, SkipKind::Refused, error));
                     continue;
@@ -5258,7 +5253,7 @@ pub(super) fn prepare_candidates_inner(
                     );
                     previous_outcome = provider_preparation_fallback(&error);
                     let class = error.boundary_class();
-                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                    if class != provenant_records::policy::Boundary::None {
                         reason_boundaries.insert(reasons.len(), class);
                     }
                     reasons.push(credential_failure_skip(
@@ -5379,7 +5374,7 @@ pub(super) fn prepare_candidates_inner(
                 );
                 previous_outcome = provider_preparation_fallback(&error);
                 let class = error.boundary_class();
-                if class != provenant_records::diagnostic::BoundaryClass::None {
+                if class != provenant_records::policy::Boundary::None {
                     reason_boundaries.insert(reasons.len(), class);
                 }
                 if let Some(fact) = error.resource_fact() {
@@ -5420,7 +5415,7 @@ pub(super) fn prepare_candidates_inner(
                     );
                     previous_outcome = provider_preparation_fallback(&error);
                     let class = error.boundary_class();
-                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                    if class != provenant_records::policy::Boundary::None {
                         reason_boundaries.insert(reasons.len(), class);
                     }
                     if let Some(fact) = error.resource_fact() {
@@ -5463,7 +5458,7 @@ pub(super) fn prepare_candidates_inner(
                 ));
                 reason_boundaries.insert(
                     reasons.len() - 1,
-                    provenant_records::diagnostic::BoundaryClass::Authority,
+                    provenant_records::policy::Boundary::Authority,
                 );
                 continue;
             }
@@ -5487,7 +5482,7 @@ pub(super) fn prepare_candidates_inner(
                 ));
                 reason_boundaries.insert(
                     reasons.len() - 1,
-                    provenant_records::diagnostic::BoundaryClass::Authority,
+                    provenant_records::policy::Boundary::Authority,
                 );
                 continue;
             }
@@ -5500,7 +5495,7 @@ pub(super) fn prepare_candidates_inner(
                     Some(guard) => continuation_skip(&label, guard),
                     None => skip(&label, SkipKind::Refused, error.to_string()),
                 });
-                if class != provenant_records::diagnostic::BoundaryClass::None {
+                if class != provenant_records::policy::Boundary::None {
                     reason_boundaries.insert(reasons.len() - 1, class);
                 }
                 continue;
@@ -5672,7 +5667,7 @@ pub(super) fn prepare_candidates_inner(
             let publishing = spec.configure_publishing(scratch, &git, gh, &home, &gh_shim);
             if let Err(error) = publishing {
                 let class = error.boundary_class();
-                if class != provenant_records::diagnostic::BoundaryClass::None {
+                if class != provenant_records::policy::Boundary::None {
                     reason_boundaries.insert(reasons.len(), class);
                 }
                 reasons.push(setup_skip(&label, error.to_string()));
@@ -7761,7 +7756,7 @@ fn binding_refusal_preserves_local_repair_and_closed_route_guard() {
     );
     assert_eq!(
         refusal.boundary_class,
-        provenant_records::diagnostic::BoundaryClass::Authority
+        provenant_records::policy::Boundary::Authority
     );
     assert_eq!(
         refusal.policy_code.as_deref(),

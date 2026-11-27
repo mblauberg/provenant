@@ -691,7 +691,7 @@ fn handoff_write_scope_report_round_trips_full_and_compact_shapes() {
     use crate::{
         PathWire,
         handoff::{Handoff, HandoffStatus, WriteScopeReport},
-        policy::{Source, Strength},
+        policy::Strength,
     };
     let path =
         PathWire::from_relative(&provenant_core::RelativePath::parse("outside.txt").unwrap())
@@ -703,13 +703,19 @@ fn handoff_write_scope_report_round_trips_full_and_compact_shapes() {
             base: "1".repeat(40),
             head: "2".repeat(40),
             strength: Strength::Warn,
-            source: Source::Project,
+            source: crate::provenance::Source {
+                layer: Layer::Project,
+                origin: Some(".provenant/policy.toml".to_owned()),
+            },
             out_of_scope_paths: vec![path],
         },
         WriteScopeReport::Compact {
             code: "WRITE_SCOPE".into(),
             strength: Strength::Warn,
-            source: Source::Project,
+            source: crate::provenance::Source {
+                layer: Layer::Project,
+                origin: Some(".provenant/policy.toml".to_owned()),
+            },
             paths_artifact: "policy-write-scope.json".into(),
             out_of_scope_count: 1,
             paths_omitted_from_handoff: true,

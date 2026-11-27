@@ -830,7 +830,7 @@ mod tests {
                 mandatory
                     .validate_extra_write(&credential)
                     .map_err(|error| error.boundary_class()),
-                Err(provenant_records::diagnostic::BoundaryClass::Credentials)
+                Err(provenant_records::policy::Boundary::Credentials)
             );
         }
         Ok(())
@@ -1828,7 +1828,7 @@ mod tests {
                 inventory
                     .validate_extra_write(target)
                     .map_err(|error| error.boundary_class()),
-                Err(provenant_records::diagnostic::BoundaryClass::Credentials)
+                Err(provenant_records::policy::Boundary::Credentials)
             );
         }
         assert!(!inventory.github().contains(&targets[8]));

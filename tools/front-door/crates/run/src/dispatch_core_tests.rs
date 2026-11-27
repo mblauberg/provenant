@@ -412,7 +412,7 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
 }
 #[test]
 fn nested_lane_depth_above_the_maximum_warns_and_proceeds_unless_configured_to_stop() {
-    use provenant_records::policy::{Policy, Source, Strength};
+    use provenant_records::policy::{Policy, Strength};
     let policy = Policy::default();
     assert!(matches!(next_lane_depth(0, 2, &policy), Ok(1)));
     assert!(matches!(next_lane_depth(1, 2, &policy), Ok(2)));
@@ -423,7 +423,7 @@ fn nested_lane_depth_above_the_maximum_warns_and_proceeds_unless_configured_to_s
     let mut strict = Policy::default();
     strict.overlay(
         &std::collections::BTreeMap::from([("LANE_DEPTH".to_owned(), Strength::Refuse)]),
-        Source::Host,
+        provenant_records::Layer::Host,
     );
     assert!(matches!(
         next_lane_depth(2, 2, &strict),

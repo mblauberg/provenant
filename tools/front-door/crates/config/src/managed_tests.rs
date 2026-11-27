@@ -2,6 +2,7 @@
 use super::*;
 use provenant_core::RootInputs;
 use provenant_os::clock::SystemClock;
+use provenant_records::Layer;
 use provenant_records::{SourceInput, source_digest};
 use provenant_test_support::IdentityPathResolver;
 use std::{
@@ -156,7 +157,7 @@ mod account_sync;
 // Spec: docs/specs/state.md#config-never-widens-authority
 #[test]
 fn targets_retain_supplied_project_policy() {
-    use provenant_records::policy::{Source, Strength};
+    use provenant_records::policy::Strength;
     let fixture = Fixture::new();
     let mut settings = crate::policy::Settings::default();
     settings.projects.insert(
@@ -184,8 +185,12 @@ fn targets_retain_supplied_project_policy() {
         Strength::Refuse
     );
     assert_eq!(
-        targets.policy.rule("INSTALL_HOOKS_UNAVAILABLE").source,
-        Source::Project
+        targets
+            .policy
+            .rule("INSTALL_HOOKS_UNAVAILABLE")
+            .source
+            .layer,
+        Layer::Project
     );
 }
 
@@ -3650,7 +3655,7 @@ fn declared_hooks_render_and_symlinked_configs_refuse_before_any_write() {
             "INSTALL_HOOKS_UNAVAILABLE".to_owned(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Project,
+        provenant_records::Layer::Project,
     );
     f.targets.policy = std::sync::Arc::new(strict);
     assert!(matches!(

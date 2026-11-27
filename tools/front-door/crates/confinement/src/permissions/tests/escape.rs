@@ -558,7 +558,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         refused_runtime,
         Err(error)
             if error.boundary_class()
-                == provenant_records::diagnostic::BoundaryClass::Credentials
+                == provenant_records::policy::Boundary::Credentials
     ));
     let connect = |sbpl: &str, socket: &Path| {
         run_in(

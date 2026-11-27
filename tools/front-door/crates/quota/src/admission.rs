@@ -1,5 +1,6 @@
 //! Admission checks use validated evidence, including persisted provider refusals.
 use crate::*;
+use provenant_records::Layer;
 use provenant_records::{ExtraFields, ResolvedRoute, RouteExclusionReason, RouteReadiness};
 use serde::{Deserialize, Serialize};
 
@@ -844,11 +845,11 @@ mod admission_tests {
     // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
     #[test]
     fn admission_context_keeps_project_policy() {
-        use provenant_records::policy::{Policy, Source, Strength};
+        use provenant_records::policy::{Policy, Strength};
         let mut policy = Policy::default();
         policy.overlay(
             &[("QUOTA_IDENTITY_UNKNOWN".into(), Strength::Refuse)].into(),
-            Source::Project,
+            Layer::Project,
         );
         let context = super::Admission {
             freshness: &crate::DEFAULT_FRESHNESS,
@@ -863,8 +864,8 @@ mod admission_tests {
             Strength::Refuse
         );
         assert_eq!(
-            context.policy.rule("QUOTA_IDENTITY_UNKNOWN").source,
-            Source::Project
+            context.policy.rule("QUOTA_IDENTITY_UNKNOWN").source.layer,
+            Layer::Project
         );
     }
 
@@ -970,7 +971,7 @@ mod admission_tests {
                 provenant_records::policy::Strength::Refuse,
             )]
             .into(),
-            provenant_records::policy::Source::Project,
+            provenant_records::Layer::Project,
         );
         assert!(admission(&[]).check_with_policy(&route, &strict).is_err());
     }
@@ -2039,7 +2040,7 @@ mod admission_tests {
 
     #[test]
     fn stale_readiness_and_unknown_identity_warn_or_refuse_by_policy() {
-        use provenant_records::policy::{Policy, Source, Strength};
+        use provenant_records::policy::{Policy, Strength};
 
         let default_policy = Policy::default();
         let admission = Admission {
@@ -2062,7 +2063,7 @@ mod admission_tests {
         let mut strict = Policy::default();
         strict.overlay(
             &std::collections::BTreeMap::from([("QUOTA_READINESS_STALE".into(), Strength::Refuse)]),
-            Source::Project,
+            Layer::Project,
         );
         assert!(matches!(
             admission.check_with_policy(&stale, &strict),
@@ -2077,7 +2078,7 @@ mod admission_tests {
                 "QUOTA_IDENTITY_UNKNOWN".into(),
                 Strength::Refuse,
             )]),
-            Source::Project,
+            Layer::Project,
         );
         assert!(matches!(
             admission.check_with_policy(&unknown, &strict),

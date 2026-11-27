@@ -760,7 +760,7 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
                 "PLAN_STATE_SCRATCH_OVERLAP".to_owned(),
                 provenant_records::policy::Strength::Refuse,
             )]),
-            provenant_records::policy::Source::Project,
+            provenant_records::Layer::Project,
         );
         assert!(matches!(
             compile_sbpl_impl(&plan, &profile, &anchors, ProfileLimits::default(), &strict),
@@ -902,7 +902,7 @@ fn invalid_native_control_labels_are_omitted() {
     use super::super::validation::{
         filtered_native_controls, filtered_native_controls_with_policy,
     };
-    use provenant_records::policy::{Effect, Facts, Policy, Source, Strength};
+    use provenant_records::policy::{Effect, Facts, Policy, Strength};
     use std::collections::BTreeMap;
     let mut spec = ProviderProfileSpec {
         process_executables: vec![PathGrant {
@@ -934,7 +934,7 @@ fn invalid_native_control_labels_are_omitted() {
     ));
     policy.overlay(
         &BTreeMap::from([(code.to_owned(), Strength::Off)]),
-        Source::Host,
+        provenant_records::Layer::Host,
     );
     assert_eq!(
         policy.check(code, Facts::violation("predicate observed")),

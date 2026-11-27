@@ -7,6 +7,7 @@ use provenant_core::CancelToken;
 use provenant_os::exec::SystemExecutor;
 #[cfg(target_os = "macos")]
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
+use provenant_records::Layer;
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 use provenant_records::policy::Policy;
 #[cfg(target_os = "macos")]
@@ -471,7 +472,7 @@ fn large_profiles_render_without_truncation() -> Result<(), Box<dyn std::error::
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
 fn capacity_policy_controls_warning_off_and_typed_refusal() {
-    use provenant_records::policy::{Boundary, Source, Strength};
+    use provenant_records::policy::{Boundary, Strength};
     use std::collections::BTreeMap;
 
     let default = Policy::default();
@@ -501,7 +502,7 @@ fn capacity_policy_controls_warning_off_and_typed_refusal() {
     let mut off = Policy::default();
     off.overlay(
         &BTreeMap::from([("PROFILE_GRANT_COUNT".to_owned(), Strength::Off)]),
-        Source::Host,
+        Layer::Host,
     );
     assert!(
         check_capacity_policy(
@@ -523,7 +524,7 @@ fn capacity_policy_controls_warning_off_and_typed_refusal() {
     let mut strict = Policy::default();
     strict.overlay(
         &BTreeMap::from([("PROFILE_BYTES".to_owned(), Strength::Refuse)]),
-        Source::Dispatch,
+        Layer::Route,
     );
     assert!(matches!(
         check_capacity_policy(

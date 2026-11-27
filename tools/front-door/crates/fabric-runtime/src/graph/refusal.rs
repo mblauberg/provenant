@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn secret_shaped_inputs_warn_without_disclosing_values_under_every_policy() {
         let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
-        use provenant_records::policy::{Policy, Source, Strength};
+        use provenant_records::policy::{Policy, Strength};
         use std::collections::BTreeMap;
 
         let marker = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
@@ -524,7 +524,7 @@ mod tests {
         let mut strict = Policy::default();
         strict.overlay(
             &BTreeMap::from([("SECRET_SHAPED_INPUT".into(), Strength::Refuse)]),
-            Source::Project,
+            provenant_records::Layer::Project,
         );
         assert_eq!(
             strict.rule("SECRET_SHAPED_INPUT").rule.strength,

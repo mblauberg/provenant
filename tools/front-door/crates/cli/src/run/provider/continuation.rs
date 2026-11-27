@@ -210,27 +210,27 @@ impl ContinuationError {
         Some(ContinuationGuard { rule, field, issue })
     }
 
-    pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass;
+    pub(super) fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary;
         match self {
             Self::RouteMismatch(_)
             | Self::MissingSession
             | Self::MissingRoute
             | Self::NativeSessionUnavailable
-            | Self::NativeSessionLocation(_) => BoundaryClass::Authority,
+            | Self::NativeSessionLocation(_) => Boundary::Authority,
             Self::Provider(error) => error.boundary_class(),
             Self::StateCopy(error) => error.class,
-            Self::Other(_) => BoundaryClass::None,
+            Self::Other(_) => Boundary::None,
         }
     }
 }
 
 #[test]
 fn continuation_route_mismatch_is_a_typed_authority_boundary() {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     assert_eq!(
         ContinuationError::RouteMismatch(F::Model).boundary_class(),
-        BoundaryClass::Authority
+        Boundary::Authority
     );
     for error in [
         ContinuationError::MissingSession,
@@ -242,11 +242,11 @@ fn continuation_route_mismatch_is_a_typed_authority_boundary() {
         ContinuationError::Provider(provenant_providers::ProviderError::IdentityMismatch),
         ContinuationError::Provider(provenant_providers::ProviderError::UnknownIdentity),
     ] {
-        assert_eq!(error.boundary_class(), BoundaryClass::Authority);
+        assert_eq!(error.boundary_class(), Boundary::Authority);
     }
     assert_eq!(
         ContinuationError::Other("unavailable".into()).boundary_class(),
-        BoundaryClass::None
+        Boundary::None
     );
 }
 
@@ -847,14 +847,14 @@ pub(super) fn find_session_state_within(
 #[error("{message}")]
 pub(crate) struct StateCopyError {
     message: String,
-    class: provenant_records::diagnostic::BoundaryClass,
+    class: provenant_records::policy::Boundary,
     resource: Option<provenant_records::diagnostic::ResourceFact>,
 }
 impl StateCopyError {
     fn authority(message: &str) -> Self {
         Self {
             message: message.into(),
-            class: provenant_records::diagnostic::BoundaryClass::Authority,
+            class: provenant_records::policy::Boundary::Authority,
             resource: None,
         }
     }
@@ -866,7 +866,7 @@ impl StateCopyError {
                 diagnostic.detail.unwrap_or_default(),
                 diagnostic.next.unwrap_or_default()
             ),
-            class: provenant_records::diagnostic::BoundaryClass::None,
+            class: provenant_records::policy::Boundary::None,
             resource: Some(fact),
         }
     }
@@ -875,7 +875,7 @@ impl From<String> for StateCopyError {
     fn from(message: String) -> Self {
         Self {
             message,
-            class: provenant_records::diagnostic::BoundaryClass::None,
+            class: provenant_records::policy::Boundary::None,
             resource: None,
         }
     }
@@ -929,17 +929,17 @@ fn copy_state_classified(
         let Err(error) = &result else {
             return result;
         };
-        if error.class != provenant_records::diagnostic::BoundaryClass::None {
+        if error.class != provenant_records::policy::Boundary::None {
             let code = match error.class {
-                provenant_records::diagnostic::BoundaryClass::Integrity => {
+                provenant_records::policy::Boundary::Operation => {
                     Some("CONTINUATION_COPY_STATE_CLASSIFIED_DATA_INTEGRITY")
                 }
-                provenant_records::diagnostic::BoundaryClass::Authority
+                provenant_records::policy::Boundary::Authority
                     if error.message.contains("anchored directory") =>
                 {
                     Some("CONTINUATION_COPY_STATE_CLASSIFIED_AUTHORITY_2")
                 }
-                provenant_records::diagnostic::BoundaryClass::Authority => {
+                provenant_records::policy::Boundary::Authority => {
                     Some("CONTINUATION_COPY_STATE_CLASSIFIED_AUTHORITY")
                 }
                 _ => None,
@@ -1099,7 +1099,7 @@ fn copy_state_bounded(
 #[test]
 #[allow(clippy::print_stderr, reason = "report an unavailable test fixture")]
 fn retained_state_links_follow_access_model() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     let temp = tempfile::tempdir()?;
     let source = temp.path().join("source");
     std::fs::create_dir(&source)?;
@@ -1121,7 +1121,7 @@ fn retained_state_links_follow_access_model() -> Result<(), Box<dyn std::error::
         &Default::default(),
     )
     .unwrap_err();
-    assert_eq!(error.class, BoundaryClass::Integrity);
+    assert_eq!(error.class, Boundary::Operation);
     assert_eq!(
         error.to_string(),
         "retained provider state holds a hard-linked file"
@@ -1202,12 +1202,12 @@ pub(super) enum CopyRefusal {
 }
 
 impl CopyRefusal {
-    fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass;
+    fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary;
         match self {
-            Self::HardLink => BoundaryClass::Integrity,
-            Self::CrossDevice => BoundaryClass::Authority,
-            Self::Limit(_) | Self::Fs(_) => BoundaryClass::None,
+            Self::HardLink => Boundary::Operation,
+            Self::CrossDevice => Boundary::Authority,
+            Self::Limit(_) | Self::Fs(_) => Boundary::None,
         }
     }
 }
@@ -1479,7 +1479,7 @@ pub(super) fn copy_tree(
 #[test]
 fn retained_state_copy_refuses_redirected_roots_as_authority()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     let temp = tempfile::tempdir()?;
     let source = temp.path().join("source");
     std::fs::create_dir(&source)?;
@@ -1499,7 +1499,7 @@ fn retained_state_copy_refuses_redirected_roots_as_authority()
             &Default::default(),
         )
         .unwrap_err();
-        assert_eq!(error.class, BoundaryClass::Authority);
+        assert_eq!(error.class, Boundary::Authority);
         assert!(error.resource.is_none());
         assert!(!target.exists());
     }

@@ -156,12 +156,9 @@ WHERE record IS NOT NULL AND json_valid(CAST(record AS TEXT))
 
 -- A retained resource fact on a skipped route named its setting's origin with
 -- the retired SettingSource spellings; a shipped default is the Default layer
--- and a host setting is the Host layer. Only the Layer-typed ResourceFacts use
--- those spellings: PacingReserve (PacingSettingSource) and LanePorts
--- (PortSettingSource) still spell their origins `configuration` and
--- `shipped_default`. Rewriting those would turn a previously decodable
--- terminal row into an undecodable one, so restrict the rewrite to the eight
--- Layer kinds (every ResourceFact variant whose `origin` is a Layer).
+-- and a host setting is the Host layer. PacingReserve and LanePorts used their
+-- own setting-source enums, now replaced by Layer, so their old spellings are
+-- rewritten too. Every ResourceFact whose `origin` is a Layer is covered.
 UPDATE attempts
 SET record = CAST(json_set(CAST(record AS TEXT), '$.skipped_routes', json((
         SELECT json_group_array(
@@ -169,13 +166,13 @@ SET record = CAST(json_set(CAST(record AS TEXT), '$.skipped_routes', json((
                 WHEN json_extract(step.value, '$.guard_resource.kind') IN (
                         'disk','argv_prompt_limit','continuation_copy',
                         'write_grant_limit','grant_limit','profile_limit',
-                        'memory_pressure','lane_cap')
+                        'memory_pressure','lane_cap','pacing_reserve','lane_ports')
                     AND json_extract(step.value, '$.guard_resource.origin') = 'configuration'
                     THEN json(json_set(step.value, '$.guard_resource.origin', 'host'))
                 WHEN json_extract(step.value, '$.guard_resource.kind') IN (
                         'disk','argv_prompt_limit','continuation_copy',
                         'write_grant_limit','grant_limit','profile_limit',
-                        'memory_pressure','lane_cap')
+                        'memory_pressure','lane_cap','pacing_reserve','lane_ports')
                     AND json_extract(step.value, '$.guard_resource.origin') = 'shipped_default'
                     THEN json(json_set(step.value, '$.guard_resource.origin', 'default'))
                 ELSE json(step.value)
@@ -195,7 +192,7 @@ WHERE record IS NOT NULL
         WHERE json_extract(step.value, '$.guard_resource.kind') IN (
                   'disk','argv_prompt_limit','continuation_copy',
                   'write_grant_limit','grant_limit','profile_limit',
-                  'memory_pressure','lane_cap')
+                  'memory_pressure','lane_cap','pacing_reserve','lane_ports')
           AND json_extract(step.value, '$.guard_resource.origin') IN ('configuration','shipped_default')
   );
 

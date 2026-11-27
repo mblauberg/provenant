@@ -13,7 +13,7 @@
 //! Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
 
 use crate::ports::PortTable;
-use provenant_records::policy::{Policy, Source as PolicySource};
+use provenant_records::policy::Policy;
 use provenant_records::provenance::{Layer, Source, Sourced};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -350,20 +350,17 @@ fn port_source(ports: &PortTable, leaf: &str, key: &str) -> Source {
 
 /// Rank a policy's contributing sources to name the layer that set it.
 fn policy_layer(policy: &Policy) -> Layer {
-    fn rank(source: PolicySource) -> u8 {
-        match source {
-            PolicySource::CompiledDefault => 0,
-            PolicySource::Host => 1,
-            PolicySource::Project => 2,
-            PolicySource::Dispatch => 3,
-        }
+    fn rank(source: Layer) -> u8 {
+        Layer::ALL
+            .iter()
+            .position(|layer| *layer == source)
+            .unwrap_or_default() as u8
     }
     policy
         .rules
         .iter()
-        .map(|rule| rule.source)
+        .map(|rule| rule.source.layer)
         .max_by_key(|source| rank(*source))
-        .map(PolicySource::layer)
         .unwrap_or(Layer::Default)
 }
 
@@ -1125,7 +1122,7 @@ mod tests {
         // The compiled policy table owns the rule order; find the configured
         // rule by code rather than pinning its position in that table.
         let effective = result.policy.value.rule("PORT_COMMAND_EVIDENCE");
-        assert_eq!(effective.source, provenant_records::policy::Source::Project);
+        assert_eq!(effective.source.layer, provenant_records::Layer::Project);
         assert_eq!(effective.rule.strength, Strength::Refuse);
     }
 

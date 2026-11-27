@@ -322,7 +322,7 @@ fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
         )]
         .into_iter()
         .collect(),
-        provenant_records::policy::Source::Project,
+        provenant_records::Layer::Project,
     );
     let strict_config = RoutingConfig {
         freshness: provenant_quota::FreshnessPolicy::default(),
@@ -460,7 +460,7 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
         )]
         .into_iter()
         .collect(),
-        provenant_records::policy::Source::Project,
+        provenant_records::Layer::Project,
     );
     let strict_config = RoutingConfig {
         freshness: provenant_quota::FreshnessPolicy::default(),
@@ -661,7 +661,7 @@ fn pools_never_draw_unresolved_or_login_required_accounts() -> Result<(), Box<dy
             "QUOTA_IDENTITY_UNKNOWN".into(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     let access = [
         AccessContext {

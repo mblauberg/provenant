@@ -1604,7 +1604,10 @@ mod tests {
             base: "1".repeat(40),
             head: "2".repeat(40),
             strength: provenant_records::policy::Strength::Warn,
-            source: provenant_records::policy::Source::Project,
+            source: provenant_records::provenance::Source {
+                layer: provenant_records::Layer::Project,
+                origin: Some("policy.WRITE_SCOPE".to_owned()),
+            },
             out_of_scope_paths: paths,
         };
         seal(

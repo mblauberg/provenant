@@ -58,12 +58,12 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
                 ..Default::default()
             };
             skipped.set_continuation_guard(guard);
-            skipped.guard_boundary = Some(provenant_records::diagnostic::BoundaryClass::Authority);
+            skipped.guard_boundary = Some(provenant_records::policy::Boundary::Authority);
             let mut refusal = run::PrepareRefusal::boxed(
                 provenant_records::run::CauseKind::AccessPolicyRefused,
                 skipped.describe(),
             );
-            refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+            refusal.boundary_class = provenant_records::policy::Boundary::Authority;
             refusal.policy_code = Some(guard.rule.code().into());
             refusal.skipped_routes.push(skipped);
             Err(refusal)

@@ -205,7 +205,7 @@ fn disk_policy(strength: provenant_records::policy::Strength) -> provenant_recor
     let mut policy = provenant_records::policy::Policy::default();
     policy.overlay(
         &std::collections::BTreeMap::from([(provenant_config::DISK_FLOOR.to_owned(), strength)]),
-        provenant_records::policy::Source::Host,
+        provenant_records::Layer::Host,
     );
     policy
 }

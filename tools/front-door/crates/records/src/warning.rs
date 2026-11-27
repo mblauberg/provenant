@@ -56,6 +56,10 @@ impl WarningCode {
     }
 }
 
+/// An explicit `policy.<CODE>` named a boundary or operation row, which has
+/// no override. `--strict` and `policy.default` never emit this code.
+pub const CHECK_NOT_OVERRIDABLE: WarningCode = WarningCode("CHECK_NOT_OVERRIDABLE");
+
 /// A configured key was ignored: it is not part of the declared schema.
 pub const CONFIG_KEY_IGNORED: WarningCode = WarningCode("CONFIG_KEY_IGNORED");
 /// A configured value was malformed, so the default applied.

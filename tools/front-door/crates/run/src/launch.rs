@@ -325,7 +325,7 @@ pub struct Decoded {
 #[error("{message}")]
 pub struct PrepareRefusal {
     /// Boundary established by the original typed preparation failure, if any.
-    pub boundary_class: provenant_records::diagnostic::BoundaryClass,
+    pub boundary_class: provenant_records::policy::Boundary,
     /// Stable table row for the predicate that refused preparation.
     pub policy_code: Option<String>,
     /// A configurable resource threshold that refused this launch, if known.
@@ -365,7 +365,7 @@ impl PrepareRefusal {
 
     pub fn boxed(cause: CauseKind, message: impl Into<String>) -> Box<Self> {
         Box::new(Self {
-            boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+            boundary_class: provenant_records::policy::Boundary::None,
             policy_code: None,
             resource: None,
             cause,
@@ -389,7 +389,7 @@ impl PrepareRefusal {
             }
         } else if let Some(fact) = self.resource.clone() {
             RefusalKind::PreparationResource(fact)
-        } else if self.boundary_class != provenant_records::diagnostic::BoundaryClass::None {
+        } else if self.boundary_class != provenant_records::policy::Boundary::None {
             RefusalKind::PreparationBoundary(self.boundary_class)
         } else {
             RefusalKind::Preparation
@@ -407,11 +407,11 @@ impl PrepareRefusal {
 #[cfg(test)]
 #[test]
 fn pacing_refusal_retains_the_selected_reserve_fact() {
-    use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
+    use provenant_records::diagnostic::{PacingReserveSetting, ResourceFact};
     let fact = ResourceFact::PacingReserve {
         percent: 15,
         setting: PacingReserveSetting::AdapterFiveHour,
-        origin: PacingSettingSource::ShippedDefault,
+        origin: Layer::Default,
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),
@@ -567,29 +567,29 @@ fn check_launch_policy(
         code
     } else {
         match refusal.boundary_class {
-            provenant_records::diagnostic::BoundaryClass::Credentials => {
+            provenant_records::policy::Boundary::Credentials => {
                 "PREPARATION_PREPARE_WITH_CREDENTIALS"
             }
-            provenant_records::diagnostic::BoundaryClass::LaneGit => {
+            provenant_records::policy::Boundary::OtherWork => {
                 "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
             }
-            provenant_records::diagnostic::BoundaryClass::Integrity => {
+            provenant_records::policy::Boundary::Operation => {
                 "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
             }
-            provenant_records::diagnostic::BoundaryClass::Authority => {
+            provenant_records::policy::Boundary::Authority => {
                 "LAUNCH_RUNSTORE_START_INNER_AUTHORITY"
             }
-            provenant_records::diagnostic::BoundaryClass::None
+            provenant_records::policy::Boundary::None
                 if matches!(refusal.cause, CauseKind::DiskObservationUnavailable) =>
             {
                 "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
             }
             // A generic refusal with no boundary is not evidence of disk pressure.
             // Keep its typed outcome instead of letting a disk knob authorise it.
-            provenant_records::diagnostic::BoundaryClass::None => return Err(refusal),
+            provenant_records::policy::Boundary::None => return Err(refusal),
         }
     };
-    if refusal.boundary_class != provenant_records::diagnostic::BoundaryClass::None {
+    if refusal.boundary_class != provenant_records::policy::Boundary::None {
         return Err(policy.boundary_error(code, Facts::violation(&refusal.message), refusal));
     }
     match policy.check(code, Facts::violation(&refusal.message)) {
@@ -608,17 +608,17 @@ fn check_preparation_refusal(
     policy: &provenant_records::policy::Policy,
     refusal: Box<PrepareRefusal>,
 ) -> Box<PrepareRefusal> {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     let class = refusal.boundary_class;
-    if class == BoundaryClass::None {
+    if class == Boundary::None {
         return refusal;
     }
     let fallback = match class {
-        BoundaryClass::Credentials => Some("PREPARATION_PREPARE_WITH_CREDENTIALS"),
-        BoundaryClass::LaneGit => Some("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"),
-        BoundaryClass::Integrity => Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"),
-        BoundaryClass::Authority => Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY"),
-        BoundaryClass::None => None,
+        Boundary::Credentials => Some("PREPARATION_PREPARE_WITH_CREDENTIALS"),
+        Boundary::OtherWork => Some("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"),
+        Boundary::Operation => Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"),
+        Boundary::Authority => Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY"),
+        Boundary::None => None,
     };
     let owned = refusal.policy_code.clone();
     let Some(code) = owned.as_deref().or(fallback) else {
@@ -954,7 +954,7 @@ pub(crate) enum HandOff {
     /// A typed boundary refused the prepared handoff.
     Boundary {
         message: String,
-        class: provenant_records::diagnostic::BoundaryClass,
+        class: provenant_records::policy::Boundary,
         cause: Option<CauseKind>,
     },
     Resource {
@@ -1047,10 +1047,10 @@ pub(crate) fn mark_admission_release_pending(record: &mut AttemptRecord) -> Resu
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefusalKind {
     Policy,
-    PolicyBoundary(provenant_records::diagnostic::BoundaryClass),
+    PolicyBoundary(provenant_records::policy::Boundary),
     PolicyResource(provenant_records::diagnostic::ResourceFact),
     Preparation,
-    PreparationBoundary(provenant_records::diagnostic::BoundaryClass),
+    PreparationBoundary(provenant_records::policy::Boundary),
     PreparationResource(provenant_records::diagnostic::ResourceFact),
     PacingReserve,
     PacingReserveResource(provenant_records::diagnostic::ResourceFact),
@@ -1061,7 +1061,7 @@ pub enum RefusalKind {
     InvalidWriteGrantPath,
     WriteGrantsLimit(provenant_records::diagnostic::ResourceFact),
     Handoff,
-    HandoffBoundary(provenant_records::diagnostic::BoundaryClass),
+    HandoffBoundary(provenant_records::policy::Boundary),
     HandoffResource(provenant_records::diagnostic::ResourceFact),
     RetainedImport {
         fence: provenant_supervisor::custody::PendingImport,
@@ -1116,14 +1116,14 @@ impl RefusalKind {
 
     /// The boundary established by this kind alone. Generic preparation and
     /// handoff errors need their original cause to establish a boundary.
-    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass as B;
+    pub fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary as B;
         match self {
             Self::HandoffBoundary(class)
             | Self::PreparationBoundary(class)
             | Self::PolicyBoundary(class) => *class,
             Self::WorktreeBusy | Self::InvalidWriteGrantPath => B::Authority,
-            Self::RetainedImport { .. } => B::LaneGit,
+            Self::RetainedImport { .. } => B::OtherWork,
             Self::StoredPromptUnreadable | Self::CloudPlacementRemoved => B::Authority,
             Self::Policy
             | Self::Preparation
@@ -2288,9 +2288,7 @@ impl RunStore {
                 Err(refusal) => {
                     let kind = if let Some(fact) = refusal.resource.clone() {
                         RefusalKind::PolicyResource(fact)
-                    } else if refusal.boundary_class
-                        != provenant_records::diagnostic::BoundaryClass::None
-                    {
+                    } else if refusal.boundary_class != provenant_records::policy::Boundary::None {
                         RefusalKind::PolicyBoundary(refusal.boundary_class)
                     } else {
                         RefusalKind::Policy
@@ -2947,11 +2945,11 @@ mod lane_environment_tests {
                 "LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE".into(),
                 provenant_records::policy::Strength::Off,
             )]),
-            provenant_records::policy::Source::Project,
+            provenant_records::Layer::Project,
         );
         assert_eq!(
-            off.rule("LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE").source,
-            provenant_records::policy::Source::Project
+            off.rule("LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE").source.layer,
+            provenant_records::Layer::Project
         );
         assert!(lane_port_plan_or_warn(&not_directory, &off).is_none());
         let defaults = lane_port_plan_or_warn(temp.path(), &policy).expect("default plan");

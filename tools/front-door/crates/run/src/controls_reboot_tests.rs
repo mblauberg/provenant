@@ -6,7 +6,7 @@ type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 #[test]
 // Spec: docs/specs/run-settlement.md#continuation
 fn resume_policy_uses_current_project_configuration() -> TestResult {
-    use provenant_records::policy::{Source, Strength};
+    use provenant_records::policy::Strength;
     let temp = tempfile::tempdir()?;
     let clock = crate::tests::clock();
     let cancel = provenant_core::CancelToken::new();
@@ -25,14 +25,17 @@ fn resume_policy_uses_current_project_configuration() -> TestResult {
     )?;
     let policy = store.resume_policy(run.attempt_id, &call)?;
     assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, Strength::Refuse);
-    assert_eq!(policy.rule("WRITE_SCOPE").source, Source::Project);
+    assert_eq!(
+        policy.rule("WRITE_SCOPE").source.layer,
+        provenant_records::Layer::Project
+    );
     Ok(())
 }
 
 #[test]
 // Spec: docs/specs/run-settlement.md#continuation
 fn resume_re_resolves_policy_from_current_project_configuration() -> TestResult {
-    use provenant_records::policy::{Source, Strength};
+    use provenant_records::policy::Strength;
     let temp = tempfile::tempdir()?;
     let clock = crate::tests::clock();
     let cancel = provenant_core::CancelToken::new();
@@ -64,7 +67,10 @@ fn resume_re_resolves_policy_from_current_project_configuration() -> TestResult 
         &Default::default(),
     );
     assert_eq!(current.rule("WRITE_SCOPE").rule.strength, Strength::Warn);
-    assert_eq!(current.rule("WRITE_SCOPE").source, Source::Project);
+    assert_eq!(
+        current.rule("WRITE_SCOPE").source.layer,
+        provenant_records::Layer::Project
+    );
     let next = Resume {
         prior: run.attempt_id,
         expected_generation: 0,
@@ -77,7 +83,10 @@ fn resume_re_resolves_policy_from_current_project_configuration() -> TestResult 
     store.resume(&next, &call)?;
     let policy = store.resume_policy(next.attempt_id, &call)?;
     assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, Strength::Warn);
-    assert_eq!(policy.rule("WRITE_SCOPE").source, Source::Project);
+    assert_eq!(
+        policy.rule("WRITE_SCOPE").source.layer,
+        provenant_records::Layer::Project
+    );
     Ok(())
 }
 

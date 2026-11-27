@@ -1180,7 +1180,7 @@ impl CapabilityOverlay {
             let mut rule = GapRule {
                 action,
                 source: crate::Source {
-                    layer: effective.source.layer(),
+                    layer: effective.source.layer,
                     origin: Some(format!("policy.{code}")),
                 },
                 shadowed: Vec::new(),

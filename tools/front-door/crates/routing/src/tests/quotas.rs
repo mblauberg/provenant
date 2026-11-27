@@ -965,7 +965,7 @@ fn go_missing_cycle_uses_ledger_and_warns_without_holding() -> Result<(), Box<dy
                 provenant_records::policy::Strength::Warn,
             ),
         ]),
-        provenant_records::policy::Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     let route = go_route(&fixture, config, &fixture.explicit, Some(observation))?;
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));

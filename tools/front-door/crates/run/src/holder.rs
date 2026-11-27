@@ -9,6 +9,7 @@ use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock, OperationId, ProjectId, RootInputs, WallTime,
 };
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
+use provenant_records::Layer;
 #[cfg(test)]
 use provenant_records::Tokens;
 use provenant_supervisor::{
@@ -248,7 +249,7 @@ fn route_identity_label(route: Option<&RouteRecord>) -> String {
 #[cfg(test)]
 mod identity_policy_tests {
     use super::*;
-    use provenant_records::policy::{Policy, Source, Strength};
+    use provenant_records::policy::{Policy, Strength};
 
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
@@ -265,7 +266,7 @@ mod identity_policy_tests {
             let mut policy = Policy::default();
             policy.overlay(
                 &[("PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE".to_owned(), strength)].into(),
-                Source::Host,
+                Layer::Host,
             );
             let mut exit = crate::tests::exit();
             exit.provider_identity_evidence_incomplete = true;

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn shared_submit_context_warns_above_the_depth_limit_unless_configured_to_stop() {
-    use provenant_records::policy::{Policy, Source, Strength};
+    use provenant_records::policy::{Policy, Strength};
     let parent = AttemptId::from_bytes([7; 16]);
     let parent_text = parent.to_string();
     let state = Path::new("/state");
@@ -20,7 +20,7 @@ fn shared_submit_context_warns_above_the_depth_limit_unless_configured_to_stop()
     let mut strict = Policy::default();
     strict.overlay(
         &std::collections::BTreeMap::from([("LANE_DEPTH".to_owned(), Strength::Refuse)]),
-        Source::Host,
+        provenant_records::Layer::Host,
     );
     let Err(failure) = lane_dispatch_values(
         Some("2"),

@@ -140,18 +140,18 @@ impl PermissionError {
 
     /// Classify only a boundary that the typed error itself establishes.
     /// Ambiguous guards stay unclassified until their caller supplies context.
-    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass as B;
+    pub fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary as B;
         match self {
             Self::ConfigOrigin { source, .. } => source.boundary_class(),
             Self::CredentialRoot
             | Self::CredentialRootAt { .. }
             | Self::CredentialGrant { .. }
             | Self::CredentialStore { .. } => B::Credentials,
-            Self::GitControlEntriesExceeded { .. } => B::Integrity,
+            Self::GitControlEntriesExceeded { .. } => B::Operation,
             Self::GitControlHardLinked(_)
             | Self::GitWriteAuthorityMissing
-            | Self::Repository(_) => B::LaneGit,
+            | Self::Repository(_) => B::OtherWork,
             // A required path that cannot be encoded cannot be enforced in
             // SBPL. Optional discoveries are filtered before compilation.
             Self::AnchorMismatch
@@ -236,7 +236,7 @@ mod repository_error_tests {
 
     #[test]
     fn boundary_classification_uses_the_typed_guard_not_a_generic_code() {
-        use provenant_records::diagnostic::BoundaryClass as B;
+        use provenant_records::policy::Boundary as B;
         for (error, expected) in [
             (PermissionError::CredentialRoot, B::Credentials),
             (
@@ -246,13 +246,13 @@ mod repository_error_tests {
                 },
                 B::Credentials,
             ),
-            (PermissionError::GitWriteAuthorityMissing, B::LaneGit),
+            (PermissionError::GitWriteAuthorityMissing, B::OtherWork),
             (
                 PermissionError::GitControlEntriesExceeded {
                     limit: 1,
                     path: "/fixture".into(),
                 },
-                B::Integrity,
+                B::Operation,
             ),
             (PermissionError::AnchorMismatch, B::Authority),
             (PermissionError::NonUtf8Path, B::Authority),

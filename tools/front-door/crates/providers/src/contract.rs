@@ -98,8 +98,8 @@ impl ProviderError {
         }
     }
     /// Classify only failures whose typed cause establishes a hard boundary.
-    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass as B;
+    pub fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary as B;
         match self {
             Self::ContinuationRefused(_)
             | Self::IdentityMismatch
@@ -130,7 +130,7 @@ impl ProviderError {
 #[cfg(test)]
 #[test]
 fn provider_failure_boundary_depends_on_typed_cause() {
-    use provenant_records::diagnostic::BoundaryClass as B;
+    use provenant_records::policy::Boundary as B;
     assert_eq!(
         ProviderError::IdentityMismatch.boundary_class(),
         B::Authority

@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::Layer;
 use provenant_records::warning::{Warning, warn};
 
 /// Bind declared lane capabilities to the provider's confinement profile.
@@ -539,7 +540,7 @@ fn admission_policy_is_independent_of_primary_or_fallback_adapter()
             );
             assert_eq!(
                 admission.boundary,
-                provenant_records::diagnostic::BoundaryClass::None
+                provenant_records::policy::Boundary::None
             );
             assert_eq!(admission.source, provenant_records::Layer::Default);
         }
@@ -570,7 +571,7 @@ pub(super) fn apply_sandbox_mode(
     };
     route.sandbox_admission = Some(run::SandboxAdmissionReceipt {
         parent_sandboxed: parent,
-        boundary: provenant_records::diagnostic::BoundaryClass::None,
+        boundary: provenant_records::policy::Boundary::None,
         strength,
         knob: "lanes.sandbox_floor".into(),
         source: task
@@ -1444,10 +1445,10 @@ pub(super) enum SourceCwdError {
     Operational(String),
 }
 impl SourceCwdError {
-    pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+    pub(super) fn boundary_class(&self) -> provenant_records::policy::Boundary {
         match self {
-            Self::Authority(_) => provenant_records::diagnostic::BoundaryClass::Authority,
-            Self::Operational(_) => provenant_records::diagnostic::BoundaryClass::None,
+            Self::Authority(_) => provenant_records::policy::Boundary::Authority,
+            Self::Operational(_) => provenant_records::policy::Boundary::None,
         }
     }
 }
@@ -1671,22 +1672,22 @@ impl From<provenant_config::ConfigError> for ReadOnlyPlanError {
     }
 }
 impl ReadOnlyPlanError {
-    pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass;
+    pub(super) fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary;
         match self {
             Self::Run(error) => error.boundary_class(),
             Self::Plan(error) => error.boundary_class(),
             Self::BindingMismatch
             | Self::MissingBinding
             | Self::PinnedSourceRequiresGit
-            | Self::ProjectBindingDirectory(_) => BoundaryClass::Authority,
-            Self::Other(_) => BoundaryClass::None,
+            | Self::ProjectBindingDirectory(_) => Boundary::Authority,
+            Self::Other(_) => Boundary::None,
         }
     }
 }
 
 fn read_only_plan_authority(error: ReadOnlyPlanError) -> ReadOnlyPlanError {
-    if error.boundary_class() == provenant_records::diagnostic::BoundaryClass::Authority {
+    if error.boundary_class() == provenant_records::policy::Boundary::Authority {
         provenant_records::policy::Policy::default().boundary_error(
             "CONFINEMENT_READ_ONLY_PLAN_AUTHORITY",
             provenant_records::policy::Facts::violation(error.to_string()),
@@ -1700,18 +1701,18 @@ fn read_only_plan_authority(error: ReadOnlyPlanError) -> ReadOnlyPlanError {
 // Spec: docs/specs/state.md#config-never-widens-authority
 #[test]
 fn read_only_plan_preserves_typed_authority_failures() {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     assert_eq!(
         ReadOnlyPlanError::BindingMismatch.boundary_class(),
-        BoundaryClass::Authority
+        Boundary::Authority
     );
     assert_eq!(
         ReadOnlyPlanError::MissingBinding.boundary_class(),
-        BoundaryClass::Authority
+        Boundary::Authority
     );
     assert_eq!(
         ReadOnlyPlanError::PinnedSourceRequiresGit.boundary_class(),
-        BoundaryClass::Authority
+        Boundary::Authority
     );
     let unsafe_binding = ReadOnlyPlanError::from(
         provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
@@ -1726,18 +1727,18 @@ fn read_only_plan_preserves_typed_authority_failures() {
             if diagnostic.detail.as_deref().is_some_and(|detail| detail.contains("/private/state"))
                 && diagnostic.next.as_deref().is_some_and(|next| next.contains("chmod 700"))
     ));
-    assert_eq!(unsafe_binding.boundary_class(), BoundaryClass::Authority);
+    assert_eq!(unsafe_binding.boundary_class(), Boundary::Authority);
     assert!(matches!(
         ReadOnlyPlanError::from(provenant_config::ConfigError::InvalidProjectBinding),
         ReadOnlyPlanError::Other(_)
     ));
     assert_eq!(
         ReadOnlyPlanError::Other("unavailable".into()).boundary_class(),
-        BoundaryClass::None
+        Boundary::None
     );
     assert_eq!(
         ReadOnlyPlanError::Run(run::RunError::WriterHeadNotLaneBranch).boundary_class(),
-        BoundaryClass::LaneGit
+        Boundary::OtherWork
     );
 }
 
@@ -2610,7 +2611,7 @@ mod alias_tests {
     #[test]
     // Spec: docs/specs/fabric.md#sources-and-read-roots
     fn source_configuration_warning_is_opt_in() {
-        use provenant_records::policy::{Policy, Source, Strength};
+        use provenant_records::policy::{Policy, Strength};
         let admission = crate::run::SourceAdmission {
             path: "/project".into(),
             warnings: vec![crate::run::SourceWarning {
@@ -2625,7 +2626,7 @@ mod alias_tests {
                 "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE".into(),
                 Strength::Warn,
             )]),
-            Source::Host,
+            Layer::Host,
         );
         assert_eq!(source_warning_messages(&admission, &policy).len(), 1);
     }
