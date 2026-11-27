@@ -12,11 +12,13 @@ mod hooks;
 mod standing;
 mod state;
 mod summary;
+mod template;
 pub use discovery::*;
 pub use hooks::*;
 pub use standing::*;
 pub use state::*;
 pub use summary::*;
+pub use template::*;
 
 /// The most a checkpoint may hold: the size of the largest workflow input the CLI
 /// reads, so a saved file never fits the reader but not the store. Readers that
@@ -276,6 +278,10 @@ impl From<HostSessionId> for String {
 pub enum SessionError {
     #[error("checkpoint exceeds 256 KiB")]
     TooLarge,
+    #[error("checkpoint template edit did not produce a revision")]
+    TemplateNotSaved,
+    #[error("checkpoint template could not be scaffolded")]
+    Template(#[from] TemplateError),
     #[error("checkpoint is not UTF-8")]
     Utf8(#[from] std::str::Utf8Error),
     #[error("filesystem failure while accessing checkpoint")]
@@ -394,6 +400,39 @@ impl SessionStore {
         self.save_revision_with(text, budget, cancel, clock, |dir, record| {
             self.publish_discovery(dir, record)
         })
+    }
+
+    /// Scaffold from the current revision and publish under one checkpoint lock.
+    pub fn save_template(
+        &self,
+        input: &str,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<(Saved, String), SessionError> {
+        self.save_template_with(input, budget, cancel, clock, scaffold_checkpoint)
+    }
+
+    fn save_template_with(
+        &self,
+        input: &str,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+        scaffold: impl FnOnce(Option<&str>, &str) -> Result<String, TemplateError>,
+    ) -> Result<(Saved, String), SessionError> {
+        let mut text = String::new();
+        let saved = self.update(
+            true,
+            |current| {
+                text = scaffold(current, input)?;
+                Ok(Some(text.clone()))
+            },
+            budget,
+            cancel,
+            clock,
+        )?;
+        Ok((saved.ok_or(SessionError::TemplateNotSaved)?, text))
     }
 
     fn save_revision_with(
@@ -2458,6 +2497,37 @@ mod tests {
         // An unrelated key is not held by the first key's lock.
         save(&store(&root, project, "other"), b"independent").unwrap();
     }
+    #[test]
+    fn template_save_scaffolds_and_publishes_under_the_checkpoint_lock() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        save(&selected, b"## Intent\nPreserve this grant.\n").unwrap();
+        let clock = clock(0);
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let expired = TestClock::new(
+            UtcMicros::from_micros(0).unwrap(),
+            MonoTime::from_micros(1_000_000),
+        );
+        let (_, text) = selected
+            .save_template_with(
+                "## Goal\nNew goal.\n",
+                budget,
+                &CancelToken::new(),
+                &clock,
+                |current, input| {
+                    assert!(matches!(
+                        selected.save(b"racing", budget, &CancelToken::new(), &expired),
+                        Err(SessionError::Filesystem(FsError::LockTimeout { .. }))
+                    ));
+                    scaffold_checkpoint(current, input)
+                },
+            )
+            .unwrap();
+        assert!(text.contains("Preserve this grant."));
+        assert!(text.contains("New goal."));
+        assert_eq!(selected.read().unwrap().unwrap().markdown, text);
+    }
+
     #[test]
     fn update_edits_under_the_checkpoint_lock_and_creates_only_when_asked() {
         let (_temp, root, project) = setup();

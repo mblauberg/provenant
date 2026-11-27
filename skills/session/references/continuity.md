@@ -29,6 +29,13 @@ ask. A save replaces the whole file, so carry the record forward, dropping
 grants and asks that ended. Hooks restore the record ahead of the prose at
 session start, after compaction and after an account switch.
 
+The chair's standing grants — maintainer ownership, release, admin-merge, no
+local builds and the CI cap — live in this typed record, each with its source
+and expiry. Memory prose is not their owner: it may explain why a grant exists,
+but a hook restores only what this record carries. `session save
+--from-template` scaffolds the record and carries it forward from the previous
+revision; a save that omits it warns and names the gap instead of refusing.
+
 ## Body
 
 The [checkpoint template](../templates/checkpoint.template.md) lists the

@@ -116,6 +116,42 @@ names, with no data schema version bump (see [consumer contract](consumer-contra
   catalogue must remain useful without inventing content or spending a model call.
 - Owner: `crates/workflow/src/session/summary.rs`, `crates/cli/src/console.rs`
 
+### Template-backed checkpoint saves
+
+A save validates the checkpoint against the contract of
+`skills/session/templates/checkpoint.template.md` and warns, never refuses,
+naming each gap: no `provenant_standing` frontmatter, no `## Intent` heading,
+or a body over 2 KiB after frontmatter. The 2 KiB body budget is a template
+conformance advisory and coexists with the configured, 8 KiB-floored
+`retention.projects.<project>.checkpoint_soft_bytes` warning; a small body
+therefore produces neither size warning. All three are typed
+`SESSION_ADVISORY` warnings and leave the stored text unchanged. Standing
+grants — maintainer ownership, release, admin-merge, no local builds and the
+CI cap — are owned by the typed record, each with its `owner:` or `rule:`
+source and expiry, not by memory prose; a hook restores only sourced,
+unexpired grants.
+
+`session save --from-template` builds a template-shaped checkpoint: every
+template section is present, each filled from the same section of the current
+revision and then overridden by a section in `--file` (`-` reads stdin). The
+frontmatter root keys carry forward from the current revision unless the input
+supplies the same key, preserving structured summaries while allowing input
+values to win. A valid typed standing record carries forward unless the input
+supplies a valid one; an empty record is scaffolded only when neither header
+has a valid record. Preamble text and unknown sections carry forward; input
+nonblank preamble replaces previous preamble and input sections replace matching
+previous sections, including unknown headings. Repeated headings in one input and
+additional H1 sections retain their content. A first save has no previous
+revision and starts from an empty standing record. Reading, scaffolding and
+publishing a template save hold the checkpoint lock together, so another save
+cannot be overwritten by a scaffold based on a stale revision.
+`session show` renders the whole checkpoint as its default human output;
+`--json` stays an independent transport and an explicit `--full` keeps the same
+complete text.
+- Why: a checkpoint missing its standing record restores no grants, and a
+  compact one-line view hides the ruling the chair needs after compaction.
+- Owner: `crates/workflow/src/session/template.rs`, `crates/cli/src/workflow.rs`
+
 ### Explicit chairs are discoverable
 
 Only an explicit checkpoint save registers a chair; lanes, autosave and reads

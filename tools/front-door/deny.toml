@@ -38,6 +38,8 @@ allow = [
   "anstyle",
   "arraydeque",
   "autocfg",
+  # serde-saphyr's serializer enables binary values encoded with base64.
+  "base64",
   "bitflags",
   "block-buffer",
   "cc",
@@ -80,6 +82,8 @@ allow = [
   "memchr",
   "multiversion_no_op",
   "num-traits",
+  # serde-saphyr's serializer uses this hasher for its internal value map.
+  "nohash-hasher",
   "once_cell",
   "pkg-config",
   "portable-atomic",

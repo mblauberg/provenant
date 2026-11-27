@@ -84,6 +84,10 @@ pub enum Session {
         /// Replace the registered chair binding and record its previous identity
         #[arg(long)]
         rebind: bool,
+        /// Scaffold the checkpoint template, prefilled from the previous revision;
+        /// sections from --file win over the previous revision's sections
+        #[arg(long)]
+        from_template: bool,
     },
     /// Show a session checkpoint, one of its retained revisions or their list
     Show {
@@ -566,23 +570,37 @@ fn execute(
             session_id,
             file,
             rebind,
+            from_template,
             ..
         }) => {
             let id = HostSessionId::parse(&session_id).map_err(|e| invalid(e.to_string()))?;
-            let text = read_input(&file)?;
+            let input = read_input(&file)?;
             let keep = session_revisions(&edge.roots);
             let host = provenant_config::bind_host(&edge.roots)
                 .map_err(|error| invalid(error.to_string()))?;
-            let saved = SessionStore::new(edge.roots.state.clone(), project, id)
+            let store = SessionStore::new(edge.roots.state.clone(), project, id)
                 .with_chair(host, actor)
                 .with_workspace(cwd.to_owned())
                 .with_rebind(rebind)
-                .with_revisions(keep)
-                .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
+                .with_revisions(keep);
+            let (saved, text) = if from_template {
+                let input = std::str::from_utf8(&input).map_err(|e| invalid(e.to_string()))?;
+                let (saved, text) =
+                    store.save_template(input, edge.budget()?, &edge.cancel, &edge.clock)?;
+                (saved, text.into_bytes())
+            } else {
+                let saved =
+                    store.save_revision(&input, edge.budget()?, &edge.cancel, &edge.clock)?;
+                (saved, input)
+            };
             for warning in saved.warnings {
                 report_text_warning(warning);
             }
-            let references = checkpoint_references(std::str::from_utf8(&text).unwrap_or_default());
+            let markdown = std::str::from_utf8(&text).unwrap_or_default();
+            for warning in provenant_workflow::session::template_gaps(markdown) {
+                report_text_warning(warning);
+            }
+            let references = checkpoint_references(markdown);
             let closed = std::thread::scope(|scope| {
                 let tasks: Vec<_> = references
                     .iter()
@@ -1329,7 +1347,18 @@ pub fn run(
     } else {
         String::new()
     };
-    let mode = globals.render_mode(&human, read_only, None);
+    // A chair reading its own checkpoint needs the whole text, not the
+    // compact fallback's bounded rows. JSON stays an independent transport and
+    // an explicit --full keeps the same complete human view.
+    let mode = if command == "workflow session show" && !globals.json {
+        crate::RenderMode::Human {
+            text: &human,
+            read_only,
+            summary: None,
+        }
+    } else {
+        globals.render_mode(&human, read_only, None)
+    };
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     match crate::render_command_result(
         &mut out,
