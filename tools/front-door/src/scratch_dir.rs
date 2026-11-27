@@ -29,6 +29,12 @@ impl ScratchDir {
 
 impl Drop for ScratchDir {
     fn drop(&mut self) {
+        // `upgrade --keep` writes a `keep` marker into the smoke scratch. Its
+        // presence is the durable request to retain the graph's worktree, so
+        // collection must leave the whole tree in place.
+        if self.0.join("keep").exists() {
+            return;
+        }
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -51,6 +57,21 @@ mod tests {
         std::fs::write(path.join("content"), b"data")?;
         drop(first);
         assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scratch_with_a_keep_marker_is_retained() -> std::io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let scratch = ScratchDir::new_in(parent.path(), "kept-")?;
+        let path = scratch.path().to_owned();
+        std::fs::write(path.join("keep"), b"smoke-verify-1\n")?;
+        drop(scratch);
+        assert!(path.exists(), "a kept scratch must survive drop");
+        assert_eq!(
+            std::fs::read_to_string(path.join("keep"))?,
+            "smoke-verify-1\n"
+        );
         Ok(())
     }
 }

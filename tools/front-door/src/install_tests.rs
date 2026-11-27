@@ -1032,7 +1032,7 @@ fn smoke_preview_and_verify_share_writer_branch_and_base() -> Result<(), Box<dyn
         set: vec!["smoke-write=false".into(), "diff_base=ignored".into()],
     };
     let render = |explain: bool| {
-        smoke_run_argv(
+        smoke_argv(
             &program,
             &project,
             &state,
@@ -1620,4 +1620,125 @@ fn upgrade_full_human_keeps_capability_notices_and_smoke_envelopes() {
     );
     assert!(text.contains("\"schema_version\""), "{text}");
     assert!(!text.contains("use --full for detail"), "{text}");
+}
+
+#[test]
+fn keep_marker_retains_the_smoke_graph_and_names_retire_next()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("smoke");
+    std::fs::create_dir(&project)?;
+    let ((), warnings) = provenant_records::warning::capture(|| {
+        super::retain_smoke(&project, "smoke-verify-1", true).unwrap();
+    });
+    assert_eq!(
+        std::fs::read_to_string(project.join("keep"))?.trim(),
+        "smoke-verify-1"
+    );
+    let warning = warnings
+        .iter()
+        .find(|warning| warning.code.as_ref() == "SMOKE_GRAPH_RETAINED")
+        .ok_or("SMOKE_GRAPH_RETAINED was not emitted")?;
+    assert!(
+        warning
+            .next
+            .iter()
+            .any(|step| step.argv.join(" ") == "provenant retire graph:smoke-verify-1"),
+        "{warning:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn release_pin_keeps_a_release_that_pruning_would_remove() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_records::{AbsolutePath, FileDigest, InstallReceipt, SourceDigest};
+
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let install = state.join("install");
+    let releases = state.join("releases");
+    std::fs::create_dir_all(&install)?;
+    std::fs::create_dir_all(&releases)?;
+    let mut pinned = [0u8; 32];
+    pinned[31] = 1;
+    let receipt = InstallReceipt {
+        extra: Default::default(),
+        schema_version: provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION,
+        state_format_version: provenant_records::STATE_FORMAT_VERSION,
+        live_record_format: None,
+        source_digest: SourceDigest::from_bytes(pinned),
+        manifest_digest: FileDigest::from_bytes([2; 32]),
+        asset_digest: SourceDigest::from_bytes([3; 32]),
+        target: "fixture".into(),
+        toolchain: "fixture".into(),
+        bin_dir: AbsolutePath::new(&temp.path().join("bin"))?,
+        harnesses: Vec::new(),
+        harness_targets: Vec::new(),
+        entries: Vec::new(),
+        migrations: Vec::new(),
+    };
+    std::fs::write(
+        install.join("receipt.json"),
+        provenant_records::encode(&receipt)?,
+    )?;
+    let pin = super::verify_release_pin(&state).map_err(std::io::Error::other)?;
+    for n in 1..=4u8 {
+        let release = releases.join(format!("{n:064x}"));
+        std::fs::create_dir(&release)?;
+        std::fs::write(release.join("release.json"), b"fixture")?;
+    }
+    let active = format!("{:064x}", 4u8);
+    let pinned_name = format!("{:064x}", 1u8);
+    super::prune_release_directories(&releases, &active, &[])?;
+    assert!(
+        releases.join(&pinned_name).exists(),
+        "a pinned release must survive"
+    );
+    assert!(!releases.join(format!("{:064x}", 2u8)).exists());
+    drop(pin);
+    Ok(())
+}
+
+#[test]
+fn upgrade_host_selection_keeps_all_or_only_named_peers() {
+    let args = cli::Upgrade {
+        common: Default::default(),
+        yes: false,
+        from_source: None,
+        hosts: "all".into(),
+        keep: false,
+        verify: false,
+        verify_only: false,
+        dry_run: false,
+        host: None,
+        route: None,
+        set: Vec::new(),
+    };
+    assert_eq!(super::selected_upgrade_hosts(&args), None);
+    let all = cli::Upgrade {
+        common: cli::CommonArgs {
+            host: vec![cli::HostArg::All],
+            ..Default::default()
+        },
+        ..args.clone()
+    };
+    assert_eq!(super::selected_upgrade_hosts(&all), None);
+    let named = cli::Upgrade {
+        common: cli::CommonArgs {
+            host: vec![
+                cli::HostArg::Named("worker".into()),
+                cli::HostArg::Named("peer-a".into()),
+            ],
+            ..Default::default()
+        },
+        ..args
+    };
+    assert_eq!(
+        super::selected_upgrade_hosts(&named),
+        Some(std::collections::BTreeSet::from([
+            "peer-a".to_owned(),
+            "worker".to_owned(),
+        ]))
+    );
 }

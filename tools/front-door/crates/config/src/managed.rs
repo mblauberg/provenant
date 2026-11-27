@@ -10,7 +10,7 @@ use provenant_records::{
     AbsolutePath, CanonicalV1, FileDigest, Harness, HookAction, HookProtocol, InstallReceipt,
     Limits, OwnedEntry, OwnedValue, PathWire, ResolvedHarnessTarget, VersionInfo,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
@@ -78,6 +78,8 @@ pub enum InstallError {
     PeerAgentConflict(PathBuf),
     #[error("destination changed since preview: {0}")]
     Drift(PathBuf),
+    #[error("install lock is held by another process: {detail}")]
+    LockHeld { detail: String },
     #[error("select at least one harness explicitly, without duplicates")]
     HarnessSelection,
     #[error(
@@ -623,6 +625,10 @@ pub struct InstallOutcome {
     pub actions: Vec<Action>,
     pub manual_includes: Vec<ManualInclude>,
     pub dry_run: bool,
+    /// The target already matched the recorded receipt, so the install wrote
+    /// nothing and the caller can skip straight to verification.
+    #[serde(default)]
+    pub already_installed: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManualInclude {
@@ -1514,6 +1520,78 @@ pub struct InstallContext<'a> {
     pub budget: WaitBudget,
     pub cancel: &'a CancelToken,
 }
+
+/// Advisory identity of the process that owns `install.lock`. Published while
+/// the lock is held so a waiter whose bounded wait expired can name the holder.
+#[derive(Debug, Serialize, Deserialize)]
+struct InstallLockHolder {
+    pid: u32,
+    started_at_unix_seconds: u64,
+    version: String,
+}
+
+impl InstallLockHolder {
+    fn detail(&self) -> String {
+        format!(
+            "pid {}, started {}, version {}",
+            self.pid, self.started_at_unix_seconds, self.version
+        )
+    }
+}
+
+fn install_lock_holder_path(install_root: &Path) -> PathBuf {
+    install_root.join("lock-holder.json")
+}
+
+/// Publish under the lock. A failure is advisory: the install still proceeds.
+fn publish_install_lock_holder(install_root: &Path) -> impl Drop {
+    let path = install_lock_holder_path(install_root);
+    let started_at_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let holder = InstallLockHolder {
+        pid: std::process::id(),
+        started_at_unix_seconds,
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&holder)
+        && let Ok(mut file) = std::fs::File::create(&path)
+    {
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        let _ = file.write_all(&bytes);
+    }
+    InstallLockHolderGuard(path)
+}
+
+struct InstallLockHolderGuard(PathBuf);
+
+impl Drop for InstallLockHolderGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn install_lock_holder_detail(install_root: &Path) -> String {
+    std::fs::read(install_lock_holder_path(install_root))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<InstallLockHolder>(&bytes).ok())
+        .map(|holder| holder.detail())
+        .unwrap_or_else(|| "holder details unavailable".to_owned())
+}
+
+/// The recorded target and the requested one name the same version, artefact
+/// and owned entries. The migration log is a history of steps, not a target,
+/// so a later migration never turns an unchanged install into a rewrite.
+fn same_install_target(current: &InstallReceipt, target: &InstallReceipt) -> bool {
+    let mut current = current.clone();
+    current.migrations.clear();
+    let mut target = target.clone();
+    target.migrations.clear();
+    current == target
+}
+
 pub fn install(
     plan: &InstallPlan,
     context: &InstallContext<'_>,
@@ -1540,6 +1618,7 @@ pub fn install(
             actions: actions.clone(),
             manual_includes: plan.manual_includes.clone(),
             dry_run: true,
+            already_installed: false,
         });
     }
     crate::release::verify_binary_identity(&plan.release, smoke, context.cancel)?;
@@ -1547,13 +1626,32 @@ pub fn install(
     let state_root = plan.targets.roots.state.as_path();
     let install_root = plan.targets.roots.state.as_path().join("install");
     let dir = directory_scoped(&install_root, state_root, true)?;
-    let _lock = dir.lock(
-        OsStr::new("install.lock"),
-        LockMode::Exclusive,
-        context.budget,
-        context.cancel,
-        context.clock,
-    )?;
+    let _lock = dir
+        .lock(
+            OsStr::new("install.lock"),
+            LockMode::Exclusive,
+            context.budget,
+            context.cancel,
+            context.clock,
+        )
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => InstallError::LockHeld {
+                detail: install_lock_holder_detail(&install_root),
+            },
+            other => InstallError::Fs(other),
+        })?;
+    let _holder = publish_install_lock_holder(&install_root);
+    // Under the lock, an unchanged target is a no-op: report it so the caller
+    // can skip straight to verification instead of rewriting owned files.
+    if read_receipt(&plan.targets)?.is_some_and(|current| same_install_target(&current, &receipt)) {
+        return Ok(InstallOutcome {
+            findings: plan.findings().to_vec(),
+            actions: Vec::new(),
+            manual_includes: plan.manual_includes.clone(),
+            dry_run: false,
+            already_installed: true,
+        });
+    }
     // Validate the complete preview before the first authoritative file write.
     for (path, before) in &plan.before.entries {
         if &snapshot_scoped(path, plan.targets.roots.state.as_path())? != before {
@@ -1625,6 +1723,7 @@ pub fn install(
         manual_includes: plan.manual_includes.clone(),
         findings: plan.findings().to_vec(),
         dry_run: false,
+        already_installed: false,
     })
 }
 /// Preview and apply, repeating both up to twice when the only change since
@@ -2878,6 +2977,7 @@ fn not_installed(
         actions: Vec::new(),
         manual_includes: Vec::new(),
         dry_run: false,
+        already_installed: false,
     })
 }
 
@@ -3108,6 +3208,7 @@ pub fn uninstall(
         findings,
         manual_includes: Vec::new(),
         dry_run: false,
+        already_installed: false,
     })
 }
 
