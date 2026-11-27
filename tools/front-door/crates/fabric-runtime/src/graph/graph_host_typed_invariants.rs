@@ -234,7 +234,15 @@ fn node_progress_host_fields_round_trip_and_reject_malformed_values() {
             json!(false),
         ),
         field("provisioned_source", json!("abc123"), json!(false)),
-        field("warnings", json!(["redacted launch warning"]), json!(false)),
+        field(
+            "warnings",
+            json!([{
+                "code":"SECRET_INPUT_POLICY_UNEXPECTED",
+                "message":"redacted launch warning",
+                "source":{"layer":"detected","origin":"warning:SECRET_INPUT_POLICY_UNEXPECTED"}
+            }]),
+            json!(false),
+        ),
         field(
             "removed_requirements",
             json!([{"consumer":"review","verdict_input":true}]),

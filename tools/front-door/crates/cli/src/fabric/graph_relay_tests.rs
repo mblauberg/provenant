@@ -422,7 +422,11 @@ mod provisioning_tests {
         foreign_progress.worktree = Some(path.into());
         checkpoint.nodes.push(foreign_progress);
         bind_admitted_provisioning_owners(&mut checkpoint, &default_sharing())?;
-        let rebound = checkpoint.nodes[1].provisioned_owner;
+        let rebound = checkpoint
+            .nodes
+            .iter()
+            .find(|row| row.id == "other--writer")
+            .and_then(|row| row.provisioned_owner);
         assert!(rebound.is_some());
         assert_eq!(checkpoint.nodes[0].provisioned_owner, rebound);
         Ok(())

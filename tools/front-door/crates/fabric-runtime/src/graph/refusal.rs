@@ -546,6 +546,10 @@ mod tests {
             .expect("compiled scanner policy");
         rule.rule.refusable = true;
         rule.rule.strength = Strength::Refuse;
+        legacy.set_default(
+            Strength::Refuse,
+            provenant_records::provenance::Layer::Project,
+        );
         let warnings = input_warnings(&input, &legacy);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("strength=Warn"));

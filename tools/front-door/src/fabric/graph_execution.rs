@@ -2770,6 +2770,10 @@ mod tests {
     #[test]
     fn nested_graph_selectors_refuse_symlinked_scratch_directories()
     -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            FileJournal, GraphCheckpoint, GraphExecution, GraphJournal,
+        };
+
         if super::super::peer_tests::host_test(
             "fabric::graph_execution::tests::nested_graph_selectors_refuse_symlinked_scratch_directories",
         )? {
@@ -2811,25 +2815,44 @@ mod tests {
             }
             // A corrupt exact ID remains resolved, with its typed error intact
             // for resume; status/cancel still have the graph identity.
-            let mut corrupt: serde_json::Value = serde_json::from_slice(include_bytes!(
+            let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
                 "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
             ))?;
             let corrupt_id = "broken-checkpoint";
-            corrupt["checkpoint"]["graph_id"] = corrupt_id.into();
-            corrupt["execution"]["document"]["graph_id"] = corrupt_id.into();
-            corrupt["digest"] = format!("sha256:{}", "0".repeat(64)).into();
-            let retained = factory
+            let mut execution: GraphExecution =
+                serde_json::from_value(fixture["execution"].clone())?;
+            execution.directory = rig.project.clone();
+            execution.document.graph_id = corrupt_id.into();
+            let mut corrupt: GraphCheckpoint =
+                serde_json::from_value(fixture["checkpoint"].clone())?;
+            corrupt.graph_id = corrupt_id.into();
+            let corrupt_path = factory
                 .context
                 .roots
                 .state
                 .as_path()
                 .join("fabric/graphs")
-                .join(factory.context.identity.project.to_string());
-            std::fs::create_dir_all(&retained)?;
-            std::fs::write(
-                retained.join(format!("graph-{corrupt_id}.json")),
-                serde_json::to_vec(&corrupt)?,
-            )?;
+                .join(factory.context.identity.project.to_string())
+                .join(format!("graph-{corrupt_id}.json"));
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+            {
+                let mut journal = FileJournal::open(
+                    &factory.context.roots.state,
+                    factory.context.identity.project,
+                    corrupt_id,
+                    budget,
+                    &cancel,
+                    &factory.clock,
+                )?;
+                journal.bind(execution)?;
+                journal.prepare_fixture_checkpoint(&mut corrupt)?;
+                journal.save(&corrupt)?;
+            }
+            let mut stored: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&corrupt_path)?)?;
+            stored["digest"] = format!("sha256:{}", "0".repeat(64)).into();
+            std::fs::write(&corrupt_path, serde_json::to_vec(&stored)?)?;
             let (id, resolved_document) = factory.resolve_graph(corrupt_id)?;
             assert_eq!(id, corrupt_id);
             let error = resolved_document.unwrap_err();

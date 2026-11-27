@@ -507,8 +507,8 @@ fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     let graph_id = "g-test";
     let credential = "AKIAIOSFODNN7EXAMPLE";
-    // In round-2 normal form, identity-like keys inside parameters retained their
-    // value unredacted. Round 3 normalises all descendants of parameters as content.
+    // The credential-shaped value stays byte-for-byte in the sealed submission
+    // through the store migration and replay.
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 2,
         "graph_id": graph_id,
@@ -550,6 +550,8 @@ fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
         .join(format!("fabric/graphs/{project}/graph-{graph_id}.json"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, CanonicalV1::bytes(&fixture).unwrap().as_bytes()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    migrate_store(root.as_path()).unwrap();
 
     let mut journal = FileJournal::open(&root, project, graph_id, budget, &cancel, &clock).unwrap();
     // Stored checkpoint in round-2 normal form must resume without BadCheckpoint/BadDigest.

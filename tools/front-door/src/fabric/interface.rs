@@ -307,6 +307,12 @@ fn launch_settings_report(
             "lanes.read_source".into(),
             launch_setting(json!(read_source.source.to_string()), "--isolated"),
         );
+        if flags.checks_mode.is_none() {
+            settings.insert(
+                "policy.default".into(),
+                launch_setting(json!("refuse"), "--isolated"),
+            );
+        }
     }
     if let Some(destination) = &flags.destination {
         settings.insert(
@@ -367,10 +373,15 @@ pub(super) fn launch_input(input: &Value) -> Result<Value, FacadeError> {
         if attempt.get("lane_access").is_none() {
             attempt["lane_access"] = json!("isolated");
         }
-        if attempt.get("sandbox").is_none()
-            && let Some(sandbox) = input.get("sandbox").filter(|value| !value.is_null())
-        {
-            attempt["sandbox"] = sandbox.clone();
+        if attempt.get("sandbox").is_none() {
+            attempt["sandbox"] = input
+                .get("sandbox")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .unwrap_or_else(|| json!("on"));
+        }
+        if attempt.get("checks_mode").is_none() {
+            attempt["checks_mode"] = json!("strict");
         }
     }
     if let Some(mode) = &flags.checks_mode {
@@ -1181,11 +1192,16 @@ impl Factory {
                 }
             };
         let flags = LaunchFlags::from_input(value);
-        if let Some(mode) = flags
+        let checks_mode = flags
             .checks_mode
             .as_deref()
             .and_then(provenant_records::policy::ChecksMode::from_checks)
-        {
+            .or_else(|| {
+                flags
+                    .isolated
+                    .then_some(provenant_records::policy::ChecksMode::Strict)
+            });
+        if let Some(mode) = checks_mode {
             policy.apply_checks(mode);
         }
         Ok(
