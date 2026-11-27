@@ -19,6 +19,7 @@ use super::gh::rate_limit_reset;
 use provenant_config::ports::Request;
 use provenant_config::{Forge, ForgePort};
 use provenant_core::GitOid;
+use provenant_records::command_result::{CommandError, ErrorClass, Subject};
 pub(crate) mod journal;
 mod port;
 mod retry;
@@ -71,6 +72,45 @@ pub(crate) enum ObserveError {
     Expired,
     #[error("{0}")]
     Unavailable(String),
+}
+
+/// The one error-contract projection for an exhausted forge allowance: a
+/// transient condition carrying the reset, never a CI verdict and never bad
+/// input. Spec: docs/specs/agent-native.md#33-error-and-warning-contract-3777
+fn forge_quota_error(reset: jiff::Timestamp, pr: Option<u64>, cause: Option<&str>) -> CommandError {
+    let mut error = CommandError::new(
+        "FORGE_QUOTA_EXHAUSTED",
+        format!("forge rate limit; retry after {reset}"),
+        cause,
+        format!("wait until {reset}, then retry the head observation"),
+    );
+    error = error
+        .with_class(ErrorClass::Transient {
+            retry_at: Some(reset),
+        })
+        .with_subject(Subject {
+            host: None,
+            project: None,
+            graph: None,
+            node: None,
+            attempt: None,
+            item: None,
+            pr,
+            head: None,
+        });
+    error
+}
+
+impl ObserveError {
+    /// A rate limit becomes a typed transient error; other read failures keep
+    /// their own classification and are not silently turned into quota.
+    #[allow(dead_code, reason = "readers adopt this projection as they migrate")]
+    pub(crate) fn command_error(&self, pr: u64) -> Option<CommandError> {
+        match self {
+            Self::RateLimited { reset } => Some(forge_quota_error(*reset, Some(pr), None)),
+            _ => None,
+        }
+    }
 }
 
 /// What GitHub reports about a pull request's ability to merge. UNKNOWN is a
@@ -131,20 +171,56 @@ pub(crate) struct HeadReading {
     pub retry_at: Option<jiff::Timestamp>,
 }
 
-/// Contract stub for the batch's single head-bound CI reader. It performs no
-/// forge I/O and marks the observation incomplete until the reader is wired.
-#[allow(dead_code)]
-pub(crate) fn observe_head(_repo: &str, _pr: u64, expected: GitOid) -> HeadReading {
-    HeadReading {
-        expected_head: expected,
-        branch_ref: None,
-        pr_head: None,
-        mergeable: MergeState::Unknown,
-        required: Vec::new(),
-        observed_at: WallClock.now(),
-        complete: false,
-        pending_reason: Some("head observation is not wired".into()),
-        retry_at: None,
+/// The oldest a head-bound observation may be before it can settle a verdict.
+/// The one reader uses this as its `max_age` when a caller supplies no tighter
+/// bound; it is the batch's `observed_at` freshness rule.
+pub(crate) const HEAD_MAX_AGE: Duration = Duration::from_secs(60);
+
+impl HeadReading {
+    /// An answer that cannot settle a verdict, with the reason it is pending.
+    fn pending(expected: GitOid, reason: impl Into<String>) -> Self {
+        Self {
+            expected_head: expected,
+            branch_ref: None,
+            pr_head: None,
+            mergeable: MergeState::Unknown,
+            required: Vec::new(),
+            observed_at: WallClock.now(),
+            complete: false,
+            pending_reason: Some(reason.into()),
+            retry_at: None,
+        }
+    }
+
+    /// A quota-bound answer. The reset is carried as `retry_at` so callers hold
+    /// the stage until it passes rather than turning quota into a CI verdict.
+    fn limited(expected: GitOid, reset: jiff::Timestamp, reason: impl Into<String>) -> Self {
+        let mut reading = Self::pending(expected, reason);
+        reading.retry_at = Some(reset);
+        reading
+    }
+
+    /// Whether this reading was sampled within `max_age` of `now`. A stale
+    /// observation cannot bind a verdict to an exact head.
+    pub(crate) fn fresh_at(&self, now: jiff::Timestamp, max_age: Duration) -> bool {
+        let Ok(age) = jiff::SignedDuration::try_from(max_age) else {
+            return false;
+        };
+        now >= self.observed_at && now.duration_since(self.observed_at) <= age
+    }
+
+    /// The error contract for a quota-bound reading: a transient condition
+    /// carrying the forge's reset, never a CI verdict and never bad input.
+    /// Spec: docs/specs/agent-native.md#33-error-and-warning-contract-3777
+    #[allow(dead_code, reason = "wired by the queue CI effect in batch 2")]
+    pub(crate) fn quota_error(&self) -> Option<CommandError> {
+        let retry_at = self.retry_at?;
+        let mut error = forge_quota_error(retry_at, None, self.pending_reason.as_deref());
+        error.subject = error.subject.map(|mut subject| {
+            subject.head = Some(self.expected_head);
+            subject
+        });
+        Some(error)
     }
 }
 
@@ -231,6 +307,34 @@ pub(crate) fn repository_for_project(
         .ok_or_else(|| {
             ObserveError::Unavailable("repository response has no canonical name".into())
         })
+}
+
+/// The production entry to the one head-bound reader. `repo` names the host's
+/// repository, `pr` the pull whose head is being judged, and `expected` the
+/// exact commit the caller will act on. The batched GraphQL row is consulted
+/// only when a REST read is quota-bound, and only its head is used here: a
+/// transport that names another commit cannot confirm this observation.
+#[allow(dead_code, reason = "the queue CI effect becomes its first caller")]
+pub(crate) fn observe_head(
+    state: &Path,
+    project: &Path,
+    repo: &str,
+    pr: u64,
+    expected: GitOid,
+    request: &Request,
+) -> HeadReading {
+    let Ok(mut reader) = Observer::open(state, project, repo, request) else {
+        return HeadReading::pending(expected, "cannot open the CI observer");
+    };
+    reader.observe_head(pr, expected, request, HEAD_MAX_AGE, &|| {
+        match crate::pr::status::batch::single(state, project, pr) {
+            crate::pr::status::batch::Batch::Entries(entries) => entries
+                .first()
+                .and_then(|entry| GitOid::parse(&entry.head).ok())
+                .map(|head| head.to_string()),
+            _ => None,
+        }
+    })
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -845,6 +949,166 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 )
             });
         }
+    }
+
+    /// The one head-bound reading for queue and landing decisions. A verdict
+    /// binds to the PR head, the required set and every check page through this
+    /// observer's single cache and rate-limit hold-off, so no waiter can settle
+    /// on a head that another read has already superseded. `graphql_head` is
+    /// consulted only when a REST read is quota-bound: a GraphQL row answers a
+    /// rate-limited read only when it names the very same head.
+    ///
+    /// Spec: docs/specs/agent-native.md#39-delivery-queue-absorbs-the-fleet-3972-residue-3510
+    #[allow(dead_code, reason = "consumers move to it with the queue CI effect")]
+    pub(crate) fn observe_head(
+        &mut self,
+        number: u64,
+        expected: GitOid,
+        request: &Request,
+        max_age: Duration,
+        graphql_head: &dyn Fn() -> Option<String>,
+    ) -> HeadReading {
+        // No observation older than the batch's freshness bound can settle a
+        // verdict, however long a caller is willing to wait for one.
+        let max_age = max_age.min(HEAD_MAX_AGE);
+        let pull = match self.resource(&format!("pulls/{number}"), max_age, request) {
+            Ok(pull) => pull,
+            Err(ObserveError::RateLimited { reset }) => {
+                return match graphql_head().and_then(|head| GitOid::parse(&head).ok()) {
+                    // The fallback answered for the same head, but the REST
+                    // read is still quota-bound: hold until the reset passes.
+                    Some(head) if head == expected => HeadReading::limited(
+                        expected,
+                        reset,
+                        "forge rate limit; REST head read held",
+                    ),
+                    // Two transports disagree about the head. That is pending,
+                    // never a verdict for either head.
+                    Some(head) => HeadReading::pending(
+                        expected,
+                        format!("rest/graphql head mismatch: graphql {head}"),
+                    ),
+                    None => HeadReading::limited(
+                        expected,
+                        reset,
+                        "forge rate limit; no alternate head reading",
+                    ),
+                };
+            }
+            Err(error) => return HeadReading::pending(expected, error.to_string()),
+        };
+        let pr_head = pull
+            .pointer("/head/sha")
+            .and_then(Value::as_str)
+            .and_then(|sha| GitOid::parse(sha).ok());
+        let branch_ref = pull
+            .pointer("/head/ref")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mergeable = merge_state(&pull);
+        let base = pull
+            .pointer("/base/ref")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let required_names = self.required_head_checks(base, request, max_age);
+        let observed = match self.checks(&expected.to_string(), max_age, request) {
+            Ok(checks) => checks,
+            Err(ObserveError::RateLimited { reset }) => {
+                return HeadReading::limited(expected, reset, "forge rate limit; check pages held");
+            }
+            Err(error) => return HeadReading::pending(expected, error.to_string()),
+        };
+        let required: Vec<Check> = observed
+            .into_iter()
+            .filter(|check| required_names.contains(&check.name))
+            .collect();
+        let observed_at = self.clock.now();
+        let head_agrees = pr_head == Some(expected);
+        let covered = !required_names.is_empty()
+            && required_names
+                .iter()
+                .all(|name| required.iter().any(|check| &check.name == name));
+        let settled = !required
+            .iter()
+            .any(|check| matches!(check.bucket.as_str(), "pending" | "queued" | "in_progress"));
+        let complete = head_agrees && covered && settled;
+        let pending_reason = if complete {
+            None
+        } else if !head_agrees {
+            Some(format!(
+                "pull head {pr_head:?} is not the expected {expected}"
+            ))
+        } else if required_names.is_empty() {
+            Some("no required checks from branch protection or a ruleset".into())
+        } else if !covered {
+            Some("a required check has no observation for this head".into())
+        } else {
+            Some("a required check is queued or in progress".into())
+        };
+        let mut reading = HeadReading {
+            expected_head: expected,
+            branch_ref,
+            pr_head,
+            mergeable,
+            required,
+            observed_at,
+            complete,
+            pending_reason,
+            retry_at: None,
+        };
+        // A reading that has already aged past the bound cannot settle a
+        // verdict, even when every other condition held when it was sampled.
+        if reading.complete && !reading.fresh_at(observed_at, max_age) {
+            reading.complete = false;
+            reading.pending_reason = Some(format!("observation older than {max_age:?}"));
+        }
+        reading
+    }
+
+    /// The required check names declared by branch protection or a ruleset.
+    /// Both are one observer resource read, so a rate limit recorded here holds
+    /// off the check pages read that follows.
+    fn required_head_checks(
+        &mut self,
+        base: &str,
+        request: &Request,
+        max_age: Duration,
+    ) -> Vec<String> {
+        let mut names = Vec::new();
+        if base.is_empty() {
+            return names;
+        }
+        if let Ok(protection) =
+            self.resource(&format!("branches/{base}/protection"), max_age, request)
+            && let Some(contexts) = protection
+                .pointer("/required_status_checks/contexts")
+                .and_then(Value::as_array)
+        {
+            names.extend(contexts.iter().filter_map(Value::as_str).map(str::to_owned));
+        }
+        if let Ok(rules) = self.resource(
+            &format!("rules/branches/{base}?per_page=100"),
+            max_age,
+            request,
+        ) && let Some(rows) = rules.get("rules").and_then(Value::as_array)
+        {
+            for rule in rows {
+                if let Some(checks) = rule
+                    .pointer("/parameters/required_status_checks")
+                    .and_then(Value::as_array)
+                {
+                    names.extend(
+                        checks
+                            .iter()
+                            .filter_map(|check| check.pointer("/name").and_then(Value::as_str))
+                            .map(str::to_owned),
+                    );
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Pause between retries on the observer's clock, ending early when the
@@ -2547,5 +2811,184 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             ),
             Err(ObserveError::Unavailable(_))
         ));
+    }
+
+    /// Seed one pull, its branch protection and its exact-head check pages.
+    fn seed_head(shared: &Shared, head_sha: &str, check: serde_json::Value) {
+        shared.with(|world| {
+            world.resources.insert(
+                "repos/Owner/Repo/pulls/7".into(),
+                json!({
+                    "number": 7,
+                    "head": {"sha": head_sha, "ref": "work"},
+                    "base": {"ref": "main"},
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "CLEAN"
+                }),
+            );
+            world.resources.insert(
+                "repos/Owner/Repo/branches/main/protection".into(),
+                json!({"required_status_checks": {"contexts": ["build"]}}),
+            );
+            world.runs.insert(head_sha.into(), page(vec![check]));
+        });
+    }
+
+    fn read_head(
+        shared: &Shared,
+        dir: &std::path::Path,
+        fallback: &dyn Fn() -> Option<String>,
+    ) -> super::HeadReading {
+        let mut observer = shared.observer(dir);
+        let request = Request::within(Duration::from_secs(60));
+        observer.observe_head(
+            7,
+            GitOid::parse(HEAD).expect("expected head"),
+            &request,
+            Duration::ZERO,
+            fallback,
+        )
+    }
+
+    #[test]
+    fn ci_verdict_binds_to_exact_head_complete_reading() {
+        let shared = Shared::new();
+        seed_head(&shared, HEAD, run("build", "completed", Some("success")));
+        let dir = state();
+        let reading = read_head(&shared, dir.path(), &|| None);
+        assert!(reading.complete, "{:?}", reading.pending_reason);
+        assert_eq!(reading.pr_head, Some(GitOid::parse(HEAD).expect("head")));
+        assert_eq!(
+            reading.branch_ref.as_deref(),
+            Some("work"),
+            "the reading names the branch it bound"
+        );
+        assert_eq!(reading.mergeable, MergeState::Mergeable);
+        assert_eq!(reading.required.len(), 1);
+        assert_eq!(reading.required[0].name, "build");
+        assert!(reading.quota_error().is_none());
+        assert!(reading.fresh_at(reading.observed_at, HEAD_MAX_AGE));
+    }
+
+    #[test]
+    fn a_queued_required_check_keeps_the_head_pending() {
+        let shared = Shared::new();
+        seed_head(&shared, HEAD, run("build", "in_progress", None));
+        let dir = state();
+        let reading = read_head(&shared, dir.path(), &|| None);
+        assert!(!reading.complete);
+        assert_eq!(reading.required.len(), 1);
+        assert_eq!(reading.required[0].bucket, "pending");
+        assert!(
+            reading
+                .pending_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("queued or in progress"))
+        );
+    }
+
+    #[test]
+    fn a_head_that_moved_since_the_read_is_not_a_verdict() {
+        let shared = Shared::new();
+        seed_head(&shared, OTHER, run("build", "completed", Some("success")));
+        let dir = state();
+        let reading = read_head(&shared, dir.path(), &|| None);
+        assert!(!reading.complete);
+        assert_eq!(reading.pr_head, Some(GitOid::parse(OTHER).expect("head")));
+        assert!(
+            reading
+                .pending_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("not the expected"))
+        );
+    }
+
+    #[test]
+    fn an_empty_required_set_cannot_complete_a_reading() {
+        let shared = Shared::new();
+        seed_head(&shared, HEAD, run("build", "completed", Some("success")));
+        shared.with(|world| {
+            world
+                .resources
+                .remove("repos/Owner/Repo/branches/main/protection");
+        });
+        let dir = state();
+        let reading = read_head(&shared, dir.path(), &|| None);
+        assert!(!reading.complete);
+        assert!(reading.required.is_empty());
+        assert!(
+            reading
+                .pending_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no required checks"))
+        );
+    }
+
+    /// Spec: docs/specs/agent-native.md#33-error-and-warning-contract-3777
+    #[test]
+    fn forge_rate_limit_is_transient_with_reset() {
+        let shared = Shared::new();
+        let reset = START / 1000 + 60;
+        shared.with(|world| world.limited_until = Some(reset));
+        let dir = state();
+        let reading = read_head(&shared, dir.path(), &|| None);
+        assert!(!reading.complete);
+        assert_eq!(reading.retry_at, Some(timestamp(reset)));
+        let error = reading.quota_error().expect("quota error");
+        assert_eq!(error.code, "FORGE_QUOTA_EXHAUSTED");
+        assert_eq!(
+            error.class,
+            ErrorClass::Transient {
+                retry_at: reading.retry_at
+            }
+        );
+        assert_eq!(
+            error.subject.as_ref().and_then(|subject| subject.head),
+            Some(GitOid::parse(HEAD).expect("head"))
+        );
+        assert_eq!(error.next.len(), 1, "the catalogue requires a next step");
+        assert!(
+            error.next[0].display_text().contains(&reset.to_string()),
+            "the next step names the reset"
+        );
+        let projected = ObserveError::RateLimited {
+            reset: timestamp(reset),
+        }
+        .command_error(7)
+        .expect("quota projection");
+        assert_eq!(projected.code, "FORGE_QUOTA_EXHAUSTED");
+        assert_eq!(projected.subject.and_then(|subject| subject.pr), Some(7));
+        assert!(ObserveError::Expired.command_error(7).is_none());
+    }
+
+    /// Spec: docs/specs/agent-native.md#39-delivery-queue-absorbs-the-fleet-3972-residue-3510
+    #[test]
+    fn graphql_rest_head_mismatch_is_pending() {
+        let shared = Shared::new();
+        shared.with(|world| world.limited_until = Some(START / 1000 + 60));
+        let dir = state();
+        let reading = read_head(&shared, dir.path(), &|| Some(OTHER.to_owned()));
+        assert!(!reading.complete);
+        assert_eq!(reading.retry_at, None, "the fallback answered, so no hold");
+        assert!(
+            reading
+                .pending_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("mismatch"))
+        );
+    }
+
+    #[test]
+    fn a_stale_reading_cannot_settle_a_verdict() {
+        let shared = Shared::new();
+        seed_head(&shared, HEAD, run("build", "completed", Some("success")));
+        let dir = state();
+        let mut reading = read_head(&shared, dir.path(), &|| None);
+        reading.observed_at = timestamp(START / 1000 - 120);
+        assert!(!reading.fresh_at(timestamp(START / 1000), HEAD_MAX_AGE));
+        assert!(
+            reading.fresh_at(timestamp(START / 1000), Duration::from_secs(300)),
+            "a wider bound admits the same sample"
+        );
     }
 }
