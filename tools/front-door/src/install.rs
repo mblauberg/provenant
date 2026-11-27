@@ -1297,6 +1297,32 @@ struct PreparedInstall {
     live_record_warning: Option<String>,
 }
 
+fn after_publication<T, U, E>(
+    publish: impl FnOnce() -> Result<T, E>,
+    migrate: impl FnOnce() -> Result<U, E>,
+) -> Result<(T, U), E> {
+    let published = publish()?;
+    let migrated = migrate()?;
+    Ok((published, migrated))
+}
+
+#[cfg(test)]
+mod publication_migration_tests {
+    #[test]
+    fn publication_failure_does_not_start_store_migration() {
+        let mut migration_started = false;
+        let result = super::after_publication::<(), (), &str>(
+            || Err("publication failed"),
+            || {
+                migration_started = true;
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err("publication failed"));
+        assert!(!migration_started);
+    }
+}
+
 fn supports_hooks(batch: &Targets) -> bool {
     batch.harnesses.iter().any(|target| {
         batch
@@ -1519,30 +1545,7 @@ fn apply_install(
     }
     // Configuration has been validated at the staged root; every actual write
     // now targets its published name. Agent bytes already name that destination.
-    // Non-SQLite state migrates once here, after the live-attempt advisory and
-    // before any release is swapped in.
     let state_root = environment.roots.state.as_path();
-    let home = batches
-        .last()
-        .ok_or(InstallError::InvalidConfig("no prepared install batches"))?
-        .home
-        .clone();
-    let cutover_pending = migrations::cutover_pending(state_root)
-        .map_err(|error| Refused::Fail(Outcome::Error, "UPGRADE_MIGRATION_FAILED", error))?;
-    if cutover_pending {
-        let stopped = super::tick_agent::stop(&home).map_err(|error| {
-            Refused::Fail(
-                Outcome::Error,
-                "UPGRADE_MIGRATION_FAILED",
-                format!("disable tick before migration: {error}"),
-            )
-        })?;
-        if stopped {
-            reporter.stopped_agents.insert("dev.provenant.tick");
-        }
-    }
-    let migrated = migrations::run(state_root)
-        .map_err(|(code, message)| Refused::Fail(Outcome::Error, code, message))?;
     for batch in &mut batches {
         batch.roots = environment.roots.clone();
     }
@@ -1554,46 +1557,72 @@ fn apply_install(
     let home = targets.home.clone();
     let tick_enabled = targets.tick_agent.is_some();
     reporter.home = Some(home.clone());
+    let mut migrated = Vec::new();
     let result: Result<_, Refused> = (|| {
-        let mut combined = InstallOutcome {
-            actions: Vec::new(),
-            findings: preview.findings,
-            manual_includes: Vec::new(),
-            dry_run: args.dry_run,
-            already_installed: false,
-        };
-        for batch in batches {
-            // Publish one receipt target at a time, using config's existing lock and ownership rules.
-            let settings = batch_args(&args, &batch, args.dry_run);
-            let outcome = cli::install::execute_install(
-                &settings,
-                batch,
-                &context,
-                &mut reporter,
-                &smoke,
-                env!("PROVENANT_TARGET_TRIPLE"),
-            )
-            .map_err(|error| {
-                let (mut completed, remaining, source) = match error {
-                    InstallError::Partial {
-                        completed,
-                        remaining,
-                        source,
-                    } => (completed, remaining, source),
-                    error => (Vec::new(), Vec::new(), Box::new(error)),
+        let (mut combined, applied) = after_publication(
+            || {
+                let mut combined = InstallOutcome {
+                    actions: Vec::new(),
+                    findings: preview.findings,
+                    manual_includes: Vec::new(),
+                    dry_run: args.dry_run,
+                    already_installed: false,
                 };
-                completed.splice(0..0, combined.actions.clone());
-                InstallError::Partial {
-                    completed,
-                    remaining,
-                    source,
+                for batch in batches {
+                    // Publish one receipt target at a time, using config's existing lock and ownership rules.
+                    let settings = batch_args(&args, &batch, args.dry_run);
+                    let outcome = cli::install::execute_install(
+                        &settings,
+                        batch,
+                        &context,
+                        &mut reporter,
+                        &smoke,
+                        env!("PROVENANT_TARGET_TRIPLE"),
+                    )
+                    .map_err(|error| {
+                        let (mut completed, remaining, source) = match error {
+                            InstallError::Partial {
+                                completed,
+                                remaining,
+                                source,
+                            } => (completed, remaining, source),
+                            error => (Vec::new(), Vec::new(), Box::new(error)),
+                        };
+                        completed.splice(0..0, combined.actions.clone());
+                        InstallError::Partial {
+                            completed,
+                            remaining,
+                            source,
+                        }
+                    })?;
+                    combined.actions.extend(outcome.actions);
+                    combined.findings.extend(outcome.findings);
+                    combined.manual_includes.extend(outcome.manual_includes);
+                    combined.already_installed |= outcome.already_installed;
                 }
-            })?;
-            combined.actions.extend(outcome.actions);
-            combined.findings.extend(outcome.findings);
-            combined.manual_includes.extend(outcome.manual_includes);
-            combined.already_installed |= outcome.already_installed;
-        }
+                Ok(combined)
+            },
+            || {
+                let cutover_pending = migrations::cutover_pending(state_root).map_err(|error| {
+                    Refused::Fail(Outcome::Error, "UPGRADE_MIGRATION_FAILED", error)
+                })?;
+                if cutover_pending {
+                    let stopped = super::tick_agent::stop(&home).map_err(|error| {
+                        Refused::Fail(
+                            Outcome::Error,
+                            "UPGRADE_MIGRATION_FAILED",
+                            format!("disable tick before migration: {error}"),
+                        )
+                    })?;
+                    if stopped {
+                        reporter.stopped_agents.insert("dev.provenant.tick");
+                    }
+                }
+                migrations::run(state_root)
+                    .map_err(|(code, message)| Refused::Fail(Outcome::Error, code, message))
+            },
+        )?;
+        migrated = applied;
         if !args.dry_run {
             let inspection = provenant_config::inspect_install(
                 &targets,
@@ -2269,6 +2298,7 @@ fn installed_destination(targets: &provenant_config::Targets) -> PathBuf {
 fn verify_smoke(
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
+    timeout_seconds: u64,
 ) -> Result<String, String> {
     // Hold a shared pin on the release under verification for the whole
     // lifecycle, so a concurrent upgrade cannot prune bytes this verifier reads.
@@ -2282,13 +2312,14 @@ fn verify_smoke(
                 provenant_cli::smoke::Origin::compiled(Default::default()),
             )
         });
-    let outcome = crate::smoke::run_lifecycle(
+    let outcome = crate::smoke::run_lifecycle_with_timeout(
         &clock,
         &runner,
         &installed_destination(targets),
         targets.roots.state.as_path(),
         &targets.home,
         args,
+        std::time::Duration::from_secs(timeout_seconds),
     )?;
     crate::smoke::verdict_exit(&outcome.verdict, &outcome.text(), &settings, &origin)
 }
@@ -2301,36 +2332,53 @@ fn verify_installed_smoke(
     environment: &Resolved,
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
+    timeout_seconds: u64,
 ) -> Result<String, String> {
-    let program = installed_destination(targets);
     // JSON keeps the child's envelopes typed. In compact human mode the
     // verifier's own rows are clipped before the parent could read them, so
     // both the innermost error and the smoke verdict would be lost.
+    let project = provenant_os::git::repository_path(
+        &environment.project,
+        provenant_os::git::RepositoryPath::Toplevel,
+    )
+    .is_ok()
+    .then_some(environment.project.as_path());
+    let argv = verify_installed_smoke_argv(
+        installed_destination(targets),
+        environment.roots.state.as_path(),
+        project,
+        args,
+        timeout_seconds,
+    );
+    let output = runner.execute(&argv, None, 1_048_576, timeout_seconds)?;
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+fn verify_installed_smoke_argv(
+    program: PathBuf,
+    state: &Path,
+    project: Option<&Path>,
+    args: &cli::Upgrade,
+    timeout_seconds: u64,
+) -> Vec<std::ffi::OsString> {
     let mut argv = vec![
         program.into_os_string(),
         "--json".into(),
         "--state-dir".into(),
-        environment.roots.state.as_path().as_os_str().to_owned(),
+        state.as_os_str().to_owned(),
     ];
     // The verifier builds its own scratch checkout; the caller's project is
     // only needed for config and root resolution. Passing a non-checkout makes
     // the child refuse with INVALID before the smoke can start, which is why a
     // `upgrade --verify` run from $HOME failed only its smoke host. Resolve from
     // the child's own cwd instead when the selected project is not a checkout.
-    if provenant_os::git::repository_path(
-        &environment.project,
-        provenant_os::git::RepositoryPath::Toplevel,
-    )
-    .is_ok()
-    {
-        argv.extend([
-            "--project".into(),
-            environment.project.as_os_str().to_owned(),
-        ]);
+    if let Some(project) = project {
+        argv.extend(["--project".into(), project.as_os_str().to_owned()]);
     }
     argv.extend(["upgrade".into(), "--verify".into(), "--verify-only".into()]);
+    argv.extend(["--timeout".into(), timeout_seconds.to_string().into()]);
     if let Some(host) = &args.host {
-        argv.extend(["--host".into(), host.clone().into()]);
+        argv.extend(["--verify-host".into(), host.clone().into()]);
     }
     if let Some(route) = &args.route {
         argv.extend(["--route".into(), route.clone().into()]);
@@ -2338,8 +2386,47 @@ fn verify_installed_smoke(
     for setting in &args.set {
         argv.extend(["--set".into(), setting.clone().into()]);
     }
-    let output = runner.execute(&argv, None, 1_048_576, 3700)?;
-    Ok(String::from_utf8_lossy(&output).into_owned())
+    argv
+}
+
+#[cfg(test)]
+mod verify_child_argv_tests {
+    use super::verify_installed_smoke_argv;
+    use crate::cli::{CommonArgs, Upgrade};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn verification_child_receives_the_verify_host_flag() {
+        let args = Upgrade {
+            common: CommonArgs::default(),
+            yes: false,
+            from_source: None,
+            hosts: String::new(),
+            keep: false,
+            verify: true,
+            verify_only: true,
+            dry_run: false,
+            host: Some("remote".to_owned()),
+            route: None,
+            set: Vec::new(),
+        };
+        let argv = verify_installed_smoke_argv(
+            PathBuf::from("/bin/provenant"),
+            Path::new("/state"),
+            None,
+            &args,
+            180,
+        );
+        let captured: Vec<_> = argv.iter().map(OsString::to_string_lossy).collect();
+        assert!(
+            captured
+                .windows(2)
+                .any(|pair| pair == ["--verify-host", "remote"])
+        );
+        assert!(captured.windows(2).any(|pair| pair == ["--timeout", "180"]));
+        assert!(!captured.iter().any(|arg| arg == "--host"));
+    }
 }
 
 /// The installed binary's own verify phase. It never installs or downloads;
@@ -2348,8 +2435,9 @@ fn run_verify_only(
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
     globals: &cli::Globals,
+    timeout_seconds: u64,
 ) -> u8 {
-    let result = verify_smoke(targets, args);
+    let result = verify_smoke(targets, args, timeout_seconds);
     let version = env!("CARGO_PKG_VERSION");
     match result {
         Ok(output) => {
@@ -2463,6 +2551,7 @@ fn preview_smoke(
     state_dir: &Path,
     home: &Path,
     args: &cli::Upgrade,
+    timeout_seconds: u64,
 ) -> Result<Vec<u8>, String> {
     let roots =
         crate::roots::child(home, home, state_dir.to_path_buf()).map_err(|e| e.to_string())?;
@@ -2487,7 +2576,7 @@ fn preview_smoke(
     let argv = crate::smoke::smoke_run_argv(
         program, &fixture, state_dir, args, &settings, commits, &graph, &set, true,
     );
-    let outcome = runner.execute(&argv, None, 1_048_576, 60);
+    let outcome = runner.execute(&argv, None, 1_048_576, timeout_seconds);
     crate::smoke::report_smoke_cleanup(
         outcome,
         crate::smoke::remove_fixture(state_dir, home, &nonce, &root),
@@ -2700,13 +2789,31 @@ fn selected_upgrade_hosts(args: &cli::Upgrade) -> Option<std::collections::BTree
     }
 }
 
-pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
+fn remaining_timeout_seconds(deadline: std::time::Instant, maximum: u64) -> u64 {
+    deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .as_secs()
+        .min(maximum)
+}
+
+pub(super) fn run_upgrade(
+    args: cli::Upgrade,
+    globals: &cli::Globals,
+    timeout: Option<std::time::Duration>,
+) -> u8 {
+    let deadline =
+        std::time::Instant::now() + timeout.unwrap_or(std::time::Duration::from_secs(1_200));
     let (environment, targets) = match selected_targets(globals, &[]) {
         Ok(value) => value,
         Err(error) => return edge_error("upgrade", error, globals),
     };
     if args.verify_only {
-        return run_verify_only(&targets, &args, globals);
+        return run_verify_only(
+            &targets,
+            &args,
+            globals,
+            remaining_timeout_seconds(deadline, 3_700),
+        );
     }
     if args.dry_run {
         let runner = match runner_for_verify(&targets) {
@@ -2729,6 +2836,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             targets.roots.state.as_path(),
             &targets.home,
             &args,
+            remaining_timeout_seconds(deadline, 60),
         );
         return match output {
             Ok(bytes) => {
@@ -2830,7 +2938,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                     ],
                     None,
                     4_194_304,
-                    30,
+                    remaining_timeout_seconds(deadline, 30),
                 )?;
                 source_archive = Some(runner.execute(
                     &[
@@ -2845,7 +2953,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                     ],
                     Some(&files),
                     67_108_864,
-                    120,
+                    remaining_timeout_seconds(deadline, 120),
                 )?);
             }
         } else {
@@ -2859,7 +2967,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 ],
                 None,
                 1_048_576,
-                30,
+                remaining_timeout_seconds(deadline, 30),
             )?;
             let release: serde_json::Value =
                 serde_json::from_slice(&latest).map_err(|error| error.to_string())?;
@@ -2978,7 +3086,12 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             }
             let host = report(
                 name.clone(),
-                runner.execute(&preflight, Some(*input), 1_048_576, 3600),
+                runner.execute(
+                    &preflight,
+                    Some(*input),
+                    1_048_576,
+                    remaining_timeout_seconds(deadline, 3_600),
+                ),
             );
             if !host.success {
                 results.push(host);
@@ -2988,7 +3101,12 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         for (name, argv, input) in commands {
             results.push(report(
                 name,
-                runner.execute(&argv, Some(input), 1_048_576, 3600),
+                runner.execute(
+                    &argv,
+                    Some(input),
+                    1_048_576,
+                    remaining_timeout_seconds(deadline, 3_600),
+                ),
             ));
             if !results.last().is_some_and(|host| host.success) {
                 break;
@@ -3008,7 +3126,13 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         Ok(mut hosts) => {
             if args.verify && hosts.iter().all(|host| host.success) {
                 let verified = runner_for_verify(&targets).and_then(|runner| {
-                    verify_installed_smoke(&runner, &environment, &targets, &args)
+                    verify_installed_smoke(
+                        &runner,
+                        &environment,
+                        &targets,
+                        &args,
+                        remaining_timeout_seconds(deadline, 3_700),
+                    )
                 });
                 match verified {
                     Ok(output) => hosts.push(HostUpgrade {

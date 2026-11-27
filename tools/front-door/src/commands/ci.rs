@@ -39,7 +39,11 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let command = inv.command.clone();
     let status = match command {
-        Command::Ci(command) => crate::ci::run(command, globals),
+        Command::Ci(command) => crate::ci::run(
+            command,
+            globals,
+            inv.common.as_ref().map(|common| common.deadline),
+        ),
         _ => return crate::commands::mismatched(),
     };
     crate::commands::rendered(status)

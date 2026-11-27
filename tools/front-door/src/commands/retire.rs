@@ -49,9 +49,18 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
                     &resolved.project,
                 )?;
                 let project = context.identity.project;
+                let timeout_seconds = inv
+                    .common
+                    .as_ref()
+                    .map_or(5, |common| common.deadline.as_secs());
                 match kind {
                     "graph" => {
-                        let archive = archive_graph(resolved.roots.state.as_path(), project, id)?;
+                        let archive = archive_graph(
+                            resolved.roots.state.as_path(),
+                            project,
+                            id,
+                            timeout_seconds,
+                        )?;
                         Ok((
                             format!("retired graph {id} -> {}\n", archive.display()),
                             serde_json::json!({
@@ -111,6 +120,7 @@ fn archive_graph(
     state: &Path,
     project: provenant_core::ProjectId,
     id: &str,
+    timeout_seconds: u64,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     use provenant_os::fs::{Directory, LockMode, PublishMode};
     if id.is_empty() || id.contains('/') || id.contains('\\') || id.as_bytes().contains(&0) {
@@ -123,7 +133,7 @@ fn archive_graph(
     let directory = graphs.open_verified_directory(&project_name)?;
 
     let clock = provenant_os::clock::SystemClock::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+    let budget = WaitBudget::cli(clock.mono_now(), timeout_seconds)?;
     let cancel = provenant_core::CancelToken::new();
     let lock_name = OsString::from(format!("graph-{id}.lock"));
     let _lock = directory.lock(&lock_name, LockMode::Exclusive, budget, &cancel, &clock)?;
@@ -191,7 +201,7 @@ mod tests {
         std::fs::write(&record, b"{\"checkpoint\":1}").unwrap();
         std::fs::write(graph_dir.join("graph-g1.unreadable"), b"quarantined").unwrap();
 
-        let archive = archive_graph(&state, project, "g1").unwrap();
+        let archive = archive_graph(&state, project, "g1", 5).unwrap();
         let name = archive.to_string_lossy().into_owned();
         assert!(
             name.contains("retired"),
@@ -209,6 +219,6 @@ mod tests {
         );
 
         // Retiring again finds no live record to archive.
-        assert!(archive_graph(&state, project, "g1").is_err());
+        assert!(archive_graph(&state, project, "g1", 5).is_err());
     }
 }

@@ -21,16 +21,8 @@ use std::io::ErrorKind;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
-/// Pure record transform owned by one store. Store migrations run under that
-/// store's lock; this trait deliberately does not open or publish files.
-#[allow(dead_code)]
-pub(crate) trait StoreMigration {
-    fn migrate(from: u64, to: u64, record: Value) -> Result<Value, MigrationError>;
-}
-
 /// Marker spelling shared by store migrations while an interrupted cut-over
 /// is resumed. The marker is written beside the owning store.
-#[allow(dead_code)]
 pub(crate) fn migrating_marker(to: u64) -> String {
     format!("migrating-{to}")
 }
@@ -43,9 +35,9 @@ const DEFAULT_QUIESCE_SECONDS: u64 = 300;
 const CONFIG_KNOB_VERSION: u64 = 4;
 
 /// Ordered steps for this release. Steps are deleted in the release after the
-/// one that ships them. The store cut-over runs last: it quiesces every store
-/// once, then applies the graph, run and config transforms in that order so a
-/// resumed pass never sees half-migrated shapes.
+/// one that ships them. Store cut-over runs separately after publication: it
+/// quiesces once, then applies graph, run and config as independently recorded
+/// steps so an interrupted pass resumes at the first unfinished store.
 const STEPS: &[&dyn Migration] = &[
     &HostProjectDirs,
     &AttemptScratchMove,
@@ -1059,42 +1051,57 @@ impl Migration for ConfigKnobRewrite {
     }
 }
 
-/// The one batch 1 cut-over. Quiesce once, then migrate graph, run store and
-/// config in that order. A failure in any store leaves its marker and stops
-/// the sequence; a later install resumes from the first unchanged record.
-struct StoreCutover;
+/// The batch 1 store cut-over has a receipt per store, so an interrupted run
+/// resumes at the first store whose transform did not finish.
+enum StoreCutover {
+    Graph,
+    Run,
+    Config,
+}
 
-impl Migration for StoreCutover {
+impl StoreCutover {
     fn id(&self) -> &'static str {
-        "batch1-store-cutover"
+        match self {
+            Self::Graph => "batch1-graph-store-cutover",
+            Self::Run => "batch1-run-store-cutover",
+            Self::Config => "batch1-config-store-cutover",
+        }
     }
 
     fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
         let mut report = MigrationReport::new(self.id());
-        quiesce(state_root, quiesce_seconds(state_root))?;
-        let graph = provenant_fabric_runtime::graph::migrate_store(state_root)
-            .map_err(|error| MigrationError::new(format!("graph store cut-over: {error}")))?;
-        report.changed.extend(graph);
-        provenant_run::lease_migrate::migrate_database(state_root)
-            .map_err(|error| MigrationError::new(format!("run database cut-over: {error}")))?;
-        let run = provenant_run::lease_migrate::migrate_store(state_root)
-            .map_err(|error| MigrationError::new(format!("run store cut-over: {error}")))?;
-        report.changed.extend(run);
-        // The queue registry's batch 2 transform slots in here, before config;
-        // this batch owns only the three stores it can migrate to final shapes.
-        let config = ConfigKnobRewrite.apply(state_root)?;
-        report.changed.extend(config.changed);
-        report.warnings.extend(config.warnings);
-        if !report.warnings.is_empty() {
-            return Err(MigrationError::new(
-                "config cut-over left records unmigrated",
-            ));
+        match self {
+            Self::Graph => report.changed.extend(
+                provenant_fabric_runtime::graph::migrate_store(state_root).map_err(|error| {
+                    MigrationError::new(format!("graph store cut-over: {error}"))
+                })?,
+            ),
+            Self::Run => {
+                provenant_run::lease_migrate::migrate_database(state_root).map_err(|error| {
+                    MigrationError::new(format!("run database cut-over: {error}"))
+                })?;
+                report.changed.extend(
+                    provenant_run::lease_migrate::migrate_store(state_root).map_err(|error| {
+                        MigrationError::new(format!("run store cut-over: {error}"))
+                    })?,
+                );
+            }
+            Self::Config => {
+                let config = ConfigKnobRewrite.apply(state_root)?;
+                report.changed.extend(config.changed);
+                report.warnings.extend(config.warnings);
+                if !report.warnings.is_empty() {
+                    return Err(MigrationError::new(
+                        "config cut-over left records unmigrated",
+                    ));
+                }
+                report.changed.extend(
+                    crate::pr::landing::receipt::migrate_pending(state_root).map_err(|error| {
+                        MigrationError::new(format!("pending landing cut-over: {error}"))
+                    })?,
+                );
+            }
         }
-        report.changed.extend(
-            crate::pr::landing::receipt::migrate_pending(state_root).map_err(|error| {
-                MigrationError::new(format!("pending landing cut-over: {error}"))
-            })?,
-        );
         report.changed.sort();
         Ok(report)
     }
@@ -1102,13 +1109,21 @@ impl Migration for StoreCutover {
 
 /// Run every pending step against the state root and return every recorded id.
 pub(super) fn cutover_pending(state_root: &Path) -> Result<bool, String> {
-    Ok(!read_receipt(state_root)?
-        .is_some_and(|receipt| receipt.migrations.iter().any(|id| id == StoreCutover.id())))
+    let applied = read_receipt(state_root)?
+        .map(|receipt| receipt.migrations)
+        .unwrap_or_default();
+    Ok([
+        StoreCutover::Graph.id(),
+        StoreCutover::Run.id(),
+        StoreCutover::Config.id(),
+    ]
+    .iter()
+    .any(|id| !applied.iter().any(|applied| applied == id)))
 }
 
 pub(super) fn run(state_root: &Path) -> Result<Vec<String>, (&'static str, String)> {
     if cutover_pending(state_root).map_err(|error| ("UPGRADE_MIGRATION_FAILED", error))? {
-        StoreCutover.apply(state_root).map_err(|error| {
+        quiesce(state_root, quiesce_seconds(state_root)).map_err(|error| {
             let message = error.to_string();
             let code = if message.contains("UPGRADE_NOT_QUIESCENT") {
                 "UPGRADE_NOT_QUIESCENT"
@@ -1121,16 +1136,17 @@ pub(super) fn run(state_root: &Path) -> Result<Vec<String>, (&'static str, Strin
             .map_err(|error| ("UPGRADE_MIGRATION_FAILED", error))?
             .map(|receipt| receipt.migrations)
             .unwrap_or_default();
-        applied.push(StoreCutover.id().to_owned());
-        persist(state_root, &applied).map_err(|error| ("UPGRADE_MIGRATION_FAILED", error))?;
-        let mut remaining = run_steps(state_root, STEPS);
-        if !remaining.iter().any(|id| id == StoreCutover.id()) {
-            remaining.push(StoreCutover.id().to_owned());
+        for step in [StoreCutover::Graph, StoreCutover::Run, StoreCutover::Config] {
+            if applied.iter().any(|id| id == step.id()) {
+                continue;
+            }
+            step.apply(state_root)
+                .map_err(|error| ("UPGRADE_MIGRATION_FAILED", error.to_string()))?;
+            applied.push(step.id().to_owned());
+            persist(state_root, &applied).map_err(|error| ("UPGRADE_MIGRATION_FAILED", error))?;
         }
-        Ok(remaining)
-    } else {
-        Ok(run_steps(state_root, STEPS))
     }
+    Ok(run_steps(state_root, STEPS))
 }
 
 /// Record ids on the receipt install just published, for a step that ran

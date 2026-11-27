@@ -3,7 +3,7 @@
 mod tests {
     use super::{
         AttemptScratchMove, ConfigKnobRewrite, PortConfigSourceSpellings, PortSourceSpellings,
-        ProjectGrantKeys, StoreCutover, held_store_locks, quiesce_seconds, read_receipt, run_steps,
+        ProjectGrantKeys, held_store_locks, quiesce_seconds, read_receipt, run,
     };
     use provenant_os::fs::{Directory, LockMode};
     use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
@@ -834,7 +834,7 @@ leaf_source = "dispatch"
 
     /// Spec: docs/specs/agent-native.md#3.10-store-migrations
     #[test]
-    fn store_cutover_records_its_id_and_resumes_a_marker() {
+    fn store_cutover_records_each_store_id_and_resumes_a_marker() {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path();
         write_receipt(path, Vec::new());
@@ -847,18 +847,20 @@ leaf_source = "dispatch"
         // resumes instead of refusing to start.
         std::fs::write(path.join("migrating-4"), b"").expect("marker");
 
-        let (applied, warnings) = capture(|| run_steps(path, &[&StoreCutover]));
-        assert_eq!(applied, ["batch1-store-cutover"]);
-        assert!(warnings.is_empty(), "{warnings:?}");
+        let applied = run(path).expect("cutover");
+        assert!(applied.contains(&"batch1-graph-store-cutover".to_owned()));
+        assert!(applied.contains(&"batch1-run-store-cutover".to_owned()));
+        assert!(applied.contains(&"batch1-config-store-cutover".to_owned()));
         assert!(!path.join("migrating-4").exists());
         let text = std::fs::read_to_string(path.join("config.toml")).expect("read config");
         assert!(text.contains("read_source"), "{text}");
         let receipt = read_receipt(path).expect("read").expect("receipt");
-        assert_eq!(receipt.migrations, ["batch1-store-cutover"]);
+        assert!(receipt.migrations.contains(&"batch1-graph-store-cutover".to_owned()));
+        assert!(receipt.migrations.contains(&"batch1-run-store-cutover".to_owned()));
+        assert!(receipt.migrations.contains(&"batch1-config-store-cutover".to_owned()));
 
-        let (again, warnings) = capture(|| run_steps(path, &[&StoreCutover]));
-        assert_eq!(again, ["batch1-store-cutover"], "recorded step is skipped");
-        assert!(warnings.is_empty(), "{warnings:?}");
+        let again = run(path).expect("repeat cutover");
+        assert_eq!(again, applied, "recorded steps are skipped");
     }
 
     /// Spec: docs/specs/agent-native.md#3.10-store-migrations
@@ -886,10 +888,10 @@ leaf_source = "dispatch"
             "the held lock is visible to the gate"
         );
 
-        let error = StoreCutover.apply(path).expect_err("not quiescent");
+        let error = run(path).expect_err("not quiescent");
         assert!(
-            error.to_string().contains("UPGRADE_NOT_QUIESCENT"),
-            "{error}"
+            error.1.contains("UPGRADE_NOT_QUIESCENT"),
+            "{error:?}"
         );
         assert_eq!(std::fs::read(&config).expect("read config"), original);
         assert!(!path.join("migrating-4").exists(), "no marker was written");
