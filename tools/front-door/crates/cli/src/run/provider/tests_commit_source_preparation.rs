@@ -297,6 +297,63 @@ fn review_lane_working_directory_is_the_pinned_head_not_the_primary()
 
 #[test]
 // Spec: docs/specs/run-launch.md#inputs-and-resources
+fn pinned_read_only_lane_reads_the_recorded_head_under_host_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = CommitSourcePreparation::new()?;
+    // `--source default_branch` records this newer head as the pin even when
+    // the host checkout is behind it. Advance the tree the pin names, then
+    // leave a different, uncommitted tree in the live checkout.
+    std::fs::write(fixture.project.join("subject.txt"), "pinned version\n")?;
+    provenant_os::fixture::run_git(&fixture.project, &["add", "subject.txt"])?;
+    provenant_os::fixture::run_git(&fixture.project, &["commit", "-qm", "default branch"])?;
+    let pinned = String::from_utf8(provenant_os::fixture::run_git(
+        &fixture.project,
+        &["rev-parse", "HEAD"],
+    )?)?
+    .trim()
+    .to_owned();
+    fixture.task.head = Some(pinned.clone());
+    fixture.task.base = Some(pinned.clone());
+    // Host access seals no source root; the recorded pin alone must select the
+    // tree. A live child-directory grant must not override it either.
+    fixture.task.access.source_root = None;
+    fixture.task.access.source_identity = None;
+    fixture.task.access.source_live = false;
+    fixture
+        .task
+        .profile
+        .knobs
+        .insert("lanes.access".into(), serde_json::json!("host"));
+    std::fs::write(
+        fixture.project.join("subject.txt"),
+        "live checkout version\n",
+    )?;
+
+    let launch = fixture.prepare()?;
+    assert_ne!(
+        launch.cwd, fixture.project,
+        "a pinned reader must not run in the live checkout"
+    );
+    assert!(
+        launch.cwd.starts_with(&fixture.paths.temporary),
+        "a pinned reader must run in its attempt-private view"
+    );
+    assert_eq!(
+        std::fs::read(launch.cwd.join("subject.txt"))?,
+        b"pinned version\n",
+        "the view must hold the recorded head, not the live checkout"
+    );
+    let view_head = std::fs::read_to_string(launch.cwd.join(".git").join("HEAD"))?;
+    assert_eq!(
+        view_head.trim(),
+        pinned,
+        "the view must be detached at the recorded head"
+    );
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#inputs-and-resources
 fn review_view_ships_a_named_ref_at_the_host_pinned_base() -> Result<(), Box<dyn std::error::Error>>
 {
     let mut fixture = CommitSourcePreparation::new()?;

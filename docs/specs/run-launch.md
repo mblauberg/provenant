@@ -546,6 +546,10 @@ and otherwise pins checkout HEAD. `live` reads the live tree locally; on a peer 
 pins HEAD and warns `READ_SOURCE_PINNED_FOR_PEER`. `default_branch` pins the fetched
 default branch; any other value is a Git ref. `--source` accepts the same values
 and overrides configuration. `lanes.read_source_fetch_first` fetches before resolution.
+Whatever the access profile, a pinned source is materialised into an attempt-private
+detached worktree at the recorded commit, so the lane reads that tree rather than the
+host checkout even when the checkout is behind; "behind" illustrates `auto` and is not a
+precondition for `default_branch`.
 `bind_read_source` is the one binder: it pins each agent leaf, never a gate or composite, to
 the writer base when one resolved and otherwise to the pinned read source. A
 repository file still naming `checkout` warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`;

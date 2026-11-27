@@ -3356,8 +3356,11 @@ pub(super) fn prepare_candidates_inner(
         Some(writer) => writer.worktree.path().to_owned(),
         None => source_cwd(registry, task)?,
     };
-    let isolated =
-        writer.is_none() && task.access.source_root.is_some() && !task.access.source_live;
+    // The recorded pin selects the tree, whatever the sealed access grant says.
+    // A read-only lane that carries a head must read that head's snapshot: an
+    // access profile may seal no source root (or a live child-directory root),
+    // and in that case the live checkout would otherwise answer for the pin.
+    let isolated = writer.is_none() && task.head.is_some() && !task.access.source_live;
     let cwd = if isolated {
         super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?

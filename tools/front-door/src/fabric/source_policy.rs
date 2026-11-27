@@ -90,7 +90,8 @@ pub(super) fn read_source_choice(
 
 /// One shape for the commit a read-only launch reads, in both `run --explain`
 /// (its status) and the launch result. The source names the layer that chose
-/// the ref; `commit` is null when the choice keeps the local checkout.
+/// the ref; `commit` is null only for `live`, which keeps the local checkout.
+/// Every other choice pins a commit, including `auto` on an up-to-date checkout.
 pub(super) fn read_source_report(
     selected: Option<&provenant_cli::run::ReadSourcePin>,
     choice: &provenant_cli::run::ReadSourceChoice,

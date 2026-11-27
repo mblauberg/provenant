@@ -241,6 +241,11 @@ pub(super) fn confinement_request(
             &fixture_roots
         }
     };
+    // A read-only lane whose cwd is a view under state must be able to read and
+    // execute from it. Follow the cwd the lane actually uses, not the access
+    // grant or the inventory variant: every pinned view lives under state, and
+    // an access profile may seal no source root at all (#4136).
+    let pinned_view = writer.is_none() && !access.source_live && roots.cwd.starts_with(roots.state);
     let sandboxed = match sandbox_context {
         InventoryContext::Preflight => false,
         #[cfg(any(test, feature = "fixture"))]
@@ -276,7 +281,7 @@ pub(super) fn confinement_request(
             sandboxed,
             lane_access,
         )?;
-    if writer.is_none() && access.source_root.is_some() && !access.source_live {
+    if pinned_view {
         // The host materialises a commit source beside candidate scratch under
         // state. Its ordinary read root cannot override the state denial, and
         // every adapter starts in this cwd; keep the view immutable.
