@@ -43,6 +43,22 @@ pub enum OwnCommitInput<'a> {
     },
 }
 
+/// Inputs and runtime dependencies for an own-path commit.
+pub struct OwnCommitRequest<'a> {
+    pub worktree: &'a Path,
+    pub git_dir: &'a Path,
+    pub ref_name: &'a str,
+    pub expected: provenant_core::GitOid,
+    pub input: OwnCommitInput<'a>,
+    pub message: &'a str,
+    pub retries: u32,
+    pub env: &'a [(OsString, OsString)],
+    pub executor: &'a dyn Executor,
+    pub cancel: &'a provenant_core::CancelToken,
+    pub pause: &'a dyn Pause,
+    pub timeout: Duration,
+}
+
 #[derive(Debug, thiserror::Error)]
 enum CommitOwnError {
     #[error("git executable unavailable")]
@@ -68,42 +84,52 @@ impl Drop for PrivateIndex {
     }
 }
 
-fn git_own(
-    cwd: &Path,
-    args: &[&str],
-    env: &[(OsString, OsString)],
-    executor: &dyn Executor,
-    cancel: &provenant_core::CancelToken,
+#[derive(Clone, Copy)]
+struct GitOwnContext<'a> {
+    cwd: &'a Path,
+    env: &'a [(OsString, OsString)],
+    executor: &'a dyn Executor,
+    cancel: &'a provenant_core::CancelToken,
     timeout: Duration,
-    operation: &'static str,
-) -> std::result::Result<crate::worktree_carry::GitOutput, CommitOwnError> {
-    git_own_with_stdin(cwd, args, None, env, executor, cancel, timeout, operation)
 }
 
-fn git_own_with_stdin(
-    cwd: &Path,
-    args: &[&str],
-    stdin: Option<&[u8]>,
-    env: &[(OsString, OsString)],
-    executor: &dyn Executor,
-    cancel: &provenant_core::CancelToken,
-    timeout: Duration,
-    operation: &'static str,
-) -> std::result::Result<crate::worktree_carry::GitOutput, CommitOwnError> {
-    let out =
-        crate::worktree_carry::git_with_stdin(cwd, args, stdin, env, executor, cancel, timeout)
-            .map_err(|error| match error {
-                crate::worktree_carry::CarryError::GitUnavailable => CommitOwnError::GitUnavailable,
-                crate::worktree_carry::CarryError::Exec(source) => CommitOwnError::Exec(source),
-                other => CommitOwnError::Git {
-                    operation,
-                    detail: other.to_string(),
-                },
-            })?;
-    if out.timed_out {
-        return Err(CommitOwnError::TimedOut { operation });
+impl GitOwnContext<'_> {
+    fn run(
+        &self,
+        args: &[&str],
+        operation: &'static str,
+    ) -> std::result::Result<crate::worktree_carry::GitOutput, CommitOwnError> {
+        self.with_stdin(args, None, operation)
     }
-    Ok(out)
+
+    fn with_stdin(
+        &self,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        operation: &'static str,
+    ) -> std::result::Result<crate::worktree_carry::GitOutput, CommitOwnError> {
+        let out = crate::worktree_carry::git_with_stdin(
+            self.cwd,
+            args,
+            stdin,
+            self.env,
+            self.executor,
+            self.cancel,
+            self.timeout,
+        )
+        .map_err(|error| match error {
+            crate::worktree_carry::CarryError::GitUnavailable => CommitOwnError::GitUnavailable,
+            crate::worktree_carry::CarryError::Exec(source) => CommitOwnError::Exec(source),
+            other => CommitOwnError::Git {
+                operation,
+                detail: other.to_string(),
+            },
+        })?;
+        if out.timed_out {
+            return Err(CommitOwnError::TimedOut { operation });
+        }
+        Ok(out)
+    }
 }
 
 fn index_contention(stderr: &str) -> bool {
@@ -130,20 +156,31 @@ fn retry_error(retries: u32, detail: &str) -> CommandError {
 /// leaving the shared index untouched. The branch moves only through a
 /// compare-and-swap `update-ref`; a lost race reapplies the same input to the
 /// new head, while index-lock contention retries with a cancellable backoff.
+#[allow(clippy::result_large_err)] // Preserve the shared command-error contract at this explicit commit boundary.
 pub fn commit_own_paths(
-    worktree: &Path,
-    git_dir: &Path,
-    ref_name: &str,
-    expected: provenant_core::GitOid,
-    input: OwnCommitInput<'_>,
-    message: &str,
-    retries: u32,
-    env: &[(OsString, OsString)],
-    executor: &dyn Executor,
-    cancel: &provenant_core::CancelToken,
-    pause: &dyn Pause,
-    timeout: Duration,
+    request: OwnCommitRequest<'_>,
 ) -> std::result::Result<OwnCommit, CommandError> {
+    let OwnCommitRequest {
+        worktree,
+        git_dir,
+        ref_name,
+        expected,
+        input,
+        message,
+        retries,
+        env,
+        executor,
+        cancel,
+        pause,
+        timeout,
+    } = request;
+    let git = GitOwnContext {
+        cwd: worktree,
+        env,
+        executor,
+        cancel,
+        timeout,
+    };
     let to_error = |error: CommitOwnError| -> CommandError {
         match error {
             CommitOwnError::GitUnavailable => CommandError::new(
@@ -279,18 +316,15 @@ pub fn commit_own_paths(
             OsString::from("GIT_INDEX_FILE"),
             private.0.as_os_str().to_owned(),
         ));
+        let index_git = GitOwnContext {
+            env: &index_env,
+            ..git
+        };
         let expected_text = expected.to_string();
 
-        let read = git_own(
-            worktree,
-            &["read-tree", expected_text.as_str()],
-            &index_env,
-            executor,
-            cancel,
-            timeout,
-            "read-tree",
-        )
-        .map_err(to_error)?;
+        let read = index_git
+            .run(&["read-tree", expected_text.as_str()], "read-tree")
+            .map_err(to_error)?;
         if !read.ok {
             if index_contention(&read.stderr) {
                 attempt += 1;
@@ -310,23 +344,14 @@ pub fn commit_own_paths(
         }
 
         let stage = match patch {
-            Some(bytes) => git_own_with_stdin(
-                worktree,
-                &["apply", "--cached"],
-                Some(bytes),
-                &index_env,
-                executor,
-                cancel,
-                timeout,
-                "apply cached patch",
-            ),
+            Some(bytes) => {
+                index_git.with_stdin(&["apply", "--cached"], Some(bytes), "apply cached patch")
+            }
             None => {
                 let path_refs: Vec<&str> = pathspecs.iter().map(String::as_str).collect();
                 let mut add_args = vec!["add", "--"];
                 add_args.extend(path_refs.iter().copied());
-                git_own(
-                    worktree, &add_args, &index_env, executor, cancel, timeout, "add",
-                )
+                index_git.run(&add_args, "add")
             }
         }
         .map_err(to_error)?;
@@ -352,16 +377,9 @@ pub fn commit_own_paths(
             }));
         }
 
-        let tree = git_own(
-            worktree,
-            &["write-tree"],
-            &index_env,
-            executor,
-            cancel,
-            timeout,
-            "write-tree",
-        )
-        .map_err(to_error)?;
+        let tree = index_git
+            .run(&["write-tree"], "write-tree")
+            .map_err(to_error)?;
         if !tree.ok {
             return Err(to_error(CommitOwnError::Git {
                 operation: "write-tree",
@@ -378,16 +396,7 @@ pub fn commit_own_paths(
             "-m",
             message,
         ];
-        let made = git_own(
-            worktree,
-            &commit_args,
-            env,
-            executor,
-            cancel,
-            timeout,
-            "commit-tree",
-        )
-        .map_err(to_error)?;
+        let made = git.run(&commit_args, "commit-tree").map_err(to_error)?;
         if !made.ok {
             return Err(to_error(CommitOwnError::Git {
                 operation: "commit-tree",
@@ -398,21 +407,17 @@ pub fn commit_own_paths(
             .map_err(|_| to_error(CommitOwnError::InvalidOid(made.stdout.trim().to_owned())))?;
         let new_text = new.to_string();
 
-        let update = git_own(
-            worktree,
-            &[
+        let update = git
+            .run(
+                &[
+                    "update-ref",
+                    ref_name,
+                    new_text.as_str(),
+                    expected_text.as_str(),
+                ],
                 "update-ref",
-                ref_name,
-                new_text.as_str(),
-                expected_text.as_str(),
-            ],
-            env,
-            executor,
-            cancel,
-            timeout,
-            "update-ref",
-        )
-        .map_err(to_error)?;
+            )
+            .map_err(to_error)?;
         if update.ok {
             return Ok(OwnCommit {
                 head: new,
@@ -429,16 +434,9 @@ pub fn commit_own_paths(
                 DurationMicros::from_micros(5_000_u64 * u64::from(attempt)),
                 cancel,
             );
-            let head = git_own(
-                worktree,
-                &["rev-parse", ref_name],
-                env,
-                executor,
-                cancel,
-                timeout,
-                "rev-parse",
-            )
-            .map_err(to_error)?;
+            let head = git
+                .run(&["rev-parse", ref_name], "rev-parse")
+                .map_err(to_error)?;
             if !head.ok {
                 return Err(to_error(CommitOwnError::Git {
                     operation: "rev-parse",

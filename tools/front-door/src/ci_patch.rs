@@ -823,23 +823,23 @@ impl PatchRuntime for SystemRuntime {
             .collect::<Vec<_>>();
         let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
         let cancel = CancelToken::new();
-        provenant_run::commit_own_paths(
-            tree,
-            &git_dir,
-            &ref_name,
+        provenant_run::commit_own_paths(provenant_run::OwnCommitRequest {
+            worktree: tree,
+            git_dir: &git_dir,
+            ref_name: &ref_name,
             expected,
-            provenant_run::OwnCommitInput::Patch {
+            input: provenant_run::OwnCommitInput::Patch {
                 bytes: patch,
                 paths,
             },
             message,
-            2,
-            &env,
-            &executor,
-            &cancel,
-            &ThreadPause,
-            READ_BUDGET,
-        )
+            retries: 2,
+            env: &env,
+            executor: &executor,
+            cancel: &cancel,
+            pause: &ThreadPause,
+            timeout: READ_BUDGET,
+        })
         .map(|_| ())
         .map_err(|error| error.message)
     }

@@ -27,7 +27,7 @@ mod git_context;
 mod holder;
 mod identity;
 mod launch;
-pub use launch::{OwnCommit, OwnCommitInput, commit_own_paths};
+pub use launch::{OwnCommit, OwnCommitInput, OwnCommitRequest, commit_own_paths};
 pub mod worktree_carry;
 pub use worktree_carry::{CarryError, CarrySnapshot};
 pub mod lease_migrate;

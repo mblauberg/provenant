@@ -52,7 +52,7 @@ impl Fixture {
         &self,
         expected: provenant_core::GitOid,
         retries: u32,
-    ) -> std::result::Result<OwnCommit, CommandError> {
+    ) -> std::result::Result<OwnCommit, Box<CommandError>> {
         let paths = [self.repo.join("own.txt")];
         self.commit_input(expected, OwnCommitInput::Paths(&paths), retries)
     }
@@ -62,26 +62,32 @@ impl Fixture {
         expected: provenant_core::GitOid,
         input: OwnCommitInput<'_>,
         retries: u32,
-    ) -> std::result::Result<OwnCommit, CommandError> {
+    ) -> std::result::Result<OwnCommit, Box<CommandError>> {
         let env = test_env();
         let executor = SystemExecutor::new(4).map_err(|e| {
-            CommandError::new("EXECUTOR", "executor unavailable", None, e.to_string())
+            Box::new(CommandError::new(
+                "EXECUTOR",
+                "executor unavailable",
+                None,
+                e.to_string(),
+            ))
         })?;
         let cancel = CancelToken::new();
-        commit_own_paths(
-            &self.repo,
-            &self.git_dir(),
-            "refs/heads/main",
+        commit_own_paths(OwnCommitRequest {
+            worktree: &self.repo,
+            git_dir: &self.git_dir(),
+            ref_name: "refs/heads/main",
             expected,
             input,
-            "lane: own paths",
+            message: "lane: own paths",
             retries,
-            &env,
-            &executor,
-            &cancel,
-            &NoPause,
-            Duration::from_secs(30),
-        )
+            env: &env,
+            executor: &executor,
+            cancel: &cancel,
+            pause: &NoPause,
+            timeout: Duration::from_secs(30),
+        })
+        .map_err(Box::new)
     }
 }
 

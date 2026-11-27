@@ -2963,8 +2963,6 @@ fn candidate(
             };
             let origin = if window.profile {
                 Layer::Host
-            } else if context.config.pacing_reserve.contains_key(model.adapter()) {
-                Layer::Default
             } else {
                 Layer::Default
             };
