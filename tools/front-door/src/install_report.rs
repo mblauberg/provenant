@@ -76,11 +76,10 @@ pub(super) fn innermost_error_text(report: &str) -> (String, String) {
 /// note cannot clip the parts that tell the operator where to look.
 const SMOKE_CAUSE_BYTES: usize = 140;
 
-/// The root cause of a failed smoke graph, read from a checkpoint envelope in
-/// the failing child's report. A dependant blocked by an upstream node is not
-/// a cause: its `advance_code` is `upstream_blocked` and its `advance_note`
-/// begins `blocked by`. The cause owns a concrete code (prefer the owner's)
-/// and the detail that explains it.
+/// The shared graph cause paired with the graph that carried it. This is only
+/// a projection of `provenant_fabric_runtime::graph::RootCause` for the
+/// renderer: the selection itself lives in the one cause walk and is not
+/// repeated here.
 pub(super) struct SmokeCause {
     pub graph: String,
     pub node: String,
@@ -88,51 +87,22 @@ pub(super) struct SmokeCause {
     pub message: String,
 }
 
-/// Select the node that caused a smoke graph to fail, never the blocked
-/// dependant whose own envelope carries the misleading `upstream_blocked`
-/// error. Both `run` and `status` envelopes carry the checkpoint; the newest
-/// one with a cause wins.
+/// Read the newest checkpoint envelope with an actionable cause through the
+/// shared root-cause walk. Both `run` and `status` envelopes carry the
+/// checkpoint; a dependant whose only evidence is `upstream_blocked` is never
+/// selected as the cause.
 pub(super) fn smoke_root_cause(report: &str) -> Option<SmokeCause> {
     child_envelopes(report).into_iter().rev().find_map(|value| {
         let checkpoint = &value["data"]["checkpoint"];
-        let graph = checkpoint["graph_id"].as_str()?;
-        let nodes = checkpoint["nodes"].as_array()?;
-        let is_dependant = |node: &serde_json::Value| {
-            node["advance_code"].as_str() == Some("upstream_blocked")
-                || node["advance_note"]
-                    .as_str()
-                    .is_some_and(|note| note.trim_start().starts_with("blocked by"))
-        };
-        let has_detail = |node: &serde_json::Value| {
-            node["advance_note"]
-                .as_str()
-                .is_some_and(|note| !note.trim().is_empty())
-        };
-        let cause = nodes
-            .iter()
-            .find(|node| {
-                has_detail(node) && node["advance_owner_code"].is_string() && !is_dependant(node)
-            })
-            .or_else(|| {
-                nodes
-                    .iter()
-                    .find(|node| has_detail(node) && !is_dependant(node))
-            })?;
-        let code = cause["advance_owner_code"]
-            .as_str()
-            .or_else(|| cause["advance_code"].as_str())
-            .filter(|code| !code.is_empty())
-            .unwrap_or("unknown");
+        if !checkpoint.is_object() {
+            return None;
+        }
+        let cause = provenant_fabric_runtime::graph::root_cause::root_cause_from_value(checkpoint)?;
         Some(SmokeCause {
-            graph: graph.to_owned(),
-            node: cause["id"].as_str().unwrap_or("unknown").to_owned(),
-            code: code.to_owned(),
-            message: cause["advance_note"]
-                .as_str()
-                .unwrap_or_default()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" "),
+            graph: checkpoint["graph_id"].as_str()?.to_owned(),
+            node: cause.node,
+            code: cause.code,
+            message: cause.message,
         })
     })
 }
@@ -239,5 +209,64 @@ pub(super) fn smoke_verdict(output: &str) -> String {
     {
         Some(verdict) => format!("  smoke graph: {verdict}\n"),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{first_error_line, smoke_failure_summary, smoke_root_cause};
+
+    #[test]
+    fn upgrade_verify_root_cause_skips_upstream_blocked() {
+        // The blocked dependant carries the innermost envelope, but only the
+        // node that actually failed is actionable. The upgrade summary must
+        // use the shared cause walk rather than selecting it again here.
+        let dependant = serde_json::json!({
+            "id": "task--review",
+            "state": "blocked",
+            "advance_code": "upstream_blocked",
+            "advance_note": "blocked by task--read (Blocked)",
+            "attempts": []
+        });
+        let cause = serde_json::json!({
+            "id": "task--read",
+            "state": "failed",
+            "advance_code": "launch_refused",
+            "advance_owner_code": "confinement_refused",
+            "advance_note": "[confinement_refused] peer_project_unprojectable on /fixture/.git",
+            "attempts": []
+        });
+        let envelope = serde_json::json!({
+            "schema_version": 1,
+            "command": "run",
+            "data": {"checkpoint": {"graph_id": "smoke-4102", "nodes": [dependant, cause]}}
+        });
+        let report = format!("Command failed (Exit(1)): {envelope}\n");
+
+        let selected = smoke_root_cause(&report).expect("the checkpoint names a cause");
+        assert_eq!(selected.graph, "smoke-4102");
+        assert_eq!(selected.node, "task--read");
+        assert_eq!(selected.code, "confinement_refused");
+
+        let summary = smoke_failure_summary(&report).expect("a cause yields a summary");
+        for expected in [
+            "smoke-4102",
+            "failed at task--read",
+            "confinement_refused",
+            "peer_project_unprojectable",
+            "next: `provenant status smoke-4102`",
+        ] {
+            assert!(
+                summary.contains(expected),
+                "{expected} missing from {summary}"
+            );
+        }
+        assert!(!summary.contains("blocked by"), "{summary}");
+        assert!(!summary.contains("upstream_blocked"), "{summary}");
+
+        // The host reason reaches the operator through the same walk.
+        let reason = first_error_line(&report);
+        assert!(reason.contains("task--read"), "{reason}");
+        assert!(!reason.contains("upstream_blocked"), "{reason}");
     }
 }
