@@ -2499,7 +2499,7 @@ pub(crate) fn run(
                     }
                 }
                 })
-                .expect("spawn graph wait worker");
+                .map_err(graph_wait_spawn_error)?;
         }
         for (index, source) in sources.iter().enumerate() {
             if !matches!(source, Source::Pr { .. })
@@ -2726,8 +2726,21 @@ pub(crate) fn run(
         );
         stop.stop();
         drop(receiver);
-        done
+        Ok::<bool, std::io::Error>(done)
     });
+    let done = match done {
+        Ok(done) => done,
+        Err(error) => {
+            return crate::fail(
+                "wait",
+                Outcome::Error,
+                "IO",
+                &error.to_string(),
+                "check system thread resources, then rerun `provenant wait`; the work continues",
+                globals,
+            );
+        }
+    };
     let mut final_session = None;
     let done = done
         || final_snapshot(
@@ -2858,6 +2871,13 @@ pub(crate) fn run(
         &human,
         true,
         Some(&summary),
+    )
+}
+
+fn graph_wait_spawn_error(error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!("cannot spawn graph wait worker: {error}"),
     )
 }
 

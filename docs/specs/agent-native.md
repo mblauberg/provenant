@@ -72,7 +72,7 @@ The steps run in this fixed order and are shared by tick:
 5. `advance_with_budget` under the checkpoint's sealed execution binding, with `budget = deadline.remaining()`.
 
 - **Callers.**
-  - `wait` calls `wake` on every wake-up; this replaces `advance_after_remote_terminal`.
+  - `wait` calls `wake` on every wake-up; this replaces `advance_after_remote_terminal`. If its graph worker cannot start, it reports the OS cause and a retry step; the work continues.
   - `result` and inline `run` also call it.
   - `wait --pr N` wakes the queue item bound to that PR.
   - A named `status` or `output` wakes once with `domains.wait.advance_budget_ms`. List `status` stays a snapshot.
