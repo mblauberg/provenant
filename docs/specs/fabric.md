@@ -713,7 +713,9 @@ refusal too; the outcome supplies a fallback cause only when no stop was sealed.
 preparation refusal retains its `preparation_refused` advance code and actionable refusal detail.
 When a same-route continuation cause has no next route or explicit `on_stop`
 override, the graph starts a fresh attempt on that route; `fallback_route_pinned`
-is reserved for depleted causes.
+is reserved for depleted causes. An `on_stop` override that suppresses that
+continuation still fails under the sealed cause's advance code, not the provider
+outcome's label: a lost lane token is never reported as `auth_required`.
 - Why: preserving a writer's partial work makes an explicit stall retry safe to
   inspect and continue, while the retry budget bounds route changes.
 

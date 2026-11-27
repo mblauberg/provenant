@@ -927,23 +927,26 @@ pub(super) fn settlement_fallback_decision(
                 Some("preparation_refused"),
                 Some(bounded(cause.detail(), MAX_ADVANCE_NOTE_BYTES)),
             ),
+            // The sealed cause owns the code, not the provider label. An
+            // explicit `on_stop` can suppress the same-route continuation, but
+            // the node still fails under the cause it sealed.
             GraphAttemptOutcome::AuthRequired => (
-                Some("auth_required"),
+                cause.map(StopCause::advance_code),
                 Some("The lane requires authentication.".into()),
             ),
             GraphAttemptOutcome::ModelUnavailable => (
-                Some("model_unavailable"),
+                cause.map(StopCause::advance_code),
                 Some(
                     "The model is unavailable for this account; another eligible candidate in the same tier takes over (configurable with `depletion.tiers`)"
                         .into(),
                 ),
             ),
             GraphAttemptOutcome::AdapterUnavailable => (
-                Some("adapter_unavailable"),
+                cause.map(StopCause::advance_code),
                 Some("The lane's adapter is unavailable.".into()),
             ),
             GraphAttemptOutcome::Unclassified => (
-                Some("unclassified"),
+                cause.map(StopCause::advance_code),
                 Some("The provider reported an unclassified error.".into()),
             ),
             _ => (None, None),

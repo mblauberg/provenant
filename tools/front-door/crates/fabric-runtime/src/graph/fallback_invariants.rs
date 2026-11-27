@@ -196,3 +196,47 @@ fn a_recoverable_stop_keeps_its_code_and_never_reports_auth_required() {
         }
     ));
 }
+
+/// An explicit `on_stop` suppresses the same-route continuation, so the node
+/// fails; it must still fail under the cause it sealed, not under the label the
+/// provider reported. A lost lane token is not an authentication failure.
+#[test]
+fn explicit_on_stop_keeps_the_sealed_cause_code() {
+    use provenant_records::StopCause;
+
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"g", "nodes":[{
+            "id":"n", "prompt":"work", "access":"read_only",
+            "routes":[{"adapter":"a","model":"a/m"}],
+            "on_stop":{"lane_token_lost":"chair"}
+        }]
+    }))
+    .unwrap();
+    let (plan, _) = validate_plan(&document).unwrap();
+    let decision = next_step::settlement_fallback_decision(
+        &plan.nodes[0],
+        0,
+        GraphAttemptOutcome::AuthRequired,
+        Some(StopCause::LaneTokenLost),
+        true,
+        FallbackEvidence {
+            preparation: None,
+            unreadable: false,
+            review_limit_reached: false,
+            cause: None,
+            skipped_accounts: &[],
+        },
+    );
+    assert_eq!(
+        decision,
+        SettlementFallback::Fail {
+            code: Some(StopCause::LaneTokenLost.advance_code()),
+            message: Some("The lane requires authentication.".into()),
+        }
+    );
+    assert_ne!(
+        StopCause::LaneTokenLost.advance_code(),
+        "auth_required",
+        "the regression would be invisible if the cause shared the provider label"
+    );
+}
