@@ -775,8 +775,10 @@ fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, Stri
     for binding in
         provenant_config::registered_projects(&resolved.roots).map_err(|e| e.to_string())?
     {
-        // A binding whose common directory is gone has nothing to settle.
-        if !binding.common_dir_present() {
+        // A vanished checkout or common directory has nothing to settle. Report
+        // it once with the unregister command rather than failing every tick.
+        if crate::project_root::absent(&binding) {
+            crate::project_root::warn_vanished(&binding);
             continue;
         }
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -1172,6 +1174,78 @@ mod tests {
             codex_home: None,
         };
         assert_eq!(reap_projects(&resolved).unwrap(), "queued");
+    }
+
+    // Spec: docs/specs/supervisor.md#tick-driven-settlement
+    #[test]
+    fn settlement_warns_once_and_skips_a_project_whose_checkout_vanished() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let project = root.join("project");
+        let state = root.join("state");
+        let common = root.join("common.git");
+        for path in [&home, &project, &state] {
+            std::fs::create_dir(path).unwrap();
+        }
+        provenant_os::fixture::private_state_dir(&state).unwrap();
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        provenant_os::fixture::run_git(
+            &project,
+            &["init", "-q", "--separate-git-dir", common.to_str().unwrap()],
+        )
+        .unwrap();
+        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])
+            .unwrap();
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                common.canonicalize().unwrap(),
+                project.canonicalize().unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // Delete only the checkout: the separate Git common directory survives.
+        std::fs::remove_dir_all(&project).unwrap();
+        assert!(binding.common_dir_present());
+        assert!(!binding.primary_checkout_present());
+
+        let resolved = crate::roots::Resolved {
+            assets: root.join("assets"),
+            home,
+            project,
+            roots,
+            claude_config: None,
+            codex_home: None,
+        };
+        let (result, warnings) = provenant_records::warning::capture(|| reap_projects(&resolved));
+        assert_eq!(
+            result.unwrap(),
+            "queued",
+            "the vanished root is not a task failure"
+        );
+        let warned = warnings
+            .iter()
+            .filter(|warning| {
+                warning.code.as_ref() == provenant_records::warning::PROJECT_ROOT_VANISHED.0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(warned.len(), 1, "reported once: {warnings:?}");
+        let subject = binding.project_id().to_string();
+        assert_eq!(warned[0].subject.as_deref(), Some(subject.as_str()));
+        assert!(
+            warned[0]
+                .repair
+                .as_deref()
+                .is_some_and(|repair| repair.contains("provenant gc --apply")),
+            "the warning names the unregister command: {:?}",
+            warned[0]
+        );
     }
 
     #[allow(dead_code)] // The worktree driver includes this module without libtest.

@@ -225,3 +225,128 @@ fn admission_recovery_capability() {
         Err(JournalError::BadDigest)
     ));
 }
+
+fn subject_with_base(
+    base: Option<provenant_core::GitOid>,
+) -> provenant_records::subject::PinnedSubject {
+    provenant_records::subject::PinnedSubject {
+        extra: Default::default(),
+        base,
+        head: provenant_core::GitOid::parse(&"1".repeat(40)).unwrap(),
+        origin: provenant_records::subject::SubjectOrigin::LocalRef {
+            name: "main".into(),
+        },
+        pinned_at: provenant_core::WallTime::from_micros(1).unwrap(),
+        policy: provenant_records::subject::SubjectPolicy::Pinned,
+        repository: None,
+        base_ref: None,
+        policy_source: None,
+        followed_from: Vec::new(),
+    }
+}
+
+// The admitted subject's base and the host-bound review base name the same
+// commit whenever both are present; absence on either side is unconstrained.
+#[test]
+fn subject_base_must_agree_with_the_bound_review_base() {
+    let base = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
+    let other = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
+    let make = || {
+        let mut record: StoredCheckpoint = serde_json::from_value(stored()).unwrap();
+        record.execution.document.schema_version = 2;
+        record.execution.document.subject = Some(subject_with_base(Some(base)));
+        record.execution.bases = GraphBaseBinding::new(Some(base), None);
+        record
+    };
+
+    assert!(decode_checkpoint(&sealed(make()), "g-test").is_ok());
+
+    let mut mismatched = make();
+    mismatched.execution.bases = GraphBaseBinding::new(Some(other), None);
+    assert!(matches!(
+        decode_checkpoint(&sealed(mismatched), "g-test"),
+        Err(JournalError::BadEnvelope)
+    ));
+
+    let mut subject_without_base = make();
+    subject_without_base.execution.document.subject = Some(subject_with_base(None));
+    subject_without_base.execution.bases = GraphBaseBinding::new(Some(other), None);
+    assert!(decode_checkpoint(&sealed(subject_without_base), "g-test").is_ok());
+
+    let mut base_without_review = make();
+    base_without_review.execution.bases = GraphBaseBinding::new(None, Some(other));
+    assert!(decode_checkpoint(&sealed(base_without_review), "g-test").is_ok());
+}
+
+// Invariant 2: after a reload, status projects the subject admitted with the
+// execution, and the projection is a runtime field, never a stored one.
+#[test]
+fn status_projects_the_admitted_subject_after_reload() {
+    let subject = subject_with_base(Some(
+        provenant_core::GitOid::parse(&"a".repeat(40)).unwrap(),
+    ));
+    let mut record: StoredCheckpoint = serde_json::from_value(stored()).unwrap();
+    record.execution.document.schema_version = 2;
+    record.execution.document.subject = Some(subject.clone());
+    record.execution.bases = GraphBaseBinding::new(Some(subject.base.unwrap()), None);
+
+    let reloaded = decode_checkpoint(&sealed(record), "g-test").unwrap();
+    assert_eq!(reloaded.checkpoint.subject, Some(subject.clone()));
+    assert_eq!(
+        reloaded.checkpoint.subject,
+        reloaded.execution.document.subject
+    );
+
+    let run = GraphRun {
+        status: GraphStatus::Pending,
+        outcome: None,
+        checkpoint: reloaded.checkpoint,
+        advance_note: None,
+    };
+    let wire = serde_json::to_value(&run).unwrap();
+    assert_eq!(
+        wire["checkpoint"]["subject"],
+        serde_json::to_value(&subject).unwrap()
+    );
+}
+
+// An execution persisted before this field existed still loads with no subject,
+// and status omits the projection rather than inventing one.
+#[test]
+fn an_execution_saved_before_the_subject_field_loads_with_subject_none() {
+    let record: StoredCheckpoint = serde_json::from_value(stored()).unwrap();
+    assert!(record.execution.document.subject.is_none());
+    let reloaded = decode_checkpoint(&sealed(record), "g-test").unwrap();
+    assert!(reloaded.execution.document.subject.is_none());
+    assert!(reloaded.checkpoint.subject.is_none());
+
+    let run = GraphRun {
+        status: GraphStatus::Pending,
+        outcome: None,
+        checkpoint: reloaded.checkpoint,
+        advance_note: None,
+    };
+    let wire = serde_json::to_value(&run).unwrap();
+    assert!(wire["checkpoint"].get("subject").is_none());
+}
+
+// A review base or admitted subject requires schema 2; schema 1 cannot
+// represent either field.
+#[test]
+fn review_base_and_subject_require_document_schema_v2() {
+    let mut value = stored()["execution"]["document"].clone();
+    value["review_base"] = json!("main");
+    let v1: GraphDocument = serde_json::from_value(value.clone()).unwrap();
+    assert!(validate_plan_with_limits(&v1, &Default::default()).is_err());
+    value["schema_version"] = json!(2);
+    let v2: GraphDocument = serde_json::from_value(value).unwrap();
+    assert!(validate_plan_with_limits(&v2, &Default::default()).is_ok());
+
+    let mut document: GraphDocument =
+        serde_json::from_value(stored()["execution"]["document"].clone()).unwrap();
+    document.schema_version = 1;
+    document.subject = Some(subject_with_base(None));
+    assert!(validate_plan_with_limits(&document, &Default::default()).is_err());
+    document.schema_version = 2;
+    assert!(validate_plan_with_limits(&document, &Default::default()).is_ok());
+}

@@ -254,9 +254,9 @@ pub struct GraphDocument {
     /// Review resolution inputs retained with the submitted graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<provenant_routing::ReviewRequest>,
-    /// The graph requested a review without a resolvable review subject.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub review_subject_missing: bool,
+    /// Written by the host at admission; a caller-supplied value is overwritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<provenant_records::subject::PinnedSubject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -432,6 +432,10 @@ impl GraphBaseBinding {
 }
 
 impl GraphExecution {
+    /// Keeps the host-bound bases self-consistent and consistent with the
+    /// admitted subject: when both carry a review base they must name the same
+    /// commit. Absence on either side is allowed, so graphs admitted before
+    /// this field existed (subject `None`) still validate.
     pub(super) fn valid_bases(&self) -> bool {
         let (review, integration) = self
             .bases
@@ -447,6 +451,12 @@ impl GraphExecution {
                 .integration_branch
                 .as_deref()
                 .is_none_or(|reference| reference.is_empty() || integration.is_some())
+            && self
+                .document
+                .subject
+                .as_ref()
+                .and_then(|subject| subject.base)
+                .is_none_or(|base| review.is_none_or(|review| review == base))
     }
 }
 
@@ -1948,6 +1958,9 @@ pub struct GraphCheckpoint {
     /// GraphExecution and never stored in the checkpoint.
     #[serde(skip)]
     pub bases: Option<GraphBaseBinding>,
+    /// Runtime projection of execution.document.subject; never stored.
+    #[serde(skip)]
+    pub subject: Option<provenant_records::subject::PinnedSubject>,
     /// Integration head pinned when the first integration source was resolved.
     /// Synthesis and writers that start from that commit stop if it moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2528,6 +2541,44 @@ impl GraphCheckpoint {
             .map(provenant_records::pause::Pause::reason)
     }
 
+    /// Whether the graph pause and the active expansion pause agree (#4106).
+    ///
+    /// Only one expansion pause may be active, and when one is it must carry
+    /// the graph's typed cause. With no active expansion pause an
+    /// `InvalidPlanExpansion` graph pause would have no owner at all. This is
+    /// checked both when a stored checkpoint is admitted and when a tick reads
+    /// it, so a disagreeing pair is quarantined instead of repeated forever.
+    pub(crate) fn expansion_pause_owns_graph_pause(&self) -> bool {
+        let active: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.expansion_cause,
+                    Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+                )
+            })
+            .collect();
+        match active.len() {
+            0 => {
+                self.pause_cause()
+                    != Some(provenant_records::pause::PauseCause::InvalidPlanExpansion)
+            }
+            1 => Some(plans::expansion_pause_cause(active[0])) == self.pause_cause(),
+            _ => false,
+        }
+    }
+
+    /// Pause the graph for a structural limit, yielding any active expansion
+    /// pause so the typed graph pause always has a single consistent owner.
+    pub(super) fn pause_structural(&mut self, reason: &str) {
+        self.deactivate_expansion_pauses();
+        self.set_pause(
+            provenant_records::pause::PauseCause::StructuralLimit,
+            reason,
+        );
+    }
+
     pub(super) fn deactivate_expansion_pauses(&mut self) {
         for node in &mut self.nodes {
             if let Some(NodeDecisionCause::PlanExpansionPaused { active, .. }) =
@@ -2753,6 +2804,12 @@ impl Serialize for GraphRun {
 struct GraphCheckpointProjection<'a> {
     #[serde(flatten)]
     checkpoint: &'a GraphCheckpoint,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject: Option<&'a provenant_records::subject::PinnedSubject>,
+    /// Slot for a later result-read or settlement head comparison; status
+    /// reads stored data only in this batch, so it is always `None` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    head_check: Option<provenant_records::subject::HeadCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bound_review_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2763,6 +2820,8 @@ impl<'a> From<&'a GraphCheckpoint> for GraphCheckpointProjection<'a> {
     fn from(checkpoint: &'a GraphCheckpoint) -> Self {
         Self {
             checkpoint,
+            subject: checkpoint.subject.as_ref(),
+            head_check: None,
             bound_review_base: checkpoint
                 .bases
                 .and_then(|bases| bases.review)
@@ -2896,5 +2955,18 @@ impl CiPollBackoff {
         )
         .delay(pending_observations)
         .as_secs()
+    }
+}
+
+#[cfg(test)]
+mod subject_wire_tests {
+    use super::GraphDocument;
+
+    #[test]
+    fn document_without_subject_keeps_its_wire_bytes() {
+        let original = r#"{"schema_version":1,"graph_id":"legacy","nodes":[]}"#;
+        let document: GraphDocument = serde_json::from_str(original).unwrap();
+        assert!(document.subject.is_none());
+        assert_eq!(serde_json::to_string(&document).unwrap(), original);
     }
 }

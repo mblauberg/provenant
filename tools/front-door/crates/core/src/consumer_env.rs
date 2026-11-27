@@ -70,6 +70,7 @@ pub const LANE_HEAD: &str = "PROVENANT_LANE_HEAD";
 pub const LANE_BASE: &str = "PROVENANT_LANE_BASE";
 pub const PRIMARY_CHECKOUT: &str = "PROVENANT_PRIMARY_CHECKOUT";
 pub const WORKTREE_GITDIR: &str = "PROVENANT_WORKTREE_GITDIR";
+pub const LANE_PROJECT: &str = "PROVENANT_LANE_PROJECT";
 pub const LANE_PORT_BASE: &str = "PROVENANT_LANE_PORT_BASE";
 pub const LANE_PORT_COUNT: &str = "PROVENANT_LANE_PORT_COUNT";
 pub const CARGO_SOURCE_WRITES: &str = "PROVENANT_CARGO_SOURCE_WRITES";
@@ -239,6 +240,13 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         Lane,
         Evolving,
         "The project's primary checkout: the directory holding the common Git directory.",
+        "lanes launched in a project",
+    ),
+    var(
+        LANE_PROJECT,
+        Lane,
+        Evolving,
+        "The project the lane was launched in, as its host binding id. Provenant commands in the lane resolve their project from this binding, not from the working directory.",
         "lanes launched in a project",
     ),
     var(

@@ -1,7 +1,8 @@
 //! Document-based graph service shared by the CLI and the lane relay.
-use super::writer_base::{
-    DEFAULT_WRITER_BASE, bind_default_read_only_source, bind_writer_base_source,
-    resolve_reused_worktree_base, resolve_writer_base,
+use super::source_policy::{read_source_report, writer_base_report};
+use super::subject::{
+    ReadPlan, SubjectAdmission, bind_provisioning_base, bind_read_source,
+    resolve_reused_worktree_base,
 };
 use super::*;
 use provenant_fabric_runtime::graph::{
@@ -632,67 +633,6 @@ fn bind_review_warning(node: &mut provenant_fabric_runtime::graph::GraphNode, wa
 /// Launch controls that bind a writer; a composite template can take none of them.
 const LAUNCH_CONTROLS: [&str; 5] = ["access", "worktree", "branch", "base", "write_scope"];
 
-/// The `--source` flag is the launch layer of `lanes.read_source`. A host or
-/// project knob supplies the value and the fetch-first flag; `auto` (including
-/// the compiled default) keeps the advisory pin of a checkout behind its
-/// fetched upstream.
-fn read_source_choice(
-    input: &Value,
-    config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
-) -> provenant_cli::run::ReadSourceChoice {
-    use provenant_cli::run::ReadSourceChoice;
-    use provenant_records::Layer;
-
-    let mut choice = ReadSourceChoice::automatic();
-    if let Some(knob) = config.knobs.get(ReadSourceChoice::KNOB) {
-        let value = knob.value.as_str().unwrap_or_default();
-        // `auto` is the registry name for the compiled default, so an explicit
-        // setting of it still resolves the advisory pin. config schema reports
-        // the same value as this resolver uses.
-        choice.value = if knob.source.layer == Layer::Default || value == "auto" {
-            String::new()
-        } else {
-            value.to_owned()
-        };
-        choice.layer = knob.source.layer;
-        choice.origin = Some(format!("config.toml#{}", ReadSourceChoice::KNOB));
-    }
-    if let Some(flag) = config.knobs.get("lanes.read_source_fetch_first") {
-        choice.fetch_first = flag.value.as_bool().unwrap_or(false);
-    }
-    match input.get("source").and_then(Value::as_str) {
-        Some("local") => {
-            choice.value = "checkout".into();
-            choice.layer = Layer::Launch;
-            choice.origin = Some("--source".into());
-        }
-        Some("upstream") => {
-            choice.value = "default_branch".into();
-            choice.layer = Layer::Launch;
-            choice.origin = Some("--source".into());
-        }
-        _ => {}
-    }
-    choice
-}
-
-/// One shape for the commit a read-only launch reads, in both `run --explain`
-/// (its status) and the launch result. The source names the layer that chose
-/// the ref; `commit` is null when the choice keeps the local checkout.
-fn read_source_report(
-    selected: Option<&provenant_cli::run::ReadOnlySourceRef>,
-    choice: &provenant_cli::run::ReadSourceChoice,
-) -> Value {
-    json!({
-        "value": choice.value,
-        "fetch_first": choice.fetch_first,
-        "source": choice.layer.as_str(),
-        "origin": choice.origin,
-        "commit": selected.map(|selected| selected.commit.to_string()),
-        "reference": selected.map(|selected| selected.reference.clone()),
-    })
-}
-
 /// The resolved node a template or `use` launch runs, taken before the graph
 /// id is chosen. Its lowered roles decide whether the launch is a writer.
 struct TemplateLaunch {
@@ -840,7 +780,9 @@ fn bind_launch_controls(
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| invalid("base"))?,
-            None => DEFAULT_WRITER_BASE,
+            // The real default is resolved at admission from `lanes.writer_base`;
+            // `default_base` tells provisioning to resolve it again on the peer.
+            None => "HEAD",
         };
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
         let worktree = ports
@@ -1571,7 +1513,7 @@ impl Factory {
             .map_err(|_| invalid())?
             .accepts_review_range();
         let review_subject = self.review_subject(input, review, &CancelToken::new())?;
-        let idempotency_key = if let Some(subject) = &review_subject
+        let idempotency_key = if let Some((subject, _)) = &review_subject
             && name.is_some()
             && input
                 .get("idempotency_key")
@@ -1579,8 +1521,8 @@ impl Factory {
                 .is_none()
         {
             let mut pinned = input.clone();
-            pinned["review_subject"] = json!({"base":subject.base,"head":subject.head});
-            submission_digest(&pinned, Some(&subject.head), None)?
+            pinned["subject"] = json!({"base":subject.base,"head":subject.head});
+            submission_digest(&pinned, Some(&subject.head.to_string()), None)?
         } else {
             idempotency_key
         };
@@ -1631,9 +1573,14 @@ impl Factory {
             &self.context.port_table,
         )?;
         node["id"] = json!(key);
-        let range = review_subject
+        let range = review_subject.as_ref().and_then(|(subject, _)| {
+            subject
+                .base
+                .map(|base| (base.to_string(), subject.head.to_string()))
+        });
+        let range = range
             .as_ref()
-            .map(|subject| (subject.base.as_str(), subject.head.as_str()));
+            .map(|(base, head)| (base.as_str(), head.as_str()));
         let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref(), range)?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
@@ -1652,12 +1599,16 @@ impl Factory {
         }
         let mut typed = serde_json::from_value(compiled).map_err(|_| invalid())?;
         override_launch(&mut typed, input)?;
-        if let Some(subject) = &review_subject {
-            if subject.base != subject.head {
-                bind_submission_subject(&mut typed, Some(subject.base.as_str()), &subject.head);
-                bind_review_base(&mut typed, &subject.base);
+        if let Some((subject, warning)) = &review_subject {
+            if let Some(base) = subject.base {
+                bind_submission_subject(
+                    &mut typed,
+                    Some(&base.to_string()),
+                    &subject.head.to_string(),
+                );
+                bind_review_base(&mut typed, &base.to_string());
             }
-            if let Some(warning) = &subject.warning {
+            if let Some(warning) = warning {
                 warn_operator(warning);
                 bind_review_warning(&mut typed, warning);
             }
@@ -2166,29 +2117,64 @@ impl Factory {
         let input = &input;
         let source_choice = input.get("source").filter(|value| !value.is_null());
         if let Some(choice) = source_choice
-            && !matches!(choice.as_str(), Some("upstream" | "local"))
+            && choice
+                .as_str()
+                .is_none_or(|value| provenant_cli::run::ReadSource::parse(value).is_err())
         {
             return Err(FacadeError::invalid(InvalidInputDetail::Field(
                 "source".into(),
             )));
         }
-        // Review ranges are launch controls: resolve them on the host before
-        // admitting a graph, and bind immutable object IDs into its identity.
+        // One subject per admission: review ranges, read sources and writer
+        // bases are resolved together, once, and bound into this graph's
+        // identity. Nothing below re-reads a ref or re-resolves a source.
+        // The authored document's own review field is not the launch contract;
+        // only the selected template's acceptance decides review resolution.
         let review_launch = declared.accepts_review_range();
-        // The bundled smoke graph pins its review to the writer's scratch
-        // commit in the template itself. The host's checkout-derived default
-        // subject would point that review back at the caller and make a smoke
-        // check as expensive as the release commit it was launched from, so
-        // leave range resolution to the template for a bundled smoke launch.
-        let bundled_smoke = input.get("template").and_then(Value::as_str) == Some("smoke")
-            && library.layer("smoke") == Some(Layer::Default);
-        let review_subject = self.review_subject(input, review_launch && !bundled_smoke, cancel)?;
-        let review_pin = review_subject
+        let remote = input
+            .get("host")
+            .and_then(Value::as_str)
+            .is_some_and(|host| !host.is_empty() && !matches!(host, "local" | "localhost"));
+        // A managed queue item has no checkout yet. Resolve its writer base
+        // from the same default a provisioned `queue/<id>` branch would use,
+        // so that one commit is pinned into the item branch and worktree
+        // intent at the single admission point. Adopted items carry their own
+        // base and keep resolving it from the real checkout.
+        let queue_base_input = queue_launch
             .as_ref()
+            .filter(|launch| launch.item.adoption.is_none())
+            .map(|launch| {
+                let mut selection = input.clone();
+                selection["branch"] = json!(format!("queue/{}", launch.item.graph_id));
+                selection
+            });
+        let SubjectAdmission {
+            subject,
+            writer_base,
+            read,
+            warnings: subject_warnings,
+            review_warning,
+            read_source,
+            writer_base_setting,
+            read_pin,
+            writer_warnings,
+        } = self.admit_subject(
+            input,
+            queue_base_input.as_ref(),
+            review_launch,
+            remote,
+            cancel,
+        )?;
+        input_warnings.extend(subject_warnings);
+        let review_pin = subject
+            .as_ref()
+            .filter(|_| review_launch)
             .map(|subject| json!({"base":subject.base,"head":subject.head}));
-        let git = provenant_os::git::git_executable();
-        let mut resolved_head = review_subject.as_ref().map(|subject| subject.head.clone());
-        let resolved_review_base = review_subject.as_ref().map(|subject| subject.base.clone());
+        let mut resolved_head = subject.as_ref().map(|subject| subject.head.to_string());
+        let resolved_review_base = subject
+            .as_ref()
+            .and_then(|subject| subject.base)
+            .map(|base| base.to_string());
         let review_range = resolved_review_base
             .as_deref()
             .zip(resolved_head.as_deref());
@@ -2202,22 +2188,11 @@ impl Factory {
             limits: &self.context.config.graph.limits,
             worktree_layout: self.context.port_table.worktree_layout.clone(),
         };
-        // The read source is one sourced setting: `--source` is its launch
-        // layer and the host/project knob supplies the ref and fetch flag. An
-        // unreadable configuration is advisory; the compiled default keeps the
-        // stale-checkout pin.
+        // Admission resolved the sourced read-source and writer-base settings
+        // once; the queue settings below read the same run configuration.
         let read_config_result = provenant_cli::config_reads::read_for(&self.context.roots, "run");
         let read_config_error = read_config_result.as_ref().err().map(ToString::to_string);
         let read_config = read_config_result.ok();
-        let read_source = read_config
-            .as_ref()
-            .map(|config| read_source_choice(input, config))
-            .unwrap_or_default();
-        if read_config.is_none() {
-            warn_operator(
-                "could not read the run configuration; lanes.read_source keeps its compiled default",
-            );
-        }
         // Resolve the graph a template launch runs before sealing its identity.
         // Writer-ness is the resolved roles' answer, not one launch key's.
         let template_launch = if raw.is_none() || lane_document.is_some() {
@@ -2236,84 +2211,27 @@ impl Factory {
             Some(launch) => launch.writes_worktree(&library, &resolver)?,
             None => false,
         };
-        // Resolve the one base a writer starts from before sealing its identity.
-        // Its read-only members read that base; only a writer that names no base
-        // falls back to the caller checkout, and only then does a read-only
-        // source pin still apply to it.
-        let mut queue_base_input = None;
-        if let Some(launch) = &queue_launch
-            && launch.item.adoption.is_none()
-        {
-            let mut selection = input.clone();
-            // The managed item checkout does not exist yet. Resolve the same
-            // default base as an explicitly provisioned branch, then pin that
-            // one commit into both the item branch and worktree intent.
-            selection["branch"] = json!(format!("queue/{}", launch.item.graph_id));
-            queue_base_input = Some(selection);
+        // Admission produced the writer base, the read subject and the pin it
+        // came from; writer-ness decides which one this launch keeps. A writer
+        // starts from its resolved base, which is then the graph's only read
+        // commit, so a moving checkout HEAD never enters a writer's identity. A
+        // review keeps its range subject either way.
+        let mut writer_base = writer_base.filter(|_| writer_launch);
+        if writer_launch {
+            input_warnings.extend(writer_warnings);
         }
-        let mut writer_base = if writer_launch {
-            Some(resolve_writer_base(
-                queue_base_input.as_ref().unwrap_or(input),
-                &self.context.project_root,
-                &self.cwd,
-                self.context.roots.state.as_path(),
-                &read_source,
-                git.as_deref(),
-            ))
+        let subject = subject.filter(|_| review_launch || writer_base.is_none());
+        let default_source =
+            read_pin.filter(|_| raw.is_none() && subject.is_some() && !review_launch);
+        // The commit the launch starts from belongs to its identity.
+        let source_commit = if review_launch {
+            resolved_head.clone()
         } else {
-            None
+            writer_base
+                .map(|base| base.to_string())
+                .or_else(|| subject.as_ref().map(|subject| subject.head.to_string()))
         };
-        if let Some(warning) = writer_base
-            .as_ref()
-            .and_then(|base| base.fallback_warning(&self.cwd))
-        {
-            input_warnings.push(warning);
-        }
-        // A plain read-only task from a checkout behind its fetched upstream
-        // reviews that upstream head, not its stale local tree. Explicit source
-        // choices, authored documents, review ranges and a writer with a known
-        // base keep resolving their own subject. A writer with no base still
-        // pins its read-only members, but never its own identity. Absent Git
-        // evidence stays advisory.
-        let default_source = if review_subject.is_none()
-            && raw.is_none()
-            && writer_base
-                .as_ref()
-                .is_none_or(|base| base.commit.is_none())
-        {
-            provenant_cli::run::read_only_source_ref(
-                self.context.roots.state.as_path(),
-                &self.cwd,
-                &read_source,
-            )
-        } else {
-            None
-        };
-        // The commit the launch starts from belongs to its identity: a writer
-        // starts from its base, a reader from its resolved source. A checkout
-        // with no commit yet simply has none.
-        let source_commit = resolved_head.clone().or_else(|| {
-            if writer_launch {
-                writer_base
-                    .as_ref()
-                    .and_then(|base| base.commit.clone())
-                    .or_else(|| {
-                        git.as_deref().and_then(|git| {
-                            provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()
-                        })
-                    })
-            } else {
-                default_source
-                    .as_ref()
-                    .map(|selected| selected.commit.to_string())
-                    .or_else(|| {
-                        git.as_deref().and_then(|git| {
-                            provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()
-                        })
-                    })
-            }
-        });
-        if resolved_head.is_none() && raw.and_then(|document| document.get("graph_id")).is_none() {
+        if !review_launch {
             resolved_head = source_commit.clone();
         }
         // The name is a handle; the digest of the launch decides whether it is
@@ -2374,8 +2292,8 @@ impl Factory {
         templates["$implement_plan_default"] = json!(self.context.config.implement.plan);
         templates["$batch_max_parallel_default"] = json!(self.context.config.batch.max_parallel);
         let mut identity_input = input.clone();
-        if let Some(subject) = &review_subject {
-            identity_input["review_subject"] = json!({"base":subject.base,"head":subject.head});
+        if let Some(subject) = &subject {
+            identity_input["subject"] = json!({"base":subject.base,"head":subject.head});
         }
         let digest = match queue_replay_digest {
             Some(digest) => digest,
@@ -2471,20 +2389,13 @@ impl Factory {
         };
         // Borrow the optional base: the prompt binding below still needs it
         // after the document has been given its own copy.
-        if review_launch
-            && let Some(base) = resolved_review_base
-                .as_deref()
-                .filter(|base| Some(*base) != resolved_head.as_deref())
-        {
-            document.review_base = Some(base.to_owned());
+        // The host overwrites any caller-supplied subject and review base with
+        // the one it admitted. Both are full object IDs from Git.
+        if let Some(base) = subject.as_ref().and_then(|subject| subject.base) {
+            document.review_base = Some(base.to_string());
             document.schema_version = document.schema_version.max(2);
         }
-        if review_subject
-            .as_ref()
-            .is_some_and(|subject| subject.warning.is_some() && subject.base == subject.head)
-        {
-            document.review_subject_missing = true;
-        }
+        document.subject = subject.clone();
         document.template_layers = library.snapshot_layers();
         document.template_library = library.snapshot();
         document.template_resolvers = resolver;
@@ -2516,6 +2427,10 @@ impl Factory {
         // sources that writer compares base..pushed head instead of an empty
         // range. A plain writer stays advisory: only a node-sourced review
         // needs the base to be present before launch.
+        // Admission now resolves its own git internally; this later lookup of a
+        // reused worktree's upstream/merge-base still needs the executable, so
+        // bind it here rather than relying on a name that no longer exists.
+        let git = provenant_os::git::git_executable();
         let mut reused_writer_bases = Vec::new();
         for node in &document.nodes {
             if node.access == AccessMode::WorktreeWrite && node.worktree.is_some() {
@@ -2532,13 +2447,20 @@ impl Factory {
                 ));
             }
         }
+        // The source that chose a reused writer's base, when it became the
+        // launch's writer base; the report names it instead of the knob.
+        let mut writer_base_source = None;
         for (writer_id, base) in &reused_writer_bases {
-            if writer_base
-                .as_ref()
-                .is_none_or(|base| base.commit.is_none())
+            if writer_base.is_none()
                 && reused_writer_bases.len() == 1
+                && let Some(base) = base.as_ref()
+                && let Some(commit) = base
+                    .commit
+                    .as_deref()
+                    .and_then(|commit| provenant_core::GitOid::parse(commit).ok())
             {
-                writer_base = base.clone();
+                writer_base = Some(commit);
+                writer_base_source = Some(base.source.label());
             }
             match base.as_ref().and_then(|base| base.commit.as_deref()) {
                 Some(commit) => {
@@ -2573,12 +2495,14 @@ impl Factory {
             .as_ref()
             .map(|config| (&config.domains.fabric.queue, &config.origins));
         seal_document_queue(&mut document, queue_config, read_config_error.as_deref())?;
+        // The admitted base is a GitOid; bind_item takes a borrowed ref string.
+        let writer_base_commit = writer_base.as_ref().map(|base| base.to_string());
         if let Some(launch) = &queue_launch {
             super::queue_delivery::bind_item(
                 self,
                 launch,
                 &mut document,
-                writer_base.as_ref().and_then(|base| base.commit.as_deref()),
+                writer_base_commit.as_deref(),
             )?;
         }
         // Template compilation selected a schema before document metadata was
@@ -2625,19 +2549,26 @@ impl Factory {
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
         }
-        let writer_commit = writer_base.as_ref().and_then(|base| base.commit.as_deref());
-        if let Some(commit) = writer_commit {
-            let commit = commit.to_owned();
+        // A writer's read-only members take its base; every other pinned read
+        // node takes the admitted subject's head. A live checkout keeps its
+        // working tree and carries no source binding at all.
+        let read_commit = writer_base.or_else(|| {
+            subject
+                .as_ref()
+                .filter(|_| read == ReadPlan::Pinned)
+                .map(|subject| subject.head)
+        });
+        // A local writer provisions its new worktree from the admitted base.
+        // A peer resolves its own default, since this commit may not exist in
+        // its clone; `default_base` tells it to.
+        if !remote && let Some(commit) = writer_base.map(|commit| commit.to_string()) {
             for node in &mut document.nodes {
-                bind_writer_base_source(node, &commit);
+                bind_provisioning_base(node, &commit);
             }
-            document.schema_version = document.schema_version.max(u64::from(
-                provenant_fabric_runtime::graph::minimum_schema_version(&document),
-            ));
-        } else if let Some(selected) = &default_source {
-            let commit = selected.commit.to_string();
+        }
+        if let Some(commit) = read_commit.map(|commit| commit.to_string()) {
             for node in &mut document.nodes {
-                bind_default_read_only_source(node, &commit);
+                bind_read_source(node, &commit);
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
@@ -2655,10 +2586,7 @@ impl Factory {
                 bind_review_warning(node, &warning);
             }
         }
-        if let Some(warning) = review_subject
-            .as_ref()
-            .and_then(|subject| subject.warning.as_ref())
-        {
+        if let Some(warning) = &review_warning {
             for node in &mut document.nodes {
                 bind_review_warning(node, warning);
             }
@@ -2714,9 +2642,6 @@ impl Factory {
             Some(&self.requester_lane_path()?),
         )
         .map_err(FacadeError::graph_candidate)?;
-        if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
-            input_warnings.push(warning);
-        }
         if !writer_launch && let Some(selected) = &default_source {
             let warning =
                 provenant_cli::run::read_only_source_warning(&self.cwd, selected, &read_source);
@@ -2842,16 +2767,14 @@ impl Factory {
             return Ok(json!({
                 "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
                 "capability_gaps": capability_gaps,
-                "writer_base": writer_base.as_ref().map(|base| json!({
-                    "commit": base.commit,
-                    "source": base.source.label(),
-                })),
                 "reused_writer_bases": reused_writer_bases,
                 "node_routes": node_routes,
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,
+                "subject": subject,
                 "read_source": read_source_report(default_source.as_ref(), &read_source),
+                "writer_base": writer_base_report(writer_base.as_ref(), &writer_base_setting, writer_base_source),
                 // The silence threshold is a host default with a named source,
                 // just like the other settings an explanation reports.
                 "stall": {
@@ -2911,17 +2834,14 @@ impl Factory {
         if let Some(pin) = review_pin {
             result["review_subject"] = pin;
         }
+        result["subject"] = json!(subject);
         result["warnings"] = json!(warnings);
         result["read_source"] = read_source_report(default_source.as_ref(), &read_source);
-        result["writer_base"] = writer_base
-            .as_ref()
-            .map(|base| {
-                json!({
-                    "commit": base.commit,
-                    "source": base.source.label(),
-                })
-            })
-            .unwrap_or(Value::Null);
+        result["writer_base"] = writer_base_report(
+            writer_base.as_ref(),
+            &writer_base_setting,
+            writer_base_source,
+        );
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });
@@ -3070,7 +2990,6 @@ impl Factory {
         }
         if bundled_smoke {
             smoke::configure(
-                self,
                 input,
                 &mut parameters,
                 &overrides,

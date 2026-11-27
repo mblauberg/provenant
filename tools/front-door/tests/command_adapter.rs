@@ -826,7 +826,10 @@ fn command_custom_shebang_runtime_keeps_credentials_and_writes_denied() -> Resul
     };
     assert!(built.status.success(), "{built:?}");
     fs::remove_file(&source)?;
-    let script = rig.project.join("check-script");
+    // The command lives outside the project: a grant inside the source
+    // checkout would overlap the tree a read-only lane pins.
+    let script = rig.root.join("commands/check-script");
+    fs::create_dir_all(script.parent().ok_or("script parent")?)?;
     fs::write(
         &script,
         format!(
@@ -1345,9 +1348,9 @@ fn builtin_verification_failure_is_not_a_refusal() -> Result {
     let rig = TestRig::new()?;
     let ports = verify_fixture_port(json!({"kind":"builtin"}))?;
     write_project_verify_port(&rig, &ports)?;
-    fs::create_dir_all(rig.project.join("scripts"))?;
+    fs::create_dir_all(rig.assets.join("scripts"))?;
     fs::write(
-        rig.project.join("scripts/verify-tier"),
+        rig.assets.join("scripts/verify-tier"),
         "raise SystemExit(1)\n",
     )?;
     let output = rig.command(&["verify", "security/linux", "--json"])?;

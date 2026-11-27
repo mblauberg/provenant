@@ -379,6 +379,28 @@ fn a_failed_login_takes_the_whole_account_with_it() {
 }
 
 #[test]
+fn a_model_unavailable_exact_pin_hands_off_with_its_cause() {
+    // An exact pin is not drawn from a pool, so it has no recorded tier. Its
+    // family still stands in for one: a capacity stop on the pin must hand the
+    // work to another eligible candidate instead of stranding the route.
+    let mut case = Case::new(vec![ready(HAIKU, "a1"), ready(SONNET, "a1")]);
+    case.stopped = Stopped {
+        model: model("codex/gpt-6.1-luna"),
+        account: Some("a1".into()),
+        effort: None,
+        tier: None,
+        family: Some("openai".into()),
+    };
+    case.cause = DepletionCause::from_stop(provenant_records::StopCause::ModelUnavailable)
+        .expect("model_unavailable is a depletion cause");
+    assert_eq!(case.cause, DepletionCause::ModelUnavailable);
+    assert_eq!(
+        case.handoff(),
+        Some((Rung::AdjacentTier, route(HAIKU, "a1")))
+    );
+}
+
+#[test]
 fn tried_targets_are_never_offered_twice() {
     let mut case = Case::new(vec![
         ready(SONNET, "a2"),

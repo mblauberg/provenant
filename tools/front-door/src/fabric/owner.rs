@@ -2270,6 +2270,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }
             return Ok(Some(tip.to_string()));
         }
+        // Admission resolved `lanes.writer_base` into this intent; only an
+        // unresolved default (a peer, or no Git evidence) is re-derived here.
+        if default_base && let Ok(admitted) = provenant_core::GitOid::parse(reference) {
+            return Ok(Some(admitted.to_string()));
+        }
         if default_base {
             let (base, warnings) = provenant_confinement::worktrees::with_context_using_facts(
                 &self.factory.context.roots,
@@ -4940,9 +4945,12 @@ impl BoundGraphOwner<'_> {
             &key.graph_id,
         )
         .map_err(graph_journal_error)?;
-        let review_subject_missing = execution
+        // Only the review fallback's empty range leaves a task without a base;
+        // a read subject carries none, so its tasks keep the read base below.
+        let subject_base_missing = execution
             .as_ref()
-            .is_some_and(|execution| execution.document.review_subject_missing);
+            .and_then(|execution| execution.document.subject.as_ref())
+            .is_some_and(super::subject::is_empty_review_range);
         let review_launch = node.review_launch;
         let review_base = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
             &self.factory.context.roots.state,
@@ -4993,7 +5001,7 @@ impl BoundGraphOwner<'_> {
                 .task
                 .base_ref
                 .clone()
-        } else if review_subject_missing && node.review_base.is_none() {
+        } else if subject_base_missing && node.review_base.is_none() {
             None
         } else if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
             && source_commit.is_some()
@@ -5034,19 +5042,18 @@ impl BoundGraphOwner<'_> {
         };
         // Peer roots retain the exact requested route, including family
         // exclusions, rather than resolving a second, broader alias.
-        let peer_root = provenant_fabric_runtime::graph::FileJournal::execution(
-            &self.factory.context.roots.state,
-            self.factory.context.identity.project,
-            &key.graph_id,
-        )
-        .map_err(graph_journal_error)?
-        .is_some_and(|execution| {
+        let peer_root = execution.as_ref().is_some_and(|execution| {
             execution
                 .peer_origin_context
                 .as_ref()
                 .and_then(|origin| origin.node_id.as_deref())
                 == Some(key.node_id.as_str())
         });
+        // Tasks carry the admitted subject so a peer can compare its head with
+        // the pinned one; graphs admitted before subjects leave it absent.
+        let admitted_subject = execution
+            .as_ref()
+            .and_then(|execution| execution.document.subject.clone());
         if !accepted {
             // This owner is admitting a new leaf from the host-owned graph
             // scheduler. Bind the graph marker to the work key here; the
@@ -5105,6 +5112,7 @@ impl BoundGraphOwner<'_> {
                 base,
                 fixture,
                 head: source_commit.map(str::to_owned),
+                subject: admitted_subject,
                 source_head,
                 account: route
                     .account

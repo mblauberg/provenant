@@ -879,7 +879,7 @@ fn check_target_outside_a_checkout_is_invalid_input() -> Result {
 #[test]
 fn writing_checks_use_typed_findings_and_input_exits() -> Result {
     let rig = check_rig()?;
-    let owner = rig.project.join("skills/writing");
+    let owner = rig.assets.join("skills/writing");
     std::fs::create_dir_all(&owner)?;
     std::fs::write(
         owner.join("lint-rules.json"),
@@ -917,7 +917,7 @@ fn writing_checks_use_typed_findings_and_input_exits() -> Result {
 #[test]
 fn writing_pages_bind_rules_files_and_selector() -> Result {
     let rig = check_rig()?;
-    let owner = rig.project.join("skills/legal-writing");
+    let owner = rig.assets.join("skills/legal-writing");
     std::fs::create_dir_all(&owner)?;
     std::fs::write(
         owner.join("lint-rules.json"),
@@ -956,9 +956,9 @@ fn writing_pages_bind_rules_files_and_selector() -> Result {
 #[test]
 fn writing_refuses_inputs_that_only_resolve_skipped_legal_files() -> Result {
     let rig = check_rig()?;
-    std::fs::create_dir_all(rig.project.join("skills/legal-writing"))?;
+    std::fs::create_dir_all(rig.assets.join("skills/legal-writing"))?;
     std::fs::write(
-        rig.project.join("skills/legal-writing/lint-rules.json"),
+        rig.assets.join("skills/legal-writing/lint-rules.json"),
         include_str!("../../../skills/legal-writing/lint-rules.json"),
     )?;
     std::fs::write(rig.project.join("draft.md"), "TODO\n")?;

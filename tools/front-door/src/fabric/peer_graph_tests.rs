@@ -391,31 +391,118 @@ fn peer_placed_reader_binds_its_own_source_like_a_local_reader() -> TestResult {
     Ok(())
 }
 
+/// Invariant 3: a peer placed reader pins to the head its initiator submitted,
+/// never to a caller checkout or an absent source (#4015). The task the peer
+/// seals carries the same head, so the reader sees the admitted subject.
 #[test]
-// Spec: docs/specs/run-launch.md#writer-binding — a remote reader binds the
-// peer's own checkout even when the sender pins a commit the peer never saw.
-fn peer_placed_smoke_reader_binds_the_peer_checkout_when_the_sender_head_is_absent() -> TestResult {
+fn peer_reader_is_pinned_to_the_initiator_subject() -> TestResult {
     if host_test(
-        "fabric::peer_tests::peer_graph_tests::peer_placed_smoke_reader_binds_the_peer_checkout_when_the_sender_head_is_absent",
+        "fabric::peer_tests::peer_graph_tests::peer_reader_is_pinned_to_the_initiator_subject",
     )? {
         return Ok(());
     }
     let (rig, factory) = receiver()?;
-    // Give the peer a two-commit checkout: its HEAD is the reader's view and
-    // its first parent is the review base. The sender pins two commits that
-    // exist only on its side, with a fixture absent from both trees.
-    crate::worktree_tests::git(&rig, &["commit", "-q", "--allow-empty", "-m", "second"])?;
-    let peer_head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    let peer_base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD^"])?;
-    let absent_head = "0".repeat(40);
-    let absent_base = "1".repeat(40);
+    let cancel = CancelToken::new();
+    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
     let input = serde_json::from_value(json!({
-        "op":"submit", "operation_id":"peer-smoke-reader-stale-source",
+        "op":"submit", "operation_id":"peer-reader-subject-pin",
+        "origin_work_key":origin_key(),
+        "task":{"prompt":"Read the pinned subject", "access":"read_only", "head":head,
+            "subject":{"head":head,"origin":{"kind":"explicit"},
+                "pinned_at":"2000-01-01T00:00:00.000000Z","policy":"pinned"},
+            "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
+            "timeout_seconds":30,
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1,
+                "graph_template_launch":true}}
+    }))?;
+    let receipt = provenant_cli::run::with_deferred_provider_launch(|| {
+        super::super::peer::peer_submit_graph(
+            &factory,
+            input,
+            factory.context.identity.inbox.actor,
+            Default::default(),
+            None,
+            None,
+            WaitBudget::cli(factory.clock.mono_now(), 30).unwrap(),
+            &cancel,
+        )
+    })?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
+    let execution = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )?
+    .ok_or("receiver graph missing")?;
+    assert_eq!(execution.document.schema_version, 2);
+    assert_eq!(
+        execution.document.subject.as_ref().map(|subject| subject.head),
+        Some(head.parse()?)
+    );
+    let node = execution.document.nodes.first().ok_or("receiver node")?;
+    let bound = node.source.as_ref().and_then(|binding| match binding {
+        // This module is also compiled under `feature = "fixture"` without
+        // libtest, where the `#[test]` bodies are absent and a top-level
+        // import would be unused. Keep the path at its single use site.
+        provenant_fabric_runtime::graph::SourceBinding::Commit { commit } => {
+            Some(commit.as_str())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        bound,
+        Some(head.as_str()),
+        "peer reader must pin to the initiator's subject: {node:?}"
+    );
+    let attempt = receipt.targets[0].attempt;
+    let owner = BinaryRunOwner {
+        factory: &factory,
+        allow_remote: false,
+        actor: None,
+        chair: None,
+    };
+    let store = owner.store(&cancel)?;
+    let call = owner.call(&cancel);
+    let record = store.record(attempt, &call)?;
+    let request = store.request(record.attempt_id, &call)?;
+    // The run request carries only the head; the coordination task beside it
+    // keeps the subject. One assertion on the head pins both facts here.
+    assert_eq!(
+        request.task.head.as_deref(),
+        Some(head.as_str()),
+        "peer task head must be the initiator subject, never None"
+    );
+    Ok(())
+}
+
+#[test]
+// Spec invariant 3: a peer reader reads the initiator's pinned task.head, never
+// its own checkout HEAD, even when the peer checkout has moved past it.
+fn peer_reader_reads_the_pinned_head_not_the_peer_checkout_head() -> TestResult {
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::peer_reader_reads_the_pinned_head_not_the_peer_checkout_head",
+    )? {
+        return Ok(());
+    }
+    let (rig, factory) = receiver()?;
+    // The initiator pinned the peer's current commit; the peer checkout then
+    // moves on, so its HEAD differs from the pinned subject.
+    let pinned = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    crate::worktree_tests::git(&rig, &["commit", "-q", "--allow-empty", "-m", "later"])?;
+    let peer_head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    assert_ne!(pinned, peer_head, "the fixture must move the peer HEAD");
+    let input = serde_json::from_value(json!({
+        "op":"submit", "operation_id":"peer-reader-pinned-not-peer-head",
         "origin_work_key":provenant_records::WorkKey::new(
             provenant_core::ProjectId::from_bytes([77; 16]), "origin-graph", "read", 1)?,
-        "task":{"prompt":"Read the supplied fixture and report its single stated fact.",
-            "access":"read_only", "head":absent_head, "base":absent_base,
-            "fixture":{"name":"fixture.txt","content":b"token-7f3a9c21\n".to_vec()},
+        "task":{"prompt":"Read the pinned subject.", "access":"read_only", "head":pinned,
+            "subject":{"head":pinned,"origin":{"kind":"explicit"},
+                "pinned_at":"2000-01-01T00:00:00.000000Z","policy":"pinned"},
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
             "context":{"graph_id":"origin-graph", "node_id":"read", "attempt":1,
@@ -447,23 +534,10 @@ fn peer_placed_smoke_reader_binds_the_peer_checkout_when_the_sender_head_is_abse
     let request = store.request(record.attempt_id, &call)?;
     assert_eq!(
         request.task.head.as_deref(),
-        Some(peer_head.as_str()),
-        "the reader must view the peer checkout, not the sender's absent commit: {:?}",
+        Some(pinned.as_str()),
+        "the peer reader must read the pinned head, not its checkout HEAD {peer_head}: {:?}",
         request.task
     );
-    assert_eq!(
-        request.task.base.as_deref(),
-        Some(peer_base.as_str()),
-        "the reviewer needs a real range in the peer checkout: {:?}",
-        request.task
-    );
-    let fixture = request
-        .task
-        .fixture
-        .as_ref()
-        .ok_or("the remote read node lost its fixture")?;
-    assert_eq!(fixture.name, "fixture.txt");
-    assert_eq!(fixture.content, b"token-7f3a9c21\n");
     Ok(())
 }
 

@@ -113,7 +113,7 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KNOB_PRECEDENCE, KnobEdit, knob_source};
+pub use knobs::{KNOB_PRECEDENCE, KnobEdit, knob_source, read_source_value};
 pub use lane_history::{
     CONFLICT_MARKERS, DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, HistoryEffect, HistoryValue,
     LaneHistory, REBASE, Rebase, Setting, UNROOTED_TIP,
@@ -126,8 +126,8 @@ pub use project_binding::{
     GcProjectSelection, GcProjectStatus, PROJECT_RETRY_SECONDS, ProjectBinding, ProjectIncarnation,
     ProjectLocation, ProjectPresence, Retirement, bind_host, bind_project,
     classify_project_presence, forget_project, forget_project_at_state, host_project_dir,
-    lookup_gc_project, lookup_host, lookup_project, lookup_project_at_state, project_binding_dir,
-    project_id_for_path, project_presence, registered_gc_project_selection,
+    lookup_gc_project, lookup_host, lookup_project, lookup_project_at_state, lookup_project_by_id,
+    project_binding_dir, project_id_for_path, project_presence, registered_gc_project_selection,
     registered_gc_project_selection_with_progress, registered_gc_projects, registered_projects,
     retire_vanished_projects, transient_location,
 };

@@ -815,8 +815,9 @@ pub struct GraphRunArgs {
     /// Access for a plain task; writer targets imply worktree-write
     #[arg(long, value_parser = ["read-only", "worktree-write"])]
     pub mode: Option<String>,
-    /// Tree a read-only task reads: the checkout, default branch, or automatic choice
-    #[arg(long)]
+    /// Tree a read-only task reads: the checkout (`live`), default branch
+    /// (`default_branch`), an automatic choice (`auto`), or an explicit Git ref
+    #[arg(long, value_parser = parse_read_source)]
     pub source: Option<String>,
     /// Existing writer worktree
     #[arg(long, conflicts_with = "branch")]
@@ -1711,6 +1712,9 @@ pub struct Wait {
     /// Wait until GitHub reports this exact head; never verdict another SHA
     #[arg(long, value_name = "SHA", value_parser = parse_head_oid)]
     pub head: Option<String>,
+    /// What this wait does when its pinned pull request head moves: pinned or follow_latest
+    #[arg(long, value_name = "POLICY", value_parser = parse_pr_head_policy, requires = "prs", conflicts_with = "head")]
+    pub pr_head_policy: Option<provenant_records::subject::SubjectPolicy>,
     /// PR check settlement: failure (default) or complete (waits for all checks, with a 60-minute default budget)
     #[arg(long, value_enum, requires = "prs")]
     pub until: Option<PrWaitUntil>,
@@ -1767,6 +1771,15 @@ fn parse_head_oid(value: &str) -> Result<String, String> {
     GitOid::parse(value)
         .map(|_| value.to_owned())
         .map_err(|error| error.to_string())
+}
+
+/// Parse the declared wait policy, so a bad flag value is a grammar refusal
+/// with the allowed spellings rather than a runtime default.
+fn parse_pr_head_policy(value: &str) -> Result<provenant_records::subject::SubjectPolicy, String> {
+    serde_json::from_value::<provenant_records::subject::SubjectPolicy>(serde_json::Value::String(
+        value.to_owned(),
+    ))
+    .map_err(|_| "expected pinned or follow_latest".to_owned())
 }
 
 fn parse_landing_tier(value: &str) -> Result<String, String> {
@@ -1902,4 +1915,9 @@ mod common_args_tests {
         assert_eq!(all.selection(), HostSelection::All);
         assert!(all.selection().is_aggregate());
     }
+}
+
+/// Validate launch read sources using the same vocabulary as configuration.
+fn parse_read_source(value: &str) -> Result<String, String> {
+    crate::run::ReadSource::parse(value).map(|_| value.to_owned())
 }

@@ -23,9 +23,9 @@ Layers apply lowest to highest: `builtin` < `detected` < `host` (`<state>/ports.
 host-project directory is the ProjectId binding directory that
 `provenant config path` prints, so a repository can be configured from
 host state with no files in its tree. A missing layer is skipped silently. The
-binding record can be forgotten when its common directory is gone; the
-host-project directory and its `ports.json` stay for a later bind of the same
-location.
+binding record can be forgotten when its common directory or verified primary
+checkout is gone; the host-project directory and its `ports.json` stay for a
+later bind of the same location.
 
 - A layer sets only the fields it changes. Objects deep-merge, so
   `{"verify": {"base": "origin/master"}}` keeps the other verify fields. Arrays

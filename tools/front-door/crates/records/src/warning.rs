@@ -374,6 +374,23 @@ pub const AFFECTED_SELECTION_UNAVAILABLE: WarningCode =
 pub const TEMP_CHECKOUT_RETAINED: WarningCode = WarningCode("TEMP_CHECKOUT_RETAINED");
 /// A smoke-test scratch project binding could not be removed.
 pub const SMOKE_BINDING_RETAINED: WarningCode = WarningCode("SMOKE_BINDING_RETAINED");
+/// The caller project was ignored for hermetic smoke.
+pub const SMOKE_PROJECT_IGNORED: WarningCode = WarningCode("SMOKE_PROJECT_IGNORED");
+/// The retired read-source spelling now falls back to auto.
+pub const READ_SOURCE_VALUE_RENAMED: WarningCode = WarningCode("READ_SOURCE_VALUE_RENAMED");
+/// The peer does not support the smoke fixture protocol.
+pub const SMOKE_PEER_FIXTURE_UNSUPPORTED: WarningCode =
+    WarningCode("SMOKE_PEER_FIXTURE_UNSUPPORTED");
+/// A fixture directory has no ownership marker and was left in place by the sweep.
+pub const SMOKE_FIXTURE_FOREIGN: WarningCode = WarningCode("SMOKE_FIXTURE_FOREIGN");
+/// A pull request wait followed a new head.
+pub const PR_HEAD_FOLLOWED: WarningCode = WarningCode("PR_HEAD_FOLLOWED");
+/// A pull request wait has not yet pinned a head.
+pub const PR_HEAD_UNPINNED: WarningCode = WarningCode("PR_HEAD_UNPINNED");
+/// A local head was requested but the pull request branch has no local tip.
+pub const PR_HEAD_LOCAL_UNAVAILABLE: WarningCode = WarningCode("PR_HEAD_LOCAL_UNAVAILABLE");
+/// A live read source was pinned for a peer.
+pub const READ_SOURCE_PINNED_FOR_PEER: WarningCode = WarningCode("READ_SOURCE_PINNED_FOR_PEER");
 /// A build ledger rotated and some rotation entries expired.
 pub const BUILD_LEDGER_ROTATED: WarningCode = WarningCode("BUILD_LEDGER_ROTATED");
 /// The recent CI duration cache was unavailable; a slower cadence applied.
@@ -421,6 +438,8 @@ pub const FORWARDER_UNAVAILABLE: WarningCode = WarningCode("FORWARDER_UNAVAILABL
 pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIALS_SKIPPED");
 /// A brief `Verification scope:` line overrode the `lanes.verification` knob; the brief wins.
 pub const VERIFICATION_BRIEF_OVERRIDES: WarningCode = WarningCode("VERIFICATION_BRIEF_OVERRIDES");
+/// A registered project's root has vanished; scheduled tasks skip it.
+pub const PROJECT_ROOT_VANISHED: WarningCode = WarningCode("PROJECT_ROOT_VANISHED");
 
 /// A route model is a full `ADAPTER/ID` that the effective catalogue does not
 /// know. The declared spelling is preserved; the warning names it.

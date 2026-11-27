@@ -263,11 +263,6 @@ fn inbox_explicit_local_and_unconfigured_owner() -> Result {
     let moved = rig.home.join("repo");
     std::fs::rename(&rig.project, &moved)?;
     rig.project = moved;
-    for (key, value) in &mut rig.env {
-        if key == "PROVENANT_ROOT" {
-            *value = rig.project.clone().into();
-        }
-    }
     call(&rig, &["inbox"], None, 0)?;
     let remote = call(&rig, &["inbox", "--host", "remote"], None, 3)?;
     assert_eq!(remote["error"]["code"], "owner_unavailable");

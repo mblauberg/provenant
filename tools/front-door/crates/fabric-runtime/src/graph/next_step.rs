@@ -64,6 +64,7 @@ pub(super) fn stop_cause(
     match attempt.outcome? {
         GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        GraphAttemptOutcome::ModelUnavailable => Some(StopCause::ModelUnavailable),
         GraphAttemptOutcome::AdapterUnavailable => Some(StopCause::AdapterUnavailable),
         GraphAttemptOutcome::PreparationRefused(cause) => Some(cause.into()),
         GraphAttemptOutcome::DeadlineExceeded => Some(StopCause::Deadline),
@@ -932,6 +933,7 @@ pub(super) fn settlement_fallback_decision(
     let cause = match outcome {
         GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        GraphAttemptOutcome::ModelUnavailable => Some(StopCause::ModelUnavailable),
         GraphAttemptOutcome::PreparationRefused(
             provenant_records::run::CauseKind::SpawnFailure,
         ) => Some(StopCause::SpawnFailure),
@@ -973,6 +975,13 @@ pub(super) fn settlement_fallback_decision(
                 Some("auth_required"),
                 Some("The lane requires authentication.".into()),
             ),
+            GraphAttemptOutcome::ModelUnavailable => (
+                Some("model_unavailable"),
+                Some(
+                    "The model is unavailable for this account; another eligible candidate in the same tier takes over (configurable with `depletion.tiers`)"
+                        .into(),
+                ),
+            ),
             GraphAttemptOutcome::AdapterUnavailable => (
                 Some("adapter_unavailable"),
                 Some("The lane's adapter is unavailable.".into()),
@@ -1010,7 +1019,10 @@ pub(super) fn settlement_fallback_decision(
             && route.is_some_and(|r| r.account.is_some() || r.model.is_some())
         {
             advance_code = Some("fallback_route_pinned");
-            advance_note = Some("The selected route is pinned and has no fallback.".into());
+            advance_note = Some(
+                "The selected route is pinned and has no fallback; declare another eligible route in `node.routes`, configure an applicable depletion fallback with `depletion.rungs` and `depletion.tiers`, or remove the route's account/model pin."
+                    .into(),
+            );
         }
         if !allowed && route_index + 1 < node.routes.len() {
             let (code, message) = fallback_denial(

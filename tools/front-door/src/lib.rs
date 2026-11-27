@@ -46,6 +46,7 @@ mod pr;
 #[cfg(any(test, feature = "fixture"))]
 mod pr_land_tests;
 mod process_tree;
+mod project_root;
 mod provider_retention;
 mod release_smoke;
 #[cfg(test)]
@@ -56,6 +57,7 @@ mod scratch_dir;
 mod scratch_owner;
 mod session_handoff;
 mod settlement;
+mod smoke;
 mod staging_gc;
 mod state_handoff;
 mod status_wait;

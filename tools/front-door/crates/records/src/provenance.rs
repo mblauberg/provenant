@@ -146,6 +146,24 @@ pub struct Source {
     pub origin: Option<String>,
 }
 
+impl Source {
+    /// A source at `layer` naming its exact place.
+    pub fn at(layer: Layer, origin: impl Into<String>) -> Self {
+        Self {
+            layer,
+            origin: Some(origin.into()),
+        }
+    }
+
+    /// `LAYER (ORIGIN)`, the prose form diagnostics print.
+    pub fn describe(&self) -> String {
+        match &self.origin {
+            Some(origin) => format!("{} ({origin})", self.layer.description()),
+            None => self.layer.description().to_owned(),
+        }
+    }
+}
+
 /// A value with its source. Serialises as
 /// `{"value": .., "layer": "<layer>", "origin": ".."}`; the source is
 /// flattened beside the value, and an absent origin is omitted.

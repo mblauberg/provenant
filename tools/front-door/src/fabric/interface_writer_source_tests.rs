@@ -233,15 +233,57 @@ fn deliver_plan_reads_the_writer_worktree_base() -> Result {
     Ok(())
 }
 
+/// Invariant 1 (origin leg): admission records the exact head of the chosen
+/// source as a full object ID with the origin and policy status projects. A
+/// later push cannot change this admitted subject; a new admission resolves
+/// the new head instead.
+#[test]
+fn admitted_subject_records_the_resolved_origin() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let head = git(&rig, &["rev-parse", "HEAD"])?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    // The default `auto` source pins the up-to-date checkout HEAD; `live`
+    // records the same HEAD but follows the working tree locally.
+    for (input, policy, read) in [
+        (
+            json!({"op":"run"}),
+            provenant_records::subject::SubjectPolicy::Pinned,
+            super::super::subject::ReadPlan::Pinned,
+        ),
+        (
+            json!({"op":"run", "source":"live"}),
+            provenant_records::subject::SubjectPolicy::FollowLatest,
+            super::super::subject::ReadPlan::Live,
+        ),
+    ] {
+        let resolved = factory.admit_subject(&input, None, false, false, &cancel)?;
+        let subject = resolved.subject.ok_or("an admitted graph has a subject")?;
+        assert_eq!(subject.head.to_string(), head, "{input}");
+        assert!(
+            matches!(
+                subject.origin,
+                provenant_records::subject::SubjectOrigin::LocalRef { .. }
+            ),
+            "{input}: {:?}",
+            subject.origin
+        );
+        assert_eq!(subject.policy, policy, "{input}");
+        assert_eq!(resolved.read, read, "{input}");
+    }
+    Ok(())
+}
+
 /// Regression #3870: a writer that names no base still says its identity falls
 /// back to the caller checkout.
 #[test]
 fn writer_without_a_base_names_the_caller_checkout_fallback() {
-    let base = super::super::writer_base::resolve_writer_base(
+    let base = super::super::subject::resolve_writer_base(
         &json!({"access":"worktree_write"}),
         std::path::Path::new("/project"),
         std::path::Path::new("/project"),
         std::path::Path::new("/state"),
+        &Default::default(),
         &provenant_cli::run::ReadSourceChoice::automatic(),
         None,
     );

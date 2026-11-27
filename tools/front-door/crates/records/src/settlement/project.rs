@@ -54,7 +54,10 @@ pub fn graph_outcome(record: &AttemptRecord) -> Option<GraphAttemptOutcome> {
             GraphAttemptOutcome::OtherFailure
         }
         Outcome::TimedOut => GraphAttemptOutcome::OtherFailure,
-        Outcome::ModelUnavailable => GraphAttemptOutcome::AdapterUnavailable,
+        // The typed capacity outcome stays distinct: the graph treats it as a
+        // route-level depletion and hands the work to another candidate. It is
+        // not an adapter failure, which would strand a pinned exact model.
+        Outcome::ModelUnavailable => GraphAttemptOutcome::ModelUnavailable,
         Outcome::Unclassified => GraphAttemptOutcome::Unclassified,
         Outcome::Rejected if !launched => cause.or(Some(CauseKind::Unrecorded)).map_or(
             GraphAttemptOutcome::OtherFailure,

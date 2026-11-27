@@ -1467,7 +1467,7 @@ pub(super) fn flatten_fragment(
         queue_ci_wait: None,
         queue: None,
         review: None,
-        review_subject_missing: false,
+        subject: None,
         exclude: Vec::new(),
         network: None,
         capability: Vec::new(),
@@ -1849,7 +1849,10 @@ pub(super) fn settle(
             }
         };
         checkpoint.nodes[index].state = NodeState::Succeeded;
-        clear_expansion_pause(checkpoint, index, false);
+        // The fallback settled the expansion, so refresh the graph pause: a
+        // stale `InvalidPlanExpansion` pause would otherwise outlive its owner
+        // and fail validation on every later tick (#4106).
+        clear_expansion_pause(checkpoint, index, true);
         let outputs = checkpoint.nodes[index]
             .outputs
             .get_or_insert_with(|| super::outputs::make_outputs(None, None, None, None, None));

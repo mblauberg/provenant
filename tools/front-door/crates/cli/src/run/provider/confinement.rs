@@ -1941,7 +1941,7 @@ pub(in crate::run) fn read_only_checkout_warning(
     source: &Path,
     choice: &crate::run::ReadSourceChoice,
 ) -> Option<String> {
-    let selected = read_only_source_ref(state, source, choice)?;
+    let selected = resolve_read_source(state, source, choice)?;
     Some(crate::run::read_only_local_checkout_warning(
         source, &selected,
     ))
@@ -1986,18 +1986,20 @@ fn fetch_read_source(remote: &provenant_config::RemoteName, repo: &Path) -> bool
 }
 
 /// The one resolver for a read-only lane's source. The compiled default pins
-/// only a checkout behind its fetched upstream; `checkout` keeps the local tree,
-/// `default_branch` the fetched default, and any other value an explicit ref.
-/// `fetch_first` fetches first; unusable Git evidence is advisory, never fatal.
-pub(in crate::run) fn read_only_source_ref(
+/// the fetched upstream when the checkout is behind it, and pins the observed
+/// checkout HEAD otherwise, so a commit after admission cannot move the tree a
+/// read-only lane reads; `live` keeps the local tree, `default_branch` the
+/// fetched default, and any other value an explicit ref. `fetch_first` fetches
+/// first; unusable Git evidence is advisory, never fatal.
+pub(in crate::run) fn resolve_read_source(
     state: &Path,
     source: &Path,
     choice: &crate::run::ReadSourceChoice,
-) -> Option<crate::run::ReadOnlySourceRef> {
+) -> Option<crate::run::ReadSourcePin> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
 
-    if choice.value == "checkout" {
+    if choice.source == crate::run::ReadSource::Live {
         return None;
     }
     let git = provenant_os::git::git_executable()?;
@@ -2015,7 +2017,7 @@ pub(in crate::run) fn read_only_source_ref(
             provenant_records::warning::UPSTREAM_UNRESOLVED,
             format!(
                 "lanes.read_source_fetch_first: fetch from {remote} did not complete; resolving {} from the last fetched refs",
-                choice.value
+                choice.source
             ),
             provenant_records::warning::detected_source(
                 provenant_records::warning::UPSTREAM_UNRESOLVED,
@@ -2036,7 +2038,7 @@ pub(in crate::run) fn read_only_source_ref(
     .ok()
     .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
     .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok())?;
-    let (commit, reference) = if choice.value.is_empty() {
+    let (commit, reference) = if choice.source == crate::run::ReadSource::Auto {
         configured_upstream(&executor, &repo, &utility, budget, &cancel).or_else(|| {
             // The remote comes from the one declared/inferred context, never a
             // compiled `origin`: a fork checkout must not pin its review base to
@@ -2053,29 +2055,68 @@ pub(in crate::run) fn read_only_source_ref(
                 format!("read-only source could not resolve this branch's configured upstream; using {} instead, which may not track this checkout", fallback.1),
              provenant_records::warning::detected_source(provenant_records::warning::UPSTREAM_UNRESOLVED)));
             Some(fallback)
-        })?
-    } else if choice.value == "default_branch" {
+        }).unwrap_or_else(|| {
+            let reference = current_branch(&executor, &repo, &utility, budget, &cancel)
+                .unwrap_or_else(|| "HEAD".to_owned());
+            (head, reference)
+        })
+    } else if choice.source == crate::run::ReadSource::DefaultBranch {
         // An explicit default_branch pins the fetched default branch, never
         // this checkout's configured tracking upstream: a feature branch may
         // track a different branch and must still read the forge default.
-        // Only the empty compiled-default case above uses configured_upstream.
+        // Only the auto choice above uses configured_upstream.
         // Spec: docs/specs/run-launch.md#inputs-and-resources
         let remote = resolved_forge_remote(state, ancestor)?;
         default_upstream(&executor, &repo, &utility, budget, &cancel, &remote)?
     } else {
-        resolve_upstream_ref(&executor, &repo, &utility, budget, &cancel, &choice.value)?
+        resolve_upstream_ref(
+            &executor,
+            &repo,
+            &utility,
+            budget,
+            &cancel,
+            &choice.source.to_string(),
+        )?
     };
     let behind =
         commits_behind(&executor, &repo, &utility, budget, &cancel, head, commit).unwrap_or(0);
-    if choice.value.is_empty() && behind == 0 {
-        return None;
+    if choice.source == crate::run::ReadSource::Auto && behind == 0 {
+        // An up-to-date auto checkout still pins the HEAD observed here: the
+        // tree a read-only lane reads must not move after admission. The
+        // reference names the checked-out branch, or HEAD when detached.
+        let reference = current_branch(&executor, &repo, &utility, budget, &cancel)
+            .unwrap_or_else(|| "HEAD".to_owned());
+        return Some(crate::run::ReadSourcePin {
+            commit: head,
+            reference,
+            behind: 0,
+            checkout_head: head,
+        });
     }
-    Some(crate::run::ReadOnlySourceRef {
+    Some(crate::run::ReadSourcePin {
         commit,
         reference,
         behind,
-        head,
+        checkout_head: head,
     })
+}
+
+/// Resolve the remote's default branch for a writer base through the one
+/// read-source resolver. The remote comes from the declared/inferred forge
+/// context, never a compiled `origin`, so a repository whose only remote is
+/// named `upstream` resolves to `upstream/HEAD`.
+pub(crate) fn resolve_default_branch(
+    state: &Path,
+    source: &Path,
+) -> Option<crate::run::ReadSourcePin> {
+    resolve_read_source(
+        state,
+        source,
+        &crate::run::ReadSourceChoice {
+            source: crate::run::ReadSource::DefaultBranch,
+            ..crate::run::ReadSourceChoice::automatic()
+        },
+    )
 }
 
 /// Resolve a fetched ref to its commit and keep the exact ref that named it.
@@ -2259,7 +2300,10 @@ fn configured_upstream(
 /// could fetch; callers without a remote keep their local source behaviour.
 ///
 /// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
-fn resolved_forge_remote(state: &Path, project: &Path) -> Option<provenant_config::RemoteName> {
+pub(in crate::run) fn resolved_forge_remote(
+    state: &Path,
+    project: &Path,
+) -> Option<provenant_config::RemoteName> {
     let ports = provenant_config::PortTable::read_for(Some(project), state).ok()?;
     let policy = provenant_config::operation_policy(state, project, &ports);
     let config = provenant_config::ForgeConfig::new(&ports, (*policy).clone());

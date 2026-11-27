@@ -296,7 +296,7 @@ fn a_writer_with_a_false_launch_condition_is_never_bound() {
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some("lane".into());
     writer.when = vec![WhenTerm {
-        name: "smoke-write".into(),
+        name: "write".into(),
         expected: "true".into(),
         actual: "false".into(),
     }];
@@ -309,7 +309,7 @@ fn a_writer_with_a_false_launch_condition_is_never_bound() {
         progress
             .skip_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("smoke-write")),
+            .is_some_and(|reason| reason.contains("write")),
         "{progress:?}"
     );
     assert!(progress.writer_binding.is_none(), "{progress:?}");

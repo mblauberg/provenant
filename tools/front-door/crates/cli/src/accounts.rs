@@ -795,7 +795,9 @@ fn edit_accounts(
     }
 }
 
-fn ensure_state_directory(path: &Path) -> Result<Directory, String> {
+/// Open the state root, creating each missing component privately. Every
+/// writer that publishes into a fresh state root goes through this one opener.
+pub fn ensure_state_directory(path: &Path) -> Result<Directory, String> {
     if !path.is_absolute() {
         return Err("state directory must be absolute".into());
     }

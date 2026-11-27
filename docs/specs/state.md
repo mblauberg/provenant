@@ -89,11 +89,23 @@ status with its graph ID and typed reason, and landing review reports unreadable
 graph sources by graph ID while keeping valid settlements. The first tick read of
 a corrupt checkpoint records its file digest and reason in a quarantine marker;
 identical bytes are skipped on later ticks, changed bytes are reported again and
-`provenant stop -- NAME` retires the record. Pending-index recovery never uses
-unverified lifecycle fields to classify a corrupt record as settled.
+`provenant stop -- NAME` retires the record. A readable checkpoint whose active
+expansion pause disagrees with the graph pause is quarantined on the same byte
+key and reported once with the same retire step, so a bad pause pair cannot
+repeat every tick. Pending-index recovery never uses unverified lifecycle fields
+to classify a corrupt record as settled.
 - Why: stored text must verify on reload, and one damaged graph must not hide
   another's review evidence or flood every tick with an unresolvable retry.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`
+
+`GraphDocument.subject` is additive: the host writes the admitted `PinnedSubject`
+at admission and overwrites any caller-supplied value, and its serialisation is
+skipped when absent so older execution digests stay byte-identical. A document
+with a subject uses graph schema v2; schema v1 cannot represent subject
+provenance. There is no `CHECKPOINT_SCHEMA_VERSION` bump. `GraphCheckpoint.subject`
+is a serde-skipped projection hydrated from the execution on reload and shown under
+`checkpoint.subject` in status; it is never stored on its own. Graphs already in
+flight at upgrade load with `subject` absent and status omits the field.
 
 ## SQLite stores
 
@@ -179,8 +191,10 @@ diagnostic; malformed bindings and filesystem errors keep their own causes, and
 lookup never repairs state. First publication, hint replacement and removal share
 a binding lock; contended readers, including GC, retry under its shared side.
 A binding record can be forgotten when its common
-directory is gone: the smoke verifier cleans up its scratch binding at exit, and
-GC retires a vanished binding once its record has been idle for `gc.idle`. The
+directory or verified primary checkout is gone: the smoke verifier cleans up its
+scratch binding at exit, and GC retires a vanished binding once its record has
+been idle for `gc.idle`, so `provenant gc --apply` unregisters a vanished
+temporary checkout whose separate Git common directory survives. The
 private host-project directory stays for a later bind. Peer status and events
 replace local paths in a terminal cause with a safe reason and remedy, taken
 from the event's own recorded cause, and disclose remote paths only through an
@@ -463,6 +477,14 @@ state to migrate; the receipt it publishes records any later step's id.
 - Why: state a store does not own still changes shape, and one recorded
   crossing keeps retries safe without a permanent decoder.
 - Owner: `crates/records/src/migrate.rs`, `src/install/migrations.rs`
+
+`ReadSourceLiveSpelling` (`read-source-live`) rewrites the retired
+`lanes.read_source` value `checkout` to `live` in the host and host-project
+config files. It is idempotent, reports each changed path, and never rewrites a
+repository's own `.provenant/config.toml`; a repository file still saying
+`checkout` warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`. No other
+batch-P rename needs a persisted step: the other names are unreleased or in
+memory only.
 
 ## Typed host metadata in format 2
 

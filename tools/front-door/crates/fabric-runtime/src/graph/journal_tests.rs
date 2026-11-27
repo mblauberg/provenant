@@ -1666,6 +1666,75 @@ fn tick_reports_corrupt_checkpoints_once_until_bytes_change_or_retired() {
     std::fs::write(&path, b"{} ").unwrap();
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
 }
+
+// Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
+#[test]
+fn tick_quarantines_a_disagreeing_expansion_pause_with_a_retire_step() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
+    // The shape from #4106: a refused expansion owns an InvalidPlanExpansion
+    // pause, while a later structural pause took over the graph pause.
+    fixture.checkpoint.nodes[0].expansion_pause = Some("fragment invalid".into());
+    fixture.checkpoint.nodes[0].expansion_cause = Some(NodeDecisionCause::PlanExpansionPaused {
+        active: true,
+        fallback: false,
+        structural_limit: None,
+        fragment_error: None,
+    });
+    fixture
+        .checkpoint
+        .set_pause(PauseCause::StructuralLimit, "limits.nodes");
+    assert!(!fixture.checkpoint.expansion_pause_owns_graph_pause());
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    let path = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+    let first = FileJournal::read_checkpoint_for_tick(&root, project, "g-test").unwrap_err();
+    assert!(
+        first.to_string().contains("invalid_expansion_pause"),
+        "{first}"
+    );
+    assert!(
+        first.to_string().contains("provenant stop -- g-test"),
+        "{first}"
+    );
+    let marker = path.with_file_name("graph-g-test.unreadable");
+    assert!(marker.is_file());
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().lines().nth(1),
+        Some("invalid_expansion_pause")
+    );
+    // The same bytes are quarantined: the next tick skips them instead of
+    // repeating the validation error forever.
+    assert!(
+        FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+            .unwrap()
+            .is_none()
+    );
+    // `provenant stop -- g-test` retires the quarantined record.
+    assert!(
+        FileJournal::retire_unreadable(&root, project, "g-test", budget, &cancel, &clock, |_| Ok(
+            ()
+        ))
+        .unwrap()
+    );
+    assert!(!path.exists());
+    assert!(!marker.exists());
+}
+
 #[test]
 fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     let temp = crate::test_support::tempdir().unwrap();
@@ -2815,6 +2884,89 @@ mod launch_recovery {
         );
         assert_eq!(ledger.lock().unwrap().starts.len(), 2);
     }
+}
+
+// Binding is the first of the two paths that enforce the subject/base
+// agreement (journal.rs bind and decode). A subject whose base disagrees with
+// the bound review base must be refused before any checkpoint is stored.
+#[test]
+fn bind_refuses_a_subject_that_disagrees_with_the_bound_review_base() {
+    let temp = crate::test_support::tempdir().unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "g-test",
+        "nodes": [{
+            "id": "reader",
+            "prompt": "work for reader",
+            "access": "read_only",
+            "route": {"adapter": "fixture", "model": "fixture/model"}
+        }]
+    }))
+    .unwrap();
+    document.subject = Some(provenant_records::subject::PinnedSubject {
+        extra: Default::default(),
+        base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
+        head: provenant_core::GitOid::parse(&"1".repeat(40)).unwrap(),
+        origin: provenant_records::subject::SubjectOrigin::LocalRef {
+            name: "main".into(),
+        },
+        pinned_at: provenant_core::WallTime::from_micros(1).unwrap(),
+        policy: provenant_records::subject::SubjectPolicy::Pinned,
+        repository: None,
+        base_ref: None,
+        policy_source: None,
+        followed_from: Vec::new(),
+    });
+
+    let make_execution = |graph_id: &str, review: &str| GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+        requester_path: None,
+        extra: Default::default(),
+        bases: GraphBaseBinding::new(Some(provenant_core::GitOid::parse(review).unwrap()), None),
+        directory: inputs.checkout.clone(),
+        document: GraphDocument {
+            graph_id: graph_id.to_owned(),
+            ..document.clone()
+        },
+    };
+
+    let mut agreeing = FileJournal::open(
+        &root,
+        project,
+        "g-agree",
+        WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+        &cancel,
+        &clock,
+    )
+    .unwrap();
+    assert!(
+        agreeing
+            .bind(make_execution("g-agree", &"a".repeat(40)))
+            .is_ok()
+    );
+
+    let mut disagreeing = FileJournal::open(
+        &root,
+        project,
+        "g-disagree",
+        WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+        &cancel,
+        &clock,
+    )
+    .unwrap();
+    let error = disagreeing
+        .bind(make_execution("g-disagree", &"b".repeat(40)))
+        .expect_err("a subject base must agree with the bound review base");
+    assert!(matches!(error.root_cause(), JournalError::BadEnvelope));
 }
 
 #[test]

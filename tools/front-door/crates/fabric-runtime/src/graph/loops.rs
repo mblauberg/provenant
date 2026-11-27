@@ -957,7 +957,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             // isolated body has only local names and uses temporary refs.
             queue: None,
             review: None,
-            review_subject_missing: false,
+            subject: None,
             nodes: body,
             delivery: None,
             ..document.clone()

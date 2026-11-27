@@ -200,6 +200,10 @@ pub enum EdgeError {
     InvalidField(&'static str),
     #[error("Git executable is unavailable")]
     GitUnavailable,
+    /// The lane's declared project binding is missing or unreadable; the
+    /// message names the variable, the binding path and the next step.
+    #[error("{0}")]
+    LaneProject(String),
 }
 pub fn edge_diagnostic(error: &EdgeError) -> Option<provenant_records::diagnostic::Diagnostic> {
     use provenant_fabric_runtime::coordination::facade::FacadeError;
@@ -573,6 +577,7 @@ pub fn run(
                 | EdgeError::Invalid
                 | EdgeError::InvalidField(_)
                 | EdgeError::StateDirectoryPermissions { .. }
+                | EdgeError::LaneProject(_)
                 | EdgeError::Root(_) => (Outcome::Invalid, "invalid_input"),
                 EdgeError::Relay(error) => (Outcome::Error, error.code()),
                 EdgeError::Config(_) => (Outcome::Invalid, "config"),
@@ -584,6 +589,10 @@ pub fn run(
                 .as_ref()
                 .and_then(|projection| projection.next.clone())
                 .unwrap_or_else(|| {
+                    if matches!(error, EdgeError::LaneProject(_)) {
+                        return "Bind the project on the host, then relaunch the lane from it."
+                            .to_owned();
+                    }
                     let next = match code {
                         "io" => {
                             "Inspect the reported I/O error, resolve it, then retry the command."
