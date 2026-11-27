@@ -114,27 +114,36 @@ fn only_git_control_files_are_checked_for_other_names() -> Result<(), Box<dyn st
     for control in ["config", "hooks/pre-commit", "info/exclude"] {
         let alias = fixture.root.join("alias");
         std::fs::hard_link(git_dir.join(control), &alias)?;
-        let error = verify_git_control_links(&fixture.repo).unwrap_err();
+        // Settlement moves hard-linked handoffs aside, so a second name is
+        // advisory: the check warns through its `none/warn` rule and proceeds.
+        let (result, warnings) =
+            provenant_records::warning::capture(|| verify_git_control_links(&fixture.repo));
+        result?;
         assert!(
-            matches!(&error, PermissionError::GitControlHardLinked(path) if path == &git_dir.join(control)),
-            "{control}: {error}"
+            warnings.iter().any(|warning| {
+                warning.code == "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION"
+                    && warning
+                        .message
+                        .contains(&git_dir.join(control).display().to_string())
+            }),
+            "{control}: {warnings:?}"
         );
         let policy = provenant_records::policy::Policy::default();
         let rule = policy.rule("VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION");
         assert_eq!(
             rule.rule.boundary,
-            provenant_records::policy::Boundary::OtherWork
+            provenant_records::policy::Boundary::None
         );
         assert_eq!(
             rule.rule.strength,
-            provenant_records::policy::Strength::Refuse
+            provenant_records::policy::Strength::Warn
         );
         assert!(matches!(
             policy.check(
                 "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION",
                 provenant_records::policy::Facts::violation("guard failed"),
             ),
-            provenant_records::policy::Effect::Refuse(_)
+            provenant_records::policy::Effect::Warn(_)
         ));
         std::fs::remove_file(alias)?;
         verify_git_control_links(&fixture.repo)?;
@@ -165,7 +174,32 @@ fn a_hard_linked_exact_grant_names_its_path() -> Result<(), Box<dyn std::error::
         Err(PermissionError::AnchorMismatchAt { path, stage })
             if path == root.join("linked") && stage == "file has other hard links"
     ));
+    // Worktree grants use the advisory check: the default `none/warn` rule
+    // names the link and proceeds, while the strict check above is retained
+    // for credential grants.
+    let (result, warnings) = provenant_records::warning::capture(|| {
+        anchors.verify_single_link_grant_advisory(
+            &grant("linked"),
+            "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+        )
+    });
+    result?;
+    assert!(
+        warnings.iter().any(|warning| {
+            warning.code == "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
+                && warning.message.contains("file has other hard links")
+        }),
+        "{warnings:?}"
+    );
+    anchors.verify_single_link_grant_advisory(
+        &grant("linked"),
+        "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+    )?;
     anchors.verify_single_link_grant(&grant("absent"))?;
+    anchors.verify_single_link_grant_advisory(
+        &grant("absent"),
+        "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+    )?;
     Ok(())
 }
 

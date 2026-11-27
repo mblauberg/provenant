@@ -34,9 +34,12 @@ pub(super) fn verify_worktree_authority(
     credentials: &CredentialRoots,
     access: &LaneAccessReceipt,
 ) -> Result<WorktreeWriteGrants, PermissionError> {
-    verify_worktree_authority_inner(authority, anchors, credentials, access).map_err(|error| {
-        boundary_error("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION", error)
-    })
+    // The compiled rule for this site is `none/warn` and applies only to the
+    // hard-link predicate handled in the exact-grant loop below. Every other
+    // failure is already a typed `PermissionError` whose own boundary refuses
+    // at the caller; routing it through `boundary_error` here would assert
+    // against a non-boundary rule and panic.
+    verify_worktree_authority_inner(authority, anchors, credentials, access)
 }
 
 #[cfg(target_os = "macos")]
@@ -76,7 +79,10 @@ fn verify_worktree_authority_inner(
     for grant in grants.iter() {
         match grant.scope {
             PathScope::Subtree => anchors.verify_grant_held(grant)?,
-            PathScope::Exact => anchors.verify_single_link_grant(grant)?,
+            PathScope::Exact => anchors.verify_single_link_grant_advisory(
+                grant,
+                "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+            )?,
         }
     }
     anchors.verify_grant_held(&authority.git_state)?;
@@ -99,14 +105,27 @@ fn verify_worktree_authority_inner(
 pub(super) fn verify_git_control_links(
     repo: &crate::repo::VerifiedRepo,
 ) -> Result<(), PermissionError> {
-    verify_git_control_links_inner(repo).map_err(|error| {
-        let code = if matches!(&error, PermissionError::GitControlHardLinked(_)) {
-            "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION"
-        } else {
-            "VALIDATION_VERIFY_GIT_CONTROL_LINKS_DATA_INTEGRITY"
-        };
-        boundary_error(code, error)
-    })
+    match verify_git_control_links_inner(repo) {
+        Ok(()) => Ok(()),
+        // A second name for a Git control file is advisory: settlement moves
+        // hard-linked handoffs aside, so the link destroys no live lane's work.
+        // The `none/warn` rule decides warn-and-proceed versus a configured
+        // stop; credential stores use a separate strict check.
+        Err(error) if matches!(&error, PermissionError::GitControlHardLinked(_)) => {
+            let detail = error.to_string();
+            Policy::default().warn_or(
+                "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION",
+                Facts::violation(detail),
+                |_| error,
+            )
+        }
+        // An incomplete scan cannot establish the invariant: a typed operation
+        // error that no setting may override.
+        Err(error) => Err(boundary_error(
+            "VALIDATION_VERIFY_GIT_CONTROL_LINKS_DATA_INTEGRITY",
+            error,
+        )),
+    }
 }
 
 #[cfg(target_os = "macos")]

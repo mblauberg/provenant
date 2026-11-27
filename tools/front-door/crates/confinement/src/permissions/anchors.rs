@@ -5,6 +5,8 @@ use crate::repo::{GitRefName, VerifiedWorktree};
 #[cfg(target_os = "macos")]
 use provenant_os::fs::Metadata;
 use provenant_os::fs::{Directory, FileKind};
+#[cfg(target_os = "macos")]
+use provenant_records::policy::{Facts, Policy};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -192,6 +194,31 @@ impl Anchors<'_> {
             Some(_) => Err(anchor_at(&grant.path, "file has other hard links")),
             None => Ok(()),
         }
+    }
+
+    /// Advisory counterpart for worktree grants. A hard link on a handoff file
+    /// is not destruction: settlement moves hard-linked handoffs aside before a
+    /// writer starts. The compiled `none/warn` rule decides whether this warns
+    /// and proceeds or stops under strict mode or an explicit
+    /// `policy.<CODE>=refuse`; an absent file still grants nothing. Credential
+    /// grants keep `verify_single_link_grant` above and still refuse.
+    pub(super) fn verify_single_link_grant_advisory(
+        &self,
+        grant: &PathGrant,
+        code: &'static str,
+    ) -> Result<(), PermissionError> {
+        if grant.scope != PathScope::Exact {
+            return Err(PermissionError::InvalidPath(grant.path.clone()));
+        }
+        if let Some(metadata) = self.exact_grant_metadata(&grant.path)?
+            && metadata.links > 1
+        {
+            let detail = format!("{}: file has other hard links", grant.path.display());
+            Policy::default().warn_or(code, Facts::violation(detail), |_| {
+                anchor_at(&grant.path, "file has other hard links")
+            })?;
+        }
+        Ok(())
     }
 
     /// The verified parent anchor and entry name of an exact grant, or `None`
