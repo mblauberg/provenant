@@ -191,19 +191,15 @@ fn a_hard_linked_exact_grant_names_its_path() -> Result<(), Box<dyn std::error::
         }),
         "{warnings:?}"
     );
-    anchors
-        .verify_single_link_grant_advisory(
-            &grant("linked"),
-            "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
-        )
-        .unwrap();
+    anchors.verify_single_link_grant_advisory(
+        &grant("linked"),
+        "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+    )?;
     anchors.verify_single_link_grant(&grant("absent"))?;
-    anchors
-        .verify_single_link_grant_advisory(
-            &grant("absent"),
-            "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
-        )
-        .unwrap();
+    anchors.verify_single_link_grant_advisory(
+        &grant("absent"),
+        "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+    )?;
     Ok(())
 }
 

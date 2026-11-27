@@ -210,13 +210,13 @@ impl Anchors<'_> {
         if grant.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath(grant.path.clone()));
         }
-        if let Some(metadata) = self.exact_grant_metadata(&grant.path)? {
-            if metadata.links > 1 {
-                let detail = format!("{}: file has other hard links", grant.path.display());
-                Policy::default().warn_or(code, Facts::violation(detail), |_| {
-                    anchor_at(&grant.path, "file has other hard links")
-                })?;
-            }
+        if let Some(metadata) = self.exact_grant_metadata(&grant.path)?
+            && metadata.links > 1
+        {
+            let detail = format!("{}: file has other hard links", grant.path.display());
+            Policy::default().warn_or(code, Facts::violation(detail), |_| {
+                anchor_at(&grant.path, "file has other hard links")
+            })?;
         }
         Ok(())
     }
