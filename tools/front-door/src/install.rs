@@ -2346,40 +2346,20 @@ fn preview_smoke(
     let nonce = crate::smoke::nonce()?;
     let commits = crate::smoke::create_fixture(state_dir, home, &nonce, &root)?;
     let fixture = crate::smoke::fixture_root(home, &root).join(&nonce);
-    let mut argv = vec![
-        program.as_os_str().to_owned(),
-        "--project".into(),
-        fixture.as_os_str().to_owned(),
-        "--state-dir".into(),
-        state_dir.as_os_str().to_owned(),
-        "--json".into(),
-        "run".into(),
-        "smoke".into(),
-        "--explain".into(),
-    ];
-    if let Some(host) = &args.host {
-        argv.extend(["--host".into(), host.into()]);
-    }
-    if let Some(route) = &args.route {
-        argv.extend(["--route".into(), route.into()]);
-    }
-    let set = settings.merged_set(&args.set);
-    let has = |name: &str| {
-        set.iter()
-            .any(|item| item.split_once('=').is_some_and(|(key, _)| key == name))
-    };
-    for setting in &set {
-        argv.extend(["--set".into(), setting.clone().into()]);
-    }
-    if !has("diff_base") {
-        argv.extend(["--set".into(), format!("diff_base={}", commits.head).into()]);
-    }
-    if !has("fixture_base") {
-        argv.extend([
-            "--set".into(),
-            format!("fixture_base={}", commits.base).into(),
-        ]);
-    }
+    // The preview shares the lifecycle's argv builder, so its writer branch,
+    // base, host and parameters are the ones the real launch would use.
+    let set = crate::smoke::with_fixture_defaults(settings.merged_set(&args.set), commits);
+    let argv = crate::smoke::smoke_run_argv(
+        program,
+        &fixture,
+        state_dir,
+        args,
+        &settings,
+        commits,
+        &crate::smoke::smoke_graph_name(),
+        &set,
+        true,
+    );
     let outcome = runner.execute(&argv, None, 1_048_576, 60);
     crate::smoke::report_smoke_cleanup(
         outcome,

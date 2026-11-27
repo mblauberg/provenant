@@ -154,8 +154,10 @@ once and applied to every smoke node. Adding `--dry-run` previews it without
 upgrading.
 The preview runs the currently installed binary's own `run smoke --explain`, not
 the candidate, so it shows the graph shape and route resolution that binary
-would launch; the candidate's graph is exercised only after it installs. The
-lifecycle creates one deterministic fixture under `domains.smoke.fixture_root`
+would launch; the candidate's graph is exercised only after it installs. It
+passes the same writer branch and base as the real verify, so the previewed
+writer starts from the fixture rather than falling back to the caller checkout.
+The lifecycle creates one deterministic fixture under `domains.smoke.fixture_root`
 (default `.local/state/provenant-smoke`, home-relative, owner-only) on every
 target host; a home-relative fixture is one a peer can project as a cross-host
 project, which a fixture in the system temporary directory never is. A

@@ -1061,30 +1061,38 @@ impl Factory {
         )
     }
 
-    fn validate_host_placement(
-        &self,
-        node: &provenant_fabric_runtime::graph::GraphNode,
-    ) -> Result<(), FacadeError> {
-        if !provenant_fabric_runtime::graph::when::holds(&node.when) {
-            return Ok(());
-        }
-        if let Some(name) = node
+    /// Resolve a node's declared host to this host or a configured peer. The
+    /// placement check and the read-only explanation share this resolution, so
+    /// an unknown name is refused in both and an alias is never mistaken for a
+    /// peer (or the reverse).
+    fn node_host(&self, node: &GraphNode) -> Result<Option<provenant_core::HostId>, FacadeError> {
+        let Some(name) = node
             .attempt
             .as_ref()
             .and_then(|attempt| attempt.host.as_deref())
+        else {
+            return Ok(None);
+        };
+        let local = self.context.identity.host;
+        if matches!(name, "local" | "localhost")
+            || name
+                .parse::<provenant_core::HostId>()
+                .is_ok_and(|host| host == local)
         {
+            return Ok(Some(local));
+        }
+        self.context
+            .peer_host(name)
+            .map(Some)
+            .ok_or(FacadeError::UnknownHost)
+    }
+
+    fn validate_host_placement(&self, node: &GraphNode) -> Result<(), FacadeError> {
+        if !provenant_fabric_runtime::graph::when::holds(&node.when) {
+            return Ok(());
+        }
+        if let Some(host) = self.node_host(node)? {
             let local = self.context.identity.host;
-            let host = if matches!(name, "local" | "localhost")
-                || name
-                    .parse::<provenant_core::HostId>()
-                    .is_ok_and(|host| host == local)
-            {
-                local
-            } else {
-                self.context
-                    .peer_host(name)
-                    .ok_or(FacadeError::UnknownHost)?
-            };
             if host == local
                 && node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
                 && node.worktree.as_deref().is_none_or(str::is_empty)
@@ -3228,6 +3236,43 @@ impl Factory {
                     writer_root.join(path)
                 }
             };
+            // A peer-placed writer is provisioned on the peer from a branch
+            // and a base ref. It has no local path to admit: resolving its
+            // empty worktree against this checkout would treat the caller's
+            // root as the writer and refuse it for the caller's state root
+            // (#4103). Report the peer's own provisioned worktree as proposed
+            // and leave credential admission to the peer's launch.
+            if self
+                .node_host(node)?
+                .is_some_and(|host| host != self.context.identity.host)
+                && node.access == AccessMode::WorktreeWrite
+                && node
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.new_worktree.is_some())
+            {
+                let label = node
+                    .attempt
+                    .as_ref()
+                    .and_then(|attempt| attempt.host.as_deref())
+                    .unwrap_or("peer");
+                let relative = node
+                    .attempt
+                    .as_ref()
+                    .and_then(|attempt| attempt.new_worktree.as_ref())
+                    .and_then(|worktree| {
+                        self.context
+                            .port_table
+                            .managed_writer_path(&worktree.branch)
+                            .ok()
+                    })
+                    .unwrap_or_else(|| PathBuf::from("writer"));
+                let path = PathBuf::from(label).join(relative);
+                rows.push(json!({"node":node.id, "host":label, "path":path,
+                    "status":"pending_registration", "credential_admission":"pending_route",
+                    "warnings":[]}));
+                continue;
+            }
             let access = provenant_cli::Access {
                 mode: None,
                 worktree: (node.access

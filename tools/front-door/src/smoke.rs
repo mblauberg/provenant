@@ -528,10 +528,86 @@ fn peer_fixture_matches(
     Ok(())
 }
 
+fn has_setting(set: &[String], name: &str) -> bool {
+    set.iter()
+        .any(|item| item.split_once('=').is_some_and(|(key, _)| key == name))
+}
+
+/// The merged `--set` items with the fixture's own review range filled in
+/// when neither layer named it: `diff_base` is the fixture head and
+/// `fixture_base` the commit before it.
+pub(crate) fn with_fixture_defaults(mut set: Vec<String>, commits: FixtureCommits) -> Vec<String> {
+    if !has_setting(&set, "diff_base") {
+        set.push(format!("diff_base={}", commits.head));
+    }
+    if !has_setting(&set, "fixture_base") {
+        set.push(format!("fixture_base={}", commits.base));
+    }
+    set
+}
+
+/// The `run smoke` arguments shared by the lifecycle and its dry-run preview.
+/// The preview asks for `--explain` instead of naming the graph, but it must
+/// otherwise place the writer exactly as the launch does: the branch and base
+/// are the writer's start point, and without them the preview would fall back
+/// to the caller checkout (#4103).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn smoke_run_argv(
+    program: &Path,
+    fixture: &Path,
+    state: &Path,
+    args: &Upgrade,
+    settings: &provenant_cli::smoke::Settings,
+    commits: FixtureCommits,
+    graph: &str,
+    set: &[String],
+    explain: bool,
+) -> Vec<std::ffi::OsString> {
+    let mut run: Vec<std::ffi::OsString> = vec![
+        program.as_os_str().to_owned(),
+        "--project".into(),
+        fixture.as_os_str().to_owned(),
+        "--state-dir".into(),
+        state.as_os_str().to_owned(),
+        "--json".into(),
+        "run".into(),
+        "smoke".into(),
+    ];
+    if explain {
+        run.push("--explain".into());
+    } else {
+        run.extend(["--name".into(), graph.into()]);
+    }
+    run.extend([
+        "--branch".into(),
+        format!("{}{graph}", settings.branch_prefix).into(),
+        "--base".into(),
+        commits.head.to_string().into(),
+    ]);
+    if let Some(host) = peer_host(args) {
+        run.extend(["--host".into(), host.into()]);
+    }
+    if let Some(route) = &args.route {
+        run.extend(["--route".into(), route.clone().into()]);
+    }
+    for setting in set {
+        run.extend(["--set".into(), setting.clone().into()]);
+    }
+    run
+}
+
+/// The peer a smoke run targets; an empty, `local` or `localhost` host is
+/// this host.
+fn peer_host(args: &Upgrade) -> Option<&str> {
+    args.host
+        .as_deref()
+        .filter(|host| !host.is_empty() && !matches!(*host, "local" | "localhost"))
+}
+
 /// The graph name for one smoke run: a fixed `smoke-` prefix, never the
 /// configured branch prefix, because a graph name is a path segment and the
 /// branch prefix (default `smoke/`) carries a slash.
-fn smoke_graph_name() -> String {
+pub(crate) fn smoke_graph_name() -> String {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     format!(
         "smoke-{}-{}",
@@ -752,10 +828,7 @@ pub(crate) fn run_lifecycle(
     fixture_phase.0 = clock.mono_now();
     let commits = create_fixture(state, home, &nonce, &root)?;
     let mut verdict = SmokeVerdict::Passed;
-    let host = args
-        .host
-        .as_deref()
-        .filter(|host| !host.is_empty() && !matches!(*host, "local" | "localhost"));
+    let host = peer_host(args);
     if let Some(host) = host {
         match peer_fixture(state, home, host, &nonce, true, &root) {
             Ok(receipt) => {
@@ -780,29 +853,6 @@ pub(crate) fn run_lifecycle(
     fixture_phase.1 = clock.mono_now();
     let graph = smoke_graph_name();
     let fixture = fixture_root(home, &root).join(&nonce);
-    let program = program.as_os_str().to_owned();
-    let mut run = vec![
-        program.clone(),
-        "--project".into(),
-        fixture.as_os_str().to_owned(),
-        "--state-dir".into(),
-        state.as_os_str().to_owned(),
-        "--json".into(),
-        "run".into(),
-        "smoke".into(),
-        "--name".into(),
-        graph.clone().into(),
-        "--branch".into(),
-        format!("{}{graph}", settings.branch_prefix).into(),
-        "--base".into(),
-        commits.head.to_string().into(),
-    ];
-    if let Some(host) = host {
-        run.extend(["--host".into(), host.into()]);
-    }
-    if let Some(route) = &args.route {
-        run.extend(["--route".into(), route.clone().into()]);
-    }
     // Configured parameters are merged under `--set`; a command-line item of
     // the same key wins. Each effective value carries the layer that chose it.
     let mut parameters = BTreeMap::new();
@@ -833,17 +883,8 @@ pub(crate) fn run_lifecycle(
             );
         }
     }
-    let mut set = settings.merged_set(&args.set);
-    let has_diff_base = set.iter().any(|item| {
-        item.split_once('=')
-            .is_some_and(|(key, _)| key == "diff_base")
-    });
-    let has_fixture_base = set.iter().any(|item| {
-        item.split_once('=')
-            .is_some_and(|(key, _)| key == "fixture_base")
-    });
-    if !has_diff_base {
-        set.push(format!("diff_base={}", commits.head));
+    let merged = settings.merged_set(&args.set);
+    if !has_setting(&merged, "diff_base") {
         parameters.insert(
             "diff_base".to_owned(),
             SmokeParameter {
@@ -852,8 +893,7 @@ pub(crate) fn run_lifecycle(
             },
         );
     }
-    if !has_fixture_base {
-        set.push(format!("fixture_base={}", commits.base));
+    if !has_setting(&merged, "fixture_base") {
         parameters.insert(
             "fixture_base".to_owned(),
             SmokeParameter {
@@ -862,9 +902,11 @@ pub(crate) fn run_lifecycle(
             },
         );
     }
-    for setting in &set {
-        run.extend(["--set".into(), setting.clone().into()]);
-    }
+    let set = with_fixture_defaults(merged, commits);
+    let run = smoke_run_argv(
+        program, &fixture, state, args, &settings, commits, &graph, &set, false,
+    );
+    let program = program.as_os_str().to_owned();
     let write_enabled = !set.iter().any(|item| item == "write=false");
     let mut output = String::new();
     launch_phase.0 = clock.mono_now();

@@ -1021,6 +1021,91 @@ fn smoke_dry_run_keeps_a_user_diff_base_and_adds_fixture_base()
 }
 
 #[test]
+// Spec: docs/specs/cli.md#run-explain-reports-peer-placement — a dry run
+// must preview the writer placement the real verify launches, not a preview
+// that falls back to the caller checkout because no base was named.
+fn smoke_preview_and_verify_share_writer_branch_and_base() -> Result<(), Box<dyn std::error::Error>>
+{
+    let tmp = tempfile::tempdir()?;
+    let program = tmp.path().join("provenant");
+    let fixture = tmp.path().join("fixture");
+    let state = tmp.path().join("state");
+    let graph = "smoke-verify-test";
+    let args = cli::Upgrade {
+        yes: false,
+        from_source: None,
+        hosts: "all".into(),
+        verify: true,
+        verify_only: false,
+        dry_run: true,
+        host: Some("peer-a".into()),
+        route: Some("junior".into()),
+        set: vec!["write=false".into()],
+    };
+    let settings = provenant_cli::smoke::Settings::default();
+    let commits = crate::smoke::FixtureCommits {
+        base: provenant_core::GitOid::parse(&"1".repeat(40))?,
+        head: provenant_core::GitOid::parse(&"2".repeat(40))?,
+    };
+    let set = crate::smoke::with_fixture_defaults(settings.merged_set(&args.set), commits);
+    let render = |explain: bool| {
+        crate::smoke::smoke_run_argv(
+            &program, &fixture, &state, &args, &settings, commits, graph, &set, explain,
+        )
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+    };
+    let preview = render(true);
+    let verify = render(false);
+    // Only the preview/launch mode flag and its name differ. The writer
+    // branch, its base and every routing control are one argv builder.
+    let without_mode = |argv: Vec<String>| {
+        let mut controls = Vec::new();
+        let mut skip_next = false;
+        for arg in argv {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            match arg.as_str() {
+                "--explain" => {}
+                "--name" => skip_next = true,
+                _ => controls.push(arg),
+            }
+        }
+        controls
+    };
+    assert_eq!(without_mode(preview.clone()), without_mode(verify.clone()));
+    assert!(preview.contains(&"--explain".to_owned()), "{preview:?}");
+    assert!(verify.contains(&"--name".to_owned()), "{verify:?}");
+    let branch = format!("{}{graph}", settings.branch_prefix);
+    let head = commits.head.to_string();
+    for expected in [
+        "--branch",
+        branch.as_str(),
+        "--base",
+        head.as_str(),
+        "--host",
+        "peer-a",
+    ] {
+        assert!(
+            preview.iter().any(|arg| arg == expected),
+            "{expected}: {preview:?}"
+        );
+    }
+    assert!(
+        preview.contains(&format!("diff_base={head}")),
+        "{preview:?}"
+    );
+    assert!(
+        preview.contains(&format!("fixture_base={}", commits.base)),
+        "{preview:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn orphan_detection_keeps_default_environment_and_registered_targets()
 -> Result<(), Box<dyn std::error::Error>> {
     use super::*;
