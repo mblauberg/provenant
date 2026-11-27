@@ -1713,7 +1713,7 @@ pub fn admitted_writer_guard(
     let admit = admit_shared_writer(&tree, Some(&observation), &sharing);
     emit_admission_warning(&admit);
     if let Admit::Refuse { error } = admit {
-        return Err(WorktreeError::CustodyCommand(error));
+        return Err(WorktreeError::CustodyCommand(Box::new(error)));
     }
     let directory = writer_directory(context.project_state, path)?;
     let guard = provenant_supervisor::custody::lock_writer_occupancy(

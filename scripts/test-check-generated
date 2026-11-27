@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import test_git_env
+test_git_env.isolate()
+
 import json
 from pathlib import Path
 import shutil

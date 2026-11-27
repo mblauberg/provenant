@@ -808,11 +808,11 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
         &[
             (
                 "full",
-                json!({"kind": "full", "schema_version": 1, "code": "c", "base": "b", "head": "h", "strength": "warn", "source": "dispatch", "out_of_scope_paths": []}),
+                json!({"kind": "full", "schema_version": 1, "code": "c", "base": "b", "head": "h", "strength": "warn", "source": {"layer": "launch", "origin": "dispatch"}, "out_of_scope_paths": []}),
             ),
             (
                 "compact",
-                json!({"kind": "compact", "code": "c", "strength": "warn", "source": "dispatch", "paths_artifact": "p", "out_of_scope_count": 0, "paths_omitted_from_handoff": true}),
+                json!({"kind": "compact", "code": "c", "strength": "warn", "source": {"layer": "launch", "origin": "dispatch"}, "paths_artifact": "p", "out_of_scope_count": 0, "paths_omitted_from_handoff": true}),
             ),
         ],
     )?;

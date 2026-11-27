@@ -1532,16 +1532,16 @@ mod tests {
             origin: ".provenant/config.toml:12".into(),
         };
         let mut result = CommandResult::new("status", Outcome::Error, ());
-        result.error = Some(
-            provenant_records::CommandError::new(
-                "PEER_PROJECT_UNLOCATABLE",
-                "project is outside the peer's home",
-                None,
-                "provenant run task --brief b",
-            )
-            .with_subject(subject)
-            .with_setting(setting),
-        );
+        let error = provenant_records::CommandError::new(
+            "PEER_PROJECT_UNLOCATABLE",
+            "project is outside the peer's home",
+            None,
+            "provenant run task --brief b",
+        )
+        .with_subject(subject)
+        .with_setting(setting);
+        result.next = error.next.clone();
+        result.error = Some(error);
         let mut bytes = Vec::new();
         render(
             &result,
@@ -1832,16 +1832,16 @@ mod overflow_tests {
         assert_eq!(String::from_utf8(output)?, receipt);
         assert!(String::from_utf8(errors)?.contains("REFUSED: both lanes refused"));
 
-        // Encode the diagnostic before either stream escapes. An oversized
-        // error must publish the complete result without a partial receipt.
-        result.error.as_mut().ok_or("missing diagnostic")?.message = "x".repeat(MAX_RESULT_BYTES);
+        // An oversized receipt must publish the complete result without writing
+        // either the receipt or diagnostic as a partial two-stream result.
+        let oversized_receipt = format!("{receipt}{}", "x".repeat(MAX_RESULT_BYTES));
         let mut output = Vec::new();
         let mut errors = Vec::new();
         let mut published = 0;
         let outcome = render_or_publish(
             &result,
             RenderMode::Human {
-                text: receipt,
+                text: &oversized_receipt,
                 read_only: false,
                 summary: None,
             },

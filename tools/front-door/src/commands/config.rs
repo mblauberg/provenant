@@ -143,7 +143,11 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
 fn render_candidate(candidate: &serde_json::Value) -> String {
     let value = candidate
         .get("value")
-        .map(ToString::to_string)
+        .map(|value| {
+            value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned)
+        })
         .unwrap_or_else(|| "null".to_owned());
     let layer = candidate
         .get("layer")

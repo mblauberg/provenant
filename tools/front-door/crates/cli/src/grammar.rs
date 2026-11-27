@@ -1,7 +1,7 @@
 //! CLI-owned grammar with mounted owner subtrees.
 use crate::metadata::CatalogueArg;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
-use provenant_core::{AttemptId, GitOid, OperationId};
+use provenant_core::{AttemptId, OperationId};
 pub use provenant_records::Harness;
 use provenant_records::warning::{Warning, warn};
 use std::{ffi::OsString, path::PathBuf, time::Duration};
@@ -1227,156 +1227,11 @@ pub enum NativeSettlement {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Subcommand)]
-pub enum Telemetry {
-    /// Summarise local attempts and usage
-    Stats(Stats),
-    /// Write attempts as a Chrome Trace Event file for ui.perfetto.dev
-    Trace(Trace),
-    /// Maintain the telemetry price sheet
-    Prices {
-        #[command(subcommand)]
-        command: Prices,
-    },
-    /// Record native chair and sub-agent token usage per account
-    Ingest(Ingest),
-    /// Report quota mileage from quota history and ingested usage
-    Mileage(Mileage),
-    /// Compare each account's API-equivalent lane usage with its plan price and quota readings
-    Value(crate::telemetry_args::TelemetryValue),
-    /// Report API-equivalent cost from the usage ledger, for one attempt or grouped
-    Cost(crate::telemetry_args::TelemetryCost),
-    /// Compare experiment arms using offline pipeline outcomes
-    #[command(subcommand, visible_alias = "exp")]
-    Experiments(Experiments),
-}
-#[derive(Clone, Debug, Subcommand)]
-pub enum Experiments {
-    /// Show one experiment's stratified arm comparison
-    Show(ExperimentShow),
-}
-#[derive(Clone, Debug, Args)]
-pub struct ExperimentShow {
-    /// Historical experiment name recorded in offline outcomes
-    pub id: String,
-    #[command(flatten)]
-    pub pipeline: PipelineOptions,
-}
-#[derive(Clone, Debug, Subcommand)]
-pub enum Prices {
-    /// Fetch market prices and write a proposed diff; never edits the sheet
-    Refresh(PricesRefresh),
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum PriceSource {
-    Openrouter,
-    Litellm,
-}
-#[derive(Clone, Debug, Args)]
-pub struct PricesRefresh {
-    /// Primary source; the other is the cross-check (default openrouter)
-    #[arg(long, value_enum, default_value = "openrouter")]
-    pub source: PriceSource,
-    /// Read the OpenRouter models document from this file instead of fetching it
-    #[arg(long)]
-    pub openrouter_file: Option<PathBuf>,
-    /// Read the LiteLLM price document from this file instead of fetching it
-    #[arg(long)]
-    pub litellm_file: Option<PathBuf>,
-    /// Proposal file (default `telemetry-prices.proposed.json`)
-    #[arg(long, default_value = "telemetry-prices.proposed.json")]
-    pub out: PathBuf,
-}
-#[derive(Clone, Debug, Args)]
-pub struct Ingest {
-    /// Ingest only this provider's sessions (only `claude` writes native transcripts)
-    #[arg(long)]
-    pub provider: Option<String>,
-    /// Ingest transcripts written, and messages stamped, from this date or timestamp, or a span such as 1d ago
-    #[arg(long, value_parser = since)]
-    pub since: Option<jiff::Timestamp>,
-    /// Resume from the durable cursor instead of rescanning a time window
-    #[arg(long)]
-    pub incremental: bool,
-}
-#[derive(Clone, Debug, Args)]
-pub struct Mileage {
-    /// Account label or key
-    #[arg(long)]
-    pub account: Option<String>,
-    /// Quota window, such as five_hour or weekly (default every window)
-    #[arg(long)]
-    pub window: Option<String>,
-    /// Count only usage of this exact model; quota deltas still cover every model, so mileage is understated
-    #[arg(long)]
-    pub model: Option<String>,
-    /// Use readings and usage from this date or timestamp, or a span such as 1d ago
-    #[arg(long, value_parser = since)]
-    pub since: Option<jiff::Timestamp>,
-    /// Runs needed on each side before a capacity trend is judged
-    #[arg(long, default_value_t = 10, catalog_u32_range = 2..=10_000)]
-    pub min_runs: u32,
-    /// Fall in capacity, in percent, that is flagged rather than inconclusive
-    #[arg(long, default_value_t = 20, catalog_u32_range = 1..=99)]
-    pub fall_percent: u32,
-    /// Days in the recent side of a capacity step change
-    #[arg(long, default_value_t = 7, catalog_u32_range = 1..=90)]
-    pub recent_days: u32,
-}
-#[derive(Clone, Debug, Args)]
-pub struct Trace {
-    /// Output file (default `provenant-trace.json`)
-    #[arg(long, default_value = "provenant-trace.json")]
-    pub out: std::path::PathBuf,
-    /// Include attempts finished from this date or timestamp, or a span such as 1d ago
-    #[arg(long, value_parser = since)]
-    pub since: Option<jiff::Timestamp>,
-    /// Restrict the trace to one graph, node or attempt (NAME[/NODE[#N]])
-    #[arg(value_name = "TARGET", catalog_graph_target())]
-    pub target: Option<Target>,
-    /// Also read the attempts of runs placed on peers, one SSH status read per peer
-    #[arg(long)]
-    pub peers: bool,
-}
-#[derive(Clone, Debug, Args)]
-pub struct Stats {
-    /// Include offline post-merge outcomes and stratified ranking
-    #[arg(long, conflicts_with = "usage")]
-    pub outcomes: bool,
-    /// Include advisory expiring suggestions from offline pipeline evidence
-    #[arg(long, conflicts_with = "usage")]
-    pub suggest: bool,
-    #[command(flatten)]
-    pub pipeline: PipelineOptions,
-    /// Count local CLI verbs, including unused installed units.
-    #[arg(long)]
-    pub usage: bool,
-    /// Count from this date or timestamp, or a span such as 1d ago
-    #[arg(long, value_parser = since)]
-    pub since: Option<jiff::Timestamp>,
-    /// Count up to this date or timestamp
-    #[arg(long, value_parser = timestamp)]
-    pub until: Option<jiff::Timestamp>,
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct PipelineOptions {
-    /// Local main-line ref to analyse; no fetch is performed
-    #[arg(long, default_value = "main")]
-    pub main_ref: String,
-    /// Recorded gh main-branch run list JSON; absent means CI not_measured
-    #[arg(long)]
-    pub ci_file: Option<PathBuf>,
-    /// Days after a merge to attribute escaped defects
-    #[arg(long, default_value_t = 14, catalog_u32_range = 1..=3650)]
-    pub outcome_days: u32,
-    /// Independent graphs and mature merges required per arm
-    #[arg(long, default_value_t = 20, catalog_u32_range = 1..=100_000)]
-    pub min_samples: u32,
-    /// Days until a suggestion expires
-    #[arg(long, default_value_t = 14, catalog_u32_range = 1..=3650)]
-    pub expiry_days: u32,
-}
+pub use crate::telemetry_args::{
+    ExperimentShow, Experiments, Ingest, Mileage, PipelineOptions, PriceSource, Prices,
+    PricesRefresh, Stats, Telemetry, Trace,
+};
+pub use crate::wait_args::{PrWaitUntil, Wait};
 #[derive(Clone, Debug, Subcommand)]
 pub enum Worktree {
     /// Create a worktree on a new branch
@@ -1552,7 +1407,7 @@ pub(crate) fn reason(value: &str) -> Result<String, &'static str> {
     }
     Ok(value.into())
 }
-fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
+pub(crate) fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
     if value.len() == 10
         && let Ok(date) = value.parse::<jiff::civil::Date>()
     {
@@ -1738,50 +1593,6 @@ pub struct Status {
     #[arg(long)]
     pub cursor: Option<u64>,
 }
-/// When a PR wait can settle after checks fail.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum PrWaitUntil {
-    /// Settle as soon as a check fails.
-    Failure,
-    /// Wait for all observed checks to finish.
-    Complete,
-}
-
-/// `wait`: block until graph work or pull requests settle.
-#[derive(Clone, Debug, Args)]
-pub struct Wait {
-    #[command(flatten)]
-    pub common: CommonArgs,
-    /// Graphs, nodes or attempts (NAME[/NODE[#N]]); this project's running
-    /// graphs when neither a target nor --pr is given
-    #[arg(value_name = "TARGET", catalog_graph_target())]
-    pub targets: Vec<Target>,
-    /// Pull request whose required checks, merge or close ends the wait (repeatable)
-    #[arg(long = "pr", value_name = "NUMBER", catalog_u64_range = 1..)]
-    pub prs: Vec<u64>,
-    /// Wait until GitHub reports this exact head; never verdict another SHA
-    #[arg(long, value_name = "SHA", value_parser = parse_head_oid)]
-    pub head: Option<String>,
-    /// What this wait does when its pinned pull request head moves: pinned or follow_latest
-    #[arg(long, value_name = "POLICY", value_parser = parse_pr_head_policy, requires = "prs", conflicts_with = "head")]
-    pub pr_head_policy: Option<provenant_records::subject::SubjectPolicy>,
-    /// PR check settlement: failure (default) or complete (waits for all checks, with a 60-minute default budget)
-    #[arg(long, value_enum, requires = "prs")]
-    pub until: Option<PrWaitUntil>,
-    /// Wait until every target settles (the default)
-    #[arg(long, conflicts_with_all = ["any", "fail_fast"])]
-    pub all: bool,
-    /// Return at the first target to settle or need input
-    #[arg(long, conflicts_with_all = ["all", "fail_fast"])]
-    pub any: bool,
-    /// Return when a target fails, or when all targets settle
-    #[arg(long = "fail-fast", conflicts_with_all = ["all", "any"])]
-    pub fail_fast: bool,
-    /// Print one line per transition until the wait ends
-    #[arg(long)]
-    pub follow: bool,
-}
-
 #[derive(Clone, Debug, Args)]
 pub struct TickArgs {
     #[command(flatten)]
@@ -1815,21 +1626,6 @@ pub struct GraphTrace {
     /// Graph, node or attempt, as NAME[/NODE[#N]]
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub target: Target,
-}
-
-fn parse_head_oid(value: &str) -> Result<String, String> {
-    GitOid::parse(value)
-        .map(|_| value.to_owned())
-        .map_err(|error| error.to_string())
-}
-
-/// Parse the declared wait policy, so a bad flag value is a grammar refusal
-/// with the allowed spellings rather than a runtime default.
-fn parse_pr_head_policy(value: &str) -> Result<provenant_records::subject::SubjectPolicy, String> {
-    serde_json::from_value::<provenant_records::subject::SubjectPolicy>(serde_json::Value::String(
-        value.to_owned(),
-    ))
-    .map_err(|_| "expected pinned or follow_latest".to_owned())
 }
 
 fn parse_landing_tier(value: &str) -> Result<String, String> {

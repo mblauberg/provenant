@@ -951,9 +951,14 @@ mod tests {
         let mut policy = Policy::default();
         let code = table()
             .iter()
-            .find(|rule| rule.boundary == Boundary::Authority)
+            .find(|rule| {
+                matches!(
+                    rule.boundary,
+                    Boundary::Credentials | Boundary::OtherWork | Boundary::Authority
+                )
+            })
             .map(|rule| rule.code.clone())
-            .expect("an authority row");
+            .expect("a boundary row");
         let compiled = policy.rule(&code).rule.strength;
         let ((), warnings) = crate::warning::capture(|| {
             policy.overlay(

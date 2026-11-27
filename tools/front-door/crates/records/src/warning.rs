@@ -769,13 +769,25 @@ mod tests {
         // without a hand-kept list.
         let source = include_str!("warning.rs");
         let mut seen = std::collections::BTreeSet::new();
-        let mut rest = source;
-        while let Some(start) = rest.find("pub const ") {
-            rest = &rest[start + "pub const ".len()..];
-            let Some((name, tail)) = rest.split_once(':') else {
-                break;
+        let mut declaration = String::new();
+        for line in source.lines() {
+            if let Some(line) = line.strip_prefix("pub const ") {
+                declaration.clear();
+                declaration.push_str(line.trim());
+            } else if !declaration.is_empty() {
+                declaration.push(' ');
+                declaration.push_str(line.trim());
+            }
+
+            if !declaration.ends_with(';') {
+                continue;
+            }
+            let Some((name, tail)) = declaration.split_once(':') else {
+                declaration.clear();
+                continue;
             };
             let Some(body) = tail.trim_start().strip_prefix("WarningCode =") else {
+                declaration.clear();
                 continue;
             };
             let value = body
@@ -792,6 +804,7 @@ mod tests {
                 "{value}"
             );
             assert!(seen.insert(value.to_owned()), "{value} is declared twice");
+            declaration.clear();
         }
         assert!(seen.contains("STEER_TARGET_SETTLED"), "{seen:?}");
         assert!(seen.len() > 50, "the scan found only {seen:?}");
