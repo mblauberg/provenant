@@ -208,26 +208,39 @@ pub(super) fn run_tasks<V: TickTask + 'static>(
                             Ok(guard) => {
                                 let worker_active = Arc::clone(&active);
                                 let (send, receive) = mpsc::sync_channel(1);
-                                std::thread::spawn(move || {
-                                    let _guard = guard;
-                                    let result =
-                                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                            || task.run(TaskContext { wall, deadline }),
-                                        ));
-                                    worker_active.fetch_sub(1, Ordering::SeqCst);
-                                    if let Ok(result) = result {
-                                        let _ = send.send(result);
-                                    }
-                                });
-                                match receive.recv_timeout(Duration::from_micros(
-                                    deadline.remaining(clock.mono_now()).as_micros(),
-                                )) {
-                                    Ok(result) => result,
-                                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                                        TaskResult::over_budget(wall, name)
-                                    }
-                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                        TaskResult::busy(wall, "worker failed")
+                                // A task may read and advance graphs, so its worker takes
+                                // the shared graph stack, not the default thread stack.
+                                let slot_active = Arc::clone(&worker_active);
+                                let spawned = std::thread::Builder::new()
+                                    .stack_size(provenant_fabric_runtime::graph::GRAPH_STACK_BYTES)
+                                    .spawn(move || {
+                                        let _guard = guard;
+                                        let result =
+                                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                                || task.run(TaskContext { wall, deadline }),
+                                            ));
+                                        worker_active.fetch_sub(1, Ordering::SeqCst);
+                                        if let Ok(result) = result {
+                                            let _ = send.send(result);
+                                        }
+                                    });
+                                if let Err(error) = spawned {
+                                    slot_active.fetch_sub(1, Ordering::SeqCst);
+                                    TaskResult::busy(
+                                        wall,
+                                        &format!("worker failed to start: {error}"),
+                                    )
+                                } else {
+                                    match receive.recv_timeout(Duration::from_micros(
+                                        deadline.remaining(clock.mono_now()).as_micros(),
+                                    )) {
+                                        Ok(result) => result,
+                                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                                            TaskResult::over_budget(wall, name)
+                                        }
+                                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                            TaskResult::busy(wall, "worker failed")
+                                        }
                                     }
                                 }
                             }

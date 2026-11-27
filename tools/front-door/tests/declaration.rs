@@ -128,7 +128,12 @@ impl Fixture {
             .join("attempts")
             .join(self.attempt.to_string())
             .join("declarations.jsonl");
-        let bytes = std::fs::read(path)?;
+        // A journal nothing was appended to is never created.
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
         bytes
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
@@ -392,6 +397,7 @@ fn the_receipt_reports_bytes_left_for_the_near_full_warning() -> Result {
     let replay = fixture.declare_with(&store, "same", payload("done"), &tight)?;
     assert_eq!(replay.sequence, first.sequence);
     assert!(tight.near_full(replay.remaining_bytes));
-    assert!(!large.near_full(replay.remaining_bytes));
+    // The same journal was nowhere near full under the larger bound.
+    assert!(!large.near_full(first.remaining_bytes));
     Ok(())
 }

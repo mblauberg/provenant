@@ -1560,6 +1560,7 @@ fn scratch_budget_resume_finishes_the_open_sequence_page() -> TestResult {
 
     let mut second = crate::tests::input();
     second.attempt_id = AttemptId::from_bytes([7; 16]);
+    second.operation_id = provenant_core::OperationId::parse("run-test-b")?;
     crate::tests::rekey(&mut second);
     store.create(&second, &initial_call)?;
     let second_attempt = context
@@ -1570,8 +1571,12 @@ fn scratch_budget_resume_finishes_the_open_sequence_page() -> TestResult {
 
     let first_tmp = scratch_root_of(&first_attempt).join("tmp");
     let second_tmp = scratch_root_of(&second_attempt).join("tmp");
-    fs::DirBuilder::new().mode(0o700).create(&first_tmp)?;
-    fs::DirBuilder::new().mode(0o700).create(&second_tmp)?;
+    for tmp in [&first_tmp, &second_tmp] {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(tmp)?;
+    }
     fs::write(first_tmp.join("small"), b"first sequence")?;
     fs::write(second_tmp.join("large"), vec![7; 1_000_000])?;
 

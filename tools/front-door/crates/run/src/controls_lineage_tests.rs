@@ -96,6 +96,10 @@ fn stopped_lane_branch_continues_with_handover_warning()
         },
     )?;
     let parent_record = store.record(prior, &call)?;
+    // Custody is acquired by a launching attempt, whose generation starts at 1;
+    // a queued record is still generation 0 and has no custody scope.
+    let mut launching = parent_record.clone();
+    launching.generation = 1;
     let first_slot = store.writer_slot(&writer)?;
     assert!(
         !lease_path(&first_slot).exists(),
@@ -103,7 +107,7 @@ fn stopped_lane_branch_continues_with_handover_warning()
     );
     let first_launch_custody = provenant_supervisor::custody::acquire_writer(
         Directory::open_anchor(&first_slot)?,
-        RunStore::scope(&parent_record),
+        RunStore::scope(&launching),
         provenant_supervisor::custody::WriterBinding::read_only(),
         call.lock_budget(),
         call.cancel,
@@ -111,7 +115,7 @@ fn stopped_lane_branch_continues_with_handover_warning()
     )?;
     let (first_launch, first_launch_warnings) = provenant_records::warning::capture(|| {
         store.check_launch_writer_lineage(
-            &parent_record,
+            &launching,
             &original.request.task,
             &initial.worktree,
             &call,
@@ -333,18 +337,23 @@ fn stopped_lane_branch_continues_with_handover_warning()
     unrelated.operation_id = "unrelated-writer-adopter".parse()?;
     crate::tests::rekey(&mut unrelated);
     unrelated.request.task.writer = Some(writer.clone());
-    unrelated.request.task.context = None;
     store.create(&unrelated, &call)?;
-    let unrelated_record = store.record(unrelated.attempt_id, &call)?;
-    let unrelated_task = store.request(unrelated.attempt_id, &call)?.task;
+    // As above, a launching attempt holds custody from generation 1.
+    let mut unrelated_record = store.record(unrelated.attempt_id, &call)?;
+    unrelated_record.generation = 1;
+    // The store keys every attempt by work, but the launch check also sees
+    // tasks that carry no graph context.
+    let mut unrelated_task = store.request(unrelated.attempt_id, &call)?.task;
+    unrelated_task.context = None;
 
     let slot_path = store.writer_slot(&writer)?;
     let slot = Directory::open_anchor(&slot_path)?;
-    let child_record = store.record(child.attempt_id, &call)?;
+    let mut child_record = store.record(child.attempt_id, &call)?;
     assert!(
         !matches!(&child_record.state, AttemptState::Terminal { .. }),
         "the unreachable foreign holder must remain nonterminal in run state"
     );
+    child_record.generation = child_record.generation.max(1);
     assert_eq!(unrelated_record.retry_of, None);
     let _holder_custody = provenant_supervisor::custody::acquire_writer(
         slot,
