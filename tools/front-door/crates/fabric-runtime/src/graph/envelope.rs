@@ -108,7 +108,7 @@ fn ask_bound(ask: &AskRequest) -> usize {
         wake_at: Some(latest()),
         timeout: Some(asks::DecideTimeout {
             seconds: u64::MAX,
-            source: asks::DecideTimeoutSource::Configured,
+            source: Layer::Host,
         }),
         request: "f".repeat(asks::REQUEST_ID_BYTES),
     };
@@ -851,7 +851,7 @@ fn node_bound(
             outcome: Some(GraphAttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),
             input_cap: Some(usize::MAX),
-            input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
+            input_cap_source: Some(Layer::Detected),
             input_manifest: None,
             settled: u64::MAX,
             usage: Some(AttemptUsage {

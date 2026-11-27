@@ -81,7 +81,7 @@ fn start(
             input_cap: limits.node_prompt_bytes,
             placement_host_id: None,
             launch_actor: "original-actor".into(),
-            input_cap_source: InputCapSource::Configured,
+            input_cap_source: Layer::Host,
             timing: None,
         },
     );

@@ -30,12 +30,17 @@ pub(super) fn seal_delivery_queue_knobs(
     origins: &BTreeMap<String, provenant_config::Origin>,
     authored: Option<&QueueKnobs>,
 ) -> Result<QueueKnobs, FacadeError> {
-    use provenant_fabric_runtime::graph::template::seal_queue_knobs;
+    use provenant_fabric_runtime::graph::template::seal_settings;
     use provenant_fabric_runtime::graph::{
         QUEUE_CI_SLOTS_KEY, QUEUE_MAX_PARALLEL_KEY, QUEUE_PREP_RETRIES_KEY,
     };
     use provenant_records::{Layer, Sourced};
 
+    let keys = [
+        QUEUE_MAX_PARALLEL_KEY,
+        QUEUE_CI_SLOTS_KEY,
+        QUEUE_PREP_RETRIES_KEY,
+    ];
     let mut candidates = BTreeMap::<&str, Vec<Sourced<usize>>>::new();
     for (key, value) in [
         (QUEUE_MAX_PARALLEL_KEY, config.max_parallel),
@@ -59,7 +64,18 @@ pub(super) fn seal_delivery_queue_knobs(
             candidates.entry(key).or_default().push(value);
         }
     }
-    let knobs = seal_queue_knobs(&candidates);
+    let shipped = QueueKnobs::default();
+    let defaults: BTreeMap<&str, Sourced<usize>> = BTreeMap::from([
+        (QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel),
+        (QUEUE_CI_SLOTS_KEY, shipped.ci_slots),
+        (QUEUE_PREP_RETRIES_KEY, shipped.prep_retries),
+    ]);
+    let sealed = seal_settings(&keys, &defaults, &candidates);
+    let knobs = QueueKnobs {
+        max_parallel: sealed[QUEUE_MAX_PARALLEL_KEY].clone(),
+        ci_slots: sealed[QUEUE_CI_SLOTS_KEY].clone(),
+        prep_retries: sealed[QUEUE_PREP_RETRIES_KEY].clone(),
+    };
     knobs.validate().map_err(graph_input_reason)?;
     Ok(knobs)
 }

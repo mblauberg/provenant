@@ -69,7 +69,7 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
     );
     assert_eq!(
         ask.timeout.unwrap().source,
-        DecideTimeoutSource::DomainDefault
+        Layer::Default
     );
     assert!(owner.filed[0].body.contains("Ship the change?"));
     assert_eq!(ask.wake_at, waiting.checkpoint.wake_at);
@@ -481,7 +481,7 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
     assert_eq!(owner.filed[0].wake_at, Some(at(60)));
     assert_eq!(
         owner.filed[0].timeout.unwrap().source,
-        DecideTimeoutSource::Graph
+        Layer::Template
     );
     assert!(owner.filed[0].body.contains("from the decide declaration"));
     assert_eq!(journal.0.as_ref().unwrap().wake_at, Some(at(60)));

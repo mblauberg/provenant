@@ -2364,7 +2364,7 @@ fn ci_configured_evidence_caps_apply_before_checkpoint_and_findings() {
     assert_eq!(ci.failed_checks.len(), 1);
     let policy = ci.failed_checks_policy.as_ref().unwrap();
     assert_eq!(policy.max_bytes, 150);
-    assert_eq!(policy.max_bytes_source, CiLimitSource::Condition);
+    assert_eq!(policy.max_bytes_source, Layer::Template);
     assert!(canonical_len(&ci.failed_checks) <= 150);
     assert!(ci.truncated);
     assert!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings[0].contains("truncated"));

@@ -2682,8 +2682,7 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[0];
         node.attempts[1].input_cap = Some(262144);
-        node.attempts[1].input_cap_source =
-            Some(provenant_fabric_runtime::graph::InputCapSource::Configured);
+        node.attempts[1].input_cap_source = Some(provenant_records::Layer::Host);
         node.attempts[1].input_manifest = Some(serde_json::from_value(serde_json::json!({
             "schema_version":1, "source_commit":"1111111111111111111111111111111111111111",
             "review_base":"2222222222222222222222222222222222222222", "graph_review_base":"3333333333333333333333333333333333333333", "integration_base":"4444444444444444444444444444444444444444",
@@ -2722,7 +2721,7 @@ mod result_tests {
             "4444444444444444444444444444444444444444"
         );
         assert_eq!(attempt["outcome"], "task_failed");
-        assert_eq!(attempt["input_cap_source"], "configured");
+        assert_eq!(attempt["input_cap_source"], "host");
         let text = super::graph_human::graph_human_full(&run);
         for fact in [
             "fixture/model",

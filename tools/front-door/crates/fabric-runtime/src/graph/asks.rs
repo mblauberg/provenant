@@ -147,17 +147,9 @@ pub enum UnansweredDisposition {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DecideTimeoutSource {
-    Graph,
-    Configured,
-    DomainDefault,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecideTimeout {
     pub seconds: u64,
-    pub source: DecideTimeoutSource,
+    pub source: Layer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,14 +249,16 @@ fn unanswered_disposition_text(disposition: UnansweredDisposition) -> &'static s
 /// The longest rendered timeout, for byte bounds computed before a deadline.
 pub(super) const WORST_DECIDE_TIMEOUT: DecideTimeout = DecideTimeout {
     seconds: u64::MAX,
-    source: DecideTimeoutSource::Configured,
+    source: Layer::Host,
 };
 
-fn timeout_source_text(source: DecideTimeoutSource) -> &'static str {
+fn timeout_source_text(source: Layer) -> &'static str {
     match source {
-        DecideTimeoutSource::Graph => "the decide declaration",
-        DecideTimeoutSource::Configured => "domains.fabric.graph.decide_timeout_seconds",
-        DecideTimeoutSource::DomainDefault => "the Fabric graph domain default",
+        Layer::Default | Layer::Profile => "the Fabric graph domain default",
+        Layer::Host | Layer::HostProject | Layer::Project => {
+            "domains.fabric.graph.decide_timeout_seconds"
+        }
+        _ => "the decide declaration",
     }
 }
 
@@ -454,11 +448,11 @@ pub(super) fn validate_decide(
     let timeout = spec.timeout_seconds.map_or(
         DecideTimeout {
             seconds: crate::config::MAX_DECIDE_TIMEOUT_SECONDS,
-            source: DecideTimeoutSource::Configured,
+            source: Layer::Host,
         },
         |seconds| DecideTimeout {
             seconds,
-            source: DecideTimeoutSource::Graph,
+            source: Layer::Template,
         },
     );
     if decide_body(graph_id, &node.id, spec, timeout, None).len()
@@ -648,7 +642,7 @@ fn effective_decide_timeout<R: AttemptOwner, J: Error + 'static>(
     let timeout = match spec.timeout_seconds {
         Some(seconds) => DecideTimeout {
             seconds,
-            source: DecideTimeoutSource::Graph,
+            source: Layer::Template,
         },
         None => owner.decide_timeout().map_err(GraphError::Run)?,
     };

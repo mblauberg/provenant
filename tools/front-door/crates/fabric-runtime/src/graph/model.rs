@@ -1446,20 +1446,12 @@ pub enum CiState {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CiLimitSource {
-    #[default]
-    Default,
-    Condition,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CiFailedChecksPolicy {
     pub max_bytes: usize,
-    pub max_bytes_source: CiLimitSource,
+    pub max_bytes_source: provenant_records::Layer,
     pub max_checks: usize,
-    pub max_checks_source: CiLimitSource,
+    pub max_checks_source: provenant_records::Layer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2375,7 +2367,7 @@ pub struct GraphAttempt {
     pub input_cap: Option<usize>,
     /// The effective graph limits supplied to admission own this cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_cap_source: Option<InputCapSource>,
+    pub input_cap_source: Option<provenant_records::Layer>,
     /// Bounded identifiers describing what was selected and delivered before launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_manifest: Option<AttemptInputManifest>,
@@ -2387,15 +2379,6 @@ pub struct GraphAttempt {
     /// The stop cause the run sealed for this attempt, read at settlement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<provenant_records::StopCause>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InputCapSource {
-    EffectiveGraphLimits,
-    #[serde(rename = "default")]
-    Default,
-    Configured,
 }
 
 /// Evidence contains identifiers and digests only, never input text or host paths.
