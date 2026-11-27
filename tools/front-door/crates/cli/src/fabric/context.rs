@@ -6,6 +6,9 @@ use provenant_fabric_runtime::{
     hosts::{
         PeerAction, PeerError, PeerRequest, PeerResult, PeerTransport, ProjectLocator,
         SshTransport, discover_ssh_executable,
+        mirror::{
+            self, PEER_PROJECT_UNLOCATABLE, PEER_SOURCE_SNAPSHOT, PROJECTION_KEY, ProjectionMode,
+        },
     },
     identity::{CrossHostProjectKey, Identity, IdentityError},
 };
@@ -14,7 +17,11 @@ use provenant_os::{
     exec::{Executor, SystemExecutor},
     fs::{Directory, PublishMode},
 };
-use provenant_records::{AbsolutePath, CommandResult, Outcome};
+use provenant_records::{
+    AbsolutePath, CommandResult, Outcome, Source, Sourced,
+    command_result::SettingRef,
+    warning::{Warning, WarningCode, warn},
+};
 use serde::Serialize;
 use std::{
     ffi::OsStr,
@@ -39,6 +46,8 @@ pub struct Context {
     pub graph_decide_timeout_source: provenant_records::Layer,
     /// Captured once from the host-set lane environment, never from arguments.
     pub in_lane: bool,
+    /// `domains.fabric.project_projection` with its resolved layer and origin.
+    pub projection: Sourced<ProjectionMode>,
     pub(super) executor: SystemExecutor,
     pub(super) home: PathBuf,
     pub(super) cwd: PathBuf,
@@ -403,6 +412,31 @@ fn prompt_limit_source(
     }
 }
 
+/// Read the projection setting once, keeping its layer and origin so a
+/// mirrored read and an unlocatable writer can both name the setting that
+/// selected the behaviour.
+fn projection_from_knobs(
+    knobs: &std::collections::BTreeMap<String, Sourced<serde_json::Value>>,
+) -> Sourced<ProjectionMode> {
+    knobs
+        .get(PROJECTION_KEY)
+        .map(|knob| Sourced {
+            value: knob
+                .value
+                .as_str()
+                .map(ProjectionMode::parse)
+                .unwrap_or(ProjectionMode::Auto),
+            source: knob.source.clone(),
+        })
+        .unwrap_or_else(|| Sourced {
+            value: ProjectionMode::Auto,
+            source: Source {
+                layer: provenant_records::Layer::Default,
+                origin: None,
+            },
+        })
+}
+
 impl Context {
     /// Directory selected for this project context, which may be a linked checkout.
     pub fn selected_project(&self) -> &Path {
@@ -488,6 +522,7 @@ impl Context {
             roots,
             identity,
             config,
+            projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
             project_root,
@@ -555,6 +590,7 @@ impl Context {
             roots,
             identity,
             config,
+            projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
             project_root,
@@ -668,6 +704,7 @@ impl Context {
             roots,
             identity,
             config,
+            projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
             project_root,
@@ -731,6 +768,7 @@ impl Context {
             roots,
             identity,
             config,
+            projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
             project_root,
@@ -927,6 +965,54 @@ impl Context {
     ) -> Result<PeerResult, PeerFailure> {
         self.peer_bounded(executor, clock, host, action, budget, cancel, None)
     }
+
+    /// Resolve a project for a peer call when it is not home-relative. Writers
+    /// always need a locatable project; only readers may cross through a
+    /// mirrored snapshot under `auto` or `mirror`.
+    fn project_for_peer(
+        &self,
+        host: HostId,
+        action: &PeerAction,
+        peer: &str,
+        cancel: &CancelToken,
+    ) -> Result<ProjectLocator, PeerFailure> {
+        if !self
+            .projection
+            .value
+            .allows_mirror(is_reader_action(action))
+        {
+            return Err(unlocatable(&self.projection, host, peer));
+        }
+        let git = provenant_os::git::git_executable()
+            .ok_or_else(|| mirror_failure(&self.projection, "Git executable is unavailable"))?;
+        let snapshot = mirror::mirror_snapshot(
+            &self.executor,
+            &git,
+            &self.cwd,
+            self.roots.state.as_path().join("tmp").join("mirror"),
+            self.roots.state.as_path(),
+            &self.identity.host.to_string(),
+            &self.identity.project.to_string(),
+            cancel,
+        )
+        .map_err(|error| mirror_failure(&self.projection, &error.to_string()))?;
+        warn_mirror(&self.projection, &snapshot, peer);
+        // The peer binds the bundle advertised at the snapshot commit instead
+        // of locating a live checkout. The key is derived from that commit, so
+        // two snapshots of the same tree at different times are distinct.
+        let key_text = format!(
+            "mirror:{}:{}:{}",
+            self.identity.host, snapshot.project_id, snapshot.commit
+        );
+        let key: CrossHostProjectKey = serde_json::from_value(serde_json::Value::String(key_text))
+            .map_err(|_| mirror_failure(&self.projection, "mirror key could not be encoded"))?;
+        Ok(ProjectLocator {
+            extra: Default::default(),
+            key,
+            common_dir: format!("mirrors/{}", snapshot.project_id),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn peer_bounded(
         &self,
@@ -946,29 +1032,10 @@ impl Context {
             .ok_or_else(|| {
                 PeerFailure::new(FacadeError::HomeUnavailable, "peer host is not configured")
             })?;
-        let project = ProjectLocator::new(&self.identity, &self.home).map_err(|_| {
-            // A peer call needs a home-relative project identity. A scratch
-            // project (for example the upgrade verify fixture) has none; name
-            // the rule and the path that could not be projected instead of
-            // collapsing every locator failure into a bare confinement refusal.
-            let rule = "peer_project_unprojectable";
-            let path = self
-                .identity
-                .common_dir
-                .to_path_buf()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| "unavailable".to_owned());
-            PeerFailure::from(FacadeError::ConfinementRefused {
-                resource: Some(
-                    provenant_records::diagnostic::ResourceFact::ConfinementRule(Box::new(
-                        provenant_records::diagnostic::ConfinementRule {
-                            rule: rule.to_owned(),
-                            path,
-                        },
-                    )),
-                ),
-            })
-        })?;
+        let project = match ProjectLocator::new(&self.identity, &self.home) {
+            Ok(project) => project,
+            Err(_) => self.project_for_peer(host, &action, &peer.destination, cancel)?,
+        };
         // Graph operation replay is scoped to the actor that first launched
         // the attempt, even when another agent later resumes its graph.
         // Keep that namespace under the authenticated sending host rather
@@ -1170,6 +1237,95 @@ impl From<FacadeError> for PeerFailure {
         }
     }
 }
+/// Read-only peer actions may be served from a mirrored snapshot. Everything
+/// that mutates state needs a locatable project on the peer.
+fn is_reader_action(action: &PeerAction) -> bool {
+    matches!(
+        action,
+        PeerAction::Health { .. }
+            | PeerAction::Doctor { .. }
+            | PeerAction::ConsoleBoard { .. }
+            | PeerAction::ConsoleTree { .. }
+            | PeerAction::ConsoleDetail { .. }
+            | PeerAction::ConsoleInbox { .. }
+            | PeerAction::RunStatuses { .. }
+            | PeerAction::Output { .. }
+            | PeerAction::RunEvents { .. }
+            | PeerAction::Lanes { .. }
+            | PeerAction::LaneWaits { .. }
+    )
+}
+
+fn setting_ref(projection: &Sourced<ProjectionMode>) -> SettingRef {
+    SettingRef {
+        key: PROJECTION_KEY.to_owned(),
+        value: projection.value.as_str().to_owned(),
+        layer: projection.source.layer,
+        origin: projection
+            .source
+            .origin
+            .clone()
+            .unwrap_or_else(|| "shipped default".to_owned()),
+    }
+}
+
+/// A writer whose project cannot be located: an operation error that names the
+/// setting and the way out, never a policy refusal.
+fn unlocatable(projection: &Sourced<ProjectionMode>, host: HostId, peer: &str) -> PeerFailure {
+    let setting = setting_ref(projection);
+    let detail = format!(
+        "{} = {} ({}); project is outside the peer's home on host {host}",
+        setting.key, setting.value, setting.origin
+    );
+    PeerFailure::new(
+        FacadeError::RunKind {
+            run_code: PEER_PROJECT_UNLOCATABLE.to_owned(),
+            next: "run without --host".to_owned(),
+            detail: Some(detail),
+            resource: None,
+        },
+        format!("{peer}: project is outside the peer's home"),
+    )
+}
+
+/// A snapshot could not be produced or verified. The transfer is retryable,
+/// so it stays an operation error rather than a refusal.
+fn mirror_failure(projection: &Sourced<ProjectionMode>, detail: &str) -> PeerFailure {
+    let setting = setting_ref(projection);
+    PeerFailure::new(
+        FacadeError::RunKind {
+            run_code: "PEER_MIRROR_FAILED".to_owned(),
+            next: "retry the read, or run without --host".to_owned(),
+            detail: Some(format!("{}: {detail}", setting.key)),
+            resource: None,
+        },
+        detail.to_owned(),
+    )
+}
+
+/// Tell a reader that it is seeing a snapshot, not live edits.
+fn warn_mirror(
+    projection: &Sourced<ProjectionMode>,
+    snapshot: &mirror::MirrorSnapshot,
+    peer: &str,
+) {
+    warn(
+        Warning::new(
+            WarningCode(PEER_SOURCE_SNAPSHOT),
+            format!(
+                "peer {peer} reads snapshot {} of project {}; live edits are not visible",
+                snapshot.commit, snapshot.project_id
+            ),
+            projection.source.clone(),
+        )
+        .setting(setting_ref(projection))
+        .repair(format!(
+            "rerun this read after a writer commits to {}",
+            snapshot.project_id
+        )),
+    );
+}
+
 /// The stable outcome and code for a peer refusal, shared by remote runs and
 /// session hand-off. `LaunchUnknown` is handled by each caller, which names
 /// its own recovery step. `TIMEOUT` is retryable.
@@ -1194,6 +1350,9 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::ConfinementRefused { .. }
         | FacadeError::GraphRelayRefused { .. }
         | FacadeError::RecordedRefusal { .. } => (Outcome::Refused, ErrorKind::Refused),
+        // Custody is a lease: `admit_writer` only raises WriterBusy when the
+        // owning lane set `lanes.worktree.sharing = refuse`. Shared and warn
+        // modes proceed, so a refusal here always names that setting's owner.
         FacadeError::WriterBusy { .. } => (Outcome::Refused, ErrorKind::WriterBusy),
         FacadeError::WriterLeaseHeld { .. } => (Outcome::Refused, ErrorKind::WriterLeaseHeld),
         FacadeError::WriterLockBusy { .. } => (Outcome::Refused, ErrorKind::WriterLockBusy),
@@ -1289,12 +1448,15 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 #[cfg(test)]
 mod tests {
     #[test]
-    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
-    fn peer_call_names_the_rule_and_path_when_the_project_is_outside_home()
+    // Spec: docs/specs/agent-native.md#peer-projection
+    fn unlocatable_peer_project_is_a_typed_operation_error_with_setting_and_next()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
-        use provenant_fabric_runtime::{config::Peer, hosts::PeerAction};
-        use provenant_records::{AbsolutePath, diagnostic::ResourceFact};
+        use provenant_fabric_runtime::{
+            config::Peer,
+            hosts::{PeerAction, mirror::ProjectionMode},
+        };
+        use provenant_records::AbsolutePath;
 
         let root = tempfile::tempdir()?;
         let home = root.path().join("home");
@@ -1317,9 +1479,10 @@ mod tests {
                 connect_timeout_seconds: 10,
             },
         );
-        // A scratch checkout outside the peer host's home has no cross-host
-        // project key. ProjectLocator::new refuses it before any transport is
-        // opened, exercising the real mapping in `peer_bounded`.
+        // `locate` never mirrors, so a project outside the peer's home is an
+        // operation error that names the setting and a way out, before any
+        // transport is opened.
+        context.projection.value = ProjectionMode::Locate;
         let outside = root.path().join("scratch").join("project");
         context.identity.common_dir = AbsolutePath::new(&outside)?;
         let clock = provenant_os::clock::SystemClock;
@@ -1334,16 +1497,57 @@ mod tests {
                 budget,
                 &CancelToken::new(),
             )
-            .expect_err("a project outside home must be refused before peer transport");
+            .expect_err("a project outside home must fail before peer transport");
         match *failure.error {
-            super::FacadeError::ConfinementRefused {
-                resource: Some(ResourceFact::ConfinementRule(rule)),
+            super::FacadeError::RunKind {
+                run_code,
+                next,
+                detail,
+                ..
             } => {
-                assert_eq!(rule.rule, "peer_project_unprojectable");
-                assert_eq!(rule.path, outside.display().to_string());
+                assert_eq!(run_code, super::PEER_PROJECT_UNLOCATABLE);
+                assert_eq!(next, "run without --host");
+                let detail = detail.expect("operation error names the setting");
+                assert!(detail.contains(super::PROJECTION_KEY), "{detail}");
+                assert!(detail.contains("locate"), "{detail}");
             }
-            other => panic!("expected a named confinement refusal, got {other:?}"),
+            other => panic!("expected an unlocatable operation error, got {other:?}"),
         }
+        let (outcome, kind) = super::facade_outcome(&failure.error);
+        assert_eq!(outcome, provenant_records::Outcome::Error);
+        assert_eq!(kind.code(), super::PEER_PROJECT_UNLOCATABLE);
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/agent-native.md#peer-projection
+    fn projection_setting_uses_the_resolved_layer_and_origin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::{Layer, Source, Sourced};
+
+        let mut knobs = std::collections::BTreeMap::new();
+        knobs.insert(
+            super::PROJECTION_KEY.to_owned(),
+            Sourced {
+                value: serde_json::json!("mirror"),
+                source: Source {
+                    layer: Layer::Project,
+                    origin: Some(".provenant/config.toml:12".to_owned()),
+                },
+            },
+        );
+        let sourced = super::projection_from_knobs(&knobs);
+        assert_eq!(sourced.value, ProjectionMode::Mirror);
+        assert_eq!(sourced.source.layer, Layer::Project);
+        assert_eq!(
+            sourced.source.origin.as_deref(),
+            Some(".provenant/config.toml:12")
+        );
+
+        let empty = std::collections::BTreeMap::new();
+        let default = super::projection_from_knobs(&empty);
+        assert_eq!(default.value, ProjectionMode::Auto);
+        assert_eq!(default.source.layer, Layer::Default);
         Ok(())
     }
 

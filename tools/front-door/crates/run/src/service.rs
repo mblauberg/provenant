@@ -835,6 +835,7 @@ error_kinds! {
     StateCorrupt => "STATE_CORRUPT", "A stored record or artifact is corrupt.";
     LaunchUnknown => "LAUNCH_UNKNOWN", "The launch handoff was not confirmed; reconcile the run.";
     UnknownHost => "UNKNOWN_HOST", "No configured peer has this host label.";
+    ProjectUnlocatable => "PEER_PROJECT_UNLOCATABLE", "The peer cannot locate the project for this launch; run without --host.";
     PeerUnavailable => "PEER_UNAVAILABLE", "The peer host could not be reached.";
     PeerVersion => "PEER_VERSION", "The peer host runs an incompatible version.";
     OwnerUnavailable => "OWNER_UNAVAILABLE", "The run owner is unavailable in this build or host.";
