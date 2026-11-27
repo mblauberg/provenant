@@ -761,7 +761,7 @@ pub(crate) fn execute(
             let target = Target::parse(target)?;
             let globals = globals_with_full(globals, *full);
             let reply = with_edge(&globals, |edge| {
-                unified::unified_graph_result(&target, edge)
+                unified::unified_graph_result(&target, edge, std::time::Duration::from_secs(55))
             })?;
             Ok(reply.result)
         }

@@ -1478,11 +1478,39 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
         );
     };
+    let mut common = command.resolve_common(Duration::from_secs(verb_default_timeout(&inv.leaf)));
+    if inv.leaf == "run"
+        && common
+            .as_ref()
+            .is_some_and(|common| invalid_run_target(&common.target))
+    {
+        return fail(
+            "run",
+            Outcome::Invalid,
+            "INVALID_HOST_SELECTION",
+            "run requires exactly one host",
+            "select one host with `--host NAME` or omit `--host`",
+            globals,
+        );
+    }
+    if let Some(resolved_common) = common.as_mut()
+        && let Ok(resolved) = roots::resolve(
+            globals,
+            roots::Workspace::Directory,
+            roots::Product::Optional,
+        )
+    {
+        resolved_common.deadline = Duration::from_secs(fabric::host_read::bounded_timeout_request(
+            &resolved.roots,
+            resolved_common.deadline.as_secs(),
+        ));
+    }
     let invocation = provenant_cli::Call {
         command,
         globals,
         leaf: inv.leaf.as_str(),
         process,
+        common: common.clone(),
     };
     if let Some(status) =
         fabric::host_read::route_if_selected(invocation.command, |command, selection| {
@@ -1495,9 +1523,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     // flatten CommonArgs must read both here instead of accepting and ignoring
     // them. The peer-served reads and gc route selected hosts; unsupported
     // verbs retain the explicit warning and local behavior.
-    if let Some(common) = invocation
-        .command
-        .resolve_common(Duration::from_secs(verb_default_timeout(&inv.leaf)))
+    if let Some(common) = common
         && matches!(&common.target, provenant_cli::HostSelection::All)
         && !matches!(
             &invocation.command,
@@ -1526,6 +1552,35 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Ok(outcome) => provenant_cli::exit_status(&outcome),
         Err(error) => fail_with_command_error(&inv.leaf, Outcome::Error, error, globals),
     }
+}
+
+#[cfg(test)]
+mod multi_host_run_tests {
+    use provenant_cli::HostSelection;
+
+    #[test]
+    fn multi_host_run_is_invalid_before_the_unsupported_host_warning() {
+        let multi_host = [
+            HostSelection::All,
+            HostSelection::Many(vec!["a".into(), "b".into()]),
+        ];
+        assert!(
+            multi_host
+                .iter()
+                .all(|target| super::invalid_run_target(target))
+        );
+        assert!(!super::invalid_run_target(&HostSelection::Named(
+            "a".into()
+        )));
+        assert!(!super::invalid_run_target(&HostSelection::Local));
+    }
+}
+
+fn invalid_run_target(target: &provenant_cli::HostSelection) -> bool {
+    matches!(
+        target,
+        provenant_cli::HostSelection::All | provenant_cli::HostSelection::Many(_)
+    )
 }
 
 /// Disk observations are best-effort and may stall on an unhealthy volume.

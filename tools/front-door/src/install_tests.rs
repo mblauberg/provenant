@@ -368,6 +368,7 @@ fn verify_execs_the_installed_binary() -> Result<(), Box<dyn std::error::Error>>
             route: None,
             set: Vec::new(),
         },
+        3_700,
     )?;
 
     let calls = std::fs::read_to_string(calls)?;
@@ -451,6 +452,7 @@ fn verify_smoke_runs_outside_a_checkout_without_requiring_one()
             route: None,
             set: Vec::new(),
         },
+        3_700,
     )?;
 
     let calls = std::fs::read_to_string(calls)?;
@@ -771,6 +773,7 @@ fn smoke_fails_without_the_nonce() -> Result<(), Box<dyn std::error::Error>> {
         &state,
         &home,
         &smoke_upgrade(None, Vec::new()),
+        60,
     )?;
     let crate::smoke::SmokeVerdict::Failed { row, reason } = &outcome.verdict else {
         panic!("the nonce is absent, so the smoke must fail");
@@ -1018,6 +1021,7 @@ fn smoke_dry_run_keeps_a_user_diff_base_and_adds_fixture_base()
         &state,
         &home,
         &smoke_upgrade(None, vec![format!("diff_base={user_base}")]),
+        60,
     )?;
     let run = std::fs::read_to_string(calls)?
         .lines()

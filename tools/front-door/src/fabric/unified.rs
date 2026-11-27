@@ -3780,8 +3780,9 @@ fn add_cache_share(data: &mut Value) {
 pub(crate) fn unified_graph_result(
     target: &provenant_cli::Target,
     edge: &provenant_cli::run::Edge<'_>,
+    timeout: std::time::Duration,
 ) -> provenant_cli::run::Reply {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(55);
+    let deadline = std::time::Instant::now() + timeout;
     let rows = match read_status_rows_with_recovery(
         target,
         edge,

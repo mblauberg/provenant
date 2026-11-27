@@ -1308,6 +1308,8 @@ pub struct Call<'a> {
     /// Space-joined command path, such as `quota tick`.
     pub leaf: &'a str,
     pub process: &'a dyn Process,
+    /// Shared host selection and bounded deadline resolved by the process edge.
+    pub common: Option<VerbCommon>,
 }
 
 /// The domains the binary registered at its process edge.

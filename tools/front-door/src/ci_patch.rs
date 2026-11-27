@@ -1035,7 +1035,11 @@ fn emit_error(error: PatchError, globals: &Globals) -> u8 {
 /// `provenant ci patch`: verify the generated artefact, then apply it only
 /// under `--apply` and only after the destruction guard, `git apply --check`
 /// and the head re-check all pass.
-pub(crate) fn run(command: provenant_cli::ci::Patch, globals: &Globals) -> u8 {
+pub(crate) fn run(
+    command: provenant_cli::ci::Patch,
+    globals: &Globals,
+    read_budget: std::time::Duration,
+) -> u8 {
     type FetchedPatch = (GeneratedManifest, Vec<u8>, RunIdentity, PathBuf, PathBuf);
     let fetched = (|| -> Result<FetchedPatch, Box<dyn std::error::Error>> {
         let project = crate::roots::selected_project(globals.project.as_deref(), true)?;
@@ -1045,7 +1049,7 @@ pub(crate) fn run(command: provenant_cli::ci::Patch, globals: &Globals) -> u8 {
             crate::roots::Product::Optional,
         )?;
         let state = resolved.roots.state.as_path();
-        let request = provenant_config::ports::Request::within(READ_BUDGET);
+        let request = provenant_config::ports::Request::within(READ_BUDGET.min(read_budget));
         let (manifest, patch, identity) = fetch(state, &project, &command.target, &request)?;
         let worktree = command
             .worktree
