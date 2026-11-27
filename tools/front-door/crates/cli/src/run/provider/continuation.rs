@@ -420,7 +420,7 @@ pub(super) fn continuation_for_policy(
                         return Err(StateCopyError::resource(policy.fact(setting, None)).into());
                     }
                     if let provenant_records::policy::Effect::Warn(warning) = effect {
-                        warn(warning);
+                        warn(*warning);
                     }
                     match setting {
                         ContinuationCopyLimit::Entries => policy.limits.entries = u32::MAX,
@@ -679,7 +679,7 @@ impl StateCopyPolicy {
                         "continuation copy settings unavailable ({error}); using compiled defaults"
                     )),
                 ) {
-                    warn(warning);
+                    warn(*warning);
                 }
                 let mut policy = Self::shipped(RETAINED_STATE);
                 policy.enforcement = Some(enforcement.clone());
@@ -982,7 +982,7 @@ fn copy_state_classified(
             return result;
         }
         if let provenant_records::policy::Effect::Warn(warning) = effect {
-            warn(warning);
+            warn(*warning);
         }
         match setting {
             ContinuationCopyLimit::Bytes
@@ -1284,7 +1284,7 @@ fn warn_link(budget: &Budget<'_>, kind: &str) {
         "CONTINUATION_LINK_NONE",
         provenant_records::policy::Facts::violation(detail),
     ) {
-        warn(warning);
+        warn(*warning);
     }
 }
 

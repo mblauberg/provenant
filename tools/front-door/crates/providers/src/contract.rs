@@ -289,7 +289,7 @@ impl Prompt {
         match policy.check("ARGV_PROMPT", Facts::violation(detail)) {
             Effect::Proceed => Ok(()),
             Effect::Warn(warning) => {
-                warn(warning);
+                warn(*warning);
                 Ok(())
             }
             Effect::Refuse(_) | Effect::Stop(_) => Err(error()),

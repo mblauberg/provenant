@@ -1099,7 +1099,7 @@ fn lane_port_allocation(
             let effect = policy.check("PORT_BLOCKS", Facts::violation("lane port pool exhausted"));
             match effect {
                 Effect::Proceed => return Ok((None, None)),
-                Effect::Warn(warning) => return Ok((None, Some(warning))),
+                Effect::Warn(warning) => return Ok((None, Some(*warning))),
                 Effect::Refuse(_) | Effect::Stop(_) => {}
             }
             let origin = match plan.blocks_origin {
@@ -1124,7 +1124,7 @@ fn lane_port_allocation(
                 ),
             );
             let warning = match effect {
-                provenant_records::policy::Effect::Warn(warning) => Some(warning),
+                provenant_records::policy::Effect::Warn(warning) => Some(*warning),
                 _ => None,
             };
             Ok((None, warning))

@@ -808,7 +808,7 @@ mod tests {
             let key = warning.key();
             for _ in 0..2 {
                 let _sink = install_command_sink(false);
-                warning::warn(warning.clone());
+                warning::warn((*warning).clone());
                 let mut out = Vec::new();
                 let mut err = Vec::new();
                 assert_eq!(
@@ -832,7 +832,7 @@ mod tests {
             drop(db);
 
             let _sink = install_command_sink(true);
-            warning::warn(warning);
+            warning::warn(*warning);
             let mut out = Vec::new();
             let mut err = Vec::new();
             assert_eq!(

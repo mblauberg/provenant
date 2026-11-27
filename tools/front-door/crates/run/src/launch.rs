@@ -156,7 +156,6 @@ fn retry_error(retries: u32, detail: &str) -> CommandError {
 /// leaving the shared index untouched. The branch moves only through a
 /// compare-and-swap `update-ref`; a lost race reapplies the same input to the
 /// new head, while index-lock contention retries with a cancellable backoff.
-#[allow(clippy::result_large_err)] // Preserve the shared command-error contract at this explicit commit boundary.
 pub fn commit_own_paths(
     request: OwnCommitRequest<'_>,
 ) -> std::result::Result<OwnCommit, CommandError> {
@@ -734,7 +733,7 @@ fn applied_write_grants(
     }
     if let provenant_records::policy::Effect::Warn(warning) = &effect {
         // Spec: docs/specs/cli.md#warnings-are-typed-values
-        provenant_records::warning::warn(warning.clone());
+        provenant_records::warning::warn((**warning).clone());
     }
     let git_grants_digest = match &permissions.mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => None,
@@ -965,7 +964,7 @@ fn check_launch_policy(
         Effect::Warn(message) => {
             use provenant_records::warning::warn;
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            warn(message);
+            warn(*message);
             Ok(())
         }
         Effect::Refuse(_) | Effect::Stop(_) => Err(refusal),
@@ -1203,7 +1202,7 @@ impl WriteGrantLimit {
             ) {
                 use provenant_records::warning::warn;
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                warn(message);
+                warn(*message);
             }
             Self::default()
         }

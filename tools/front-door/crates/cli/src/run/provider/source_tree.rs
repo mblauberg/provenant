@@ -546,7 +546,7 @@ fn overlap_effect(
     match policy.check(code, provenant_records::policy::Facts::violation(&detail)) {
         provenant_records::policy::Effect::Stop(_) => Err(fallback),
         provenant_records::policy::Effect::Warn(warning) => {
-            provenant_records::warning::warn(warning);
+            provenant_records::warning::warn(*warning);
             Ok(())
         }
         provenant_records::policy::Effect::Proceed

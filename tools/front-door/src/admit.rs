@@ -390,7 +390,7 @@ fn check_disk_and_trim(
             match gate.decide(free) {
                 provenant_records::policy::Effect::Proceed => {}
                 provenant_records::policy::Effect::Warn(warning) => {
-                    warn(warning);
+                    warn(*warning);
                 }
                 provenant_records::policy::Effect::Refuse(diagnostic)
                 | provenant_records::policy::Effect::Stop(diagnostic) => {

@@ -7,7 +7,7 @@ use provenant_os::clock::SystemClock;
 use provenant_records::{
     CanonicalRequest,
     declaration::{
-        DeclarationError, DeclarationInput, DeclarationLimit, DeclarationReceipt, DeclarationLine,
+        DeclarationError, DeclarationInput, DeclarationLimit, DeclarationLine, DeclarationReceipt,
     },
 };
 use provenant_run::{ExecutionContext, PreparedRun, Request, RunStore};
@@ -181,7 +181,12 @@ fn field_errors_then_a_valid_correction_keeps_every_rejected_line() -> Result {
     let DeclarationError::Invalid(error) = bad.expect_err("invalid schema version") else {
         panic!("expected field errors")
     };
-    assert!(error.dropped.iter().any(|field| field.field == "schema_version"));
+    assert!(
+        error
+            .dropped
+            .iter()
+            .any(|field| field.field == "schema_version")
+    );
     let bad = fixture.declare(
         &store,
         "bad-2",
@@ -317,7 +322,11 @@ fn a_project_limit_overrides_the_host_limit() -> Result {
         ),
     )?;
     assert_eq!(settings.journal_bytes, 65536);
-    assert!(settings.journal_key.contains(&format!("projects.{project}")));
+    assert!(
+        settings
+            .journal_key
+            .contains(&format!("projects.{project}"))
+    );
     assert_eq!(settings.relay_seconds, 3);
     assert_eq!(settings.retries, 0);
     assert_eq!(settings.relay_attempts(), 1);

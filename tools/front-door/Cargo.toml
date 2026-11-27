@@ -241,3 +241,15 @@ path = "tests/git_config_helper.rs"
 [[test]]
 name = "command_adapter"
 path = "tests/command_adapter.rs"
+
+[[test]]
+name = "b8_unwired_seams"
+path = "tests/b8_unwired_seams.rs"
+
+[[test]]
+name = "declaration"
+path = "tests/declaration.rs"
+
+[[test]]
+name = "notes"
+path = "tests/notes.rs"

@@ -1339,7 +1339,6 @@ pub fn domains() -> &'static [&'static Domain] {
 pub(crate) fn install_test_domains() {
     static FIXTURE: std::sync::OnceLock<&'static [&'static Domain]> = std::sync::OnceLock::new();
     let fixture = FIXTURE.get_or_init(|| {
-        #[allow(clippy::result_large_err)]
         fn unused(_: &Call) -> Result<Outcome, CommandError> {
             Ok(Outcome::Ok)
         }

@@ -510,7 +510,7 @@ fn collect_final_host(
 pub(crate) fn result_to_host_result(
     result: CommandResult<Value>,
 ) -> crate::fabric::peer::HostResult {
-    let error = result.error.map(|error| error.message);
+    let error = result.error.map(|error| error.into_payload().message);
     crate::fabric::peer::HostResult::Command {
         status: result.status,
         data: result.data,

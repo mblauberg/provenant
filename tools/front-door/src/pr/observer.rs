@@ -207,7 +207,7 @@ impl HeadReading {
     pub(crate) fn quota_error(&self) -> Option<CommandError> {
         let retry_at = self.retry_at?;
         let mut error = forge_quota_error(retry_at, None, self.pending_reason.as_deref());
-        error.subject = error.subject.map(|mut subject| {
+        error.subject = error.subject.take().map(|mut subject| {
             subject.head = Some(self.expected_head);
             subject
         });

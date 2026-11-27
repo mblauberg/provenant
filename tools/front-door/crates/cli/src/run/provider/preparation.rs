@@ -919,7 +919,7 @@ fn prepare_writer_dependencies_with_policy(
             "PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE",
             provenant_records::policy::Facts::violation(detail),
         ) {
-            warn(warning);
+            warn(*warning);
         }
     }
     result
@@ -5237,7 +5237,7 @@ pub(super) fn prepare_candidates_inner(
                     "LAUNCH_NATIVE_AUTH_NONE",
                     provenant_records::policy::Facts::violation(detail),
                 ) {
-                    warn(warning);
+                    warn(*warning);
                 }
             }
         }
@@ -5702,7 +5702,7 @@ pub(super) fn prepare_candidates_inner(
                         "{label}: GitHub policy unreadable, the gh wrapper applies no deny list: {error}"
                     )),
                 ) {
-                    warn(warning);
+                    warn(*warning);
                 }
                 provenant_config::GithubPolicy::default()
             }
@@ -5778,7 +5778,7 @@ pub(super) fn prepare_candidates_inner(
                             "{label}: gh wrapper unavailable, gh runs unmediated: {error}"
                         )),
                     ) {
-                        warn(warning);
+                        warn(*warning);
                     }
                     false
                 }

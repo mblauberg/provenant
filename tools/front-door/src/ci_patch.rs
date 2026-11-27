@@ -152,6 +152,7 @@ impl PatchError {
     }
 
     fn from_command(error: CommandError) -> Self {
+        let error = error.into_payload();
         Self {
             code: error.code,
             message: error.message.into_boxed_str(),
@@ -838,7 +839,7 @@ impl PatchRuntime for SystemRuntime {
             timeout: READ_BUDGET,
         })
         .map(|_| ())
-        .map_err(|error| error.message)
+        .map_err(|error| error.into_payload().message)
     }
 
     fn live_holder(
@@ -1370,7 +1371,7 @@ mod tests {
         assert_eq!(error.class, ErrorClass::Configured);
         assert!(error.message.contains(HEAD));
         assert!(error.message.contains(OTHER));
-        assert_eq!(error.setting.unwrap().key, GENERATED_PATCH_KEY);
+        assert_eq!(error.setting.as_ref().unwrap().key, GENERATED_PATCH_KEY);
         assert!(error.subject.is_some());
         assert!(!error.next.is_empty());
     }

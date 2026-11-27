@@ -31,8 +31,12 @@ pub enum Outcome {
     Stalled,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommandError(Box<CommandErrorPayload>);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct CommandError {
+pub struct CommandErrorPayload {
     pub code: String,
     pub message: String,
     pub cause: Option<String>,
@@ -96,7 +100,24 @@ pub enum ErrorClass {
     },
 }
 
+impl std::ops::Deref for CommandError {
+    type Target = CommandErrorPayload;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for CommandError {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl CommandError {
+    pub fn into_payload(self) -> CommandErrorPayload {
+        *self.0
+    }
+
     /// Construct an error and translate the former repair hint into a typed
     /// next step. Commands beginning with `provenant` become argv; other text
     /// remains a condition for the caller to satisfy.
@@ -107,7 +128,7 @@ impl CommandError {
         repair: impl Into<String>,
     ) -> Self {
         let repair = repair.into();
-        Self {
+        Self(Box::new(CommandErrorPayload {
             diagnostic: None,
             code: code.into(),
             message: message.into(),
@@ -117,7 +138,7 @@ impl CommandError {
             setting: None,
             root: None,
             next: vec![NextStep::from_text(&repair)],
-        }
+        }))
     }
 
     pub fn with_subject(mut self, subject: Subject) -> Self {

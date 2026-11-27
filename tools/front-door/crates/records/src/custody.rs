@@ -352,7 +352,6 @@ pub fn admit_writer(
 /// Boundary guard signature for operations that could destroy another live
 /// lane's work. The caller supplies the already-resolved fact; no filesystem
 /// or Git mutation belongs in this records crate.
-#[allow(clippy::result_large_err)] // CommandError is the workspace's shared refusal; it is cold-path only.
 pub fn guard_destructive(
     op: &str,
     subject: &Subject,
@@ -1836,7 +1835,7 @@ mod tests {
         };
         assert_eq!(error.code, crate::policy::WORKTREE_SHARING_REFUSED);
         assert_eq!(error.class, ErrorClass::Configured);
-        assert_eq!(error.setting.unwrap().layer, Layer::Host);
+        assert_eq!(error.setting.as_ref().unwrap().layer, Layer::Host);
 
         let owner_refuse = LeaseObservation {
             lease: WorktreeLease {
@@ -1856,7 +1855,7 @@ mod tests {
         let Admit::Refuse { error } = owner_refusal else {
             panic!("owning-lane refusal should win over configured allow");
         };
-        let setting = error.setting.unwrap();
+        let setting = error.setting.as_ref().unwrap();
         assert_eq!(setting.layer, Layer::Parent);
         assert_eq!(setting.origin, "lease.json#sharing");
         let unreachable = LeaseObservation {
@@ -1958,7 +1957,7 @@ mod tests {
                     }
                     (_, Sharing::Refuse, Admit::Refuse { error }) => {
                         assert_eq!(error.code, crate::policy::WORKTREE_SHARING_REFUSED);
-                        assert_eq!(error.setting.unwrap().layer, Layer::Project);
+                        assert_eq!(error.setting.as_ref().unwrap().layer, Layer::Project);
                     }
                     (state, sharing, admission) => panic!(
                         "unexpected admission for {state:?} and {sharing:?}: {}",
@@ -1967,7 +1966,7 @@ mod tests {
                                 warning: Some(warning),
                             } => warning.code.to_string(),
                             Admit::Proceed { warning: None } => "proceed".to_owned(),
-                            Admit::Refuse { error } => error.code,
+                            Admit::Refuse { error } => error.into_payload().code,
                         }
                     ),
                 }

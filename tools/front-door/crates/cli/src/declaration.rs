@@ -345,7 +345,7 @@ pub fn run(command: DeclareArgs, globals: &crate::Globals) -> u8 {
                         .near_full_policy
                         .check("DECLARATION_JOURNAL_NEAR_FULL", Facts::violation(detail))
                     {
-                        warn(warning);
+                        warn(*warning);
                     }
                 }
                 match serde_json::to_string(&receipt) {

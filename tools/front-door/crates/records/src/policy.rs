@@ -293,10 +293,9 @@ impl Facts {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)] // Warn is the common non-proceed effect; boxing it costs every caller.
 pub enum Effect {
     Proceed,
-    Warn(Warning),
+    Warn(Box<Warning>),
     Refuse(Box<crate::diagnostic::Diagnostic>),
     Stop(Box<crate::diagnostic::Diagnostic>),
 }
@@ -313,33 +312,14 @@ impl Effect {
     }
 }
 
-#[derive(Deserialize)]
-struct Table {
-    rule: Vec<Rule>,
-}
-/// Parsed once per process. Resolution copies only this small immutable table.
-#[allow(clippy::expect_used)] // Compiled asset; invariant validated in CI.
+// The build script validates the policy asset and emits typed rows and the
+// corresponding static warning-code lookup from the same source.
+include!(concat!(env!("OUT_DIR"), "/compiled_policy.rs"));
+
+/// Parsed at build time and initialized once per process.
 pub fn table() -> &'static [Rule] {
     static TABLE: OnceLock<Vec<Rule>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        toml_edit::de::from_str::<Table>(include_str!("../../run/assets/policy.toml"))
-            .expect("compiled policy table")
-            .rule
-    })
-}
-
-/// A violated policy rule warns under its own stable rule code, so each code
-/// names one event instead of sharing a catch-all `POLICY_WARNING`. The code is
-/// read from the compiled table, the authoritative source of rule codes, which
-/// lives for the process lifetime.
-/// Spec: docs/specs/cli.md#warnings-are-typed-values
-#[allow(clippy::expect_used)] // check() calls this only for table-owned rule codes.
-fn rule_warning_code(code: &str) -> WarningCode {
-    let rule = table()
-        .iter()
-        .find(|rule| rule.code == code)
-        .expect("policy code in table");
-    WarningCode(rule.code.as_str())
+    TABLE.get_or_init(compiled_table)
 }
 
 /// Position of a layer in the canonical precedence order.
@@ -533,20 +513,28 @@ impl Policy {
         );
         match strength {
             Strength::Off => Effect::Proceed,
-            Strength::Warn => Effect::Warn(
-                Warning::new(
-                    rule_warning_code(code),
-                    message,
-                    crate::warning::detected_source(rule_warning_code(code)),
-                )
-                .subject(code.to_owned())
-                .source(resolved.source)
-                .setting(setting)
-                // Observational rules warn and proceed: one notice per
-                // state change is enough for a person, while the JSON
-                // envelope keeps every warning as data.
-                .once_per_change(),
-            ),
+            Strength::Warn => {
+                let Some(warning_code) = rule_warning_code(code) else {
+                    return Effect::Stop(Box::new(
+                        crate::diagnostic::Diagnostic::new("UNKNOWN_POLICY_CODE")
+                            .detail(format!("unknown policy warning code: {code}")),
+                    ));
+                };
+                Effect::Warn(Box::new(
+                    Warning::new(
+                        warning_code,
+                        message,
+                        crate::warning::detected_source(warning_code),
+                    )
+                    .subject(code.to_owned())
+                    .source(resolved.source)
+                    .setting(setting)
+                    // Observational rules warn and proceed: one notice per
+                    // state change is enough for a person, while the JSON
+                    // envelope keeps every warning as data.
+                    .once_per_change(),
+                ))
+            }
             Strength::Refuse => Effect::Stop(Box::new(
                 crate::diagnostic::Diagnostic::new(code).detail(message),
             )),
@@ -570,7 +558,7 @@ impl Policy {
         match self.check(code, facts) {
             Effect::Proceed => Ok(()),
             Effect::Warn(w) => {
-                warning::warn(w);
+                warning::warn(*w);
                 Ok(())
             }
             Effect::Stop(diagnostic) => Err(refuse(*diagnostic)),

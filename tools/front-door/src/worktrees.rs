@@ -1556,7 +1556,7 @@ fn run_gc_hosts(
                         crate::fabric::peer::HostResult::Command {
                             status: result.status,
                             data: result.data,
-                            error: result.error.map(|error| error.message),
+                            error: result.error.map(|error| error.into_payload().message),
                             warnings: result.warnings,
                             next: result.next,
                         },
@@ -1574,7 +1574,7 @@ fn run_gc_hosts(
                 crate::fabric::peer::HostResult::Command {
                     status: result.status,
                     data: result.data,
-                    error: result.error.map(|error| error.message),
+                    error: result.error.map(|error| error.into_payload().message),
                     warnings: result.warnings,
                     next: result.next,
                 }

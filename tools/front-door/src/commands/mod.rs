@@ -9,12 +9,6 @@
 //! its space-joined path and calls its verb.
 //!
 //! Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
-//!
-//! The registry contract returns `CommandError` by value; it is the type the
-//! result envelope already carries, and boxing it would allocate on every
-//! refusal to satisfy a size heuristic. One scope-level allow keeps the
-//! contracted signature across every domain.
-#![allow(clippy::result_large_err)]
 mod accounts;
 mod adapter;
 mod admit;

@@ -1091,7 +1091,7 @@ fn lock_worktree_impl(
         });
         match effect {
             Effect::Proceed => {}
-            Effect::Warn(warning) => provenant_records::warning::warn(warning),
+            Effect::Warn(warning) => provenant_records::warning::warn(*warning),
             Effect::Refuse(_) | Effect::Stop(_) => {
                 return Err(live_refusal(context.workers, &canonical));
             }
@@ -1762,9 +1762,9 @@ pub(crate) fn guard_destructive_worktree(
         Ok(()) => Ok(()),
         Err(error) => Err(WorktreeError::CustodyRefused {
             code: DESTROYS_LIVE_WORK,
-            message: error.message,
+            message: error.message.clone(),
             holder,
-            cause: error.cause,
+            cause: error.cause.clone(),
         }),
     }
 }

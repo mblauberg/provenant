@@ -681,7 +681,7 @@ fn writer_gc_settings(
                 "gc.free_floor configuration unavailable ({error}); using compiled GC defaults"
             )),
         ) {
-            warn(warning);
+            warn(*warning);
         }
         provenant_config::GcSettings::default()
     })
@@ -745,7 +745,7 @@ impl run::Providers for Registry<'_> {
                         "domains.run.write_grant_limit_bytes unavailable ({error}); using compiled default"
                     )),
                 ) {
-                    warn(warning);
+                    warn(*warning);
                 }
                 run::WriteGrantLimit::default()
             }
@@ -786,7 +786,7 @@ impl run::Providers for Registry<'_> {
                     "writer disk policy context unavailable; continuing without a disk check",
                 ),
             ) {
-                warn(warning);
+                warn(*warning);
             }
             return Ok(());
         };

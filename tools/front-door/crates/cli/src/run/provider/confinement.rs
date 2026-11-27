@@ -933,7 +933,7 @@ pub(super) fn credential_roots(
                 "CREDENTIAL_ROOTS_OVERLAP_NONE",
                 provenant_records::policy::Facts::violation(detail),
             ) {
-                warn(warning);
+                warn(*warning);
             }
         }
     };
@@ -1165,7 +1165,7 @@ pub(super) fn credential_access_grant_refusal(
                     "CREDENTIAL_ROOTS_OVERLAP_NONE",
                     provenant_records::policy::Facts::violation(detail),
                 ) {
-                    warn(warning);
+                    warn(*warning);
                 }
             }
         }
@@ -1217,7 +1217,7 @@ pub(super) fn warn_profile_credential_grants(
                 "CREDENTIAL_ROOTS_OVERLAP_NONE",
                 provenant_records::policy::Facts::violation(detail),
             ) {
-                warn(warning);
+                warn(*warning);
             }
         }
     }
@@ -1517,7 +1517,7 @@ fn source_warning_messages(
                     warning.source
                 )),
             ) {
-                provenant_records::policy::Effect::Warn(warning) => Some(warning),
+                provenant_records::policy::Effect::Warn(warning) => Some(*warning),
                 _ => None,
             }
         })

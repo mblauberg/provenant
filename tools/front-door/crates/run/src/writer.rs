@@ -3158,7 +3158,7 @@ impl WriterLaunch {
             );
             if let provenant_records::policy::Effect::Warn(warning) = &effect {
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                provenant_records::warning::warn(warning.clone());
+                provenant_records::warning::warn((**warning).clone());
             }
             if effect.blocks() {
                 return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
@@ -3212,7 +3212,7 @@ impl WriterLaunch {
         )?;
         if let provenant_records::policy::Effect::Warn(warning) = &effect {
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            provenant_records::warning::warn(warning.clone());
+            provenant_records::warning::warn((**warning).clone());
         }
         if effect.blocks() {
             return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
@@ -3452,7 +3452,7 @@ impl WriterLaunch {
             }
             if let provenant_records::policy::Effect::Warn(warning) = &effect {
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                provenant_records::warning::warn(warning.clone());
+                provenant_records::warning::warn((**warning).clone());
             }
         }
         self.report_tool_state_paths(work_base, verified_tip, source.as_ref(), enforcement)?;

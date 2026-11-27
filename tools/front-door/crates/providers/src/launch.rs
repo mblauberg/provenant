@@ -470,7 +470,7 @@ pub(crate) fn policy_warning(
     match policy.check(code, Facts::violation(detail)) {
         Effect::Proceed => Ok(()),
         Effect::Warn(warning) => {
-            warn(warning);
+            warn(*warning);
             Ok(())
         }
         Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
