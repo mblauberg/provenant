@@ -262,7 +262,7 @@ fn message_template(message: &str) -> String {
 /// nothing is weakened or dropped from the group's first warning.
 pub fn collapse_warnings(warnings: &[Warning]) -> Vec<WarningGroup> {
     let mut groups: Vec<WarningGroup> = Vec::new();
-    let mut positions = std::collections::HashMap::new();
+    let mut positions = std::collections::HashMap::<String, usize>::new();
     for warning in warnings {
         let key = warning_collapse_key(warning);
         if let Some(index) = positions.get(&key) {

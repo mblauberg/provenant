@@ -1,5 +1,4 @@
 use super::*;
-use provenant_records::Layer;
 use provenant_records::warning::{Warning, warn};
 
 /// Bind declared lane capabilities to the provider's confinement profile.

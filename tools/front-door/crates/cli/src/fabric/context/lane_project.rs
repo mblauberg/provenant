@@ -175,6 +175,7 @@ impl Context {
             roots,
             identity,
             config,
+            projection: super::projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
             project_root,

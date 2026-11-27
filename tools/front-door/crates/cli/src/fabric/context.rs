@@ -981,7 +981,7 @@ impl Context {
             &self.executor,
             &git,
             &self.cwd,
-            self.roots.state.as_path().join("tmp").join("mirror"),
+            &self.roots.state.as_path().join("tmp").join("mirror"),
             self.roots.state.as_path(),
             &self.identity.host.to_string(),
             &self.identity.project.to_string(),

@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::Layer;
 use provenant_records::warning::{Warning, warn};
 
 /// Resolve a provider or named command through the filtered requester PATH.

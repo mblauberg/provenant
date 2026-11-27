@@ -36,7 +36,7 @@ pub enum GraphRelay {
 
 /// Resolve the sharing setting at the host boundary, retaining its source.
 fn configured_sharing(context: &Context) -> Sourced<Sharing> {
-    let config = match provenant_cli::config_reads::read_for(&context.roots, "fabric") {
+    let config = match crate::config_reads::read_for(&context.roots, "fabric") {
         Ok(config) => config,
         Err(error) => {
             let fallback = default_sharing();
@@ -362,7 +362,7 @@ fn bind_admitted_provisioning_owners(
                         format!(
                             "{tree} had an advisory claim from another lane; it now names {owner}"
                         ),
-                        provenant_records::warning::detected_source(WORKTREE_SHARED),
+                        provenant_records::warning::detected_source(WarningCode(WORKTREE_SHARED)),
                     )
                     .setting(sharing_setting_ref(sharing)));
                 }
@@ -404,7 +404,7 @@ fn bind_provisioning_owner(
                         format!(
                             "{tree} had an advisory claim from another lane; it now names {owner}"
                         ),
-                        provenant_records::warning::detected_source(WORKTREE_SHARED),
+                        provenant_records::warning::detected_source(WarningCode(WORKTREE_SHARED)),
                     )
                     .setting(sharing_setting_ref(sharing)));
                 }
@@ -2371,12 +2371,11 @@ fn provision_in_context(
         ) {
             return Err(worktrees::custody_refusal(existing.occupancy));
         }
-        let tree = provenant_confinement::verify_worktree(context.repo, &existing.path).map_err(
-            |error| WorktreeError::UnknownOccupancy {
+        let mut tree = provenant_confinement::verify_worktree(context.repo, &existing.path)
+            .map_err(|error| WorktreeError::UnknownOccupancy {
                 path: existing.path.clone(),
                 detail: format!("worktree registration could not be verified: {error}"),
-            },
-        )?;
+            })?;
         if let Some(owner) = owner {
             let receipt = tree
                 .repo()

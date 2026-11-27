@@ -344,7 +344,6 @@ pub enum Command {
     #[command(subcommand)]
     Lane(Lane),
     /// Control delivery queue items
-    #[command(subcommand)]
     Queue(QueueArgs),
     /// Settle open attempts, reclaim dead leases behind undecodable records, and report uncertain custody
     Reconcile(Reconcile),
