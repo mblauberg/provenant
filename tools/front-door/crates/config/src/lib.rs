@@ -43,6 +43,7 @@ pub use hooks_config::{
     Settings as HookSettings, hook_budget,
 };
 mod inspection;
+pub use inspection::{ExplanationCandidate, SettingExplanation, explain};
 mod knobs;
 mod lane_history;
 mod loader;
