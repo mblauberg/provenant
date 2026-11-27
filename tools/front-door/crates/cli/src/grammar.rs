@@ -1,7 +1,7 @@
 //! CLI-owned grammar with mounted owner subtrees.
 use crate::metadata::CatalogueArg;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
-use provenant_core::{AttemptId, OperationId};
+use provenant_core::{AttemptId, GitOid, OperationId};
 pub use provenant_records::Harness;
 use provenant_records::warning::{Warning, warn};
 use std::{ffi::OsString, path::PathBuf, time::Duration};

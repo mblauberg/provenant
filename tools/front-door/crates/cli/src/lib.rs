@@ -3407,6 +3407,47 @@ mod tests {
     }
 
     #[test]
+    fn worktree_remove_since_accepts_only_a_git_oid() {
+        let oid = "a".repeat(40);
+        let invocation = valid(&[
+            "worktree",
+            "remove",
+            "--merged",
+            "--integration",
+            "main",
+            "--since",
+            &oid,
+        ]);
+        let Command::Worktree(Worktree::Remove(remove)) = invocation.command else {
+            panic!("worktree remove");
+        };
+        assert_eq!(
+            remove.since,
+            Some(provenant_core::GitOid::parse(&oid).unwrap())
+        );
+        invalid(&[
+            "worktree",
+            "remove",
+            "--merged",
+            "--integration",
+            "main",
+            "--since",
+            "not-an-oid",
+        ]);
+        invalid(&[
+            "worktree",
+            "remove",
+            "--merged",
+            "--integration",
+            "main",
+            "--since",
+            &oid,
+            "--branch",
+            "lane",
+        ]);
+    }
+
+    #[test]
     fn worktree_doctor_requires_and_preserves_a_path() {
         invalid(&["worktree", "doctor"]);
         let invocation = valid(&["worktree", "doctor", "../lane with spaces", "--json"]);
