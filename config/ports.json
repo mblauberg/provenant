@@ -243,5 +243,44 @@
     "backend": {
       "kind": "builtin"
     }
-  }
+  },
+  "format": {
+    "argv": ["cargo", "fmt"],
+    "cwd": "tools/front-door"
+  },
+  "generated": [
+    {
+      "name": "swift-fixtures",
+      "generate": [
+        "cargo",
+        "run",
+        "--locked",
+        "--quiet",
+        "-p",
+        "provenant-cli",
+        "--bin",
+        "generate-swift-fixtures",
+        "--",
+        "--out",
+        "../../apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures"
+      ],
+      "cwd": "tools/front-door",
+      "outputs": ["apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures/*.json"],
+      "tracked": true
+    },
+    {
+      "name": "insta-snapshots",
+      "generate": ["scripts/generate-insta-snapshots"],
+      "cwd": ".",
+      "outputs": ["tools/front-door/**/*.snap"],
+      "tracked": true
+    },
+    {
+      "name": "reference",
+      "generate": ["scripts/generate-reference", "--strict"],
+      "cwd": ".",
+      "outputs": ["docs/reference/**"],
+      "tracked": false
+    }
+  ]
 }

@@ -4,7 +4,7 @@
 //! generator builds one synthetic set of the same values and passes it here too.
 //! Every field of a console response is therefore written in exactly one place:
 //! a wire change changes both the command and the committed fixtures, and
-//! `scripts/check-swift-fixtures` fails until both are updated.
+//! `scripts/check-generated` fails until both are updated.
 //!
 //! These functions never touch the filesystem, the clock or a process. Values
 //! that the owner reads (timestamps, snapshots, host identities, coverage

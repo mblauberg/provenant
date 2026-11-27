@@ -114,6 +114,48 @@ jobs:
           cat "$RUNNER_TEMP/doc-truth.txt"
           cat "$RUNNER_TEMP/doc-truth.txt" >> "$GITHUB_STEP_SUMMARY"
 
+  # Every tracked generator runs here, even after one fails. Their outputs are
+  # staged in a scratch index and the resulting patch is uploaded with a
+  # manifest, so a drift can be applied from CI without editing bytes by hand.
+  # The render-only reference generator keeps its own job above.
+  generated:
+    name: Generated artefacts
+    needs: scope
+    if: fromJSON(needs.scope.outputs.suites).rust == 'run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
+      CARGO_PROFILE_RELEASE_LTO: "false"
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/install-rust
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-dev-default-v1-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-dev-default-v1' }}
+          add-job-id-key: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Check generated artefacts
+        env:
+          GENERATED_WORKFLOW: ci.yml
+        run: scripts/check-generated --out "$RUNNER_TEMP/generated"
+      - name: Upload generated patch and manifest
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: generated-${{ github.sha }}
+          path: ${{ runner.temp }}/generated/
+          if-no-files-found: warn
+          retention-days: 7
+
   # Lint and test builds overlap; tests are built once and split into three
   # slice partitions. `ci-status` gates on all jobs, and a
   # matrix job reports success only when every partition succeeds.
@@ -281,6 +323,7 @@ jobs:
           scripts/test-select-affected-crate-tests
           scripts/test-verify-tier
           scripts/test-download-with-retry
+          scripts/test-check-generated
       - name: Check CI suite wiring
         run: '"$RUNNER_TEMP/harness-venv/bin/python" scripts/check-ci-suites'
       - name: Test native inventory evidence
@@ -1001,15 +1044,8 @@ jobs:
           compression-level: 0
       # Clippy lives in the macOS test job, which compiles and caches the
       # workspace; only the Swift package tests (shared client, menu bar and
-      # console) stay here, to balance the two jobs.
-      - name: Check Swift replay fixtures against the Rust wire types
-        working-directory: tools/front-door
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
-          CARGO_PROFILE_RELEASE_LTO: "false"
-          RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
-          CARGO_PROFILE_ARG: --release
-        run: ../../scripts/check-swift-fixtures
+      # console) stay here, to balance the two jobs. The replay fixtures are
+      # checked by the `generated` job, which uploads their patch as an artefact.
       - name: Run Swift package tests
         working-directory: apps/quota-menubar
         run: swift test
@@ -1081,6 +1117,7 @@ jobs:
     needs:
       - scope
       - repo-checks
+      - generated
       - generated-reference
       - rust-lint
       - rust-macos-lint
