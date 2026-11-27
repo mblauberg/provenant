@@ -1986,8 +1986,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         &roots,
         provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
     )?;
-    let assets = rig.root.join("assets");
-    fs::create_dir(&assets)?;
+    let assets = rig.assets.clone();
     let mut host = provenant_run::HostLaunchContext::from_environment(
         &rig.state,
         &rig.project,
@@ -6340,12 +6339,7 @@ fn graph_codex_commit_source_starts_and_returns_a_verdict() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    let mut rig = policy_codex_fixture()?;
-    let assets = rig.root.join("product-assets");
-    fs::create_dir(&assets)?;
-    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
-    rig.env
-        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
+    let rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
     fs::write(
         rig.project.join("review-subject.txt"),

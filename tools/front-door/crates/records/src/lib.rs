@@ -110,6 +110,7 @@ pub use resolved_route::{
 pub mod lane_contract;
 pub mod result_capture;
 pub mod run;
+pub mod subject;
 
 // Format-2 records (#3078). Callers adopt them in later slices.
 pub mod finding_decision;

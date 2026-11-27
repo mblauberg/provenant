@@ -5,9 +5,9 @@ use support::{Result, TestRig, code};
 
 fn rig() -> Result<TestRig> {
     let rig = TestRig::new()?;
-    std::fs::create_dir_all(rig.project.join("config"))?;
+    std::fs::create_dir_all(rig.assets.join("config"))?;
     std::fs::write(
-        rig.project.join("config/telemetry-prices.toml"),
+        rig.assets.join("config/telemetry-prices.toml"),
         include_str!("../../../config/telemetry-prices.toml"),
     )?;
     // TestRig's executor supplies a clean environment, including for Git.

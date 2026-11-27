@@ -12,7 +12,7 @@ fn document(nodes: Vec<GraphNode>) -> GraphDocument {
         queue_ci_wait: None,
         queue: None,
         review: None,
-        review_subject_missing: false,
+        subject: None,
         exclude: Vec::new(),
         network: None,
         capability: Vec::new(),
@@ -1212,18 +1212,17 @@ fn every_bundled_template_compiles_with_required_bindings() {
 
 #[test]
 // Spec: docs/specs/fabric.md#bundled-template-declarations — the bundled smoke
-// template declares the read, write, review, retry-route and steer-route nodes,
-// with review after the write so it reads the writer's own scratch commit.
-fn smoke_template_compiles_the_read_write_review_retry_and_steer_nodes() {
+// template declares six nodes: read, write, two reviews and two route probes.
+fn smoke_template_compiles_the_read_review_write_retry_and_steer_nodes() {
     let library = library();
     let node = Compiler::new(&library)
         .compile(&json!({"id":"smoke", "use":"smoke"}))
         .unwrap();
     let composite = node.composite.unwrap();
-    // With no writer there is no scratch commit to review, so the read node is
-    // the graph's result; review is gated on smoke-write by the issue's change.
+    // With no writer the fixture review, which compares the fixture change
+    // against its base, is the graph's result.
     assert_eq!(composite.exports.len(), 1);
-    assert_eq!(composite.exports[0].node, "read");
+    assert_eq!(composite.exports[0].node, "review-fixture");
     let children = composite.nodes;
     let by_id = |id: &str| children.iter().find(|node| node.id == id).unwrap();
     // The writer runs before review so the review's node source is the smoke
@@ -1233,24 +1232,29 @@ fn smoke_template_compiles_the_read_write_review_retry_and_steer_nodes() {
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
-        ["read", "write", "review", "retry-route", "steer-route"]
+        [
+            "read",
+            "write",
+            "review-write",
+            "review-fixture",
+            "retry-probe",
+            "steer-probe"
+        ]
     );
     assert_eq!(by_id("read").access, AccessMode::ReadOnly);
-    assert_eq!(by_id("review").access, AccessMode::ReadOnly);
     assert_eq!(by_id("write").access, AccessMode::WorktreeWrite);
-    assert_eq!(by_id("retry-route").access, AccessMode::ReadOnly);
-    assert_eq!(by_id("steer-route").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("review-write").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("review-fixture").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("retry-probe").access, AccessMode::ReadOnly);
+    assert_eq!(by_id("steer-probe").access, AccessMode::ReadOnly);
 
     let node = Compiler::new(&library)
         .compile(&json!({
             "id":"smoke", "use":"smoke",
-            "with":{"worktree":"/fixture/writer", "smoke-write":true}
+            "with":{"worktree":"/fixture/writer", "write":true}
         }))
         .unwrap();
-    // With a writer and review enabled, the bounded review is the result.
-    let composite = node.composite.unwrap();
-    assert_eq!(composite.exports.len(), 1);
-    assert_eq!(composite.exports[0].node, "review");
+    assert_eq!(node.composite.unwrap().exports[0].node, "review-write");
 }
 
 #[test]
@@ -1326,60 +1330,123 @@ fn smoke_nodes_resolve_on_a_free_capable_tier() {
 }
 
 #[test]
-// Spec: docs/specs/fabric.md#sources-and-read-roots — a smoke review node is
-// pinned to its base only when a launch supplies one.
-fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
+// Spec: docs/specs/fabric.md#sources-and-read-roots — the write-review is pinned
+// to the writer's commit, not to the base the fixture change started from.
+fn smoke_review_covers_only_the_writer_commit() -> Result<(), String> {
     let library = library();
-    let review_lenses = |with: Value| -> Vec<GraphNode> {
-        let compiled = Compiler::new(&library)
-            .compile(&json!({"id":"smoke", "use":"smoke", "with":with}))
-            .unwrap();
-        let composite = compiled.composite.unwrap();
-        // The review runs after the write so its source is the writer's own
-        // scratch commit, not whatever commit the caller checkout is on. A node
-        // source, not a head source: head is reserved for delivered pr/push
-        // writers and would refuse a graph whose writer only makes a local
-        // scratch commit.
-        assert_eq!(
-            composite
-                .nodes
-                .iter()
-                .map(|node| node.id.as_str())
-                .collect::<Vec<_>>(),
-            ["read", "write", "review", "retry-route", "steer-route"]
-        );
-        let review = composite
-            .nodes
-            .into_iter()
-            .find(|node| node.id == "review")
-            .unwrap();
-        assert!(
-            matches!(
-                &review.source,
-                Some(SourceBinding::Node { node }) if node == "write"
-            ),
-            "the smoke review must read the writer's scratch commit: {review:?}"
-        );
-        review.composite.unwrap().nodes
-    };
-    // A launch binds the writer's base so every review lens has a bounded range.
-    let base = "1111111111111111111111111111111111111111";
-    let bound = review_lenses(json!({"diff_base":base}));
-    assert_eq!(bound.len(), 2);
+    let diff_base = "1111111111111111111111111111111111111111";
+    let fixture_base = "2222222222222222222222222222222222222222";
+    let compiled = Compiler::new(&library)
+        .compile(&json!({
+            "id":"smoke", "use":"smoke",
+            "with":{
+                "diff_base":diff_base,
+                "fixture_base":fixture_base,
+                "write":true
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+    let composite = compiled.composite.unwrap();
+    let review = composite
+        .nodes
+        .iter()
+        .find(|node| node.id == "review-write")
+        .unwrap();
+    assert_eq!(
+        review.source,
+        Some(SourceBinding::Node {
+            node: "write".into()
+        })
+    );
     assert!(
-        bound
+        review.depends_on.iter().any(|id| id == "write"),
+        "the write-review must depend on the writer: {:?}",
+        review.depends_on
+    );
+    let lenses = &review.composite.as_ref().unwrap().nodes;
+    assert_eq!(lenses.len(), 2);
+    assert!(
+        lenses
             .iter()
-            .all(|lens| lens.review_base.as_deref() == Some(base))
+            .all(|lens| lens.review_base.as_deref() == Some(diff_base)),
+        "a write-review lens was not pinned to diff_base: {:?}",
+        lenses
+            .iter()
+            .map(|lens| lens.review_base.clone())
+            .collect::<Vec<_>>()
     );
+    Ok(())
+}
 
-    // Without a launch binding no review lens carries a base at all, so the
-    // facade decides whether to skip review while read and write compile unchanged.
-    let unbound = review_lenses(json!({}));
-    assert_eq!(unbound.len(), bound.len());
-    assert!(
-        unbound.iter().all(|lens| lens.review_base.is_none()),
-        "a smoke review lens was pinned without diff_base: {unbound:?}"
-    );
+#[test]
+// Spec: docs/specs/fabric.md#sources-and-read-roots — smoke carries no staged
+// fixture. The read node is plain prose, and each review takes its range from
+// the launch-supplied base for its own subject.
+fn smoke_template_reads_no_staged_fixture() -> Result<(), String> {
+    let library = library();
+    let diff_base = "1111111111111111111111111111111111111111";
+    let fixture_base = "2222222222222222222222222222222222222222";
+
+    fn collect<'a>(nodes: &'a [GraphNode], out: &mut Vec<&'a GraphNode>) {
+        for node in nodes {
+            out.push(node);
+            if let Some(composite) = &node.composite {
+                collect(&composite.nodes, out);
+            }
+            if let Some(loop_body) = &node.loop_body {
+                collect(&loop_body.body, out);
+            }
+        }
+    }
+    fn bases(node: &GraphNode, out: &mut Vec<String>) {
+        if let Some(base) = &node.review_base {
+            out.push(base.clone());
+        }
+        if let Some(composite) = &node.composite {
+            for child in &composite.nodes {
+                bases(child, out);
+            }
+        }
+    }
+
+    for smoke_write in [true, false] {
+        let compiled = Compiler::new(&library)
+            .compile(&json!({
+                "id":"smoke", "use":"smoke",
+                "with":{
+                    "diff_base":diff_base,
+                    "fixture_base":fixture_base,
+                    "write":smoke_write
+                }
+            }))
+            .map_err(|error| error.to_string())?;
+        let composite = compiled.composite.unwrap();
+        let mut all = Vec::new();
+        collect(&composite.nodes, &mut all);
+        assert!(
+            all.iter()
+                .all(|node| node.fixture.is_none() && node.fixture_bytes.is_none()),
+            "smoke staged a fixture with write={smoke_write}"
+        );
+        let by_id = |id: &str| all.iter().find(|node| node.id == id).unwrap();
+        let read = by_id("read");
+        assert_eq!(read.access, AccessMode::ReadOnly);
+        assert!(read.fixture.is_none(), "the read node stages a fixture");
+
+        for (id, expected) in [
+            ("review-write", diff_base),
+            ("review-fixture", fixture_base),
+        ] {
+            let mut found = Vec::new();
+            bases(by_id(id), &mut found);
+            assert!(!found.is_empty(), "{id} carries no review_base");
+            assert!(
+                found.iter().all(|base| base == expected),
+                "{id} carried a wrong review_base with write={smoke_write}: {found:?}"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[test]

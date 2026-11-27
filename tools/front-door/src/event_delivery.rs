@@ -1617,7 +1617,21 @@ mod tests {
         );
         // A default (incomplete) wait settles from the event directly, with no
         // fresh observer read, so the failure must still be named downstream.
-        let reading = crate::status_wait::reading_pr_event(7, None, false, detail);
+        let mut subject = None;
+        let mut seen = false;
+        let reading = crate::status_wait::reading_pr_event(
+            &mut subject,
+            &mut seen,
+            &crate::status_wait::PrSample {
+                number: 7,
+                repository: &Ok("owner/repo".into()),
+                policy: provenant_records::subject::SubjectPolicy::Pinned,
+                policy_source: &crate::status_wait::test_policy_source(),
+                now: provenant_core::WallTime::UNIX_EPOCH,
+            },
+            false,
+            detail,
+        );
         assert_eq!(reading.settle, crate::status_wait::Settle::Unsuccessful);
         let recovered: crate::pr::status::Line =
             serde_json::from_value(reading.data.clone()).unwrap();
@@ -1675,7 +1689,21 @@ mod tests {
             let round_trip: crate::pr::status::Line =
                 serde_json::from_value(recovered["status"].clone()).unwrap();
             assert_eq!(serde_json::to_value(round_trip).unwrap(), projected);
-            let reading = crate::status_wait::reading_pr_event(7, None, false, recovered);
+            let mut subject = None;
+            let mut seen = false;
+            let reading = crate::status_wait::reading_pr_event(
+                &mut subject,
+                &mut seen,
+                &crate::status_wait::PrSample {
+                    number: 7,
+                    repository: &Ok("owner/repo".into()),
+                    policy: provenant_records::subject::SubjectPolicy::Pinned,
+                    policy_source: &crate::status_wait::test_policy_source(),
+                    now: provenant_core::WallTime::UNIX_EPOCH,
+                },
+                false,
+                recovered,
+            );
             assert_eq!(
                 reading.settle,
                 if count == 0 {

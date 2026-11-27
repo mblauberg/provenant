@@ -63,6 +63,18 @@ for mutation in ('missing', 'needs', 'unmapped', 'binding', 'always', 'unwatched
     if mutation == 'unwatched': w['jobs']['native-test']['steps'].append({'run': "nextest -E 'package(=c)'"})
     if mutation == 'unknown': w['jobs']['native-test']['steps'].append({'run': "nextest -E 'package(=zz)'"})
     assert checker.check(config, w, packages), mutation
+
+native_inventory = {
+    'rust-macos-archive': {},
+    'rust-macos-inventory': {
+        'needs': ['scope', 'rust-macos-archive'],
+        'if': "${{ always() && needs.rust-macos-archive.result == 'success' && fromJSON(needs.scope.outputs.suites).macos_native == 'run' }}",
+    },
+}
+assert not checker.artifact_edges(native_inventory)
+native_inventory['rust-macos-inventory']['if'] = "${{ always() && fromJSON(needs.scope.outputs.suites).macos_native == 'run' }}"
+assert checker.artifact_edges(native_inventory), 'inventory must skip when its archive producer is skipped'
+
 # Every macOS-specific cfg file must be selected, even with nested cfg syntax.
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)

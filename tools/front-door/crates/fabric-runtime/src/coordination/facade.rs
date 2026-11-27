@@ -50,6 +50,11 @@ pub struct SubmittedTask {
     pub fixture: Option<provenant_records::run::StagedFixture>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// Provenance of the admitted graph subject beside `head`. A peer placement
+    /// records it as its own graph's subject; the run request carries only
+    /// `head`, the one commit a lane reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<provenant_records::subject::PinnedSubject>,
     /// Original writer source, retained when a graph retry starts from a later head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_head: Option<String>,

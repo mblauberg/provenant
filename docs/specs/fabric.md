@@ -296,6 +296,16 @@ candidate leaves the checkpoint and execution binding unchanged. The pure
 `admit_candidate` gate owns admission; entry points keep no separate resume
 validators.
 
+A graph's subject (base, head, origin, policy) is resolved once at admission and
+stored on the execution; read-only nodes bind to its head; status shows it under
+`checkpoint.subject`. Nothing inside an admitted graph re-resolves a ref, so a
+later push or commit on the source cannot change what its lanes read. The
+subject records `repository`, `base_ref` and `policy_source` as credential-free
+provenance, `followed_from` for any `follow_latest` re-pins, and the reserved
+`Continuation` origin for a predecessor graph name (#3972; no producer yet).
+`head_check` is a status slot for a later result-read comparison, not a stored
+fact in this batch.
+
 A structural limit at first admission refuses without publishing. A running graph
 that later exceeds one (during expansion or after a host limit is lowered) saves
 a `StructuralLimit` pause and resumes once the limit is raised; a cancelled or
@@ -509,6 +519,28 @@ configuration overlaps follow
 - Why: scouts share read access while review and repair keep one immutable
   subject.
 
+### Read source and writer base
+
+`lanes.read_source` selects the read-only tree and is resolved once at admission.
+`auto` (the default) pins the fetched upstream when the checkout is behind it and
+otherwise pins checkout HEAD; `live` reads the live tree locally and is pinned to
+HEAD on a peer with `READ_SOURCE_PINNED_FOR_PEER`; `default_branch` pins the
+fetched default branch; any other value is a Git ref. `--source` accepts the same
+vocabulary and overrides configuration. The admitted subject's `policy_source`
+is a typed provenance source (`{layer, origin}`) naming the layer and the exact
+file, key or flag that chose the pin. A repository file that still says `checkout`
+warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`; it never acts as `live`.
+
+A writer's base is selected separately by `lanes.writer_base`: `default_branch`
+resolves the remote the read-source resolver finds (never a hard-coded
+`origin`), `checkout` pins the caller HEAD at admission and any Git ref pins that
+ref. Explicit `--base` always wins. The admitted commit is the one provisioning
+creates the writer branch from (a peer placement resolves its own). The run
+result reports `writer_base` with its commit and source, and a fallback warning
+names the key that chose it. Graph
+subject policy itself is always pinned; `follow_latest` applies only to a wait
+and to the local `live` read choice.
+
 A relay admission stores one schema-versioned typed receipt with its request
 digest in the patch record; replay returns it with `replayed=true` whatever the
 current worktree-layout configuration, and a missing or malformed receipt is
@@ -529,7 +561,11 @@ force and refuses a mismatched branch.
 Gates decide without a model or attempt and save the decision before dependants
 run. CI gates query the exact pinned SHA, and unavailable checks or policy fail
 explicitly. The `domains.wait.pr_*` settings (conditional requests, intervals)
-change forge-observer request cadence only, never a gate verdict.
+change forge-observer request cadence only, never a gate verdict. A wait's own
+subject policy is separate: `domains.wait.pr_head_policy` (`pinned` by default,
+or `follow_latest`), `domains.wait.pr_head_source` and
+`domains.wait.pr_head_unpinned` decide how a PR head is pinned and what happens
+when it moves; none of them changes a gate verdict.
 - Why: deterministic decisions need durable evidence without a launch.
 
 The [delivery queue target](delivery-queue.md) extends these graph capabilities
@@ -699,3 +735,14 @@ identifies a registered Git common directory, Git's verified worktree inventory
 selects the checkout that owns project configuration, and a bare common directory
 stays its own host-only layout root.
 - Why: a remote guess or resent mutation could free a live lane or apply twice.
+
+### Hermetic smoke
+
+Peer feature actions declare their own wire protocol so an old peer is detected
+before its action is decoded. `SMOKE_FIXTURE_PROTOCOL = 16` adds `smoke_fixture`:
+`Create { nonce, recipe, root }` builds the deterministic fixture under the
+configured home-relative `root` and returns its base and head commits;
+`Remove { nonce }` forgets the binding and deletes it. The peer echoes its own
+`recipe`, and a mismatch fails rather than passing two different fixtures off as
+one. A peer below protocol 16 cannot run hermetic smoke and its result is
+`unverified`, never a pass. The base `PROTOCOL` stays 14.

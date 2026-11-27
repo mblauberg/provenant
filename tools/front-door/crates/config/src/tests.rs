@@ -939,6 +939,25 @@ fn version_refusal_precedes_unknown_key_decoding() {
     ));
 }
 
+/// Inspection reports a repository spelling without changing the file.
+#[test]
+fn config_check_reports_retired_repository_read_source() {
+    let fixture = Files::new();
+    let repo = fixture.roots.checkout().join(".provenant");
+    std::fs::create_dir_all(&repo).unwrap();
+    let file = repo.join("config.toml");
+    std::fs::write(&file, "[knobs]\nlanes.read_source='checkout'\n").unwrap();
+    let check = inspect_config(&fixture.roots, &DOMAINS).unwrap().check;
+    assert!(
+        check
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "read_source_value_renamed"
+                && finding.message.contains("using auto"))
+    );
+    assert!(std::fs::read_to_string(file).unwrap().contains("checkout"));
+}
+
 #[test]
 fn inspect_collects_ordered_unknown_type_range_and_domain_failures() {
     let fixture = Files::new();
@@ -1448,6 +1467,31 @@ fn inspect_config_returns_all_findings_and_binds_bytes_and_presence() {
     let second = inspect_config(&files.roots, &domains::NO_DOMAINS).unwrap();
     assert_eq!(first.check, second.check);
     assert_ne!(first.input_digest, second.input_digest);
+}
+
+#[test]
+fn inspect_config_reports_repository_checkout_read_source_with_repository_path() {
+    let files = Files::new();
+    let repository_config = files.roots.checkout().join(".provenant/config.toml");
+    std::fs::create_dir_all(repository_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &repository_config,
+        "schema_version=1\n[knobs]\nlanes.read_source='checkout'\n",
+    )
+    .unwrap();
+
+    let inspection = inspect_config(&files.roots, &domains::NO_DOMAINS).unwrap();
+    let finding = inspection
+        .check
+        .findings
+        .iter()
+        .find(|finding| finding.rule == "read_source_value_renamed")
+        .expect("repository checkout read-source setting has a typed finding");
+
+    assert_eq!(
+        finding.path.to_relative_path().unwrap().as_path(),
+        Path::new(".provenant/config.toml")
+    );
 }
 
 #[test]

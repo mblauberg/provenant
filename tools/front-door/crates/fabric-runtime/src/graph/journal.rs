@@ -2539,7 +2539,7 @@ fn decode_verified_checkpoint(
         return Err(JournalError::BadEnvelope);
     }
     let document = &stored.execution.document;
-    let has_v2 = document_requires_review_fields(document)
+    let has_v2 = super::validation::document_requires_v2_fields(document)
         || stored
             .execution
             .bases
@@ -2572,6 +2572,7 @@ fn decode_verified_checkpoint(
 
     let mut stored = stored;
     stored.checkpoint.bases = stored.execution.bases;
+    stored.checkpoint.subject = stored.execution.document.subject.clone();
     Ok(stored)
 }
 

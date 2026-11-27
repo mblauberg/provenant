@@ -510,9 +510,13 @@ pub(crate) fn resolve(
             });
             continue;
         };
-        let checked = from_toml(item)
-            .ok_or("type")
-            .and_then(|value| check(spec, &value).map(|()| value));
+        let checked = from_toml(item).ok_or("type").and_then(|value| {
+            if name == "lanes.read_source" && value.as_str() == Some("checkout") {
+                Err("read_source_value_renamed")
+            } else {
+                check(spec, &value).map(|()| value)
+            }
+        });
         match checked {
             Ok(value) => {
                 by_name
@@ -862,4 +866,14 @@ mod precedence_tests {
         );
         assert!(merge.ignored.is_empty());
     }
+}
+
+/// Read the read-source knob from a single TOML layer, preserving its spelling.
+pub fn read_source_value(text: &str) -> Option<String> {
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let knobs = doc.get("knobs")?.as_table_like()?;
+    let item = knobs
+        .get("lanes.read_source")
+        .or_else(|| knobs.get("lanes")?.as_table_like()?.get("read_source"))?;
+    item.as_str().map(str::to_owned)
 }

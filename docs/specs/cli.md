@@ -78,8 +78,9 @@ addressable.
 ## Upgrade verification
 
 `provenant upgrade --verify` builds its smoke fixture in an owner-only scratch
-project under a home-relative state path (`$HOME/.local/share/provenant/v2/smoke`
-by suffix), never in the system temporary directory. A peer can only name a
+project under the home-relative `domains.smoke.fixture_root` (default
+`.local/state/provenant-smoke`; see run-launch.md), never in the system
+temporary directory. A peer can only name a
 project whose canonical common directory is relative to its own home:
 `ProjectLocator` strips `$HOME`, hashes that relative path into a cross-host key
 and resolves it against the receiving home. A fixture under `$TMPDIR` is outside
@@ -655,10 +656,21 @@ settle stays pending for `domains.wait.actions_grace_seconds`, though a failure
 still settles a default wait at once. `--head SHA` pins the wait to one head:
 until GitHub reports that SHA the reading stays pending, so a push's predecessor
 never produces a verdict. Without `--head`, when the local tip differs from
-GitHub's head, the wait warns and watches the local tip. The last line of output
-names every target's settle state (`settled ok`, `failed`, `needs input` or
-`still running at timeout`) and the one next command; the observation method
-shows only under `--full` and in JSON.
+GitHub's head, the wait warns and watches the local tip. The wait pins one subject
+at admission and reports it (with `origin`, `policy` and `policy_source`) in JSON.
+`domains.wait.pr_head_policy` (default `pinned`, overridable per project and by
+`wait --pr-head-policy`, which requires `--pr` and conflicts with `--head`)
+decides what happens when that head moves: `pinned` settles `Unsuccessful` with
+cause `pr_head_moved` naming both heads and the rerun command; `follow_latest`
+re-pins and warns `PR_HEAD_FOLLOWED`, recording the old head in `followed_from`.
+`--head` always pins. `domains.wait.pr_head_source` chooses the forge head
+(`forge`), the local branch tip (`local`, warning and using the forge when no
+local branch exists) or today's `auto` preference. When no forge head is known at
+admission the wait warns `PR_HEAD_UNPINNED` and pins its first successful sample;
+`domains.wait.pr_head_unpinned` can instead refuse with cause `head_unpinned`.
+The last line of output names every target's settle state (`settled ok`, `failed`,
+`needs input` or `still running at timeout`) and the one next command; the
+observation method shows only under `--full` and in JSON.
 
 A head does not settle on whichever checks happen to exist. `wait --pr` reads
 the base branch's required-check policy through the same CI observer as the

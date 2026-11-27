@@ -281,9 +281,9 @@ fn chair_start_records_verified_identity_without_a_pending_handoff() -> Result {
     assert!(event["trace"]["project"].is_string());
     assert!(!log.contains("PRIVATE PROMPT"));
     assert!(!log.contains("transcript.jsonl"));
-    fs::create_dir_all(rig.project.join("config"))?;
+    fs::create_dir_all(rig.assets.join("config"))?;
     fs::write(
-        rig.project.join("config/telemetry-prices.toml"),
+        rig.assets.join("config/telemetry-prices.toml"),
         include_str!("../../../config/telemetry-prices.toml"),
     )?;
     let stats = rig.command(&["telemetry", "stats", "--json"])?;

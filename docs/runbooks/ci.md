@@ -64,6 +64,9 @@ declares the tests that must run natively on macOS, their invocations and
 required environment. `scripts/check-native-inventory` resolves it against the
 platform test list and passing results. Add required native coverage to the
 declaration with the test change.
+The inventory check runs only when the macOS archive job produced its test
+list. If that producer is skipped or fails, its result remains the failure
+signal instead of a second missing-artifact failure.
 
 ## Reproduce a CI failure locally
 

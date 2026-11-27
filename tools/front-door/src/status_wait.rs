@@ -3,10 +3,17 @@
 //! share one event source; pull requests remain on forge observation.
 // This edge owns the real deadline for channel receives and source I/O.
 #![allow(clippy::disallowed_methods)]
-use provenant_cli::{Globals, wait::LocalCadence};
-use provenant_core::CancelToken;
+use provenant_cli::{
+    Globals,
+    wait::{LocalCadence, PrHeadSource, PrHeadUnpinned},
+};
+use provenant_core::{CancelToken, Clock as _, GitOid, WallTime};
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-use provenant_records::Outcome;
+use provenant_records::{
+    Outcome,
+    subject::{HeadCheck, PinnedSubject, SubjectOrigin, SubjectPolicy, head_check},
+    warning::{self, WarningCode},
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -26,9 +33,18 @@ enum Source {
     Pr {
         number: u64,
         repository: Result<String, String>,
-        /// The head this wait is pinned to. Until GitHub reports it, no
-        /// verdict is taken from the pull request's current head.
-        watch_head: Option<String>,
+        /// The head and policy fixed once at admission. `None` until the forge
+        /// reports a head; the first successful sample pins it then.
+        subject: Option<Box<PinnedSubject>>,
+        /// Whether the pull request has reported the pinned head at least once.
+        /// Only after that does a different head count as a move.
+        pinned_head_seen: bool,
+        /// The effective `domains.wait.pr_head_policy` (or its command
+        /// override) this wait applies to every sample, one-off reads included.
+        policy: SubjectPolicy,
+        /// The typed source of the policy that fixed this head, carried on
+        /// every sample so a first pin reports the same source as admission.
+        policy_source: provenant_records::Source,
         complete: bool,
     },
 }
@@ -269,6 +285,11 @@ impl ActionsGrace {
         else {
             return reading;
         };
+        // A head that moved past the pinned subject is a terminal decision,
+        // not a passing verdict that might still gain Actions runs.
+        if line.cause.as_deref() == Some(crate::pr::status::PR_HEAD_MOVED) {
+            return reading;
+        }
         let first_read = match &self.head {
             Some((head, at)) if *head == line.head => *at,
             _ => {
@@ -288,7 +309,7 @@ impl ActionsGrace {
                 "{label} {}{} head={}",
                 line.class(),
                 line.cause_suffix(),
-                watched_head(&line)
+                line.awaiting.as_deref().unwrap_or(&line.head)
             ),
             data: json!(line),
         }
@@ -297,34 +318,248 @@ impl ActionsGrace {
 
 /// A PR reading is only a verdict about the head being watched. While GitHub
 /// reports a different head, keep the reading pending whatever its checks say.
-fn gate_line(
-    mut line: crate::pr::status::Line,
-    watch_head: Option<&str>,
-) -> crate::pr::status::Line {
+fn gate_line(line: &mut crate::pr::status::Line, watch_head: Option<&str>) {
     if let Some(head) = watch_head
         && line.awaiting.is_none()
         && line.head != head
     {
         line.await_head(head);
     }
-    line
 }
 
-/// The head a PR reading is watching, always shown in its status line.
-fn watched_head(line: &crate::pr::status::Line) -> &str {
-    line.awaiting.as_deref().unwrap_or(&line.head)
+/// The head a PR reading is watching, always shown in its status line. The
+/// pinned subject is authoritative: a head the pull request moved to is never
+/// reported as the thing the wait is judging.
+fn pinned_head(subject: &Option<Box<PinnedSubject>>, line: &crate::pr::status::Line) -> String {
+    subject.as_ref().map_or_else(
+        || line.awaiting.as_deref().unwrap_or(&line.head).to_owned(),
+        |subject| subject.head.to_string(),
+    )
+}
+
+/// The observation time for a subject pinned at admission or first sample.
+fn wall_now() -> WallTime {
+    provenant_os::clock::SystemClock::new()
+        .wall_now()
+        .unwrap_or(WallTime::UNIX_EPOCH)
+}
+
+/// Build the subject a `wait --pr` pins at admission. The invariant: exactly
+/// one head is fixed per wait and `--head` always pins, whatever the forge
+/// later reports. `auto` prefers a local tip that differs from the forge,
+/// `forge` always takes the reported head, and `local` takes the branch tip
+/// when there is one. A head without a chosen source leaves the subject unset.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the admission inputs stay explicit at this boundary"
+)]
+fn pr_subject(
+    number: u64,
+    repository: &Result<String, String>,
+    policy: SubjectPolicy,
+    source: PrHeadSource,
+    policy_source: &provenant_records::Source,
+    now: WallTime,
+    command_head: Option<&str>,
+    forge: Option<(String, String)>,
+    local_tip: Option<String>,
+) -> Option<PinnedSubject> {
+    let make = |head: GitOid,
+                origin: SubjectOrigin,
+                policy: SubjectPolicy,
+                source: &provenant_records::Source| PinnedSubject {
+        extra: Default::default(),
+        base: None,
+        head,
+        origin,
+        pinned_at: now,
+        policy,
+        repository: repository.as_ref().ok().cloned(),
+        base_ref: None,
+        policy_source: Some(source.clone()),
+        followed_from: Vec::new(),
+    };
+    if let Some(head) = command_head {
+        return GitOid::parse(head).ok().map(|head| {
+            make(
+                head,
+                SubjectOrigin::Explicit,
+                SubjectPolicy::Pinned,
+                &provenant_records::Source::at(provenant_records::Layer::Launch, "--head"),
+            )
+        });
+    }
+    let (sha, branch) = forge?;
+    if source != PrHeadSource::Forge
+        && let Some(local) = local_tip
+        && (source == PrHeadSource::Local || local != sha)
+        && let Ok(head) = GitOid::parse(&local)
+    {
+        return Some(make(
+            head,
+            SubjectOrigin::LocalRef { name: branch },
+            policy,
+            policy_source,
+        ));
+    }
+    GitOid::parse(&sha).ok().map(|head| {
+        make(
+            head,
+            SubjectOrigin::ForgePr {
+                repository: repository.as_ref().cloned().unwrap_or_default(),
+                number,
+            },
+            policy,
+            policy_source,
+        )
+    })
+}
+
+/// The terminal reading for a wait that refuses to proceed without a head.
+/// The invariant: the cause is the declared `head_unpinned` and the next step
+/// names the key that chose refusal, so the operator can change one setting.
+fn unpinned_refusal(number: u64, source: &str) -> Reading {
+    Reading {
+        settle: Settle::Unsuccessful,
+        line: format!("#{number} head_unpinned ({source})"),
+        data: json!({
+            "number": number,
+            "cause": crate::pr::status::HEAD_UNPINNED,
+            "next": format!("set {source} to first_sample, or rerun with --head"),
+        }),
+    }
+}
+
+/// The fixed context of one PR observation: which pull request, the policy a
+/// first pin takes and the key that chose it, and when it was observed.
+#[derive(Clone, Copy)]
+pub(crate) struct PrSample<'a> {
+    pub(crate) number: u64,
+    pub(crate) repository: &'a Result<String, String>,
+    pub(crate) policy: SubjectPolicy,
+    pub(crate) policy_source: &'a provenant_records::Source,
+    pub(crate) now: WallTime,
+}
+
+/// Apply one PR observation to the wait's pinned subject. Updates `subject`
+/// and `pinned_head_seen` in place; returns `true` only when a previously pinned_head_seen head moved
+/// past a pinned subject. The invariant: a verdict is drawn only from the head
+/// pinned at admission (or the first sample when the forge was unreadable),
+/// never from a later head whose checks belong to different work.
+fn apply_subject_sample(
+    subject: &mut Option<Box<PinnedSubject>>,
+    pinned_head_seen: &mut bool,
+    head_check_seen: &mut Option<HeadCheck>,
+    line: &mut crate::pr::status::Line,
+    sample: &PrSample<'_>,
+) -> bool {
+    let PrSample {
+        number,
+        repository,
+        policy,
+        policy_source,
+        now,
+    } = *sample;
+    let Some(subject_ref) = subject.as_deref_mut() else {
+        // The forge was unreadable at admission: the first successful sample
+        // pins its head, with the `ForgePr` origin and the configured policy.
+        if let Ok(head) = GitOid::parse(&line.head) {
+            *subject = Some(Box::new(PinnedSubject {
+                extra: Default::default(),
+                base: None,
+                head,
+                origin: SubjectOrigin::ForgePr {
+                    repository: repository.as_ref().cloned().unwrap_or_default(),
+                    number,
+                },
+                pinned_at: now,
+                policy,
+                repository: repository.as_ref().ok().cloned(),
+                base_ref: None,
+                policy_source: Some(policy_source.clone()),
+                followed_from: Vec::new(),
+            }));
+        }
+        *pinned_head_seen = true;
+        return false;
+    };
+    let (pinned, policy) = (subject_ref.head, subject_ref.policy);
+    let pinned_text = pinned.to_string();
+    let observed = head_check(
+        &pinned,
+        GitOid::parse(&line.head).map_err(|error| error.to_string()),
+    );
+    *head_check_seen = Some(observed.clone());
+    match observed {
+        HeadCheck::Unmoved => *pinned_head_seen = true,
+        HeadCheck::Moved { current, .. } => {
+            if *pinned_head_seen {
+                match policy {
+                    SubjectPolicy::Pinned => {
+                        line.cause = Some(crate::pr::status::PR_HEAD_MOVED.to_owned());
+                        line.next = Some(format!(
+                            "rerun provenant wait --pr {number} for the new head, or set domains.wait.pr_head_policy=follow_latest"
+                        ));
+                        return true;
+                    }
+                    SubjectPolicy::FollowLatest => {
+                        warn(
+                            warning::PR_HEAD_FOLLOWED,
+                            format!(
+                                "#{number} head moved from {pinned} to {current}; following the new head"
+                            ),
+                        );
+                        subject_ref.followed_from.push(pinned);
+                        subject_ref.head = current;
+                        subject_ref.pinned_at = now;
+                        *pinned_head_seen = false;
+                    }
+                }
+            }
+        }
+        HeadCheck::Unavailable { .. } => {}
+    }
+    if !*pinned_head_seen {
+        gate_line(line, Some(&pinned_text));
+    }
+    false
+}
+
+fn warn(code: WarningCode, message: String) {
+    warning::warn(warning::Warning::new(
+        code,
+        message,
+        provenant_records::warning::detected_source(code),
+    ));
+}
+
+/// Report that a local head was requested but the branch has no local tip.
+/// The source names the key that chose `local`, so a caller can change it.
+fn warn_local_head_unavailable(number: u64, source: &str) {
+    warn(
+        warning::PR_HEAD_LOCAL_UNAVAILABLE,
+        format!(
+            "#{number}: no local branch tip for this pull request; using the forge head ({source})"
+        ),
+    );
 }
 
 /// The tip of a branch known locally, checked in the local repository only.
-/// Both the checked-out branch and a remote-tracking branch count; a missing
-/// repository or an unsafe branch name simply means no local tip is known.
-fn local_branch_tip(cwd: &Path, branch: &str) -> Option<String> {
+/// Both the checked-out branch and its tracking ref under the configured forge
+/// remote count; a missing repository, remote or unsafe branch name simply
+/// means no local tip is known.
+fn local_branch_tip(state: &Path, cwd: &Path, branch: &str) -> Option<String> {
     let binary = provenant_os::git::git_executable()?;
-    let refs = [
-        provenant_confinement::repo::GitRefName::branch(branch).ok()?,
-        provenant_confinement::repo::GitRefName::remote_tracking(format!("origin/{branch}"))
+    let mut refs = vec![provenant_confinement::repo::GitRefName::branch(branch).ok()?];
+    if let Some(remote) = provenant_cli::run::resolved_forge_remote(state, cwd) {
+        refs.push(
+            provenant_confinement::repo::GitRefName::remote_tracking(format!(
+                "{}/{branch}",
+                remote.as_str()
+            ))
             .ok()?,
-    ];
+        );
+    }
     let environment: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(key, _)| {
             !key.to_str()
@@ -445,6 +680,127 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
     }
 }
 
+/// Render one PR observation as a reading. `head_moved` forces an
+/// unsuccessful settlement for a pinned subject whose head moved after it was
+/// pinned_head_seen. The subject is carried in the data so status and the wait envelope
+/// show exactly what the wait pinned.
+fn pr_reading(
+    label: &str,
+    subject: &Option<Box<PinnedSubject>>,
+    head_check: &Option<HeadCheck>,
+    line: crate::pr::status::Line,
+    complete: bool,
+    head_moved: bool,
+) -> Reading {
+    let head = pinned_head(subject, &line);
+    let settle = if head_moved {
+        Settle::Unsuccessful
+    } else {
+        match line.wait_verdict(complete) {
+            Some(true) => Settle::Succeeded,
+            Some(false) => Settle::Unsuccessful,
+            None => Settle::Pending,
+        }
+    };
+    let mut data = json!(line);
+    data["subject"] = json!(subject);
+    data["head_check"] = json!(head_check);
+    Reading {
+        settle,
+        line: format!(
+            "{label} {}{} head={head}",
+            line.class(),
+            line.cause_suffix()
+        ),
+        data,
+    }
+}
+
+/// Read one PR source, applying the wait's subject policy to the observation.
+/// `source` is owned by the polling worker so `subject` and `pinned_head_seen` persist
+/// across samples: a verdict is only ever about the pinned head.
+fn read_pr(
+    source: &mut Source,
+    edge: &provenant_cli::run::Edge<'_>,
+    _session: &mut Option<provenant_cli::fabric::Context>,
+    deadline: Instant,
+    pr_read_timeout: Duration,
+    cancel: &CancelToken,
+) -> Reading {
+    let label = source.label();
+    let (number, repository, complete, policy, policy_source) = match &*source {
+        Source::Pr {
+            number,
+            repository,
+            complete,
+            policy,
+            policy_source,
+            ..
+        } => (
+            *number,
+            repository.clone(),
+            *complete,
+            *policy,
+            policy_source.clone(),
+        ),
+        _ => return Reading::unavailable(&label, "not a pull request source"),
+    };
+    let Ok(repository) = repository else {
+        return Reading::unavailable(&label, "forge context unavailable");
+    };
+    let mut line = match crate::pr::status::wait_line_observed(
+        edge.cwd,
+        edge.roots.state.as_path(),
+        &repository,
+        number,
+        &forge_request(deadline, cancel, pr_read_timeout),
+        // Spec: docs/specs/cli.md#ci-observations — the PR path reads
+        // through the one observer and its one sourced retry family.
+        crate::pr::observer::retry(edge.roots).poll.value,
+    ) {
+        Ok(line) => line,
+        Err(error) => return Reading::unavailable(&label, &error.to_string()),
+    };
+    let mut head_check_seen = None;
+    let head_moved = match &mut *source {
+        Source::Pr {
+            subject,
+            pinned_head_seen,
+            ..
+        } => apply_subject_sample(
+            subject,
+            pinned_head_seen,
+            &mut head_check_seen,
+            &mut line,
+            &PrSample {
+                number,
+                repository: &Ok(repository),
+                policy,
+                policy_source: &policy_source,
+                now: wall_now(),
+            },
+        ),
+        _ => unreachable!("checked above"),
+    };
+    line.attach_failure_digest(
+        edge.roots.state.as_path(),
+        edge.cwd,
+        &forge_request(deadline, cancel, pr_read_timeout),
+    );
+    let subject = match &*source {
+        Source::Pr { subject, .. } => subject.clone(),
+        _ => unreachable!("checked above"),
+    };
+    pr_reading(
+        &label,
+        &subject,
+        &head_check_seen,
+        line,
+        complete,
+        head_moved,
+    )
+}
+
 /// Read one source after a native event or a configured fallback tick. A graph
 /// read also re-drives the journal-locked advance when its remote reading is
 /// terminal, so a settled peer need not wait for the next host tick.
@@ -464,6 +820,12 @@ fn read(
     }
 
     match source {
+        Source::Pr { .. } => {
+            // A one-off read has no state to carry forward; the polling worker
+            // owns the persistent subject for the wait loop.
+            let mut owned = source.clone();
+            read_pr(&mut owned, edge, session, deadline, pr_read_timeout, cancel)
+        }
         Source::UnreadableGraph(_, error) => classify_rows(
             &label,
             &[json!({
@@ -480,58 +842,20 @@ fn read(
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
             }
         }
-        Source::Pr {
-            number,
-            repository,
-            watch_head,
-            complete,
-        } => match repository {
-            Ok(repository) => match crate::pr::status::wait_line_observed(
-                edge.cwd,
-                edge.roots.state.as_path(),
-                repository,
-                *number,
-                &forge_request(deadline, cancel, pr_read_timeout),
-                // Spec: docs/specs/cli.md#ci-observations — the PR path reads
-                // through the one observer and its one sourced retry family.
-                crate::pr::observer::retry(edge.roots).poll.value,
-            ) {
-                Ok(line) => {
-                    let mut line = gate_line(line, watch_head.as_deref());
-                    line.attach_failure_digest(
-                        edge.roots.state.as_path(),
-                        edge.cwd,
-                        &forge_request(deadline, cancel, pr_read_timeout),
-                    );
-                    Reading {
-                        settle: match line.wait_verdict(*complete) {
-                            Some(true) => Settle::Succeeded,
-                            Some(false) => Settle::Unsuccessful,
-                            None => Settle::Pending,
-                        },
-                        line: format!(
-                            "{label} {}{} head={}",
-                            line.class(),
-                            line.cause_suffix(),
-                            watched_head(&line)
-                        ),
-                        data: json!(line),
-                    }
-                }
-                Err(error) => Reading::unavailable(&label, &error.to_string()),
-            },
-            Err(error) => Reading::unavailable(&label, error),
-        },
     }
 }
 
+/// Render a PR journal event as a reading, applying the same subject policy
+/// as a forge read. The label is derived from the PR number so event readings
+/// agree with direct readings in the wait's per-target rows.
 pub(crate) fn reading_pr_event(
-    number: u64,
-    watch_head: Option<&str>,
+    subject: &mut Option<Box<PinnedSubject>>,
+    pinned_head_seen: &mut bool,
+    sample: &PrSample<'_>,
     complete: bool,
     detail: Value,
 ) -> Reading {
-    let label = format!("#{number}");
+    let label = format!("#{}", sample.number);
     let status = &detail["status"];
     let malformed: Vec<_> = [
         "draft",
@@ -565,30 +889,31 @@ pub(crate) fn reading_pr_event(
     })
     .collect();
     match serde_json::from_value::<crate::pr::status::Line>(status.clone()) {
-        Ok(line) => {
-            let line = gate_line(line, watch_head);
-            let summary = format!(
-                "{label} {}{} head={}",
-                line.class(),
-                line.cause_suffix(),
-                watched_head(&line)
+        Ok(mut line) => {
+            let mut head_check_seen = None;
+            let head_moved = apply_subject_sample(
+                subject,
+                pinned_head_seen,
+                &mut head_check_seen,
+                &mut line,
+                sample,
             );
-            Reading {
-                settle: match line.wait_verdict(complete) {
-                    Some(true) => Settle::Succeeded,
-                    Some(false) => Settle::Unsuccessful,
-                    None => Settle::Pending,
-                },
-                line: if malformed.is_empty() {
-                    summary
-                } else {
-                    format!(
-                        "{summary} warning: invalid display fields {}",
-                        malformed.join(",")
-                    )
-                },
-                data: json!(line),
+            let mut reading = pr_reading(
+                &label,
+                subject,
+                &head_check_seen,
+                line,
+                complete,
+                head_moved,
+            );
+            if !malformed.is_empty() {
+                reading.line = format!(
+                    "{} warning: invalid display fields {}",
+                    reading.line,
+                    malformed.join(",")
+                );
             }
+            reading
         }
         Err(error) => Reading::unavailable(&label, &format!("invalid PR journal status: {error}")),
     }
@@ -1700,6 +2025,21 @@ pub(crate) fn run(
     prs.dedup();
     let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
     let actions_grace = Duration::from_secs(settings.actions_grace_seconds);
+    // One resolution per wait: the project row the wait resolves its
+    // repository from beats the host section, and every sourced report cites
+    // the key that supplied the effective value.
+    let project_key = project_id.map(|id| id.to_string());
+    let head = settings.effective_pr_head(project_key.as_deref());
+    let pr_head_policy = command.pr_head_policy.unwrap_or(head.policy);
+    let pr_policy_source = if command.head.is_some() {
+        provenant_records::Source::at(provenant_records::Layer::Launch, "--head")
+    } else if command.pr_head_policy.is_some() {
+        provenant_records::Source::at(provenant_records::Layer::Launch, "--pr-head-policy")
+    } else {
+        origin.source(&head.policy_key)
+    };
+    let head_source_source = origin.describe(&head.source_key);
+    let unpinned_source = origin.describe(&head.unpinned_key);
     if sources.len() + prs.len() > settings.max_targets as usize {
         return crate::fail(
             "wait",
@@ -1716,39 +2056,78 @@ pub(crate) fn run(
             crate::pr::status::wait_repository(edge.roots.state.as_path(), edge.cwd, &request)
                 .map_err(|error| error.to_string());
         sources.extend(prs.into_iter().map(|number| {
-            let watch_head = command.head.clone().or_else(|| {
-                let repository = repository.as_ref().ok()?;
-                let reported = crate::pr::status::wait_head(
-                    edge.roots.state.as_path(),
-                    edge.cwd,
-                    repository,
-                    number,
-                    &request,
-                )
-                .ok()?;
-                let local = local_branch_tip(edge.cwd, &reported.branch)?;
-                (local != reported.sha).then(|| {
-                    provenant_records::warning::warn(
-                        provenant_records::warning::Warning::new(
-                            provenant_records::warning::BRANCH_BEHIND_BASE,
-                            format!(
-                                "#{number}: local tip {local} differs from GitHub head {}; waiting for the local tip",
-                                reported.sha
-                            ),
-                         provenant_records::warning::detected_source(provenant_records::warning::BRANCH_BEHIND_BASE))
-                        .subject(reported.branch.clone())
-                        .source(provenant_records::Source {
-                            layer: provenant_records::Layer::Detected,
-                            origin: Some(format!("GitHub #{number}")),
-                        }),
-                    );
-                    local
+            let forge = if command.head.is_some() {
+                None
+            } else {
+                repository.as_ref().ok().and_then(|repository| {
+                    crate::pr::status::wait_head(
+                        edge.roots.state.as_path(),
+                        edge.cwd,
+                        repository,
+                        number,
+                        &request,
+                    )
+                    .ok()
+                    .map(|reported| (reported.sha, reported.branch))
                 })
-            });
+            };
+            let local_tip = forge
+                .as_ref()
+                .and_then(|(_, branch)| local_branch_tip(edge.roots.state.as_path(), edge.cwd, branch));
+            if let (Some((sha, branch)), Some(local)) = (&forge, &local_tip)
+                && local != sha
+            {
+                let action = if head.source == PrHeadSource::Forge {
+                    "ignoring the local tip"
+                } else {
+                    "waiting for the local tip"
+                };
+                warning::warn(
+                    warning::Warning::new(
+                        warning::BRANCH_BEHIND_BASE,
+                        format!("#{number}: local tip {local} differs from GitHub head {sha}; {action}"), provenant_records::warning::detected_source(warning::BRANCH_BEHIND_BASE),)
+                    .subject(branch.clone()),
+                );
+            }
+            if head.source == PrHeadSource::Local
+                && command.head.is_none()
+                && local_tip.is_none()
+                && forge.is_some()
+            {
+                warn_local_head_unavailable(number, &head_source_source);
+            }
+            let unpinned = command.head.is_none() && forge.is_none();
+            let subject = pr_subject(
+                number,
+                &repository,
+                pr_head_policy,
+                head.source,
+                &pr_policy_source,
+                wall_now(),
+                command.head.as_deref(),
+                forge,
+                local_tip,
+            );
+            if unpinned {
+                if head.unpinned == PrHeadUnpinned::Refuse {
+                    validation.insert(
+                        format!("#{number}"),
+                        unpinned_refusal(number, &unpinned_source),
+                    );
+                } else {
+                    warn(
+                        warning::PR_HEAD_UNPINNED,
+                        format!("#{number}: forge head unavailable; the first observation pins the subject ({unpinned_source})"),
+                    );
+                }
+            }
             Source::Pr {
                 number,
                 repository: repository.clone(),
-                watch_head,
+                subject: subject.map(Box::new),
+                pinned_head_seen: false,
+                policy: pr_head_policy,
+                policy_source: pr_policy_source.clone(),
                 complete,
             }
         }));
@@ -2089,33 +2468,39 @@ pub(crate) fn run(
             let stop = &stop;
             let interval = Duration::from_secs(60);
             scope.spawn(move || {
-                let mut session = None;
-                let (watch_head, complete) = match source {
+                // Own the source so the subject and `pinned_head_seen` survive across
+                // samples: they are the wait's one pinned decision.
+                let mut source = (*source).clone();
+                let (number, repository, complete, policy_source) = match &source {
                     Source::Pr {
-                        watch_head,
+                        number,
+                        repository,
                         complete,
+                        policy_source,
                         ..
-                    } => (watch_head.as_deref(), *complete),
-                    _ => (None, false),
+                    } => (
+                        *number,
+                        repository.clone(),
+                        *complete,
+                        policy_source.clone(),
+                    ),
+                    _ => return,
                 };
+                let label = source.label();
+                let mut session = None;
                 // Each subscription owns its replay cursor. No target can
                 // consume another target's events from a shared cursor.
                 let setup =
                     (|| -> Result<crate::pr::observer::journal::PrJournal, Box<dyn std::error::Error>> {
                         // The observer module owns both transports: this journal
                         // supplies a current PR observation when one exists, and
-                        // `read` falls back to the forge through the observer.
+                        // `read_pr` falls back to the forge through the observer.
                         let journal = crate::pr::observer::journal::PrJournal::open(
                             edge.roots.state.as_path(),
                             edge.cwd,
                         )?;
-                        if let Source::Pr {
-                            number,
-                            repository: Ok(repository),
-                            ..
-                        } = source
-                        {
-                            journal.register(repository, *number, None)?;
+                        if let Ok(repository) = &repository {
+                            journal.register(repository, number, None)?;
                         }
                         Ok(journal)
                     })();
@@ -2131,16 +2516,15 @@ pub(crate) fn run(
                 };
                 let mut grace = ActionsGrace::new(actions_grace);
                 let initial = grace.apply(
-                    read(
-                        source,
+                    read_pr(
+                        &mut source,
                         edge,
                         &mut session,
                         deadline,
                         pr_read_timeout,
                         &stop.cancel,
-                        workers,
                     ),
-                    &source.label(),
+                    &label,
                     complete,
                 );
                 let done = initial.done();
@@ -2161,39 +2545,46 @@ pub(crate) fn run(
                     {
                         break;
                     }
-                    let reading = match (event_reader.as_mut(), source) {
-                        (
-                            Some(journal),
-                            Source::Pr {
+                    let reading = match (event_reader.as_mut(), repository.as_ref()) {
+                        (Some(journal), Ok(repository_ref)) => {
+                            match journal.next(
+                                repository_ref,
                                 number,
-                                repository: Ok(repository),
-                                ..
-                            },
-                        ) => match journal.next(
-                            repository,
-                            *number,
-                            Duration::from_secs(60)
-                                .saturating_sub(last_reconcile.elapsed())
-                                .min(deadline.saturating_duration_since(Instant::now()))
-                                .min(grace.due_in().unwrap_or(Duration::MAX)),
-                            &stop.cancel,
-                        ) {
+                                Duration::from_secs(60)
+                                    .saturating_sub(last_reconcile.elapsed())
+                                    .min(deadline.saturating_duration_since(Instant::now()))
+                                    .min(grace.due_in().unwrap_or(Duration::MAX)),
+                                &stop.cancel,
+                            ) {
                             Ok(Some(detail)) => {
                                 last_reconcile = Instant::now();
                                 if detail["status"].is_object() {
-                                    let event =
-                                        reading_pr_event(*number, watch_head, complete, detail);
+                                    let event = match &mut source {
+                                        Source::Pr { subject, pinned_head_seen, .. } => reading_pr_event(
+                                            subject,
+                                            pinned_head_seen,
+                                            &PrSample {
+                                                number,
+                                                repository: &repository,
+                                                policy: pr_head_policy,
+                                                policy_source: &policy_source,
+                                                now: wall_now(),
+                                            },
+                                            complete,
+                                            detail,
+                                        ),
+                                        _ => unreachable!("checked above"),
+                                    };
                                     if complete || event.settle == Settle::Succeeded {
                                         // Journal records are bounded and omit Actions runs.
                                         // Reconcile through the observer before settling.
-                                        read(
-                                            source,
+                                        read_pr(
+                                            &mut source,
                                             edge,
                                             &mut session,
                                             deadline,
                                             pr_read_timeout,
                                             &stop.cancel,
-                                            workers,
                                         )
                                     } else {
                                         event
@@ -2201,14 +2592,13 @@ pub(crate) fn run(
                                 } else {
                                     // Webhook records carry identifiers only;
                                     // fetch the authoritative PR status now.
-                                    read(
-                                        source,
+                                    read_pr(
+                                        &mut source,
                                         edge,
                                         &mut session,
                                         deadline,
                                         pr_read_timeout,
                                         &stop.cancel,
-                                        workers,
                                     )
                                 }
                             }
@@ -2222,30 +2612,30 @@ pub(crate) fn run(
                                 // nothing else would settle it.
                                 if !grace.is_due()
                                     && journal
-                                        .source_current(repository, *number, None)
+                                        .source_current(repository_ref, number, None)
                                         .unwrap_or(false)
                                 {
                                     continue;
                                 }
-                                read(
-                                    source,
+                                read_pr(
+                                    &mut source,
                                     edge,
                                     &mut session,
                                     deadline,
                                     pr_read_timeout,
                                     &stop.cancel,
-                                    workers,
                                 )
                             }
                             Ok(None) => continue,
                             Err(error) => {
                                 event_reader = None;
                                 Reading::unavailable(
-                                    &source.label(),
+                                    &label,
                                     &format!("PR event journal failed: {error}"),
                                 )
                             }
-                        },
+                            }
+                        }
                         _ => {
                             if !stop.pause(
                                 interval
@@ -2256,18 +2646,17 @@ pub(crate) fn run(
                                 break;
                             }
                             last_reconcile = Instant::now();
-                            read(
-                                source,
+                            read_pr(
+                                &mut source,
                                 edge,
                                 &mut session,
                                 deadline,
                                 pr_read_timeout,
                                 &stop.cancel,
-                                workers,
                             )
                         }
                     };
-                    let reading = grace.apply(reading, &source.label(), complete);
+                    let reading = grace.apply(reading, &label, complete);
                     let finished = reading.done();
                     if sender
                         .send(Update {
@@ -2435,1029 +2824,15 @@ fn write_line(line: &str) -> std::io::Result<()> {
     stdout.flush()
 }
 
+/// The policy source the unit tests pin with: the compiled profile's key.
+#[cfg(test)]
+pub(crate) fn test_policy_source() -> provenant_records::Source {
+    provenant_records::Source::at(
+        provenant_records::Layer::Default,
+        "test#domains.wait.pr_head_policy",
+    )
+}
+
 #[cfg(test)]
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
-mod tests {
-    #[test]
-    fn pr_journal_display_fields_degrade_without_unavailable() {
-        for value in [
-            None,
-            Some(serde_json::Value::Null),
-            Some(serde_json::json!([])),
-        ] {
-            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc",
-                "checks_total":1,"checks_failed":0,"checks_pending":0,"review":"APPROVED"});
-            if let Some(value) = value {
-                status["failing_checks"] = value;
-            }
-            let reading =
-                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}));
-            assert_eq!(reading.settle, super::Settle::Succeeded);
-            assert!(!reading.line.contains("unavailable"));
-        }
-        for field in [
-            "draft",
-            "checks_passed",
-            "checks_total",
-            "failing_checks",
-            "pending_checks",
-            "merge",
-        ] {
-            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
-            status[field] = serde_json::json!({"invalid":true});
-            let reading =
-                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}));
-            assert!(!reading.line.contains("unavailable"), "{field}");
-            assert!(reading.line.contains("warning"), "{field}");
-            assert_eq!(reading.settle, super::Settle::Pending, "{field}");
-        }
-        // These fields affect the verdict. Malformed values fail closed as an
-        // unavailable, still-pending observation instead of defaulting to a
-        // successful or terminal classification.
-        for field in ["checks_failed", "checks_pending", "review", "error"] {
-            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
-            status[field] = serde_json::json!({"invalid":true});
-            let reading =
-                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}));
-            assert_eq!(reading.settle, super::Settle::Pending, "{field}");
-            assert!(reading.line.contains("unavailable"), "{field}");
-        }
-        for field in ["number", "state", "head"] {
-            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
-            status.as_object_mut().unwrap().remove(field);
-            assert!(
-                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}))
-                    .line
-                    .contains("unavailable")
-            );
-        }
-    }
-
-    use super::*;
-    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
-    use provenant_core::Clock as _;
-
-    #[test]
-    fn a_selection_with_peer_or_relayed_attempts_is_not_locally_represented() {
-        let row = |id: &str| json!({"kind": "attempt", "attempt_id": id});
-        let here = "aa".to_owned();
-        assert!(rows_local(
-            &[row("aa/1"), json!({"kind": "graph"})],
-            Some(&here)
-        ));
-        assert!(!rows_local(&[row("aa/1"), row("bb/2")], Some(&here)));
-        assert!(!rows_local::<String>(&[row("aa/1")], None));
-    }
-
-    #[test]
-    fn completed_peer_source_remains_in_final_observation() {
-        let host = provenant_core::HostId::parse(&"a".repeat(32)).expect("fixture host");
-        let completed_peer = Reading {
-            settle: Settle::Succeeded,
-            line: "peer settled".into(),
-            data: json!({"rows":[{"kind":"attempt","attempt_id":format!("{}/2", "b".repeat(32))}]}),
-        };
-        let mut history = ObservationHistory::default();
-        history.record(&completed_peer, Some(&host));
-
-        let final_observation = history.render(
-            None,
-            &LocalCadence::compiled(Duration::from_millis(500)),
-            Some("event source unavailable: fixture parent missing"),
-        );
-        assert!(completed_peer.done());
-        assert!(final_observation.contains("peer/relay or unrepresented rows reread every 500 ms"));
-    }
-
-    #[test]
-    fn local_observation_reports_the_fallback_source_and_reason() {
-        let observation = LocalObservation::paced(
-            LocalCadence::compiled(Duration::from_millis(40)),
-            "fixture has no native event backend",
-        );
-        let report = observation.report(false);
-        assert!(
-            report.contains(provenant_fabric_runtime::coordination::LOCAL_OBSERVATION_INTERVAL_KEY)
-        );
-        assert!(report.contains("fixture has no native event backend"));
-    }
-
-    #[test]
-    fn repeated_short_waits_eventually_reach_one_paced_fallback_tick() {
-        let interval = Duration::from_millis(40);
-        let mut observation = LocalObservation::paced(
-            LocalCadence::compiled(interval),
-            "fixture event source unavailable",
-        );
-        let clock = provenant_core::TestClock::new(
-            provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
-            provenant_core::MonoTime::from_micros(0),
-        );
-        for _ in 0..3 {
-            assert_eq!(
-                observation
-                    .wait(Duration::from_millis(10), &CancelToken::new(), &clock)
-                    .expect("fixture clock can advance"),
-                ObservationWake::NativeTimeout
-            );
-        }
-        assert_eq!(
-            observation
-                .wait(Duration::from_millis(10), &CancelToken::new(), &clock)
-                .expect("fixture clock can advance"),
-            ObservationWake::PacedFallback
-        );
-        assert_eq!(clock.mono_now().as_micros(), 40_000);
-        assert_eq!(
-            observation
-                .wait(Duration::from_millis(10), &CancelToken::new(), &clock)
-                .expect("next cadence remains paced"),
-            ObservationWake::NativeTimeout
-        );
-        assert_eq!(clock.mono_now().as_micros(), 50_000);
-    }
-
-    #[test]
-    fn registration_does_not_create_an_event_log_and_empty_timeout_is_not_a_read() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let log = directory.path().join("graph.events.jsonl");
-        let mut observation = LocalObservation::subscribe(
-            std::slice::from_ref(&log),
-            LocalCadence::compiled(Duration::from_secs(1)),
-        );
-        assert!(!log.exists());
-        let clock = provenant_core::TestClock::new(
-            provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
-            provenant_core::MonoTime::from_micros(0),
-        );
-        let wake = observation
-            .wait(Duration::ZERO, &CancelToken::new(), &clock)
-            .expect("zero deadline does not touch the clock");
-        assert_eq!(wake, ObservationWake::NativeTimeout);
-    }
-
-    #[test]
-    fn a_short_fallback_deadline_is_not_mistaken_for_a_paced_tick() {
-        let mut observation = LocalObservation::paced(
-            LocalCadence::compiled(Duration::from_secs(1)),
-            "fixture has no native event backend",
-        );
-        let clock = provenant_core::TestClock::new(
-            provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
-            provenant_core::MonoTime::from_micros(0),
-        );
-        let wake = observation
-            .wait(Duration::ZERO, &CancelToken::new(), &clock)
-            .expect("zero deadline does not touch the clock");
-        assert_eq!(wake, ObservationWake::NativeTimeout);
-    }
-
-    #[test]
-    fn graph_events_read_only_local_sources_and_remote_deadlines_add_remote_sources() {
-        let pending = [0, 1, 2];
-        let remote = [1, 2].into_iter().collect();
-        let as_set = |indices: Vec<usize>| {
-            indices
-                .into_iter()
-                .collect::<std::collections::BTreeSet<_>>()
-        };
-        let event_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
-        assert_eq!(as_set(event_reads.clone()), [0].into_iter().collect());
-        let native_timeout = graph_reads_for_wake(&pending, &remote, GraphWake::NativeTimeout);
-        assert!(native_timeout.is_empty());
-        assert_eq!(
-            graph_reads_for_wake(&pending, &remote, GraphWake::StallDeadline),
-            [0]
-        );
-        let mut due_event_reads = event_reads;
-        include_due_remote_reads(&mut due_event_reads, &pending, &remote, true);
-        assert_eq!(as_set(due_event_reads), pending.into_iter().collect());
-        let mut due_timeout_reads = native_timeout;
-        include_due_remote_reads(&mut due_timeout_reads, &pending, &remote, true);
-        assert_eq!(as_set(due_timeout_reads), [1, 2].into_iter().collect());
-        assert_eq!(
-            as_set(graph_reads_for_wake(
-                &pending,
-                &remote,
-                GraphWake::PacedFallback
-            )),
-            pending.into_iter().collect()
-        );
-    }
-
-    #[test]
-    fn a_flood_of_local_events_cannot_starve_a_due_remote_poll() {
-        let pending = [0, 1];
-        let remote = [1].into_iter().collect();
-        let origin = Instant::now();
-        let interval = Duration::from_millis(100);
-        let next_remote_poll = origin + interval;
-
-        for elapsed in (0..100).step_by(10) {
-            let now = origin + Duration::from_millis(elapsed);
-            let mut reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
-            include_due_remote_reads(&mut reads, &pending, &remote, now >= next_remote_poll);
-            assert_eq!(reads, [0]);
-        }
-        let due = origin + interval;
-        let mut due_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
-        include_due_remote_reads(&mut due_reads, &pending, &remote, due >= next_remote_poll);
-        assert_eq!(due_reads, pending);
-        let next_remote_poll = due + interval;
-        let mut next_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
-        include_due_remote_reads(
-            &mut next_reads,
-            &pending,
-            &remote,
-            due + Duration::from_millis(99) >= next_remote_poll,
-        );
-        assert_eq!(next_reads, [0]);
-        let mut second_due_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
-        include_due_remote_reads(
-            &mut second_due_reads,
-            &pending,
-            &remote,
-            due + interval >= next_remote_poll,
-        );
-        assert_eq!(second_due_reads, pending);
-    }
-
-    #[test]
-    fn failed_reread_retains_the_last_snapshot_as_stale() {
-        for failure_delivered in [false, true] {
-            let rows = json!({"rows":[{"kind":"graph","state":"pending"}]});
-            let mut latest = vec![Some(Reading {
-                settle: Settle::Pending,
-                line: "g pending".into(),
-                data: rows.clone(),
-            })];
-            let (sender, receiver) = mpsc::channel();
-            if failure_delivered {
-                sender
-                    .send(Update {
-                        target: 0,
-                        reading: Reading::unavailable("g", "relay timed out"),
-                    })
-                    .unwrap();
-            }
-            drop(sender);
-            let mut settled = Vec::new();
-            assert!(!collect(
-                &receiver,
-                &mut latest,
-                &mut settled,
-                Instant::now(),
-                WaitMode::All,
-                &mut |_, _| {}
-            ));
-            let last = latest[0].as_ref().unwrap();
-            assert_eq!(last.data["rows"], rows["rows"]);
-            assert_eq!(last.data["stale"], true);
-            assert_eq!(last.settle, Settle::Pending);
-            assert!(settled.is_empty());
-        }
-    }
-
-    #[test]
-    fn a_target_settling_after_the_last_sample_is_reported_settled_at_expiry() {
-        // Expiry is modelled without a clock: the deadline has passed and the
-        // workers are gone, leaving only the last paced sample, which saw the
-        // graph pending. Its local store has settled since.
-        let host = provenant_core::HostId::parse(&"a".repeat(32)).expect("fixture host");
-        let graph = |state: &str, outcome: &str| {
-            classify_rows(
-                "fix",
-                &[json!({"kind":"graph","state":state,"outcome":outcome})],
-            )
-        };
-        let pull = Source::Pr {
-            number: 7,
-            repository: Ok("owner/repo".into()),
-            watch_head: None,
-            complete: false,
-        };
-        for (with_pull, expected) in [(false, Outcome::Ok), (true, Outcome::Timeout)] {
-            let mut sources = vec![Source::Graph("fix".parse().expect("target"))];
-            if with_pull {
-                sources.push(pull.clone());
-            }
-            let (sender, receiver) = mpsc::channel();
-            sender
-                .send(Update {
-                    target: 0,
-                    reading: graph("pending", ""),
-                })
-                .expect("queue the last sample");
-            drop(sender);
-            let mut latest = vec![None; sources.len()];
-            if with_pull {
-                latest[1] = Some(reading(Settle::Pending));
-            }
-            let mut settled = Vec::new();
-            let done = collect(
-                &receiver,
-                &mut latest,
-                &mut settled,
-                Instant::now(),
-                WaitMode::All,
-                &mut |_, _| {},
-            );
-            assert!(!done, "the blocking phase ends unsatisfied");
-            let mut reads = Vec::new();
-            let done = final_snapshot(
-                &sources,
-                &mut latest,
-                &mut settled,
-                WaitMode::All,
-                Some(&host),
-                |target| {
-                    reads.push(target.to_string());
-                    Some(graph("complete", "succeeded"))
-                },
-                &mut |_, _| {},
-            );
-            assert_eq!(reads, ["fix"], "only the local store is read after expiry");
-            assert_eq!(
-                latest[0].as_ref().map(|r| r.settle),
-                Some(Settle::Succeeded)
-            );
-            assert_eq!(
-                latest[0].as_ref().map(|r| r.data["stale"].is_null()),
-                Some(true)
-            );
-            assert_eq!(outcome(&latest, &settled, done, WaitMode::All), expected);
-        }
-    }
-
-    #[test]
-    fn bare_wait_reports_an_unreadable_graph_as_unsuccessful()
-    -> Result<(), Box<dyn std::error::Error>> {
-        if crate::fabric::peer_tests::host_test(
-            "status_wait::tests::bare_wait_reports_an_unreadable_graph_as_unsuccessful",
-        )? {
-            return Ok(());
-        }
-
-        use provenant_core::Clock;
-        use provenant_fabric_runtime::graph::FileJournal;
-        let rig = crate::worktree_tests::repository()?;
-        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
-        let context = provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?;
-        let clock = provenant_os::clock::SystemClock::new();
-        let cancel = CancelToken::new();
-        drop(FileJournal::open(
-            &roots.state,
-            context.identity.project,
-            "broken",
-            provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
-            &cancel,
-            &clock,
-        )?);
-        std::fs::write(
-            roots
-                .state
-                .as_path()
-                .join("fabric/graphs")
-                .join(context.identity.project.to_string())
-                .join("graph-broken.json"),
-            b"invalid checkpoint",
-        )?;
-        let edge = provenant_cli::run::Edge {
-            roots: &roots,
-            home: &rig.home,
-            assets: &rig.project,
-            cwd: &rig.project,
-        };
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let discovered = crate::fabric::unsettled_graphs(&edge, deadline, &cancel)?;
-        let graph = discovered
-            .into_iter()
-            .find(|graph| graph.target.name == "broken")
-            .ok_or("broken graph was hidden")?;
-        let reading = read(
-            &Source::UnreadableGraph(graph.target, graph.error.ok_or("decode failure")?),
-            &edge,
-            &mut None,
-            deadline,
-            Duration::from_secs(1),
-            &cancel,
-            &provenant_confinement::worktrees::SystemWorkerObserver,
-        );
-        assert_eq!(reading.settle, Settle::Unsuccessful);
-        assert!(reading.done());
-        Ok(())
-    }
-
-    // File-stamp gates were removed with local polling; native event wake
-    // coverage lives beside the OS port, with paced fallback exercised by reads.
-
-    // Local-stamp ownership checks were removed with file polling. Native graph
-    // event subscription is covered by the OS port's multi-log invariant.
-
-    #[test]
-    fn preflight_expiry_and_cancellation_use_wait_exit_codes() {
-        let cancel = CancelToken::new();
-        let globals = Globals::default();
-        let error = provenant_fabric_runtime::coordination::facade::FacadeError::Timeout;
-        assert_eq!(
-            preflight_error(&error, Instant::now(), &cancel, &globals),
-            124
-        );
-        cancel.cancel();
-        assert_eq!(
-            preflight_error(
-                &error,
-                Instant::now() + Duration::from_secs(30),
-                &cancel,
-                &globals
-            ),
-            130
-        );
-    }
-
-    #[test]
-    fn graph_wait_readers_share_the_callers_deadline_and_cancellation()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::coordination::facade::FacadeError;
-        let rig = crate::worktree_tests::repository()?;
-        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
-        let edge = provenant_cli::run::Edge {
-            roots: &roots,
-            home: &rig.home,
-            assets: &rig.project,
-            cwd: &rig.project,
-        };
-        let target = "missing".parse()?;
-        for cancelled in [false, true] {
-            let cancel = CancelToken::new();
-            let deadline = if cancelled {
-                cancel.cancel();
-                Instant::now() + Duration::from_secs(30)
-            } else {
-                Instant::now()
-            };
-            for error in [
-                crate::fabric::check_targets(
-                    std::slice::from_ref(&target),
-                    &edge,
-                    deadline,
-                    &cancel,
-                    |_, _| {},
-                )
-                .unwrap_err(),
-                crate::fabric::unsettled_graphs(&edge, deadline, &cancel).unwrap_err(),
-                crate::fabric::unified::read_status_rows(
-                    &target, &edge, &mut None, deadline, &cancel,
-                )
-                .unwrap_err(),
-            ] {
-                assert!(matches!(
-                    (cancelled, error.downcast_ref::<FacadeError>()),
-                    (true, Some(FacadeError::Cancelled)) | (false, Some(FacadeError::Timeout))
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn final_line_states_every_settle_and_the_next_command() {
-        use Settle::*;
-        let sources = vec![
-            Source::Graph("fixed".parse().expect("target")),
-            Source::Graph("broken".parse().expect("target")),
-            Source::Graph("input".parse().expect("target")),
-            Source::Graph("slow".parse().expect("target")),
-        ];
-        let mixed = vec![
-            Some(reading(Succeeded)),
-            Some(reading(Unsuccessful)),
-            Some(reading(NeedsInput)),
-            Some(reading(Pending)),
-        ];
-        assert_eq!(
-            final_human(&sources, &mixed, false, &[]),
-            "next: fixed settled ok, broken failed, input needs input, slow still running at timeout; provenant wait slow\n"
-        );
-        let settled = vec![
-            Some(reading(Succeeded)),
-            Some(reading(Unsuccessful)),
-            Some(reading(NeedsInput)),
-            Some(reading(Succeeded)),
-        ];
-        assert_eq!(
-            final_human(&sources, &settled, true, &[]),
-            "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant status fixed broken input slow\n"
-        );
-        assert_eq!(
-            final_human(&[], &[], true, &[]),
-            "next: nothing to wait for; provenant status\n"
-        );
-        // A superseded target keeps its states; the next command names the newer handle.
-        assert_eq!(
-            final_human(&sources, &settled, true, &["slow-2".to_owned()]),
-            "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant wait slow-2\n"
-        );
-    }
-
-    /// The human last line is the edge rendering the typed step; this pins the
-    /// two views to the same `why` and `argv`.
-    fn final_human(
-        sources: &[Source],
-        latest: &[Option<Reading>],
-        done: bool,
-        superseding: &[String],
-    ) -> String {
-        provenant_cli::next_steps_text(
-            &[final_step(sources, latest, done, superseding)],
-            &provenant_workflow::session::CommandPrefix::default(),
-        )
-    }
-
-    fn reading(settle: Settle) -> Reading {
-        Reading {
-            settle,
-            line: format!("{settle:?}"),
-            data: Value::Null,
-        }
-    }
-
-    fn wait_on(updates: &[(usize, Settle)], count: usize, mode: WaitMode) -> (Outcome, Vec<usize>) {
-        let (sender, receiver) = mpsc::channel();
-        for (target, settle) in updates {
-            assert!(
-                sender
-                    .send(Update {
-                        target: *target,
-                        reading: reading(*settle),
-                    })
-                    .is_ok()
-            );
-        }
-        let mut latest = vec![None; count];
-        let mut settled = Vec::new();
-        let done = collect(
-            &receiver,
-            &mut latest,
-            &mut settled,
-            Instant::now() + Duration::from_millis(20),
-            mode,
-            &mut |_, _| {},
-        );
-        (outcome(&latest, &settled, done, mode), settled)
-    }
-
-    #[test]
-    fn any_returns_at_the_first_settlement_and_takes_its_verdict() {
-        use Settle::*;
-        let (outcome, settled) = wait_on(
-            &[
-                (0, Pending),
-                (1, Pending),
-                (1, Unsuccessful),
-                (0, Succeeded),
-            ],
-            2,
-            WaitMode::Any,
-        );
-        assert_eq!(settled, [1], "the later settlement was never read");
-        assert_eq!(outcome, Outcome::Failed);
-        assert_eq!(
-            wait_on(&[(0, Pending), (1, NeedsInput)], 2, WaitMode::Any).0,
-            Outcome::Pending
-        );
-    }
-
-    #[test]
-    fn all_waits_for_every_target_and_a_timeout_is_124() {
-        use Settle::*;
-        let (outcome, _) = wait_on(&[(0, Succeeded), (1, Pending)], 2, WaitMode::All);
-        assert_eq!(provenant_cli::exit_status(&outcome), 124);
-        let (outcome, _) = wait_on(
-            &[(0, Succeeded), (1, Pending), (1, Succeeded)],
-            2,
-            WaitMode::All,
-        );
-        assert_eq!(provenant_cli::exit_status(&outcome), 0);
-        let (outcome, _) = wait_on(&[(0, NeedsInput), (1, Unsuccessful)], 2, WaitMode::All);
-        assert_eq!(provenant_cli::exit_status(&outcome), 1);
-        let (outcome, settled) = wait_on(
-            &[(1, Unsuccessful), (0, Pending), (0, Succeeded)],
-            2,
-            WaitMode::All,
-        );
-        assert_eq!(
-            settled,
-            [1, 0],
-            "all mode reads the remaining target after failure"
-        );
-        assert_eq!(outcome, Outcome::Failed);
-        assert_eq!(
-            provenant_cli::exit_status(&wait_on(&[], 1, WaitMode::Any).0),
-            124
-        );
-    }
-
-    #[test]
-    fn fail_fast_waits_for_successes_but_returns_on_first_failure() {
-        use Settle::*;
-        let (outcome, settled) = wait_on(
-            &[
-                (0, Pending),
-                (1, Pending),
-                (1, Unsuccessful),
-                (0, Succeeded),
-            ],
-            2,
-            WaitMode::FailFast,
-        );
-        assert_eq!(settled, [1]);
-        assert_eq!(outcome, Outcome::Failed);
-        let (outcome, settled) = wait_on(
-            &[(0, Pending), (1, Pending), (1, Succeeded), (0, Succeeded)],
-            2,
-            WaitMode::FailFast,
-        );
-        assert_eq!(settled, [1, 0]);
-        assert_eq!(outcome, Outcome::Ok);
-    }
-
-    #[test]
-    fn a_failed_child_is_never_reported_as_a_successful_wait() {
-        use serde_json::json;
-        // The relay's terminal child rows are the wait's targets. A `failed`
-        // or otherwise unsuccessful settled node must make the wait fail, not
-        // silently return 0 with no result.
-        let child = |node: &str, state: &str| json!({"node":node,"state":state,"settled":state != "running"});
-        assert_eq!(
-            super::child_settle(&child("a", "succeeded")),
-            Settle::Succeeded
-        );
-        for state in ["failed", "blocked", "skipped"] {
-            assert_eq!(
-                super::child_settle(&child("a", state)),
-                Settle::Unsuccessful,
-                "state={state}"
-            );
-        }
-        assert_eq!(super::child_settle(&child("a", "running")), Settle::Pending);
-    }
-
-    #[test]
-    fn a_child_wait_takes_its_verdict_from_the_selected_mode() {
-        let child = |node: &str, state: &str| json!({"node":node,"state":state,"settled":state != "running"});
-        let ok = child("a", "succeeded");
-        let failed = child("b", "failed");
-        let running = child("c", "running");
-        let children = [ok.clone(), failed.clone(), running.clone()];
-
-        // Under `all`, any failed child fails the wait.
-        assert_eq!(
-            super::child_wait_outcome(&children, WaitMode::All, &[0, 1, 2]),
-            Outcome::Failed
-        );
-        // Under `any`, only the first settled child decides the verdict, even
-        // when a later child in the same snapshot failed.
-        assert_eq!(
-            super::child_wait_outcome(&children, WaitMode::Any, &[0]),
-            Outcome::Ok
-        );
-        assert_eq!(
-            super::child_wait_outcome(&children, WaitMode::Any, &[1]),
-            Outcome::Failed
-        );
-        // Under `fail-fast`, the first failed child decides the verdict.
-        assert_eq!(
-            super::child_wait_outcome(&children, WaitMode::FailFast, &[1]),
-            Outcome::Failed
-        );
-        let all_ok = [child("a", "succeeded"), child("b", "succeeded")];
-        assert_eq!(
-            super::child_wait_outcome(&all_ok, WaitMode::FailFast, &[0, 1]),
-            Outcome::Ok
-        );
-        // A child still running when the wait ends early is not a failure.
-        assert_eq!(
-            super::child_wait_outcome(&[running], WaitMode::All, &[]),
-            Outcome::Ok
-        );
-    }
-
-    #[test]
-    fn selected_mode_is_named_in_human_and_terminal_json_output() {
-        for (mode, label) in [
-            (WaitMode::All, "all"),
-            (WaitMode::Any, "any"),
-            (WaitMode::FailFast, "fail-fast"),
-        ] {
-            assert_eq!(mode_heading(mode), format!("wait mode: {label}\n"));
-            let data = terminal_data(mode, Vec::new(), false, None);
-            assert_eq!(data["mode"], label);
-            assert_eq!(data["timed_out"], false);
-            assert!(data["local_observation"].is_null());
-        }
-    }
-
-    #[test]
-    fn wait_readings_bound_the_whole_event_line_not_just_the_target() {
-        use provenant_cli::limits::SUMMARY_ROW_BYTES;
-        use provenant_core::ProjectId;
-        use provenant_records::WorkKey;
-
-        let long_reason = format!("worktree_missing: {}", "x".repeat(SUMMARY_ROW_BYTES * 2));
-        let key = json!(WorkKey::new(ProjectId::from_bytes([9; 16]), "g", "node", 1).unwrap());
-        let reading = classify_rows(
-            "g",
-            &[
-                json!({"kind":"graph","state":"failed","reason":long_reason}),
-                json!({"kind":"node","work_key":key,"state":"failed","reason":long_reason}),
-            ],
-        );
-        assert!(
-            reading.line.len() <= SUMMARY_ROW_BYTES,
-            "wait target line is unbounded: {}",
-            reading.line
-        );
-        assert!(
-            reading.line.ends_with("..."),
-            "no clip marker on the wait target line: {}",
-            reading.line
-        );
-        let digests = reading.data["digests"].as_array().expect("digests");
-        assert_eq!(digests.len(), 1);
-        for digest in digests {
-            let line = digest["line"].as_str().expect("digest line");
-            assert!(
-                line.len() <= SUMMARY_ROW_BYTES,
-                "wait digest line is unbounded: {line}"
-            );
-            assert!(
-                line.ends_with("..."),
-                "no clip marker on a digest line: {line}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_target_settles_by_its_own_row() {
-        let graph =
-            |state: &str, outcome: &str| json!({"kind":"graph","state":state,"outcome":outcome});
-        let node = |state: &str| json!({"kind":"node","state":state});
-        let attempt =
-            |state: &str, outcome: Value| json!({"kind":"attempt","state":state,"outcome":outcome});
-        let settle = |rows: &[Value]| classify_rows("fix", rows).settle;
-        assert_eq!(
-            settle(&[graph("complete", "succeeded"), node("succeeded")]),
-            Settle::Succeeded
-        );
-        assert_eq!(
-            settle(&[graph("complete", "partial")]),
-            Settle::Unsuccessful
-        );
-        assert_eq!(
-            settle(&[graph("paused", ""), node("pending")]),
-            Settle::NeedsInput
-        );
-        // A settled older attempt never decides a node that is running again.
-        assert_eq!(
-            settle(&[node("running"), attempt("terminal", json!("failed"))]),
-            Settle::Pending
-        );
-        assert_eq!(
-            settle(&[attempt("terminal", json!("succeeded"))]),
-            Settle::Succeeded
-        );
-        assert_eq!(settle(&[attempt("running", Value::Null)]), Settle::Pending);
-    }
-
-    #[test]
-    // Spec: docs/specs/cli.md#waits-are-readers
-    fn a_silent_attempt_ends_the_wait_without_claiming_settlement() {
-        let rows = [
-            json!({"kind":"graph","state":"running"}),
-            json!({
-                "kind":"attempt","state":"running","presence":"live","stalled":true,
-                "last_event_at":"2026-11-26T04:58:00Z"
-            }),
-        ];
-        let reading = classify_rows("quiet", &rows);
-        assert_eq!(reading.settle, Settle::Stalled);
-        assert!(reading.done(), "a stall must end the wait");
-        assert!(
-            reading.line.contains("2026-11-26T04:58:00Z"),
-            "stalled line names its last-event time: {}",
-            reading.line
-        );
-        assert_eq!(
-            outcome(&[Some(reading)], &[0], true, WaitMode::All),
-            Outcome::Stalled
-        );
-        // A settled graph still decides: a stale stall cannot win.
-        let settled = classify_rows(
-            "quiet",
-            &[
-                json!({"kind":"graph","state":"complete","outcome":"succeeded"}),
-                json!({"kind":"attempt","state":"running","stalled":true}),
-            ],
-        );
-        assert_eq!(settled.settle, Settle::Succeeded);
-    }
-
-    #[test]
-    fn pr_journal_obeys_the_selected_completion_policy() {
-        let status = json!({
-            "number": 7, "state": "OPEN", "head": "head", "draft": false,
-            "merge": "clean", "review": "unknown", "error": null,
-            "checks_passed": 0, "checks_total": 2,
-            "checks_failed": 1, "checks_pending": 1
-        });
-        let event = json!({"status": status});
-        assert_eq!(
-            reading_pr_event(7, None, false, event.clone()).settle,
-            Settle::Unsuccessful
-        );
-        assert_eq!(
-            reading_pr_event(7, None, true, event).settle,
-            Settle::Pending
-        );
-    }
-
-    fn settled_pr_reading(head: &str, passed: bool, workflows: Option<bool>) -> Reading {
-        let mut data = json!({
-            "number": 7, "state": "OPEN", "head": head, "draft": false,
-            "merge": "clean", "review": "unknown", "error": null,
-            "checks_passed": u32::from(passed), "checks_total": 1,
-            "checks_failed": u32::from(!passed), "checks_pending": 0
-        });
-        if let Some(active) = workflows {
-            data["active_workflows"] = json!(active);
-        }
-        Reading {
-            settle: if passed {
-                Settle::Succeeded
-            } else {
-                Settle::Unsuccessful
-            },
-            line: "#7 settled".into(),
-            data,
-        }
-    }
-
-    #[test]
-    fn a_new_head_stays_pending_until_actions_runs_exist_or_the_grace_ends() {
-        let mut grace = ActionsGrace::new(Duration::from_secs(3600));
-        let held = grace.apply(settled_pr_reading("a", true, None), "#7", false);
-        assert_eq!(held.settle, Settle::Pending);
-        assert!(held.line.starts_with("#7 pending"), "{}", held.line);
-        assert!(held.line.contains("head=a"), "{}", held.line);
-
-        // Runs for the head end the hold.
-        for active in [true, false] {
-            let seen = grace.apply(settled_pr_reading("a", true, Some(active)), "#7", false);
-            assert_eq!(seen.settle, Settle::Succeeded);
-        }
-
-        // A default wait still settles on a failure at once; a complete one holds.
-        let failed = settled_pr_reading("a", false, None);
-        assert_eq!(
-            grace.apply(failed.clone(), "#7", false).settle,
-            Settle::Unsuccessful
-        );
-        assert_eq!(grace.apply(failed, "#7", true).settle, Settle::Pending);
-
-        // An unreadable reading carries no line to hold.
-        let unreadable = Reading::unavailable("#7", "boom");
-        assert_eq!(grace.apply(unreadable.clone(), "#7", true), unreadable);
-    }
-
-    #[test]
-    fn the_grace_period_is_bounded_and_restarts_for_a_new_head() {
-        let mut ended = ActionsGrace::new(Duration::ZERO);
-        assert_eq!(
-            ended
-                .apply(settled_pr_reading("a", true, None), "#7", false)
-                .settle,
-            Settle::Succeeded,
-            "a zero grace period never holds"
-        );
-
-        let mut grace = ActionsGrace::new(Duration::from_secs(3600));
-        assert_eq!(
-            grace
-                .apply(settled_pr_reading("a", true, None), "#7", false)
-                .settle,
-            Settle::Pending
-        );
-        assert!(!grace.is_due());
-        let left = grace.due_in().expect("a held reading has a deadline");
-        assert!(left > Duration::from_secs(3000), "{left:?}");
-        // Age the head: the period has run out, so the reading settles.
-        let (_, first_read) = grace.head.as_mut().unwrap();
-        *first_read = Instant::now()
-            .checked_sub(Duration::from_secs(7200))
-            .expect("monotonic clock far enough from its origin");
-        assert_eq!(
-            grace
-                .apply(settled_pr_reading("a", true, None), "#7", false)
-                .settle,
-            Settle::Succeeded
-        );
-        assert_eq!(grace.due_in(), None, "a settled reading is not held");
-        // A later push is a new head with its own period.
-        assert_eq!(
-            grace
-                .apply(settled_pr_reading("b", true, None), "#7", false)
-                .settle,
-            Settle::Pending
-        );
-    }
-
-    #[test]
-    fn a_pinned_wait_ignores_the_verdict_of_another_head() {
-        let line: crate::pr::status::Line = serde_json::from_value(json!({
-            "number": 7, "state": "OPEN", "head": "stale", "draft": false,
-            "merge": "clean", "review": "approved", "error": null,
-            "checks_passed": 1, "checks_total": 1,
-            "checks_failed": 0, "checks_pending": 0
-        }))
-        .expect("fixture line");
-        assert_eq!(line.verdict(), Some(true));
-        let pinned = gate_line(line, Some("new"));
-        assert_eq!(pinned.verdict(), None);
-        assert_eq!(watched_head(&pinned), "new");
-        assert_eq!(pinned.head, "stale");
-    }
-
-    #[test]
-    fn pr_timeout_reports_the_last_known_check_summary_and_next_step() {
-        let sources = vec![Source::Pr {
-            number: 7,
-            repository: Ok("owner/repo".into()),
-            watch_head: None,
-            complete: false,
-        }];
-        let pending = Reading {
-            settle: Settle::Pending,
-            line: "#7 pending".into(),
-            data: json!({
-                "number": 7, "state": "OPEN", "head": "abc", "draft": false,
-                "merge": "clean", "review": "unknown", "error": null,
-                "checks_passed": null, "checks_total": null,
-                "checks_failed": null, "checks_pending": null
-            }),
-        };
-        let settled = Reading {
-            settle: Settle::Succeeded,
-            line: "#7 ready".into(),
-            data: json!({
-                "number": 7, "state": "OPEN", "head": "abc", "draft": false,
-                "merge": "clean", "review": "approved", "error": null,
-                "checks_passed": 1, "checks_total": 1,
-                "checks_failed": 0, "checks_pending": 0
-            }),
-        };
-        let details = pr_timeout_details(&sources, &[Some(pending), Some(settled)]);
-        assert_eq!(details.len(), 1, "only an unsettled PR gets a detail");
-        assert!(details[0].contains("#7 OPEN abc"), "{details:?}");
-        assert!(details[0].contains("checks=unavailable"), "{details:?}");
-        assert!(
-            details[0].contains("cause=checks_not_scheduled"),
-            "{details:?}"
-        );
-        assert!(
-            details[0].contains(crate::pr::status::NO_CHECKS_NEXT),
-            "{details:?}"
-        );
-    }
-
-    #[test]
-    fn a_timed_out_complete_wait_keeps_its_last_known_line() {
-        // A failure with checks still running settles a default wait but keeps a
-        // complete wait pending, so only the complete wait has a last known line.
-        let reading = Reading {
-            settle: Settle::Pending,
-            line: "#7 failing".into(),
-            data: json!({
-                "number": 7, "state": "OPEN", "head": "abc", "draft": false,
-                "merge": "clean", "review": "unknown", "error": null,
-                "checks_passed": 0, "checks_total": 2,
-                "checks_failed": 1, "checks_pending": 1,
-                "failing_checks": ["lint"], "pending_checks": ["build"]
-            }),
-        };
-        let source = |complete| {
-            vec![Source::Pr {
-                number: 7,
-                repository: Ok("owner/repo".into()),
-                watch_head: None,
-                complete,
-            }]
-        };
-        let complete = pr_timeout_details(&source(true), &[Some(reading.clone())]);
-        assert_eq!(complete.len(), 1, "{complete:?}");
-        assert!(complete[0].contains("fail=1"), "{complete:?}");
-        assert!(complete[0].contains("pending=1"), "{complete:?}");
-        assert!(complete[0].contains("pending_names=build"), "{complete:?}");
-        assert!(pr_timeout_details(&source(false), &[Some(reading)]).is_empty());
-    }
-}
+mod tests;

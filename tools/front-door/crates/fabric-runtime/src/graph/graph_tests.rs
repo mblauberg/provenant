@@ -655,7 +655,7 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         queue_ci_wait: None,
         queue: None,
         review: None,
-        review_subject_missing: false,
+        subject: None,
         exclude: Vec::new(),
         network: None,
         capability: Vec::new(),

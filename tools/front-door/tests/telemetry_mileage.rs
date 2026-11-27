@@ -96,9 +96,9 @@ fn fixture() -> Result<TestRig> {
     set_claude_config_dir(&mut rig, &native);
     let identity_key = write_fake_claude_identity(&native, "work@example.test")?;
     register_account(&rig, "claude", "work", &identity_key, &native)?;
-    fs::create_dir_all(rig.project.join("config"))?;
+    fs::create_dir_all(rig.assets.join("config"))?;
     fs::write(
-        rig.project.join("config/telemetry-prices.toml"),
+        rig.assets.join("config/telemetry-prices.toml"),
         include_str!("../../../config/telemetry-prices.toml"),
     )?;
     fs::create_dir_all(rig.state.join("quota/history"))?;
