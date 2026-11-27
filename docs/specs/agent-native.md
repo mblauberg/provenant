@@ -407,7 +407,7 @@ Owned paths must be disjoint across the slices that can run in parallel. An over
 
 | Batch | Store | Transform |
 |---|---|---|
-| 1 | config | `lanes.isolation=shared` becomes `lanes.read_source=checkout`; `private` is dropped, because the destination rules replace it. `lanes.pr=never` set by the user is kept. Persisted source tags (`shipped_default`, `bundled` and `builtin` become `default`; `dispatch` becomes `launch`). |
+| 1 | config | `lanes.isolation=shared` becomes `lanes.read_source=live`; `private` is dropped, because the destination rules replace it. `lanes.pr=never` set by the user is kept. Persisted source tags (`shipped_default`, `bundled` and `builtin` become `default`; `dispatch` becomes `launch`). |
 | 1 | graph | `NodeProgress.warnings`: each string becomes `Warning{code: LEGACY_WARNING, message}`. Sealed `accept_inconclusive_without_blocking = true` becomes sealed `accept_below = blocking`, and `false` becomes `off`. Sealed `lanes.isolation` becomes `read_source` as in the config row. Source tags as in the config row. |
 | 1 | run store | Each sealed `writer-owned.json` (`WriterOwnership{lane_owned, owner}`, `crates/run/src/writer.rs:4216`) is rewritten to `lease.json` (`WorktreeLease{holder, since, sharing: Inherit}`). An unowned record has no lease. The lease state is derived from the holder's attempt state, not stored, so a terminal holder is already a lapsed lease. |
 | 2 | queue | Header 2 becomes 3. `baseline_head` is the item's current recorded head, with `baseline_source = migrated`. `generation` is 0, there is no hold, and the items' `FindingLedger` starts empty, with existing findings imported as open. |
@@ -481,7 +481,7 @@ These are two separate defaults, and neither implies the other.
 | Key | Scope | Default | Values |
 |---|---|---|---|
 | `lanes.launch.mode` | T/H/P/L | from the template's shape: a leaf is `inline`, a composite or queue is `handle`. A template field `launch_mode` overrides. | `--wait` / `--no-wait` |
-| `lanes.read_source` | H/P/R/L | `checkout`, changed from `auto` | `checkout|default_branch|auto|<REF>`. `--source` takes the same values, renamed from `upstream|local`. |
+| `lanes.read_source` | H/P/R/L | `live`, changed from `auto` | `live|default_branch|auto|<REF>`. `--source` takes the same values, renamed from `upstream|local`. |
 | `lanes.destination.write` | H/P/L | `auto` (the table above) | `auto|parent|new` |
 | `lanes.worktree.sharing` | H/P/L/O | `warn` (§3.11) | `allow|warn|refuse` |
 | `lanes.carry_uncommitted` | H/P/L | `tracked` | `off|tracked|all` |

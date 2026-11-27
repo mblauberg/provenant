@@ -3098,7 +3098,10 @@ fn v3_checkpoint_cut_over_types_warnings_and_renames_sealed_settings() {
     );
     assert_eq!(execution["accept_below"], "blocking");
     assert!(execution.get("lanes.isolation").is_none());
-    assert_eq!(execution["lanes.read_source"], "checkout");
+    assert_eq!(
+        execution["lanes.read_source"],
+        provenant_config::READ_SOURCE_LIVE
+    );
     assert_eq!(execution["source"], "default");
 
     let mut off_value = serde_json::to_value(stored_fixture()).unwrap();

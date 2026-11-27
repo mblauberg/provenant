@@ -113,7 +113,7 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KNOB_PRECEDENCE, KnobEdit, knob_source, read_source_value};
+pub use knobs::{KNOB_PRECEDENCE, KnobEdit, READ_SOURCE_LIVE, knob_source, read_source_value};
 pub use lane_history::{
     CONFLICT_MARKERS, DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, HistoryEffect, HistoryValue,
     LaneHistory, REBASE, Rebase, Setting, UNROOTED_TIP,

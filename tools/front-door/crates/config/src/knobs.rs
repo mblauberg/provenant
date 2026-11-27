@@ -64,6 +64,11 @@ pub(crate) struct Preset {
     pub(crate) knobs: BTreeMap<String, Value>,
 }
 
+/// The canonical spelling of the live read source. Every writer of
+/// `lanes.read_source` uses this one spelling, so the config cut-over and the
+/// sealed checkpoint transform cannot drift from `ReadSource::Live`.
+pub const READ_SOURCE_LIVE: &str = "live";
+
 /// The knob family's layers, lowest first. The registry default is the floor,
 /// a named preset overrides it, and an entry in the host's `[knobs]` table
 /// overrides the preset. A launch flag is recorded separately in the sealed
