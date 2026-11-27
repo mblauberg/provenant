@@ -72,19 +72,16 @@ pub fn repair_brief(failing_head: &str, failure_excerpt: &str) -> String {
 /// undeclared layer is warned, never silently dropped. Keys absent from
 /// `candidates` keep their shipped default and its source.
 pub fn seal_settings<T: Clone>(
-    keys: &[&str],
     defaults: &BTreeMap<&str, T>,
     candidates: &BTreeMap<&str, Vec<Sourced<T>>>,
 ) -> BTreeMap<String, Sourced<T>> {
     let mut sealed = BTreeMap::new();
-    for key in keys {
-        let default = defaults
-            .get(key)
-            .cloned()
-            .expect("sealed setting has a shipped default");
-        let resolved = SEALED_SETTINGS_PRECEDENCE
-            .merge_over_default(default, candidates.get(key).cloned().unwrap_or_default());
-        provenant_records::warn_ignored(&resolved.ignored, *key);
+    for (key, default) in defaults {
+        let resolved = SEALED_SETTINGS_PRECEDENCE.merge_over_default(
+            default.clone(),
+            candidates.get(key).cloned().unwrap_or_default(),
+        );
+        provenant_records::warn_ignored(&resolved.ignored, key);
         sealed.insert((*key).to_owned(), resolved.winner);
     }
     sealed

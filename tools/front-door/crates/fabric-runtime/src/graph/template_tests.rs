@@ -819,11 +819,6 @@ fn delivery_queue_knobs_resolve_and_seal_with_sources() {
             origin: Some(origin.into()),
         },
     };
-    let keys = [
-        QUEUE_MAX_PARALLEL_KEY,
-        QUEUE_CI_SLOTS_KEY,
-        QUEUE_PREP_RETRIES_KEY,
-    ];
     let shipped = QueueKnobs::default();
     let defaults = BTreeMap::from([
         (QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel.value),
@@ -838,7 +833,7 @@ fn delivery_queue_knobs_resolve_and_seal_with_sources() {
             sourced(9, Layer::Project, ".provenant/config.toml"),
         ],
     )]);
-    let sealed = seal_settings(&keys, &defaults, &overrides);
+    let sealed = seal_settings(&defaults, &overrides);
     let max_parallel = &sealed[QUEUE_MAX_PARALLEL_KEY];
     assert_eq!(max_parallel.value, 9);
     assert_eq!(max_parallel.source.layer, Layer::Project);
@@ -851,7 +846,6 @@ fn delivery_queue_knobs_resolve_and_seal_with_sources() {
     assert_eq!(sealed[QUEUE_CI_SLOTS_KEY].source.layer, Layer::Default);
     assert_eq!(sealed[QUEUE_PREP_RETRIES_KEY].value, 2);
     let launch = seal_settings(
-        &keys,
         &defaults,
         &BTreeMap::from([(
             QUEUE_CI_SLOTS_KEY,
@@ -878,6 +872,18 @@ fn delivery_queue_knobs_resolve_and_seal_with_sources() {
     assert!(invalid.validate().is_err());
 }
 
+/// Every shipped default is sealed, including settings added without overrides.
+#[test]
+fn seal_settings_includes_every_shipped_default() {
+    use provenant_records::Layer;
+    let defaults = BTreeMap::from([("first", 1), ("new_setting", 2)]);
+    let sealed = seal_settings(&defaults, &BTreeMap::new());
+    assert_eq!(sealed.len(), defaults.len());
+    assert_eq!(sealed["first"].value, 1);
+    assert_eq!(sealed["new_setting"].value, 2);
+    assert_eq!(sealed["new_setting"].source.layer, Layer::Default);
+}
+
 /// Graph setting origins use the shared provenance layer vocabulary, not a
 /// local setting-origin enum. The wire spelling is the layer's snake_case name.
 /// Spec: docs/specs/agent-native.md#33-error-and-warning-contract
@@ -888,7 +894,7 @@ fn graph_setting_sources_use_the_provenance_layer() {
         serde_json::from_value(json!({"seconds": 30, "source": "host"})).unwrap();
     assert_eq!(timeout.source, Layer::Host);
     assert_eq!(
-        serde_json::to_value(&timeout).unwrap(),
+        serde_json::to_value(timeout).unwrap(),
         json!({"seconds": 30, "source": "host"})
     );
     let policy: CiFailedChecksPolicy = serde_json::from_value(json!({

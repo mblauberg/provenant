@@ -169,17 +169,17 @@ pub fn migrate(
                     }
                 }
                 for (key, value) in object.iter_mut() {
-                    if key == "source" || key.ends_with("_source") {
-                        if let Some(source) = value.as_str() {
-                            let replacement = match source {
-                                "shipped_default" | "bundled" | "builtin" => Some("default"),
-                                "dispatch" => Some("launch"),
-                                _ => None,
-                            };
-                            if let Some(replacement) = replacement {
-                                *value = serde_json::Value::String(replacement.into());
-                                continue;
-                            }
+                    if (key == "source" || key.ends_with("_source"))
+                        && let Some(source) = value.as_str()
+                    {
+                        let replacement = match source {
+                            "shipped_default" | "bundled" | "builtin" => Some("default"),
+                            "dispatch" => Some("launch"),
+                            _ => None,
+                        };
+                        if let Some(replacement) = replacement {
+                            *value = serde_json::Value::String(replacement.into());
+                            continue;
                         }
                     }
                     rewrite_sealed_values(value);

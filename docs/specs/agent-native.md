@@ -203,7 +203,7 @@ pub struct CommandError { pub code, pub message, pub cause: Option<String>, pub 
   - `PolicySource` and `ConfinementSource` (`confinement/src/permissions/{policy.rs:622, resolved.rs:36}`);
   - `DecideTimeoutSource` (`graph/asks.rs:151`), and `CiLimitSource` and `InputCapSource` (`graph/model.rs:1450,2336`).
   - Data-origin enums are kept, for example `IdentityEvidenceSource`, `UsageSource`, `PriceSource`, `BriefSource`, `WeightSource` (config or catalogue), `LandingSource`, `WriteSource`, `WriterBaseSource`, `OfferSource` and `PriorSource`.
-  - `QUEUE_KNOB_PRECEDENCE` and `seal_queue_knob(s)` give way to the generic `seal_settings(&[key])`.
+  - `QUEUE_KNOB_PRECEDENCE` and `seal_queue_knob(s)` give way to the generic `seal_settings` over a map of shipped defaults.
 
 Human form:
 ```

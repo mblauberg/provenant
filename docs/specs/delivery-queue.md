@@ -187,7 +187,8 @@ A replacement must meet the same typed input/output and authority contracts. A
 composite override changes its constituent nodes, not unsupported leaf fields on
 the composite. No engine fork or custom JavaScript hook is needed.
 
-`graph::template::seal_settings` resolves a set of settings by key over
+`graph::template::seal_settings` uses the shipped-default map as the set of
+settings to resolve, avoiding a separate key list, over
 `SEALED_SETTINGS_PRECEDENCE` (default, host, project, launch), sealing the
 winning `Sourced<usize>` value with its layer and optional origin; an undeclared
 layer warns and is ignored. The host supplies candidates keyed by

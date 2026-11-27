@@ -37,11 +37,6 @@ pub(super) fn seal_delivery_queue_knobs(
     };
     use provenant_records::{Layer, Sourced};
 
-    let keys = [
-        QUEUE_MAX_PARALLEL_KEY,
-        QUEUE_CI_SLOTS_KEY,
-        QUEUE_PREP_RETRIES_KEY,
-    ];
     let mut candidates = BTreeMap::<&str, Vec<Sourced<usize>>>::new();
     for (key, value) in [
         (QUEUE_MAX_PARALLEL_KEY, config.max_parallel),
@@ -71,7 +66,7 @@ pub(super) fn seal_delivery_queue_knobs(
         (QUEUE_CI_SLOTS_KEY, shipped.ci_slots.value),
         (QUEUE_PREP_RETRIES_KEY, shipped.prep_retries.value),
     ]);
-    let sealed = seal_settings(&keys, &defaults, &candidates);
+    let sealed = seal_settings(&defaults, &candidates);
     let knobs = QueueKnobs {
         max_parallel: sealed[QUEUE_MAX_PARALLEL_KEY].clone(),
         ci_slots: sealed[QUEUE_CI_SLOTS_KEY].clone(),

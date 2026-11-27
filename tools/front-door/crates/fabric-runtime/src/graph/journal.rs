@@ -769,7 +769,7 @@ impl FileJournal {
         };
         if let Some(markers) = pending.as_ref() {
             let marker = pending_marker_name(graph_id);
-            if let Some(marker_bytes) = optional_sidecar(&markers, &marker)? {
+            if let Some(marker_bytes) = optional_sidecar(markers, &marker)? {
                 match archive.mkdir(OsStr::new("pending"), 0o700) {
                     Ok(()) => {}
                     Err(error) if error.is_exists() => {}
@@ -807,7 +807,7 @@ impl FileJournal {
             unlink_optional_sidecar(&journal.directory, &sidecar)?;
         }
         if let Some(markers) = pending.as_ref() {
-            remove_pending_marker(&markers, graph_id)?;
+            remove_pending_marker(markers, graph_id)?;
         }
         journal
             .directory

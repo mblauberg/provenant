@@ -435,7 +435,7 @@ pub(super) fn depletion_successor(
 enum Settle {
     Restart {
         routes: Vec<GraphRoute>,
-        restart: patch::Restart,
+        restart: Box<patch::Restart>,
         /// Why the restart took the step it did, when that needs saying.
         detail: Option<String>,
     },
@@ -642,13 +642,13 @@ fn decide(
     });
     Some(Settle::Restart {
         routes,
-        restart: patch::Restart {
+        restart: Box::new(patch::Restart {
             node: node.id.clone(),
             cause,
             step,
             ladder,
             progress: Some(patch::StopProgress::of(progress)),
-        },
+        }),
         detail,
     })
 }
@@ -756,7 +756,7 @@ pub(super) fn settle_stop(
         &node.id,
         brief.as_deref(),
         &routes,
-        restart,
+        *restart,
         detail.as_deref(),
         &PatchContext {
             catalogue: None,
