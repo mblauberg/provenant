@@ -1,5 +1,6 @@
 //! Deterministic contract for review template results and coverage.
 use super::*;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The one result order every review prompt states: one verdict line after the
 /// findings and prose, as the very last thing. A reader owes no declaration, so
@@ -28,14 +29,18 @@ pub(super) fn delivery_matches(
     if outputs.partial
         || outputs.findings_available != Some(true)
         || outputs.verdict_error.is_some()
-        || outputs.findings.iter().any(|finding| {
-            severity_class(&finding.severity) == Some(SeverityClass::Blocking)
-                || repair::blocks_acceptance(finding)
-        })
     {
         return false;
     }
-    match outputs
+    // The sealed flag maps to the acceptance threshold exactly as the store
+    // migration does: true -> blocking, false -> off. An open blocking-class
+    // finding still blocks acceptance at every threshold.
+    let threshold = if policy.accept_inconclusive_without_blocking {
+        AcceptBelow::Blocking
+    } else {
+        AcceptBelow::Off
+    };
+    let agrees = match outputs
         .verdict
         .as_deref()
         .and_then(ReviewVerdict::from_token)
@@ -43,7 +48,12 @@ pub(super) fn delivery_matches(
         Some(ReviewVerdict::Approve) => true,
         Some(ReviewVerdict::Inconclusive) => policy.accept_inconclusive_without_blocking,
         _ => false,
-    }
+    };
+    agrees
+        && matches!(
+            acceptance_decision(&outputs.findings, threshold, true),
+            Acceptance::Accept
+        )
 }
 
 pub(super) fn malformed_delivery_evidence_error(code: Option<&str>) -> bool {
@@ -491,6 +501,468 @@ pub(super) fn composite_review(
                 .as_ref()
                 .is_some_and(|spec| composite_review(spec, plan, positions))
     })
+}
+
+// ── Review convergence (batch 1 slice 27, §3.7) ───────────────────────────
+//
+// Every round reads and writes one finding ledger keyed by the exact head it
+// reviews. The ledger is the only evidence a later round or an acceptance
+// decision may carry forward: one reviewer's output alone is never enough.
+
+/// Warning emitted when a reviewer used a severity word outside the alias
+/// table. The word falls back to `High`, never to a lower severity, so an
+/// unknown word cannot be silently accepted below a `high` threshold.
+pub(super) const FINDING_SEVERITY_UNKNOWN: provenant_records::warning::WarningCode =
+    provenant_records::warning::WarningCode("FINDING_SEVERITY_UNKNOWN");
+
+/// Decode one reviewer severity word to the normalised acceptance severity.
+/// An unknown word decodes to `High` and is flagged for the caller to warn.
+pub(super) fn decode_severity(word: &str) -> (Severity, bool) {
+    let word = word.trim().to_ascii_lowercase();
+    let severity = match word.as_str() {
+        "critical" | "blocker" | "blocking" => Severity::Blocking,
+        "major" | "high" => Severity::High,
+        "medium" | "moderate" => Severity::Medium,
+        "minor" | "low" => Severity::Low,
+        "nit" | "info" | "style" => Severity::Nit,
+        _ => return (Severity::High, true),
+    };
+    (severity, false)
+}
+
+/// Decode a finding's severity and flag an unknown source word.
+pub(super) fn finding_severity(finding: &Finding) -> (Severity, bool) {
+    decode_severity(&finding.severity)
+}
+
+/// A finding stays open until it is resolved, dispositioned or falsified with
+/// evidence. Only open findings take part in acceptance and carry-forward.
+pub(super) fn is_open(finding: &Finding) -> bool {
+    !matches!(finding.status.as_str(), "closed" | "resolved" | "fixed")
+        && !finding.falsified_with_evidence()
+        && finding
+            .disposition
+            .as_deref()
+            .is_none_or(|value| !matches!(value, "accepted" | "rejected" | "wont_fix"))
+}
+
+/// The exclusive ceiling a `domains.review.accept_below` value allows. `Off`
+/// accepts no open finding; `Blocking` accepts everything strictly below it.
+fn threshold_severity(threshold: AcceptBelow) -> Option<Severity> {
+    match threshold {
+        AcceptBelow::Off => None,
+        AcceptBelow::Nit => Some(Severity::Nit),
+        AcceptBelow::Low => Some(Severity::Low),
+        AcceptBelow::Medium => Some(Severity::Medium),
+        AcceptBelow::High => Some(Severity::High),
+        AcceptBelow::Blocking => Some(Severity::Blocking),
+    }
+}
+
+/// The acceptance decision for one exact reviewed head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Acceptance {
+    Accept,
+    Reject(String),
+}
+
+/// Accept only when CI is complete and green on the exact head, no open
+/// finding carries a blocking class, and every open finding is strictly below
+/// the configured severity. Lower findings are posted, never sent to repair.
+pub(super) fn acceptance_decision(
+    findings: &[Finding],
+    threshold: AcceptBelow,
+    ci_complete_green: bool,
+) -> Acceptance {
+    if !ci_complete_green {
+        return Acceptance::Reject("ci is not complete and green on the exact head".into());
+    }
+    let Some(ceiling) = threshold_severity(threshold) else {
+        return findings.iter().find(|finding| is_open(finding)).map_or(
+            Acceptance::Accept,
+            |finding| {
+                Acceptance::Reject(format!(
+                    "finding {} is open but acceptance is off",
+                    finding.id
+                ))
+            },
+        );
+    };
+    for finding in findings.iter().filter(|finding| is_open(finding)) {
+        if repair::blocks_acceptance(finding) {
+            return Acceptance::Reject(format!(
+                "finding {} has an open blocking class",
+                finding.id
+            ));
+        }
+        let (severity, _) = finding_severity(finding);
+        if severity >= ceiling {
+            return Acceptance::Reject(format!(
+                "finding {} severity {severity:?} is not below {ceiling:?}",
+                finding.id
+            ));
+        }
+    }
+    Acceptance::Accept
+}
+
+/// How a lens that did not complete ends a round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LensOutcome {
+    Completed,
+    Retry,
+    Unavailable,
+}
+
+/// Missing or malformed evidence re-reviews the same lens on the same route;
+/// an unavailable lens retries on the next eligible route and then becomes
+/// `Unavailable`. Neither outcome sends the work to repair.
+pub(super) fn lens_outcome(
+    end_code: Option<&str>,
+    retries_used: u32,
+    max_retries: u32,
+    eligible_route: bool,
+) -> LensOutcome {
+    let can_retry = retries_used < max_retries;
+    match end_code {
+        Some("missing_evidence") => {
+            if can_retry {
+                LensOutcome::Retry
+            } else {
+                LensOutcome::Unavailable
+            }
+        }
+        Some("blocked_environment" | "model_unavailable") => {
+            if can_retry && eligible_route {
+                LensOutcome::Retry
+            } else {
+                LensOutcome::Unavailable
+            }
+        }
+        _ => LensOutcome::Completed,
+    }
+}
+
+/// The head range one review round covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RoundScope {
+    Delta { base: String, head: String },
+    Full { head: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RoundMode {
+    Delta,
+    Full,
+}
+
+/// A later round reviews `last_reviewed_head..head` plus the ledger's open
+/// findings. A moved base, an unattributable delta (no previous head), or no
+/// open findings widens the round to the full head.
+pub(super) fn round_scope(
+    ledger: &FindingLedger,
+    head: &str,
+    base_head: &str,
+    previous_base: Option<&str>,
+    mode: RoundMode,
+) -> RoundScope {
+    let last = ledger.last_reviewed_head.as_deref();
+    let base_moved = previous_base.is_some_and(|previous| previous != base_head);
+    let has_open = last
+        .and_then(|last_head| ledger.heads.get(last_head))
+        .is_some_and(|entry| !entry.unresolved.is_empty());
+    if mode == RoundMode::Delta
+        && !base_moved
+        && last.is_some_and(|last_head| last_head != head)
+        && has_open
+    {
+        RoundScope::Delta {
+            base: last.unwrap_or("").to_owned(),
+            head: head.to_owned(),
+        }
+    } else {
+        RoundScope::Full {
+            head: head.to_owned(),
+        }
+    }
+}
+
+/// Record the evidence for one exact head in the ledger.
+pub(super) fn record_head(
+    ledger: &mut FindingLedger,
+    head: &str,
+    findings: &[Finding],
+    dispositions: BTreeMap<String, String>,
+    covered_lenses: BTreeSet<String>,
+    invariant_coverage: BTreeMap<String, BTreeSet<String>>,
+) {
+    let entry = ledger.heads.entry(head.to_owned()).or_default();
+    entry.unresolved = findings
+        .iter()
+        .filter(|finding| is_open(finding))
+        .cloned()
+        .collect();
+    entry.dispositions = dispositions;
+    entry.covered_lenses = covered_lenses;
+    entry.invariant_coverage = invariant_coverage;
+    ledger.last_reviewed_head = Some(head.to_owned());
+}
+
+/// Open findings carried from the last reviewed head into this round.
+pub(super) fn carried_findings(ledger: &FindingLedger, head: &str) -> Vec<Finding> {
+    ledger
+        .heads
+        .get(head)
+        .map_or_else(Vec::new, |entry| entry.unresolved.clone())
+}
+
+/// Coverage gaps for a panel: lenses that never completed and invariants that
+/// no completed lens covered. An uncovered invariant makes the round
+/// INCONCLUSIVE rather than an agreed PASS.
+pub(super) fn coverage_gaps(
+    covered_lenses: &BTreeSet<String>,
+    required_lenses: &[String],
+    invariant_coverage: &BTreeMap<String, BTreeSet<String>>,
+    invariants: &[String],
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    let missing: Vec<_> = required_lenses
+        .iter()
+        .filter(|lens| !covered_lenses.contains(*lens))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        gaps.push(format!("lenses: {}", missing.join(", ")));
+    }
+    for invariant in invariants {
+        if invariant_coverage
+            .get(invariant)
+            .is_none_or(|lenses| lenses.is_empty())
+        {
+            gaps.push(format!("invariant {invariant}: uncovered"));
+        }
+    }
+    gaps
+}
+
+/// A split on one head goes to exactly one adjudication lane, not a new round.
+pub(super) fn split_needs_adjudicator(
+    verdicts: &[provenant_records::workflow::ReviewVerdict],
+) -> bool {
+    verdicts
+        .first()
+        .is_some_and(|first| verdicts.iter().any(|verdict| verdict != first))
+}
+
+/// Rebuild the ledger from reviewer rows already in the checkpoint. Each round
+/// reads the same facts under the journal lock, so a replay carries the same
+/// open findings and coverage.
+pub(super) fn ledger_from_checkpoint(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+) -> FindingLedger {
+    let mut ledger = FindingLedger::default();
+    for (index, progress) in checkpoint.nodes.iter().enumerate() {
+        let Some(settlement) = progress.review_settlement.as_ref() else {
+            continue;
+        };
+        let Some(outputs) = progress.outputs.as_ref() else {
+            continue;
+        };
+        let head = settlement.head.to_string();
+        let entry = ledger.heads.entry(head.clone()).or_default();
+        if let Some(base) = settlement.base {
+            entry
+                .dispositions
+                .insert("base".to_owned(), base.to_string());
+        }
+        entry.unresolved.extend(
+            outputs
+                .findings
+                .iter()
+                .filter(|finding| is_open(finding))
+                .cloned(),
+        );
+        if let Some(lens) = plan
+            .nodes
+            .get(index)
+            .and_then(|node| node.review_lens.as_deref())
+        {
+            entry.covered_lenses.insert(lens.to_owned());
+        }
+        let (invariants, lenses) = outputs::finding_coverage(&outputs.findings);
+        entry.invariant_coverage = invariants;
+        entry.covered_lenses.extend(lenses);
+        ledger.last_reviewed_head = Some(head);
+    }
+    ledger
+}
+
+#[cfg(test)]
+mod convergence_tests {
+    use super::*;
+
+    fn finding(id: &str, severity: &str, status: &str) -> Finding {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "severity": severity,
+            "file": "a.rs",
+            "line": 1,
+            "summary": "defect",
+            "status": status
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn severity_aliases_decode() {
+        assert_eq!(decode_severity("critical"), (Severity::Blocking, false));
+        assert_eq!(decode_severity("blocker"), (Severity::Blocking, false));
+        assert_eq!(decode_severity("blocking"), (Severity::Blocking, false));
+        assert_eq!(decode_severity("major"), (Severity::High, false));
+        assert_eq!(decode_severity("high"), (Severity::High, false));
+        assert_eq!(decode_severity("medium"), (Severity::Medium, false));
+        assert_eq!(decode_severity("moderate"), (Severity::Medium, false));
+        assert_eq!(decode_severity("minor"), (Severity::Low, false));
+        assert_eq!(decode_severity("low"), (Severity::Low, false));
+        assert_eq!(decode_severity("nit"), (Severity::Nit, false));
+        assert_eq!(decode_severity("info"), (Severity::Nit, false));
+        assert_eq!(decode_severity("style"), (Severity::Nit, false));
+        assert_eq!(decode_severity("  HIGH  "), (Severity::High, false));
+        assert_eq!(decode_severity("catastrophic"), (Severity::High, true));
+        assert_eq!(
+            FINDING_SEVERITY_UNKNOWN.as_str(),
+            "FINDING_SEVERITY_UNKNOWN"
+        );
+    }
+
+    #[test]
+    fn accept_below_respects_blocking_class() {
+        let high = finding("F1", "high", "open");
+        assert_eq!(
+            acceptance_decision(std::slice::from_ref(&high), AcceptBelow::Blocking, true),
+            Acceptance::Accept
+        );
+        assert_eq!(
+            acceptance_decision(std::slice::from_ref(&high), AcceptBelow::High, true),
+            Acceptance::Reject("finding F1 severity High is not below High".into())
+        );
+        let boundary: Finding = serde_json::from_value(serde_json::json!({
+            "id":"F2", "severity":"nit", "file":"a.rs", "summary":"defect", "status":"open",
+            "triage": {
+                "decision":"confirmed", "reason":"r", "worth_fixing":true,
+                "root_cause":"c", "blocking_class":"boundary"
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            acceptance_decision(std::slice::from_ref(&boundary), AcceptBelow::Blocking, true),
+            Acceptance::Reject(_)
+        ));
+        assert!(matches!(
+            acceptance_decision(&[], AcceptBelow::Off, true),
+            Acceptance::Accept
+        ));
+        assert!(matches!(
+            acceptance_decision(&[], AcceptBelow::High, false),
+            Acceptance::Reject(_)
+        ));
+    }
+
+    #[test]
+    fn delta_round_carries_open_findings() {
+        let mut ledger = FindingLedger::default();
+        let open = finding("F1", "high", "open");
+        let fixed = finding("F2", "low", "fixed");
+        record_head(
+            &mut ledger,
+            "aaa",
+            &[open.clone(), fixed],
+            BTreeMap::new(),
+            BTreeSet::from(["correctness".to_owned()]),
+            BTreeMap::new(),
+        );
+        assert_eq!(ledger.last_reviewed_head.as_deref(), Some("aaa"));
+        assert_eq!(carried_findings(&ledger, "aaa"), vec![open]);
+        let scope = round_scope(&ledger, "bbb", "base1", Some("base1"), RoundMode::Delta);
+        assert_eq!(
+            scope,
+            RoundScope::Delta {
+                base: "aaa".into(),
+                head: "bbb".into()
+            }
+        );
+    }
+
+    #[test]
+    fn base_move_widens_to_full() {
+        let mut ledger = FindingLedger::default();
+        record_head(
+            &mut ledger,
+            "aaa",
+            &[finding("F1", "high", "open")],
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+        );
+        let moved = round_scope(&ledger, "bbb", "base2", Some("base1"), RoundMode::Delta);
+        assert_eq!(moved, RoundScope::Full { head: "bbb".into() });
+        let explicit = round_scope(&ledger, "bbb", "base1", Some("base1"), RoundMode::Full);
+        assert_eq!(explicit, RoundScope::Full { head: "bbb".into() });
+    }
+
+    #[test]
+    fn sole_unavailable_lens_leaves_invariant_uncovered() {
+        let gaps = coverage_gaps(
+            &BTreeSet::new(),
+            &["correctness".to_owned()],
+            &BTreeMap::new(),
+            &["invariant-A".to_owned()],
+        );
+        assert!(gaps.iter().any(|gap| gap.contains("invariant-A")));
+        assert!(gaps.iter().any(|gap| gap.contains("correctness")));
+        // An uncovered invariant is INCONCLUSIVE, never an agreed PASS.
+        assert!(!gaps.is_empty());
+    }
+
+    #[test]
+    fn split_goes_to_one_adjudicator_no_round() {
+        use provenant_records::workflow::ReviewVerdict;
+        assert!(split_needs_adjudicator(&[
+            ReviewVerdict::Approve,
+            ReviewVerdict::RequestChanges
+        ]));
+        assert!(!split_needs_adjudicator(&[
+            ReviewVerdict::Approve,
+            ReviewVerdict::Approve
+        ]));
+        assert!(!split_needs_adjudicator(&[]));
+    }
+
+    #[test]
+    fn missing_evidence_rereviews_never_repairs() {
+        assert_eq!(
+            lens_outcome(Some("missing_evidence"), 0, 2, true),
+            LensOutcome::Retry
+        );
+        assert_eq!(
+            lens_outcome(Some("missing_evidence"), 2, 2, true),
+            LensOutcome::Unavailable
+        );
+        assert_eq!(
+            lens_outcome(Some("blocked_environment"), 0, 1, true),
+            LensOutcome::Retry
+        );
+        assert_eq!(
+            lens_outcome(Some("blocked_environment"), 1, 1, true),
+            LensOutcome::Unavailable
+        );
+        assert_eq!(
+            lens_outcome(Some("model_unavailable"), 1, 1, false),
+            LensOutcome::Unavailable
+        );
+        assert_eq!(lens_outcome(None, 0, 1, true), LensOutcome::Completed);
+    }
 }
 
 #[cfg(test)]

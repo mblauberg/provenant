@@ -828,9 +828,7 @@ fn outputs(
         // adjudication node resolves it. Flag the split so a reduced verdict
         // is never silently treated as an agreed changes-request.
         // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
-        split = verdicts
-            .first()
-            .is_some_and(|first| verdicts.iter().any(|verdict| verdict != first));
+        split = review::split_needs_adjudicator(&verdicts);
         let verdict = verdicts.into_iter().max_by_key(|verdict| rank(*verdict));
         selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
         selected.verdict_error = None;
@@ -844,6 +842,131 @@ fn outputs(
         || review::partial(&selected)
     {
         review::mark_partial(&mut selected);
+    }
+    // Batch 1 slice 27: every review round reads and writes one finding ledger
+    // for the exact head. Scope, carry-forward and coverage all come from it.
+    if review_members && checkpoint.nodes[boundary].review_settlement.is_some() {
+        let ledger = review::ledger_from_checkpoint(plan, checkpoint);
+        let boundary_progress = &checkpoint.nodes[boundary];
+        let head = boundary_progress
+            .review_settlement
+            .as_ref()
+            .map(|settlement| settlement.head.to_string())
+            .unwrap_or_default();
+        let base = boundary_progress
+            .review_settlement
+            .as_ref()
+            .and_then(|settlement| settlement.base)
+            .map(|oid| oid.to_string());
+        let previous_base = ledger
+            .last_reviewed_head
+            .as_deref()
+            .and_then(|last| ledger.heads.get(last))
+            .and_then(|entry| entry.dispositions.get("base"))
+            .map(String::as_str);
+        let mode = if plan.nodes[boundary]
+            .round
+            .as_ref()
+            .is_some_and(|round| round.round >= 2)
+        {
+            review::RoundMode::Delta
+        } else {
+            review::RoundMode::Full
+        };
+        let scope = review::round_scope(
+            &ledger,
+            &head,
+            base.as_deref().unwrap_or(""),
+            previous_base,
+            mode,
+        );
+        if let review::RoundScope::Delta { .. } = scope {
+            let carried = review::carried_findings(
+                &ledger,
+                ledger.last_reviewed_head.as_deref().unwrap_or(""),
+            );
+            for finding in carried {
+                if !selected
+                    .findings
+                    .iter()
+                    .any(|existing| existing.id == finding.id)
+                {
+                    selected.findings.push(finding);
+                }
+            }
+        }
+        let mut updated = ledger.clone();
+        review::record_head(
+            &mut updated,
+            &head,
+            &selected.findings,
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+        );
+        let mut required_invariants = Vec::new();
+        for finding in &selected.findings {
+            if let Some(invariant) = finding.named_invariant()
+                && !required_invariants
+                    .iter()
+                    .any(|value: &String| value.as_str() == invariant)
+            {
+                required_invariants.push(invariant.to_owned());
+            }
+        }
+        let gaps = updated.heads.get(&head).map_or_else(Vec::new, |entry| {
+            review::coverage_gaps(
+                &entry.covered_lenses,
+                &spec.required_review_lenses,
+                &entry.invariant_coverage,
+                &required_invariants,
+            )
+        });
+        if !gaps.is_empty() {
+            if selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(bounded(
+                    &format!("coverage_gaps: {}", gaps.join("; ")),
+                    WARNING_BYTES,
+                ));
+            }
+            if selected.verdict.as_deref() == Some("VERDICT: PASS") {
+                selected.verdict = Some("VERDICT: INCONCLUSIVE".into());
+            }
+        }
+        for finding in &selected.findings {
+            let (_, unknown) = review::finding_severity(finding);
+            if unknown && selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(bounded(
+                    &format!(
+                        "{}: finding {} used an unknown severity word; treated as high",
+                        review::FINDING_SEVERITY_UNKNOWN.as_str(),
+                        finding.id
+                    ),
+                    WARNING_BYTES,
+                ));
+            }
+        }
+        for export in &spec.exports {
+            if template::review_behaviour(&plan.nodes[positions[&export.node]]).is_none() {
+                continue;
+            }
+            let progress = &checkpoint.nodes[positions[&export.node]];
+            if !matches!(progress.state, NodeState::Failed | NodeState::Blocked) {
+                continue;
+            }
+            let end_code = progress
+                .advance_code
+                .as_deref()
+                .or(progress.advance_note.as_deref());
+            if review::lens_outcome(end_code, 0, 0, false) == review::LensOutcome::Unavailable
+                && selected.warnings.len() < MAX_WARNINGS
+            {
+                selected.warnings.push(bounded(
+                    &format!("review_lens_unavailable: {}", export.node),
+                    WARNING_BYTES,
+                ));
+            }
+        }
     }
     if !missing_review_lenses.is_empty() && selected.warnings.len() < MAX_WARNINGS {
         selected.warnings.push(bounded(
