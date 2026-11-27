@@ -1,5 +1,175 @@
 use super::*;
-use provenant_records::warning::{BRANCH_BEHIND_BASE, SETTING_LAYER_IGNORED, Warning, warn};
+use provenant_records::command_result::{ErrorClass, SettingRef};
+use provenant_records::custody::{
+    Admit, LeaseObservation, Sharing, Subject as CustodySubject, SubjectKind, admit_writer,
+};
+use provenant_records::lane_contract::{
+    ChildLaunchRequest, Destination, DestinationChoice, NarrowedAuthority,
+};
+use provenant_records::provenance::{Layer, Source, Sourced};
+use provenant_records::warning::{
+    BRANCH_BEHIND_BASE, SETTING_LAYER_IGNORED, Warning, WarningCode, warn,
+};
+
+/// The launch setting that selects where a child writer is placed.
+const DESTINATION_WRITE_KEY: &str = "lanes.destination.write";
+/// The setting whose owning-lane override decides live sharing.
+const WORKTREE_SHARING_KEY: &str = "lanes.worktree.sharing";
+
+/// A path claim another live lane has already recorded. Claims are advisory:
+/// an overlap warns and never refuses (§4, #3453/#4120).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LiveClaim {
+    pub holder: provenant_core::AttemptId,
+    pub path: provenant_core::RelativePath,
+}
+
+/// Where the host places a child writer after reading its custody.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChildPlacement {
+    /// The parent's worktree, through its sealed shared-writer grant.
+    ParentWorktree,
+    /// A managed worktree from the parent's HEAD, on the child's own branch.
+    ManagedWorktree,
+}
+
+fn child_setting(key: &str, value: impl Into<String>, layer: Layer, origin: &str) -> SettingRef {
+    SettingRef {
+        key: key.to_owned(),
+        value: value.into(),
+        layer,
+        origin: origin.to_owned(),
+    }
+}
+
+/// Whether `left` and `right` name the same path or one contains the other.
+fn claims_overlap(
+    left: &provenant_core::RelativePath,
+    right: &provenant_core::RelativePath,
+) -> bool {
+    let left = left.as_path();
+    let right = right.as_path();
+    left.starts_with(right) || right.starts_with(left)
+}
+
+/// Resolve one child launch from its shared request.
+///
+/// `auto` follows the owning lane's lease: a live lease with `refuse` separates
+/// the child into a managed worktree with `LANE_WRITER_SEPARATED`; otherwise the
+/// child shares the parent worktree and `admit_writer` supplies `WORKTREE_SHARED`.
+/// An explicit `parent` under `refuse` is the only Configured refusal here.
+/// Path claims are compared against every live claim and only ever warn.
+pub(crate) fn resolve_child_launch(
+    tree: &CustodySubject,
+    request: &ChildLaunchRequest,
+    choice: DestinationChoice,
+    sharing: Sharing,
+    lease: Option<&LeaseObservation>,
+    live_claims: &[LiveClaim],
+) -> Result<ChildPlacement, provenant_records::CommandError> {
+    use provenant_records::policy::{
+        PATH_CLAIM_OVERLAP, WORKTREE_SHARED, WORKTREE_SHARING_REFUSED,
+    };
+
+    let admission = admit_writer(tree, lease, sharing);
+    let refused = matches!(admission, Admit::Refuse { .. });
+    let placement = match choice {
+        DestinationChoice::New => ChildPlacement::ManagedWorktree,
+        DestinationChoice::Parent => {
+            if refused {
+                let holder = match admission {
+                    Admit::Refuse { holder } => holder,
+                    _ => None,
+                };
+                return Err(provenant_records::CommandError::new(
+                    WORKTREE_SHARING_REFUSED,
+                    format!(
+                        "{WORKTREE_SHARING_REFUSED}: {tree} is held by a live lane; wait for the holder or launch with --destination new"
+                    ),
+                    holder.map(|holder| holder.to_string()).as_deref(),
+                    "provenant wait HOLDER",
+                )
+                .with_class(ErrorClass::Configured)
+                .with_setting(child_setting(
+                    WORKTREE_SHARING_KEY,
+                    "refuse",
+                    Layer::Host,
+                    "config.toml#lanes.worktree.sharing",
+                )));
+            }
+            ChildPlacement::ParentWorktree
+        }
+        DestinationChoice::Auto if refused => {
+            warn(Warning::new(
+                WarningCode("LANE_WRITER_SEPARATED"),
+                format!("LANE_WRITER_SEPARATED: {tree} is held by its owning lane; child writer placed in a managed worktree"),
+                provenant_records::warning::detected_source(WarningCode("LANE_WRITER_SEPARATED")),
+            )
+            .subject(tree.to_string())
+            .setting(child_setting(
+                WORKTREE_SHARING_KEY,
+                "refuse",
+                Layer::Host,
+                "config.toml#lanes.worktree.sharing",
+            )));
+            ChildPlacement::ManagedWorktree
+        }
+        DestinationChoice::Auto => {
+            if let Admit::Proceed {
+                warning: Some(message),
+            } = admission
+            {
+                warn(
+                    Warning::new(
+                        WarningCode(WORKTREE_SHARED),
+                        message,
+                        provenant_records::warning::detected_source(WarningCode(WORKTREE_SHARED)),
+                    )
+                    .subject(tree.to_string())
+                    .setting(child_setting(
+                        WORKTREE_SHARING_KEY,
+                        "warn",
+                        Layer::Host,
+                        "config.toml#lanes.worktree.sharing",
+                    )),
+                );
+            }
+            ChildPlacement::ParentWorktree
+        }
+    };
+
+    if let Some(claims) = request.path_claim.value.as_ref() {
+        for claim in claims {
+            let Ok(path) = claim.to_relative_path() else {
+                continue;
+            };
+            for live in live_claims {
+                if claims_overlap(&path, &live.path) {
+                    warn(Warning::new(
+                        WarningCode(PATH_CLAIM_OVERLAP),
+                        format!(
+                            "{PATH_CLAIM_OVERLAP}: claim {path:?} overlaps a live claim by attempt {}",
+                            live.holder
+                        ),
+                        provenant_records::warning::detected_source(WarningCode(
+                            PATH_CLAIM_OVERLAP,
+                        )),
+                    )
+                    .subject(path.as_path().to_string_lossy().into_owned())
+                    .setting(child_setting(
+                        PATH_CLAIM_OVERLAP,
+                        "warn",
+                        Layer::Launch,
+                        "--write-scope",
+                    )));
+                }
+            }
+        }
+    }
+    // `request.commit` is applied by the launch path that owns the commit
+    // decision; placement and claims are the only decisions made here.
+    Ok(placement)
+}
 
 pub(crate) struct BoundGraphOwner<'a> {
     /// Active node's sealed launch allowance, independent of settlement observation.
@@ -1504,6 +1674,49 @@ impl BoundGraphOwner<'_> {
         }
         String::from_utf8(output.stdout.bytes).map_err(|_| "repair Git output is not UTF-8".into())
     }
+
+    /// The two layered settings that decide a child's destination. An absent
+    /// or malformed knob reads as the declared default (`auto`, `warn`), so a
+    /// child launch never refuses on a configuration read failure.
+    fn child_launch_settings(&self) -> (DestinationChoice, Sharing) {
+        let config = match provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
+        {
+            Ok(config) => config,
+            Err(error) => {
+                warn(Warning::new(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                    format!("child launch settings unavailable: {error}; using defaults"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                    ),
+                ));
+                return (DestinationChoice::Auto, Sharing::Warn);
+            }
+        };
+        let choice = config
+            .knobs
+            .get(DESTINATION_WRITE_KEY)
+            .and_then(|knob| knob.value.as_str())
+            .and_then(|value| match value {
+                "auto" => Some(DestinationChoice::Auto),
+                "parent" => Some(DestinationChoice::Parent),
+                "new" => Some(DestinationChoice::New),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let sharing = config
+            .knobs
+            .get(WORKTREE_SHARING_KEY)
+            .and_then(|knob| knob.value.as_str())
+            .and_then(|value| match value {
+                "allow" => Some(Sharing::Allow),
+                "warn" => Some(Sharing::Warn),
+                "refuse" => Some(Sharing::Refuse),
+                _ => None,
+            })
+            .unwrap_or(Sharing::Warn);
+        (choice, sharing)
+    }
 }
 
 impl BoundGraphOwner<'_> {
@@ -2396,6 +2609,43 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         source: &str,
         owner: Option<provenant_core::Digest>,
     ) -> Result<bool, Self::Error> {
+        // The graph has already selected a managed worktree path. Admit the
+        // child through the shared request so destination and claims are one
+        // decision; a host `refuse` here is a configured stop, not a busy lock.
+        let (choice, sharing) = self.child_launch_settings();
+        let parent_attempt = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
+            .ok()
+            .and_then(|value| provenant_core::AttemptId::parse(&value).ok())
+            .unwrap_or_else(|| provenant_core::AttemptId::from_bytes([0; 16]));
+        let request = ChildLaunchRequest {
+            parent_attempt,
+            authority: NarrowedAuthority {
+                routes: Default::default(),
+                budgets: Default::default(),
+                paths: Vec::new(),
+                extra: Default::default(),
+            },
+            destination: Destination::ParentOwnedPath {
+                path: path.to_owned(),
+            },
+            path_claim: Sourced {
+                value: None,
+                source: Source::default(),
+            },
+            commit: Sourced {
+                value: None,
+                source: Source::default(),
+            },
+            extra: Default::default(),
+        };
+        let tree = CustodySubject::new(SubjectKind::Worktree, path.to_owned());
+        resolve_child_launch(&tree, &request, choice, sharing, None, &[]).map_err(|error| {
+            FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: error.message,
+            }
+        })?;
         provenant_cli::fabric::graph_relay::provision_child_with_budget(
             &self.factory.context,
             path,
@@ -5951,6 +6201,142 @@ mod peer_handoff_tests;
 #[cfg(test)]
 #[path = "owner_recovery_rebuild_tests.rs"]
 mod recovery_rebuild_tests;
+
+#[cfg(test)]
+mod child_launch_tests {
+    use super::*;
+    use provenant_core::{RelativePath, WallTime};
+    use provenant_records::PathWire;
+    use provenant_records::custody::{LeaseState, WorktreeLease};
+    use provenant_records::warning::take_unhandled;
+
+    fn tree() -> CustodySubject {
+        CustodySubject::new(SubjectKind::Worktree, "worktree:/tmp/child")
+    }
+
+    fn request(claims: Option<Vec<PathWire>>) -> ChildLaunchRequest {
+        ChildLaunchRequest {
+            parent_attempt: provenant_core::AttemptId::from_bytes([7; 16]),
+            authority: NarrowedAuthority {
+                routes: Default::default(),
+                budgets: Default::default(),
+                paths: Vec::new(),
+                extra: Default::default(),
+            },
+            destination: Destination::ParentOwnedPath {
+                path: "/tmp/child".to_owned(),
+            },
+            path_claim: Sourced {
+                value: claims,
+                source: Source::default(),
+            },
+            commit: Sourced {
+                value: None,
+                source: Source::default(),
+            },
+            extra: Default::default(),
+        }
+    }
+
+    fn lease(sharing: Sharing) -> LeaseObservation {
+        LeaseObservation {
+            lease: WorktreeLease {
+                holder: provenant_core::AttemptId::from_bytes([3; 16]),
+                since: WallTime::from_unix_seconds(1).unwrap(),
+                sharing,
+            },
+            state: LeaseState::Live {
+                attempt_state: "nonterminal".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn auto_shares_the_parent_when_no_live_lease_holds_it() {
+        let _ = take_unhandled();
+        let placement = resolve_child_launch(
+            &tree(),
+            &request(None),
+            DestinationChoice::Auto,
+            Sharing::Warn,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(placement, ChildPlacement::ParentWorktree);
+        assert!(take_unhandled().is_empty());
+    }
+
+    #[test]
+    fn auto_separates_a_child_when_the_owner_refuses_sharing() {
+        let _ = take_unhandled();
+        let placement = resolve_child_launch(
+            &tree(),
+            &request(None),
+            DestinationChoice::Auto,
+            Sharing::Warn,
+            Some(&lease(Sharing::Refuse)),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(placement, ChildPlacement::ManagedWorktree);
+        let warnings = take_unhandled();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code.as_ref() == "LANE_WRITER_SEPARATED")
+        );
+    }
+
+    #[test]
+    fn explicit_parent_under_owner_refuse_is_a_configured_refusal() {
+        let error = resolve_child_launch(
+            &tree(),
+            &request(None),
+            DestinationChoice::Parent,
+            Sharing::Warn,
+            Some(&lease(Sharing::Refuse)),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            provenant_records::policy::WORKTREE_SHARING_REFUSED
+        );
+        assert_eq!(error.class, ErrorClass::Configured);
+        let setting = error
+            .setting
+            .expect("a configured refusal names its setting");
+        assert_eq!(setting.key, WORKTREE_SHARING_KEY);
+        assert!(!error.next.is_empty());
+    }
+
+    #[test]
+    fn overlapping_path_claims_warn_never_refuse() {
+        let _ = take_unhandled();
+        let claim = PathWire::from_relative(&RelativePath::parse("src/lib.rs").unwrap()).unwrap();
+        let placement = resolve_child_launch(
+            &tree(),
+            &request(Some(vec![claim])),
+            DestinationChoice::Auto,
+            Sharing::Allow,
+            None,
+            &[LiveClaim {
+                holder: provenant_core::AttemptId::from_bytes([9; 16]),
+                path: RelativePath::parse("src").unwrap(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(placement, ChildPlacement::ParentWorktree);
+        let warnings = take_unhandled();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code.as_ref()
+                    == provenant_records::policy::PATH_CLAIM_OVERLAP)
+        );
+    }
+}
 
 #[cfg(test)]
 mod on_stop_defaults_tests {
