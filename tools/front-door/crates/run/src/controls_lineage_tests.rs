@@ -96,6 +96,34 @@ fn stopped_lane_branch_continues_with_handover_warning()
         },
     )?;
     let parent_record = store.record(prior, &call)?;
+    let first_slot = store.writer_slot(&writer)?;
+    assert!(
+        !lease_path(&first_slot).exists(),
+        "first writer custody must not have a lease snapshot yet"
+    );
+    let first_launch_custody = provenant_supervisor::custody::acquire_writer(
+        Directory::open_anchor(&first_slot)?,
+        RunStore::scope(&parent_record),
+        provenant_supervisor::custody::WriterBinding::read_only(),
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+    let (first_launch, first_launch_warnings) = provenant_records::warning::capture(|| {
+        store.check_launch_writer_lineage(
+            &parent_record,
+            &original.request.task,
+            &initial.worktree,
+            &call,
+        )
+    });
+    first_launch?;
+    assert!(
+        !first_launch_warnings
+            .iter()
+            .any(|warning| { warning.code.as_ref() == provenant_records::policy::WRITER_HANDOVER })
+    );
+    first_launch_custody.withdraw_unlaunched()?;
     initial.snapshot(
         store.context.state_root.as_path(),
         &store.attempt_dir(prior, false)?,
@@ -296,6 +324,142 @@ fn stopped_lane_branch_continues_with_handover_warning()
             .any(|w| w.code.as_ref() == provenant_records::policy::WRITER_HEAD_MOVED),
         "a moved predecessor head must re-pin with WRITER_HEAD_MOVED"
     );
+
+    // A lane outside the retry chain may adopt a foreign lane after its
+    // reservation stays unobservable through the configured grace. The
+    // launch path still checks custody when the task has no graph context.
+    let mut unrelated = crate::tests::input();
+    unrelated.attempt_id = AttemptId::from_bytes([214; 16]);
+    unrelated.operation_id = "unrelated-writer-adopter".parse()?;
+    crate::tests::rekey(&mut unrelated);
+    unrelated.request.task.writer = Some(writer.clone());
+    unrelated.request.task.context = None;
+    store.create(&unrelated, &call)?;
+    let unrelated_record = store.record(unrelated.attempt_id, &call)?;
+    let unrelated_task = store.request(unrelated.attempt_id, &call)?.task;
+
+    let slot_path = store.writer_slot(&writer)?;
+    let slot = Directory::open_anchor(&slot_path)?;
+    let child_record = store.record(child.attempt_id, &call)?;
+    assert!(
+        !matches!(&child_record.state, AttemptState::Terminal { .. }),
+        "the unreachable foreign holder must remain nonterminal in run state"
+    );
+    assert_eq!(unrelated_record.retry_of, None);
+    let _holder_custody = provenant_supervisor::custody::acquire_writer(
+        slot,
+        RunStore::scope(&child_record),
+        provenant_supervisor::custody::WriterBinding::read_only(),
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+    let adopter_custody = provenant_supervisor::custody::acquire_writer(
+        Directory::open_anchor(&slot_path)?,
+        RunStore::scope(&unrelated_record),
+        provenant_supervisor::custody::WriterBinding::read_only(),
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+
+    let (within_grace, within_grace_warnings) = provenant_records::warning::capture(|| {
+        store.check_launch_writer_lineage(
+            &unrelated_record,
+            &unrelated_task,
+            &drifted.worktree,
+            &call,
+        )
+    });
+    within_grace?;
+    assert!(
+        !within_grace_warnings
+            .iter()
+            .any(|warning| { warning.code.as_ref() == provenant_records::policy::WRITER_HANDOVER })
+    );
+
+    let sibling_id = AttemptId::from_bytes([215; 16]);
+    let sibling_custody = provenant_supervisor::custody::acquire_writer(
+        Directory::open_anchor(&slot_path)?,
+        provenant_records::custody::Scope {
+            attempt: sibling_id,
+            generation: 1,
+        },
+        provenant_supervisor::custody::WriterBinding::read_only(),
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+    let sibling_reservation_path = slot_path
+        .join(sibling_id.to_string())
+        .join("reservation.json");
+
+    let grace =
+        provenant_confinement::worktrees::configured_unreachable_grace_at(&store.writer_registry)
+            .value;
+    let mut later_clock = clock.clone();
+    later_clock.advance(provenant_core::DurationMicros::from_seconds(grace + 1)?)?;
+    let later_call = Request {
+        clock: &later_clock,
+        cancel: &cancel,
+    };
+    let (blocked_by_sibling, sibling_warnings) = provenant_records::warning::capture(|| {
+        store.check_launch_writer_lineage(
+            &unrelated_record,
+            &unrelated_task,
+            &drifted.worktree,
+            &later_call,
+        )
+    });
+    blocked_by_sibling?;
+    assert!(
+        !sibling_warnings
+            .iter()
+            .any(|warning| { warning.code.as_ref() == provenant_records::policy::WRITER_HANDOVER })
+    );
+    assert!(
+        crate::writer::read_handover(&store.attempt_dir(unrelated.attempt_id, false)?)?.is_none(),
+        "a protected sibling reservation must keep the handover from transferring"
+    );
+    let mut sibling_reservation: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sibling_reservation_path)?)?;
+    let current_boot = sibling_reservation["boot"]
+        .as_str()
+        .ok_or("sibling reservation lacks a boot identity")?;
+    sibling_reservation["boot"] = if current_boot.starts_with("linux:") {
+        serde_json::json!("darwin:00000000-0000-0000-0000-000000000000")
+    } else {
+        serde_json::json!("linux:00000000-0000-0000-0000-000000000000")
+    };
+    std::fs::write(
+        &sibling_reservation_path,
+        serde_json::to_vec(&sibling_reservation)?,
+    )?;
+
+    let (adopted, lapse_warnings) = provenant_records::warning::capture(|| {
+        store.check_launch_writer_lineage(
+            &unrelated_record,
+            &unrelated_task,
+            &drifted.worktree,
+            &later_call,
+        )
+    });
+    adopted?;
+    assert!(lapse_warnings.iter().any(|warning| {
+        warning.code.as_ref() == provenant_records::policy::LEASE_HOLDER_UNREACHABLE
+    }));
+    assert!(lapse_warnings.iter().any(|warning| {
+        warning.code.as_ref() == provenant_records::policy::WRITER_HANDOVER
+            && warning.message.contains("unreachable after grace")
+    }));
+    let fact = crate::writer::read_handover(&store.attempt_dir(unrelated.attempt_id, false)?)?
+        .ok_or("unreachable holder handover fact was not sealed")?;
+    assert_eq!(fact.from, child.attempt_id);
+    assert_eq!(fact.to, unrelated.attempt_id);
+    let lease: WorktreeLease = serde_json::from_slice(&std::fs::read(lease_path(&slot_path))?)?;
+    assert_eq!(lease.holder, unrelated.attempt_id);
+    drop(adopter_custody);
+    drop(sibling_custody);
     Ok(())
 }
 

@@ -119,7 +119,8 @@ pub use lane_history::{
     LaneHistory, REBASE, Rebase, Setting, UNROOTED_TIP,
 };
 pub use loader::{
-    config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
+    config_show, inspect_config, load, load_with_domains, read, read_knobs, read_knobs_at_state,
+    read_with_domains,
 };
 pub use presets::Profile;
 pub use project_binding::{

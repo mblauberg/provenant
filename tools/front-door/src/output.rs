@@ -1213,8 +1213,7 @@ fn write_report(result: &CommandResult<serde_json::Value>) -> Option<PathBuf> {
 }
 
 /// Prune reports older than the seven-day window. The writer calls this on
-/// every write; a gc sweep can call the same seam without duplicating the rule.
-#[allow(dead_code)]
+/// every write; gc calls the same seam without duplicating the rule.
 pub(crate) fn prune_reports(root: &Path) {
     reports::prune(&root.join("reports"));
 }

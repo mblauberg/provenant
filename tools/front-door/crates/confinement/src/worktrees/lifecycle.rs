@@ -1583,12 +1583,12 @@ pub(super) fn remove_tree_when_before_delete_locked(
     // Only destruction refuses: removing a worktree whose lease is live with
     // another lane is an `other_work` boundary. A lapsed lease never triggers
     // this guard; its uncommitted files are retained by the caller's archive.
-    if let Some((holder, live)) = live_writer_holder(context.project_state, &canonical) {
+    if let Some((holder, live)) = live_writer_holder(context, &canonical) {
         let subject = CustodySubject {
             kind: SubjectKind::Worktree,
             id: canonical.to_string_lossy().into_owned(),
         };
-        guard_destructive_worktree("worktree remove", &subject, live, Some(holder))?;
+        guard_destructive_worktree("worktree remove", &subject, live, holder)?;
     }
     before_delete(&locked.verified, &canonical, archive.as_ref())?;
     // A cache that cannot be derived must not block removal; warn and skip it.

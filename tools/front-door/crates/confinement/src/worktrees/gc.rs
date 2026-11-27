@@ -198,7 +198,7 @@ pub(crate) fn retention_holder(
     path: &Path,
 ) -> Option<provenant_core::AttemptId> {
     lapsed_holder(
-        live_writer_holder(context.project_state, path),
+        live_writer_holder(context, path),
         writer_holder(context.project_state, path),
     )
 }
@@ -206,7 +206,7 @@ pub(crate) fn retention_holder(
 /// Pure core of [`retention_holder`]: only a recorded holder that is not a
 /// live lease keeps its uncommitted files.
 fn lapsed_holder(
-    live: Option<(provenant_core::AttemptId, bool)>,
+    live: Option<(Option<provenant_core::AttemptId>, bool)>,
     recorded: Option<provenant_core::AttemptId>,
 ) -> Option<provenant_core::AttemptId> {
     live.is_none().then_some(recorded).flatten()
@@ -305,12 +305,12 @@ pub(crate) fn guard_gc_removal(
     context: &WorktreeContext<'_>,
     path: &Path,
 ) -> Result<(), WorktreeError> {
-    if let Some((holder, live)) = live_writer_holder(context.project_state, path) {
+    if let Some((holder, live)) = live_writer_holder(context, path) {
         let subject = Subject {
             kind: SubjectKind::Worktree,
             id: path.to_string_lossy().into_owned(),
         };
-        guard_destructive_worktree("worktree remove", &subject, live, Some(holder))?;
+        guard_destructive_worktree("worktree remove", &subject, live, holder)?;
     }
     Ok(())
 }
@@ -3389,7 +3389,10 @@ mod lapsed_retention_tests {
         // An unreachable holder also lapses once its grace has expired.
         assert_eq!(lapsed_holder(None, Some(holder(2))), Some(holder(2)));
         // A live lease is guarded instead; nothing is retained behind its back.
-        assert_eq!(lapsed_holder(Some((lapsed, true)), Some(lapsed)), None);
+        assert_eq!(
+            lapsed_holder(Some((Some(lapsed), true)), Some(lapsed)),
+            None
+        );
         // No reservation means no prior holder to retain for.
         assert_eq!(lapsed_holder(None, None), None);
     }

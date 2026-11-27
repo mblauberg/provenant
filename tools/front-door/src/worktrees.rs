@@ -3204,6 +3204,9 @@ fn gc(
             .watch_fence(deadline.cancel().clone())
             .map_err(|error| Error::RetentionCollection(error.to_string()))?;
     }
+    if lease.is_some() && sweep_should_continue(&deadline, lease.as_ref()) {
+        crate::output::prune_reports(roots.state.as_path());
+    }
     let trigger_identity = if command.pressure {
         "pressure"
     } else {

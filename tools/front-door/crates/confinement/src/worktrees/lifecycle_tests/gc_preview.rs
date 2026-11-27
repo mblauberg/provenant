@@ -963,6 +963,66 @@ fn foreign_gc_retires_a_landed_unowned_worktree_with_a_typed_outcome() -> Result
 }
 
 #[test]
+fn gc_refuses_destruction_when_a_worktree_reservation_is_unreadable() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "unreadable-custody".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let slot = writer_directory(context.project_state, &info.path)?;
+    let attempt = provenant_core::AttemptId::from_bytes([12; 16]);
+    let evidence = slot.current_path()?.join(attempt.to_string());
+    fs::create_dir(&evidence)?;
+    fs::set_permissions(&evidence, fs::Permissions::from_mode(0o700))?;
+    fs::write(evidence.join("reservation.json"), b"not json")?;
+
+    assert!(matches!(
+        admitted_writer_guard(&context, &info.path),
+        Err(WorktreeError::UnknownOccupancy { .. })
+    ));
+    assert!(matches!(
+        super::super::gc::guard_gc_removal(&context, &info.path),
+        Err(WorktreeError::CustodyRefused {
+            code: provenant_records::policy::DESTROYS_LIVE_WORK,
+            holder: None,
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[test]
+fn gc_observes_an_unowned_legacy_slot_without_creating_an_observation_gate()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "unowned-legacy-slot".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let slot = writer_directory(context.project_state, &info.path)?;
+    let observation_gate = slot.current_path()?.join("writer-probe.lock");
+    fs::remove_file(&observation_gate)?;
+
+    assert_eq!(live_writer_holder(&context, &info.path), None);
+    assert!(!observation_gate.exists());
+    super::super::gc::guard_gc_removal(&context, &info.path)?;
+    Ok(())
+}
+
+#[test]
 fn source_fast_forward_advances_clean_tree_and_preserves_ignored_output()
 -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;

@@ -3365,13 +3365,15 @@ impl RunStore {
         {
             // Manual continuations without a graph predecessor follow the
             // immediate run's owner chain.
-            self.check_writer_lineage(record, tree, call)?;
+            self.check_writer_lineage_with_lock(record, tree, call, true)?;
             return Ok(());
         }
         let Some(context) = task.context.as_ref() else {
+            self.check_writer_lineage_with_lock(record, tree, call, true)?;
             return Ok(());
         };
         let Some(prior) = context.writer_predecessor else {
+            self.check_writer_lineage_with_lock(record, tree, call, true)?;
             return Ok(());
         };
         // An unreadable predecessor record is a typed operation error, never
@@ -3379,7 +3381,7 @@ impl RunStore {
         let previous = self.record(prior, call)?;
         // Take the lease for the launching attempt, not the predecessor: the
         // handover fact is sealed in the successor's record.
-        self.check_writer_lineage(record, tree, call)?;
+        self.check_writer_lineage_with_lock(record, tree, call, true)?;
         let request = self.request(previous.attempt_id, call)?;
         let previous_task = request.task;
         let source = previous_task
@@ -3492,12 +3494,88 @@ impl RunStore {
         holder: &AttemptRecord,
         tree: &provenant_confinement::VerifiedWorktree,
         call: &Request<'_>,
+        shared_occupancy_held: bool,
+        observed_unreachable_lapse: Option<&provenant_records::custody::LeaseObservation>,
     ) -> Result<()> {
+        use provenant_confinement::worktrees::state_dir_name;
+        use provenant_os::fs::LockMode;
+        use std::ffi::OsStr;
+
+        let slot_path = self
+            .writer_registry
+            .join("worktrees")
+            .join(record.project_id.to_string())
+            .join(state_dir_name(tree.repo().root_path()));
+        let slot = provenant_os::fs::Directory::open_anchor(&slot_path)?;
+        let _writer = if shared_occupancy_held {
+            None
+        } else {
+            Some(slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?)
+        };
+        let project_state_path = self
+            .writer_registry
+            .join("worktrees")
+            .join(record.project_id.to_string());
+        let project_state = provenant_os::fs::Directory::open_anchor(&project_state_path)?;
+        let grace = provenant_confinement::worktrees::configured_unreachable_grace_at(
+            &self.writer_registry,
+        );
+        let handover_guard = provenant_confinement::worktrees::lock_writer_lease_handover(
+            &project_state,
+            tree.repo().root_path(),
+            call.clock.wall_now()?,
+            &grace,
+            Self::scope(record),
+        )?;
+        let current = handover_guard.observation().cloned();
+        let handover_slot = handover_guard.slot().unwrap_or(&slot);
+        if handover_guard.has_other_protected_holder() {
+            // A current or unobservable sibling reservation may still be
+            // writing this shared worktree. Do not rewrite its lease owner.
+            return Ok(());
+        }
+        if observed_unreachable_lapse.is_some()
+            && !matches!(
+                current.as_ref(),
+                Some(observation)
+                    if observation.lease.holder == holder.attempt_id
+                        && matches!(
+                            &observation.state,
+                            provenant_records::custody::LeaseState::LapsedUnreachable { .. }
+                        )
+            )
+        {
+            // A vanished or changed reservation is not proof that an
+            // unreachable holder has lapsed. Only the fresh shared
+            // classification can authorise this handover.
+            return Ok(());
+        }
+        if let Some(current) = &current
+            && (current.lease.holder != holder.attempt_id
+                || !matches!(
+                    &current.state,
+                    provenant_records::custody::LeaseState::Lapsed { .. }
+                        | provenant_records::custody::LeaseState::LapsedUnreachable { .. }
+                ))
+        {
+            return Ok(());
+        }
+        let unreachable_lapse = match current.as_ref() {
+            Some(observation)
+                if matches!(
+                    &observation.state,
+                    provenant_records::custody::LeaseState::LapsedUnreachable { .. }
+                ) =>
+            {
+                Some(observation)
+            }
+            _ => None,
+        };
         let attempt = self.attempt_dir(record.attempt_id, false)?;
         if crate::writer::read_handover(&attempt)?.is_some() {
             // A replay must still name the successor at the slot path, even if
             // a previous pass sealed the receipt before the lease transfer.
-            self.transfer_slot_lease(record, tree, call.clock.wall_now()?)?;
+            self.transfer_slot_lease(record, handover_slot, call.clock.wall_now()?)?;
             return Ok(());
         }
         let head = holder.head.or_else(|| {
@@ -3519,7 +3597,23 @@ impl RunStore {
         // The receipt names the prior lane; the durable lease must name the
         // successor, or the next admission would read a holder that already
         // finished. Both live at the one slot path confinement reads.
-        self.transfer_slot_lease(record, tree, at)?;
+        self.transfer_slot_lease(record, handover_slot, at)?;
+        if let Some(observation) = unreachable_lapse
+            && let provenant_records::custody::LeaseState::LapsedUnreachable { retry_at, setting } =
+                &observation.state
+        {
+            warning::warn(
+                Self::lease_warning(
+                    provenant_records::policy::LEASE_HOLDER_UNREACHABLE,
+                    format!(
+                        "LEASE_HOLDER_UNREACHABLE: worktree holder {} remained unreachable through grace ending at {retry_at}",
+                        observation.lease.holder
+                    ),
+                    observation.lease.holder,
+                )
+                .setting(setting.clone()),
+            );
+        }
         let files = if uncommitted.is_empty() {
             "none".to_owned()
         } else {
@@ -3530,7 +3624,13 @@ impl RunStore {
             format!(
                 "WRITER_HANDOVER: lane {} ({}) left {} with head {}; uncommitted files kept in place: {files}",
                 holder.attempt_id,
-                Self::lease_holder_state(&holder.state),
+                if unreachable_lapse.is_some()
+                    && !matches!(&holder.state, AttemptState::Terminal { .. })
+                {
+                    "unreachable after grace".to_owned()
+                } else {
+                    Self::lease_holder_state(&holder.state)
+                },
                 tree.repo().root_path().display(),
                 head.map_or_else(|| "unknown".to_owned(), |head| head.to_string()),
             ),
@@ -3540,30 +3640,19 @@ impl RunStore {
     }
 
     /// Rewrite the worktree slot lease so later admissions observe the
-    /// successor as holder. The launch admission site already holds the slot's
-    /// writer lock; a stand-alone continuation takes it here when free. The
-    /// publication is an atomic replace of the one lease file.
+    /// successor as holder. Launch admission retains its shared occupancy and
+    /// observation gate; a stand-alone continuation takes exclusive occupancy
+    /// here when free. The publication is an atomic replace of the one lease file.
     fn transfer_slot_lease(
         &self,
         record: &AttemptRecord,
-        tree: &provenant_confinement::VerifiedWorktree,
+        slot: &provenant_os::fs::Directory,
         at: provenant_core::WallTime,
     ) -> Result<()> {
         use provenant_confinement::worktrees::LEASE_FILE;
-        use provenant_os::fs::{LockMode, PublishMode};
+        use provenant_os::fs::PublishMode;
         use std::ffi::OsStr;
 
-        let slot_path = self
-            .writer_registry
-            .join("worktrees")
-            .join(record.project_id.to_string())
-            .join(provenant_confinement::worktrees::state_dir_name(
-                tree.repo().root_path(),
-            ));
-        let slot = provenant_os::fs::Directory::open_anchor(&slot_path)?;
-        let _guard = slot
-            .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
-            .ok();
         let name = OsStr::new(LEASE_FILE);
         let sharing = slot
             .read_stable(name, 4096)
@@ -3598,6 +3687,59 @@ impl RunStore {
         record: &AttemptRecord,
         tree: &provenant_confinement::VerifiedWorktree,
         call: &Request<'_>,
+    ) -> Result<Option<provenant_confinement::worktrees::WorktreeOwner>> {
+        self.check_writer_lineage_with_lock(record, tree, call, false)
+    }
+
+    fn check_writer_lineage_with_lock(
+        &self,
+        record: &AttemptRecord,
+        tree: &provenant_confinement::VerifiedWorktree,
+        call: &Request<'_>,
+        shared_occupancy_held: bool,
+    ) -> Result<Option<provenant_confinement::worktrees::WorktreeOwner>> {
+        let observation = self.current_writer_lease_observation(
+            record.project_id,
+            tree.repo().root_path(),
+            call.clock.wall_now()?,
+            Self::scope(record),
+        )?;
+        self.check_writer_lineage_observed(record, tree, call, observation, shared_occupancy_held)
+    }
+
+    fn current_writer_lease_observation(
+        &self,
+        project: provenant_core::ProjectId,
+        path: &std::path::Path,
+        now: WallTime,
+        adopter: provenant_records::custody::Scope,
+    ) -> Result<Option<provenant_records::custody::LeaseObservation>> {
+        let host_state = &self.writer_registry;
+        let project_state_path = host_state.join("worktrees").join(project.to_string());
+        let project_state = match provenant_os::fs::Directory::open_anchor(&project_state_path) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let grace = provenant_confinement::worktrees::configured_unreachable_grace_at(host_state);
+        Ok(
+            provenant_confinement::worktrees::writer_lease_observation_for_adopter(
+                &project_state,
+                path,
+                now,
+                &grace,
+                adopter,
+            )?,
+        )
+    }
+
+    fn check_writer_lineage_observed(
+        &self,
+        record: &AttemptRecord,
+        tree: &provenant_confinement::VerifiedWorktree,
+        call: &Request<'_>,
+        observation: Option<provenant_records::custody::LeaseObservation>,
+        shared_occupancy_held: bool,
     ) -> Result<Option<provenant_confinement::worktrees::WorktreeOwner>> {
         use provenant_confinement::worktrees::{WorktreeOrigin, load_owner};
         let owner = load_owner(tree)?;
@@ -3635,21 +3777,75 @@ impl RunStore {
             };
             current = self.record(parent, call)?;
         }
-        let Some(holder) = holder else {
-            // A different lane's lease on this tree. Live sharing is admitted
-            // at the worktree layer; ownership alone refuses nothing.
-            return Ok(owner);
-        };
-        if holder.attempt_id == record.attempt_id {
+        if holder
+            .as_ref()
+            .is_some_and(|holder| holder.attempt_id == record.attempt_id)
+        {
             // Re-claiming one's own lease needs no handover.
             return Ok(owner);
         }
-        if !matches!(holder.state, AttemptState::Terminal { .. }) {
-            // Sharing and its warning are decided by the worktree custody
-            // guard, which resolves the setting and observes current custody.
+
+        let (handover_holder, unreachable_observation) = match observation.as_ref() {
+            Some(observation) => match &observation.state {
+                provenant_records::custody::LeaseState::Lapsed { .. }
+                | provenant_records::custody::LeaseState::LapsedUnreachable { .. } => {
+                    let current = match self.record(observation.lease.holder, call) {
+                        Ok(current) => current,
+                        Err(RunError::NotFound) => return Ok(owner),
+                        Err(error) => return Err(error),
+                    };
+                    let unreachable_observation = matches!(
+                        &observation.state,
+                        provenant_records::custody::LeaseState::LapsedUnreachable { .. }
+                    )
+                    .then(|| observation.clone());
+                    if unreachable_observation.is_some()
+                        || matches!(&current.state, AttemptState::Terminal { .. })
+                    {
+                        (Some(current), unreachable_observation)
+                    } else {
+                        (None, None)
+                    }
+                }
+                // Live and within-grace holders stay protected, even when a
+                // run record says terminal. Custody owns the current fact.
+                _ => (None, None),
+            },
+            None => {
+                let fallback = match holder {
+                    Some(holder) => Some(holder),
+                    None => match lane.attempt_id {
+                        Some(id) => match self.record(id, call) {
+                            Ok(holder) => Some(holder),
+                            Err(RunError::NotFound) => None,
+                            Err(error) => return Err(error),
+                        },
+                        None => None,
+                    },
+                };
+                if fallback
+                    .as_ref()
+                    .is_some_and(|holder| matches!(&holder.state, AttemptState::Terminal { .. }))
+                {
+                    (fallback, None)
+                } else {
+                    (None, None)
+                }
+            }
+        };
+        let Some(handover_holder) = handover_holder else {
+            // A different lane may be adopted only when the current slot
+            // lease itself proves that its holder has lapsed.
             return Ok(owner);
-        }
-        self.take_lapsed_lease(record, &holder, tree, call)?;
+        };
+        self.take_lapsed_lease(
+            record,
+            &handover_holder,
+            tree,
+            call,
+            shared_occupancy_held,
+            unreachable_observation.as_ref(),
+        )?;
         Ok(owner)
     }
     fn resume_mode(

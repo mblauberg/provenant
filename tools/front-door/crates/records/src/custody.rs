@@ -241,9 +241,22 @@ pub struct WorktreeLease {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum LeaseState {
-    Live { attempt_state: String },
-    Lapsed { attempt_state: String },
-    Unreachable { retry_at: WallTime },
+    Live {
+        attempt_state: String,
+    },
+    Lapsed {
+        attempt_state: String,
+    },
+    Unreachable {
+        retry_at: WallTime,
+        setting: SettingRef,
+    },
+    /// The holder's host stayed unobservable through the configured grace.
+    /// The lease may be adopted, but callers must report the lapse.
+    LapsedUnreachable {
+        retry_at: WallTime,
+        setting: SettingRef,
+    },
 }
 
 /// Durable fact that a new attempt continued a lapsed lease.
@@ -257,7 +270,8 @@ pub struct Handover {
     pub uncommitted: Vec<String>,
 }
 
-/// A lease record paired with its current, non-persisted holder classification.
+/// A lease record paired with its current holder classification. Confinement
+/// derives presence at read time and persists only the first-unreachable time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeaseObservation {
     pub lease: WorktreeLease,
@@ -273,7 +287,8 @@ pub enum Admit {
 
 /// Resolve the effect of an already-classified lease and sharing setting.
 /// Callers pass `Lapsed` for a terminal holder and `Live` while its attempt is
-/// nonterminal. This function creates the typed warning or refusal once.
+/// nonterminal. An unreachable holder that outlasted its grace proceeds with a
+/// lapse warning. This function creates the typed warning or refusal once.
 pub fn admit_writer(
     tree: &Subject,
     lease: Option<&LeaseObservation>,
@@ -304,6 +319,11 @@ pub fn admit_writer(
             .subject(tree.to_string())
             .setting(setting.clone())
     };
+    let warning_with_setting = |code: WarningCode, message: String, setting: SettingRef| {
+        Warning::new(code, message, detected_source(code))
+            .subject(tree.to_string())
+            .setting(setting)
+    };
     let refusal = || {
         let holder = observation.lease.holder;
         let holder_text = holder.to_string();
@@ -333,18 +353,29 @@ pub fn admit_writer(
             Sharing::Allow => Admit::Proceed { warning: None },
             Sharing::Refuse => Admit::Refuse { error: refusal() },
         },
-        LeaseState::Unreachable { retry_at } => match effective.value {
+        LeaseState::Unreachable { retry_at, setting } => match effective.value {
             Sharing::Inherit | Sharing::Warn => Admit::Proceed {
-                warning: Some(warning(
+                warning: Some(warning_with_setting(
                     WarningCode(LEASE_HOLDER_UNREACHABLE),
                     format!(
                         "LEASE_HOLDER_UNREACHABLE: {tree} holder {} is unreachable until {retry_at}",
                         observation.lease.holder
                     ),
+                    setting.clone(),
                 )),
             },
             Sharing::Allow => Admit::Proceed { warning: None },
             Sharing::Refuse => Admit::Refuse { error: refusal() },
+        },
+        LeaseState::LapsedUnreachable { retry_at, setting } => Admit::Proceed {
+            warning: Some(warning_with_setting(
+                WarningCode(LEASE_HOLDER_UNREACHABLE),
+                format!(
+                    "LEASE_HOLDER_UNREACHABLE: {tree} holder {} stayed unreachable through the grace ending at {retry_at}; its lease has lapsed",
+                    observation.lease.holder
+                ),
+                setting.clone(),
+            )),
         },
     }
 }
@@ -1862,6 +1893,12 @@ mod tests {
             lease: lease.clone(),
             state: LeaseState::Unreachable {
                 retry_at: WallTime::from_micros(10).unwrap(),
+                setting: SettingRef {
+                    key: "domains.fabric.lanes.lease_unreachable_seconds".into(),
+                    value: "900".into(),
+                    layer: Layer::Host,
+                    origin: "config.toml#domains.fabric.lanes.lease_unreachable_seconds".into(),
+                },
             },
         };
         let Admit::Proceed {
@@ -1871,6 +1908,30 @@ mod tests {
             panic!("unreachable holder should remain live during its grace period");
         };
         assert_eq!(warning.code.as_ref(), LEASE_HOLDER_UNREACHABLE);
+        assert_eq!(
+            warning.setting.as_ref().unwrap().key,
+            "domains.fabric.lanes.lease_unreachable_seconds"
+        );
+        let lapsed_unreachable = LeaseObservation {
+            lease: lease.clone(),
+            state: LeaseState::LapsedUnreachable {
+                retry_at: WallTime::from_micros(10).unwrap(),
+                setting: SettingRef {
+                    key: "domains.fabric.lanes.lease_unreachable_seconds".into(),
+                    value: "900".into(),
+                    layer: Layer::Host,
+                    origin: "config.toml#domains.fabric.lanes.lease_unreachable_seconds".into(),
+                },
+            },
+        };
+        let Admit::Proceed {
+            warning: Some(warning),
+        } = admit_writer(&tree, Some(&lapsed_unreachable), &configured)
+        else {
+            panic!("lapsed unreachable holder must proceed with a handover warning");
+        };
+        assert_eq!(warning.code.as_ref(), LEASE_HOLDER_UNREACHABLE);
+        assert!(warning.message.contains("lease has lapsed"));
         let lapsed = LeaseObservation {
             lease: lease.clone(),
             state: LeaseState::Lapsed {
@@ -1908,6 +1969,21 @@ mod tests {
             },
             LeaseState::Unreachable {
                 retry_at: WallTime::from_micros(10).unwrap(),
+                setting: SettingRef {
+                    key: "domains.fabric.lanes.lease_unreachable_seconds".into(),
+                    value: "900".into(),
+                    layer: Layer::Host,
+                    origin: "config.toml#domains.fabric.lanes.lease_unreachable_seconds".into(),
+                },
+            },
+            LeaseState::LapsedUnreachable {
+                retry_at: WallTime::from_micros(10).unwrap(),
+                setting: SettingRef {
+                    key: "domains.fabric.lanes.lease_unreachable_seconds".into(),
+                    value: "900".into(),
+                    layer: Layer::Host,
+                    origin: "config.toml#domains.fabric.lanes.lease_unreachable_seconds".into(),
+                },
             },
             LeaseState::Lapsed {
                 attempt_state: "stopped".into(),
@@ -1936,6 +2012,19 @@ mod tests {
                     (LeaseState::Lapsed { .. }, _, Admit::Proceed { warning: None })
                     | (_, Sharing::Allow, Admit::Proceed { warning: None }) => {}
                     (
+                        LeaseState::LapsedUnreachable { .. },
+                        _,
+                        Admit::Proceed {
+                            warning: Some(warning),
+                        },
+                    ) => {
+                        assert_eq!(warning.code.as_ref(), LEASE_HOLDER_UNREACHABLE);
+                        assert_eq!(
+                            warning.setting.as_ref().unwrap().key,
+                            "domains.fabric.lanes.lease_unreachable_seconds"
+                        );
+                    }
+                    (
                         LeaseState::Live { .. },
                         Sharing::Warn,
                         Admit::Proceed {
@@ -1953,7 +2042,11 @@ mod tests {
                         },
                     ) => {
                         assert_eq!(warning.code.as_ref(), LEASE_HOLDER_UNREACHABLE);
-                        assert_eq!(warning.setting.as_ref().unwrap().layer, Layer::Project);
+                        assert_eq!(warning.setting.as_ref().unwrap().layer, Layer::Host);
+                        assert_eq!(
+                            warning.setting.as_ref().unwrap().key,
+                            "domains.fabric.lanes.lease_unreachable_seconds"
+                        );
                     }
                     (_, Sharing::Refuse, Admit::Refuse { error }) => {
                         assert_eq!(error.code, crate::policy::WORKTREE_SHARING_REFUSED);
