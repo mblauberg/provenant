@@ -230,18 +230,33 @@ impl ConfinedPlan {
         if matches!(p.mode, AccessMode::ReadOnly)
             && (input.codex != CodexPolicy::Clean || input.extensions != ExtensionPolicy::Deny)
         {
-            return Err(plan_boundary_error(
+            let requested =
+                if input.codex != CodexPolicy::Clean && input.extensions != ExtensionPolicy::Deny {
+                    "inherited hooks and unconfined extensions"
+                } else if input.codex != CodexPolicy::Clean {
+                    "inherited hooks"
+                } else {
+                    "unconfined extensions"
+                };
+            // Read-only lanes destroy nothing by asking for these, so this is
+            // a `none` row in the `confinement` group: warn and keep the plain
+            // profile. A configured stop still routes through the shared
+            // resolution under `--strict` or an explicit policy.<CODE>.
+            Policy::default().warn_or(
                 "PLAN_CONFINEDPLAN_NEW_AUTHORITY",
-                PlanError::UnconfinedExtensions,
-            ));
+                Facts::violation(format!(
+                    "read-only plan requested {requested}; the plain profile is kept"
+                )),
+                |_| PlanError::UnconfinedExtensions,
+            )?;
         }
         if p.nested_confinement {
-            // The backend cannot provide nested confinement. This is a
-            // capability failure, distinct from a request that exceeds the
-            // caller's authority; callers may only inherit equivalent
-            // enforcement through a separately verified launch route.
-            return Err(plan_permission_error(
-                PermissionError::NestedConfinementUnsupported,
+            // The backend cannot enforce a nested claim, so proceeding cannot
+            // produce a valid result: this is a typed operation error, not a
+            // policy refusal and not one of the three authority boundaries.
+            return Err(plan_boundary_error(
+                "PLAN_NESTED_CONFINEMENT_UNSUPPORTED",
+                PlanError::Permission(PermissionError::NestedConfinementUnsupported),
             ));
         }
         for grant in &p.write_roots {
