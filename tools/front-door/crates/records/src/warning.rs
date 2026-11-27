@@ -92,6 +92,10 @@ pub const RESULT_TOO_LARGE: WarningCode = WarningCode("RESULT_TOO_LARGE");
 /// A host in a `--host all` fan-out did not answer; the remaining hosts are
 /// reported as a partial result.
 pub const PEER_UNREACHABLE: WarningCode = WarningCode("PEER_UNREACHABLE");
+/// `--host all` was passed to a verb that cannot aggregate across hosts; the
+/// verb serves the local host and the fan-out is ignored. Aggregation lives on
+/// `status` (FU8 extends it to the other peer-servable verbs).
+pub const HOST_ALL_UNSUPPORTED: WarningCode = WarningCode("HOST_ALL_UNSUPPORTED");
 /// A lane's unfinished Git operation is retained while its committed tip settles.
 pub const GIT_OPERATION_RETAINED: WarningCode = WarningCode("GIT_OPERATION_RETAINED");
 /// A live provider emitted no output past its configured stall threshold.

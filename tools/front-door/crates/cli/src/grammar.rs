@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{AttemptId, GitOid, OperationId};
 pub use provenant_records::Harness;
 use provenant_records::warning::{Warning, warn};
-use std::{ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 /// Options shared by verbs that can be served by a peer and bounded by a deadline.
 #[derive(Clone, Debug, Default, Args)]
@@ -66,9 +66,9 @@ impl HostSelection {
 }
 
 impl CommonArgs {
-    /// Resolve the repeatable `--host` into one routing decision. `all` wins
-    /// over named hosts, repeated names collapse, and no flag stays local.
-    pub fn selection(&self) -> HostSelection {
+    /// The host target resolved once from `--host`. `all` wins over named
+    /// hosts, repeated names collapse, and no flag stays local.
+    pub fn target(&self) -> HostSelection {
         if self.host.is_empty() {
             return HostSelection::Local;
         }
@@ -92,9 +92,60 @@ impl CommonArgs {
         }
     }
 
+    /// The bounded invocation budget: an explicit `--timeout` wins over the
+    /// verb's configured default. Nested calls receive what remains.
+    pub fn deadline(&self, default: Duration) -> Duration {
+        self.timeout
+            .map(|timeout| Duration::from_secs(timeout.seconds()))
+            .unwrap_or(default)
+    }
+
     /// The bounded invocation deadline, in seconds, when `--timeout` was set.
     pub fn timeout_seconds(&self) -> Option<u64> {
         self.timeout.map(DurationArg::seconds)
+    }
+}
+
+impl Command {
+    /// The shared flags for verbs that flatten `CommonArgs`. Every such verb
+    /// resolves its deadline and host target through this one path; verbs that
+    /// do not flatten it return `None`. Spec: docs/specs/agent-native.md#consistent-verbs-and-flags.
+    pub fn common(&self) -> Option<&CommonArgs> {
+        match self {
+            Self::Events { common, .. } | Self::Result { common, .. } => Some(common),
+            Self::Upgrade(args) => Some(&args.common),
+            Self::Run(args) => Some(&args.common),
+            Self::Output(args) => Some(&args.common),
+            Self::Queue(args) => Some(&args.common),
+            Self::Gc(args) => Some(&args.common),
+            Self::Status(args) => Some(&args.common),
+            Self::Wait(args) => Some(&args.common),
+            Self::Tick(args) => Some(&args.common),
+            Self::Retire(args) => Some(&args.common),
+            Self::Ci(Ci::Failures { common, .. }) => Some(common),
+            Self::Ci(Ci::Patch(args)) => Some(&args.common),
+            _ => None,
+        }
+    }
+}
+
+/// The two values every `CommonArgs` verb resolves before it acts: the bounded
+/// invocation budget and the host target. One resolution path keeps the flags
+/// from being accepted and ignored (spec §3.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerbCommon {
+    pub deadline: Duration,
+    pub target: HostSelection,
+}
+
+impl Command {
+    /// Resolve both shared fields for a verb that flattens `CommonArgs`.
+    pub fn resolve_common(&self, default: Duration) -> Option<VerbCommon> {
+        let common = self.common()?;
+        Some(VerbCommon {
+            deadline: common.deadline(default),
+            target: common.target(),
+        })
     }
 }
 
@@ -1881,18 +1932,26 @@ mod common_args_tests {
     }
 
     #[test]
-    fn common_args_resolve_host_selection() {
+    fn common_args_resolve_host_target() {
         let common = CommonArgs::default();
-        assert_eq!(common.selection(), HostSelection::Local);
+        assert_eq!(common.target(), HostSelection::Local);
         assert_eq!(common.timeout_seconds(), None);
+        assert_eq!(
+            common.deadline(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
 
         let one = CommonArgs {
             host: vec![HostArg::Named("workshop".into())],
             timeout: Some(DurationArg(90)),
         };
-        assert_eq!(one.selection(), HostSelection::Named("workshop".into()));
+        assert_eq!(one.target(), HostSelection::Named("workshop".into()));
         assert_eq!(one.timeout_seconds(), Some(90));
-        assert!(!one.selection().is_aggregate());
+        assert_eq!(
+            one.deadline(Duration::from_secs(30)),
+            Duration::from_secs(90)
+        );
+        assert!(!one.target().is_aggregate());
 
         let many = CommonArgs {
             host: vec![
@@ -1903,17 +1962,176 @@ mod common_args_tests {
             timeout: None,
         };
         assert_eq!(
-            many.selection(),
+            many.target(),
             HostSelection::Many(vec!["laptop".into(), "workshop".into()])
         );
-        assert!(many.selection().is_aggregate());
+        assert!(many.target().is_aggregate());
 
         let all = CommonArgs {
             host: vec![HostArg::Named("workshop".into()), HostArg::All],
             timeout: None,
         };
-        assert_eq!(all.selection(), HostSelection::All);
-        assert!(all.selection().is_aggregate());
+        assert_eq!(all.target(), HostSelection::All);
+        assert!(all.target().is_aggregate());
+    }
+
+    /// Recording fake: every verb that flattens `CommonArgs` must resolve both
+    /// fields through `Command::common`, the one production path.
+    #[derive(Default)]
+    struct RecordingCommon {
+        deadlines: Vec<Duration>,
+        targets: Vec<HostSelection>,
+    }
+
+    impl RecordingCommon {
+        fn observe(&mut self, command: &Command, default: Duration) -> bool {
+            let Some(common) = command.common() else {
+                return false;
+            };
+            self.deadlines.push(common.deadline(default));
+            self.targets.push(common.target());
+            true
+        }
+    }
+
+    #[test]
+    fn every_common_args_verb_resolves_deadline_and_target() {
+        let default = Duration::from_secs(30);
+        // One argv per verb that flattens `CommonArgs`, parsed through the real
+        // clap grammar so this census cannot drift from the declared surface.
+        let invocations: &[&[&str]] = &[
+            &[
+                "provenant",
+                "status",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "output",
+                "demo",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "result",
+                "demo",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "wait",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "events",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &["provenant", "gc", "--host", "workshop", "--timeout", "90s"],
+            &[
+                "provenant",
+                "run",
+                "task",
+                "brief",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "upgrade",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "ci",
+                "failures",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "ci",
+                "patch",
+                "pr",
+                "1",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "retire",
+                "graph:demo",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "queue",
+                "status",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "tick",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+        ];
+        let mut recorder = RecordingCommon::default();
+        for argv in invocations {
+            let invocation = RawInvocation::try_parse_from(*argv)
+                .unwrap_or_else(|error| panic!("{}: {error}", argv.join(" ")));
+            assert!(
+                recorder.observe(&invocation.command, default),
+                "{} must expose CommonArgs",
+                argv.join(" ")
+            );
+        }
+        assert_eq!(recorder.deadlines.len(), invocations.len());
+        assert_eq!(recorder.targets.len(), invocations.len());
+        assert!(
+            recorder
+                .deadlines
+                .iter()
+                .all(|deadline| *deadline == Duration::from_secs(90))
+        );
+        assert!(
+            recorder
+                .targets
+                .iter()
+                .all(|target| *target == HostSelection::Named("workshop".into()))
+        );
     }
 }
 

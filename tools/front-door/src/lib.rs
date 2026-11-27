@@ -79,6 +79,7 @@ use serde::Serialize;
 use std::{
     ffi::OsString,
     io::{self, Write},
+    time::Duration,
 };
 
 pub(crate) use output::{emit, emit_summarised, emit_unpublished, emit_with_writers};
@@ -1483,6 +1484,32 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         leaf: inv.leaf.as_str(),
         process,
     };
+    // One resolution of the shared `--timeout` and `--host` flags. Verbs that
+    // flatten CommonArgs must read both here instead of accepting and ignoring
+    // them. `status` aggregates `--host all`; every other verb warns and serves
+    // the local host. Spec: docs/specs/agent-native.md#consistent-verbs-and-flags.
+    if let Some(common) = invocation
+        .command
+        .resolve_common(Duration::from_secs(verb_default_timeout(&inv.leaf)))
+    {
+        if matches!(&common.target, provenant_cli::HostSelection::All)
+            && !inv.leaf.starts_with("status")
+        {
+            provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::HOST_ALL_UNSUPPORTED,
+                    format!(
+                        "--host all is not supported by {}; serving the local host",
+                        inv.leaf
+                    ),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::HOST_ALL_UNSUPPORTED,
+                    ),
+                )
+                .once_per_change(),
+            );
+        }
+    }
     match (verb.run)(&invocation) {
         Ok(outcome) => provenant_cli::exit_status(&outcome),
         Err(error) => fail_with_command_error(&inv.leaf, Outcome::Error, error, globals),
@@ -1517,6 +1544,19 @@ mod session_warning_tests {
         });
         assert_eq!(warning, None);
         drop(tx);
+    }
+}
+
+/// Declared per-verb budget defaults from docs/specs/agent-native.md#consistent-verbs-and-flags.
+/// `wait` resolves its own default from `domains.wait.timeout_seconds` in its handler.
+fn verb_default_timeout(leaf: &str) -> u64 {
+    match leaf {
+        "status" | "output" | "result" | "events" | "wait" => 30,
+        "gc" => 300,
+        "ci" | "ci failures" | "ci patch" => 120,
+        "run" => 1_800,
+        "upgrade" => 1_200,
+        _ => 30,
     }
 }
 
