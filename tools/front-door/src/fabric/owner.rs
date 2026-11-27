@@ -1,5 +1,7 @@
 use super::*;
-use provenant_records::command_result::{ErrorClass, SettingRef};
+#[cfg(test)]
+use provenant_records::command_result::ErrorClass;
+use provenant_records::command_result::SettingRef;
 use provenant_records::custody::{
     Admit, LeaseObservation, Sharing, Subject as CustodySubject, SubjectKind, admit_writer,
     default_sharing,

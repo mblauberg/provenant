@@ -66,10 +66,10 @@ pub(super) fn seal_delivery_queue_knobs(
         }
     }
     let shipped = QueueKnobs::default();
-    let defaults: BTreeMap<&str, Sourced<usize>> = BTreeMap::from([
-        (QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel),
-        (QUEUE_CI_SLOTS_KEY, shipped.ci_slots),
-        (QUEUE_PREP_RETRIES_KEY, shipped.prep_retries),
+    let defaults: BTreeMap<&str, usize> = BTreeMap::from([
+        (QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel.value),
+        (QUEUE_CI_SLOTS_KEY, shipped.ci_slots.value),
+        (QUEUE_PREP_RETRIES_KEY, shipped.prep_retries.value),
     ]);
     let sealed = seal_settings(&keys, &defaults, &candidates);
     let knobs = QueueKnobs {

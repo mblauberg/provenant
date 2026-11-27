@@ -200,9 +200,7 @@ pub(crate) fn wake(subject: WakeSubjectRef, reason: WakeReason, deadline: Deadli
         };
     }
     let now = provenant_os::clock::SystemClock::new().mono_now();
-    let within = std::time::Duration::from_micros(
-        deadline.remaining(now).as_micros().min(u64::MAX as u128) as u64,
-    );
+    let within = std::time::Duration::from_micros(deadline.remaining(now).as_micros());
     let cancel = provenant_core::CancelToken::new();
     match provenant_cli::fabric::graph_relay::wake_from_lane(subject, &cancel, within) {
         Ok(value) => WakeOutcome::from_value(&value),

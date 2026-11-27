@@ -1803,7 +1803,8 @@ fn prune_release_directories(
     // exclusive probe reports Held only while such a verifier is live.
     if let Ok(dir) = Directory::open_anchor(releases) {
         for (name, _, _) in &candidates {
-            let lock = OsStr::new(&format!("{name}.lock"));
+            let lock_name = format!("{name}.lock");
+            let lock = OsStr::new(&lock_name);
             if matches!(
                 dir.try_flock_foreign(lock, LockMode::Exclusive),
                 Ok(provenant_os::fs::ForeignLock::Held)
@@ -2408,6 +2409,7 @@ fn release_pin_version(state_dir: &Path) -> String {
 /// ends. Install, swap and collection probe the same lock and skip a pinned
 /// release, so a concurrent upgrade cannot remove bytes a verifier is reading.
 fn verify_release_pin(state_dir: &Path) -> Result<provenant_os::fs::LockGuard, String> {
+    use std::os::unix::fs::DirBuilderExt;
     let version = release_pin_version(state_dir);
     let releases = state_dir.join("releases");
     std::fs::DirBuilder::new()

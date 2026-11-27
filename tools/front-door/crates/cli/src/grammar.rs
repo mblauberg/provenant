@@ -1888,7 +1888,7 @@ mod common_args_tests {
         let mut host = false;
         let mut timeout = false;
         for arg in command.get_arguments() {
-            match arg.get_id() {
+            match arg.get_id().as_str() {
                 "host" => host = true,
                 "timeout" => timeout = true,
                 _ => {}

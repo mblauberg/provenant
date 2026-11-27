@@ -1005,7 +1005,11 @@ fn delete_branch(
 /// Consult the slot lease before deleting an unregistered local branch. Only
 /// positive evidence of a live lease refuses; missing or unreadable evidence
 /// warns and proceeds under the batch's ordinary-outcome rule.
-fn guard_branch_lease(host_state: &Path, project: &Path, branch: &str) -> Result<(), String> {
+pub(crate) fn guard_branch_lease(
+    host_state: &Path,
+    project: &Path,
+    branch: &str,
+) -> std::result::Result<(), String> {
     let Some(project_id) = provenant_config::project_id_for_path(project) else {
         warn(
             Warning::new(

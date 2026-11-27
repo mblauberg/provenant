@@ -181,8 +181,8 @@ impl PatchError {
             cause.as_deref(),
             "correct the reported condition and rerun the command",
         )
-        .with_class(class)
-        .with_next(next);
+        .with_class(class);
+        error.next = next;
         if let Some(setting) = setting {
             error = error.with_setting(setting);
         }
@@ -367,8 +367,9 @@ fn parse_hunk_count(range: &str, prefix: u8) -> Result<usize, String> {
         .strip_prefix(&[prefix])
         .ok_or_else(|| "patch hunk has an invalid range prefix".to_owned())?;
     let count = range
-        .split_once(|byte| *byte == b',')
-        .map_or(&b"1"[..], |(_, count)| count);
+        .iter()
+        .position(|byte| *byte == b',')
+        .map_or(&b"1"[..], |index| &range[index + 1..]);
     std::str::from_utf8(count)
         .ok()
         .and_then(|count| count.parse::<usize>().ok())
@@ -756,7 +757,7 @@ fn git(cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<String, String
 fn status_dirty_paths(status: &[u8]) -> Result<Vec<String>, String> {
     let mut fields = status.split(|byte| *byte == 0);
     let mut paths = Vec::new();
-    for entry in fields.by_ref() {
+    while let Some(entry) = fields.next() {
         if entry.is_empty() {
             continue;
         }
@@ -840,7 +841,7 @@ impl PatchRuntime for SystemRuntime {
             READ_BUDGET,
         )
         .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.message)
     }
 
     fn live_holder(

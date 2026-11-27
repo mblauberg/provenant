@@ -952,7 +952,7 @@ pub(crate) fn run(
             let _ = std::io::stdout().lock().write_all(header.as_bytes());
             let input = match catalogue.as_ref() {
                 Ok(cat) => run_input(one, cat, globals),
-                Err(error) => Err(cli_input_error(&error.to_string())),
+                Err(error) => Err(error.clone()),
             };
             worst = worst.max(invoke("run", input, globals, workers, timeout_seconds));
         }
@@ -965,6 +965,16 @@ pub(crate) fn run(
         workers,
         timeout_seconds,
     )
+}
+
+fn smoke_host(common: &provenant_cli::CommonArgs) -> Result<Option<String>, &'static str> {
+    match common.target() {
+        provenant_cli::HostSelection::Local => Ok(None),
+        provenant_cli::HostSelection::Named(host) => Ok(Some(host)),
+        provenant_cli::HostSelection::Many(_) | provenant_cli::HostSelection::All => {
+            Err("run accepts at most one named host")
+        }
+    }
 }
 
 /// Drive the smoke lifecycle from the CLI edge and publish its typed output.
@@ -1001,14 +1011,20 @@ fn smoke_lifecycle(
             );
         }
     };
+    let host = match smoke_host(&request.common) {
+        Ok(host) => host,
+        Err(detail) => return cli_input_error_emit("run", detail, globals),
+    };
     let args = provenant_cli::install::Upgrade {
+        common: request.common.clone(),
+        keep: false,
         yes: false,
         from_source: None,
         hosts: "all".into(),
         verify: true,
         verify_only: false,
         dry_run: false,
-        host: request.host.clone(),
+        host,
         route: request.route.clone(),
         set: request.set.clone(),
     };
@@ -1536,6 +1552,19 @@ pub(crate) fn templates(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smoke_uses_one_named_host_and_rejects_aggregate_targets() {
+        use provenant_cli::{CommonArgs, HostArg};
+        let mut common = CommonArgs::default();
+        assert_eq!(smoke_host(&common), Ok(None));
+        common.host = vec![HostArg::Named("workshop".into())];
+        assert_eq!(smoke_host(&common), Ok(Some("workshop".into())));
+        common.host.push(HostArg::Named("laptop".into()));
+        assert!(smoke_host(&common).is_err());
+        common.host = vec![HostArg::All];
+        assert!(smoke_host(&common).is_err());
+    }
 
     fn run_input_fixture(
         request: GraphRunArgs,

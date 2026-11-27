@@ -1401,7 +1401,7 @@ pub fn peer(
                     let globals = provenant_cli::Globals {
                         json: true,
                         full: false,
-                        state_dir: Some(peer_factory.context.roots.state.clone()),
+                        state_dir: Some(peer_factory.context.roots.state.as_path().to_owned()),
                         project: Some(cwd.clone()),
                     };
                     crate::worktrees::gc_for_peer(&command, &globals, workers).map_err(|reason| {

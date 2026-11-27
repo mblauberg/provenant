@@ -1491,16 +1491,16 @@ mod tests {
                 &CancelToken::new(),
             )
             .expect_err("a project outside home must fail before peer transport");
-        match *failure.error {
+        match &*failure.error {
             super::FacadeError::RunKind {
                 run_code,
                 next,
                 detail,
                 ..
             } => {
-                assert_eq!(run_code, super::PEER_PROJECT_UNLOCATABLE);
-                assert_eq!(next, "run without --host");
-                let detail = detail.expect("operation error names the setting");
+                assert_eq!(run_code.as_str(), super::PEER_PROJECT_UNLOCATABLE);
+                assert_eq!(next.as_str(), "run without --host");
+                let detail = detail.as_ref().expect("operation error names the setting");
                 assert!(detail.contains(super::PROJECTION_KEY), "{detail}");
                 assert!(detail.contains("locate"), "{detail}");
             }
@@ -1516,6 +1516,7 @@ mod tests {
     // Spec: docs/specs/agent-native.md#peer-projection
     fn projection_setting_uses_the_resolved_layer_and_origin()
     -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::hosts::mirror::ProjectionMode;
         use provenant_records::{Layer, Source, Sourced};
 
         let mut knobs = std::collections::BTreeMap::new();

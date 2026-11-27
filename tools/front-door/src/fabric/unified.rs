@@ -16,9 +16,11 @@ use target_faults::{
 
 pub(super) mod graph_wait;
 use graph_wait::missing_graph_context;
+#[cfg(test)]
+pub(crate) use graph_wait::read_status_rows;
 pub(crate) use graph_wait::{
-    check_targets, final_status_rows, read_lane_graph, read_status_rows,
-    read_status_rows_with_recovery, unsettled_graphs, wake_pr_item,
+    check_targets, final_status_rows, read_lane_graph, read_status_rows_with_recovery,
+    unsettled_graphs, wake_pr_item,
 };
 // The recovery decision is exercised by the graph wait test; production callers
 // reach it through `read_status_rows_with_recovery` in the same module.

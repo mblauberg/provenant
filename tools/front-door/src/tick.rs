@@ -2,7 +2,9 @@
 use crate::worktrees::GcCompletion;
 use provenant_cli::Globals;
 use provenant_confinement::worktrees::WorkerObserver;
-use provenant_core::{Clock, Deadline, DurationMicros, MonoTime, WaitBudget, WallTime};
+#[cfg(test)]
+use provenant_core::MonoTime;
+use provenant_core::{Clock, Deadline, DurationMicros, WaitBudget, WallTime};
 use provenant_os::{
     clock::SystemClock,
     fs::{Directory, LockGuard, LockMode, PublishMode},
@@ -12,14 +14,14 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, UNIX_EPOCH},
 };
 
 mod registry;
 mod steward;
 pub(crate) use registry::Cursor;
-pub(super) use registry::{TaskDef, TaskLeases};
+use registry::{TaskDef, TaskLeases};
 
 const DAY_SECONDS: u64 = 86_400;
 /// An unfinished scheduled collection retries after this delay, then after

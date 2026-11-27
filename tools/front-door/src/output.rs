@@ -83,7 +83,7 @@ impl CommandSink {
     /// invocation instead of being silently swallowed.
     /// Spec: docs/specs/cli.md#warnings-are-typed-values
     fn display_with(&self, warning: Warning, err: &mut dyn Write) {
-        let delivered = writeln!(err, "warning: {}", warning.message).is_ok();
+        let mut delivered = writeln!(err, "warning: {}", warning.message).is_ok();
         for next in &warning.next {
             let text = next.display_text();
             if !text.is_empty() {
@@ -115,8 +115,11 @@ impl CommandSink {
                 "warning [{}] ×{}: {} (first: {}) — --full lists all",
                 first.code,
                 group.count,
-                bounded_text(&first.message, provenant_cli::limits::SUMMARY_ROW_BYTES),
-                bounded_text(subject, provenant_cli::limits::SUMMARY_ROW_BYTES)
+                provenant_cli::bounded_text(
+                    &first.message,
+                    provenant_cli::limits::SUMMARY_ROW_BYTES
+                ),
+                provenant_cli::bounded_text(subject, provenant_cli::limits::SUMMARY_ROW_BYTES)
             )
             .is_ok()
         };
@@ -324,11 +327,7 @@ pub(crate) fn command_seam() -> provenant_cli::CommandSeam {
         remember: remember_warnings,
         give_back: return_warnings,
         display_warnings: display_held_warnings,
-        report: |result| {
-            write_report(result)
-                .map(|path| path.to_string_lossy().into_owned())
-                .ok()
-        },
+        report: |result| write_report(result).map(|path| path.to_string_lossy().into_owned()),
         streams: || (Box::new(io::stdout().lock()), Box::new(io::stderr().lock())),
     }
 }

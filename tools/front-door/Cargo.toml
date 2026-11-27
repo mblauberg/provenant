@@ -86,7 +86,6 @@ fixture = [
     # dependencies must be regular optional dependencies, not dev-dependencies.
     "dep:provenant-test-support",
     "provenant-test-support/fixture",
-    "dep:tempfile",
     "provenant-os/fixture",
     "provenant-quota/fixture",
     "provenant-telemetry/fixture",
@@ -136,7 +135,7 @@ provenant-confinement = { workspace = true }
 provenant-redact = { workspace = true }
 provenant-sqlite = { workspace = true }
 provenant-test-support = { path = "crates/test-support", optional = true }
-tempfile = { workspace = true, optional = true }
+tempfile = { workspace = true }
 
 [build-dependencies]
 provenant-os = { workspace = true }

@@ -394,7 +394,7 @@ mod provisioning_tests {
                 "source":{"type":"node","node":"dependency"},"prompt":"later"
             }]}]
         }))?;
-        bind_admitted_provisioning_owners(&mut checkpoint)?;
+        bind_admitted_provisioning_owners(&mut checkpoint, &default_sharing())?;
         let owner = checkpoint.nodes[0]
             .provisioned_owner
             .ok_or("deferred writer owner")?;
@@ -421,7 +421,7 @@ mod provisioning_tests {
             Some(provisioning_owner_digest("another-graph", "writer")?);
         foreign_progress.worktree = Some(path.into());
         checkpoint.nodes.push(foreign_progress);
-        bind_admitted_provisioning_owners(&mut checkpoint)?;
+        bind_admitted_provisioning_owners(&mut checkpoint, &default_sharing())?;
         let rebound = checkpoint.nodes[1].provisioned_owner;
         assert!(rebound.is_some());
         assert_eq!(checkpoint.nodes[0].provisioned_owner, rebound);
@@ -867,7 +867,7 @@ mod provisioning_tests {
                 "when":[{"name":"flag","expected":"true","actual":"false"}]
             }]}]
         }))?;
-        bind_admitted_provisioning_owners(&mut checkpoint)?;
+        bind_admitted_provisioning_owners(&mut checkpoint, &default_sharing())?;
         assert!(checkpoint.nodes[0].provisioned_owner.is_none());
         relay::fence_provisioning(&mut checkpoint, "writer", path, &source);
         let mut journal = FileJournal::open(

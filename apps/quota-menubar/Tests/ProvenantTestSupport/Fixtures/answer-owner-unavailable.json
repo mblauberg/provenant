@@ -3,9 +3,15 @@
   "data": null,
   "error": {
     "cause": null,
+    "class": "operation",
     "code": "owner_unavailable",
     "message": "inbox owner studio is not reachable",
-    "repair": "Retry with the same operation ID when the owner host is reachable."
+    "next": [
+      {
+        "argv": [],
+        "why": "Retry with the same operation ID when the owner host is reachable."
+      }
+    ]
   },
   "next": [],
   "schema_version": 2,

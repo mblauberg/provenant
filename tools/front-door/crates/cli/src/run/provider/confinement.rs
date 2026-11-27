@@ -2714,7 +2714,10 @@ mod alias_tests {
     #[test]
     // Spec: docs/specs/fabric.md#sources-and-read-roots
     fn source_configuration_warning_is_opt_in() {
-        use provenant_records::policy::{Policy, Strength};
+        use provenant_records::{
+            Layer,
+            policy::{Policy, Strength},
+        };
         let admission = crate::run::SourceAdmission {
             path: "/project".into(),
             warnings: vec![crate::run::SourceWarning {

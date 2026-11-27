@@ -143,6 +143,18 @@ impl Cursor {
     }
 }
 
+fn reserve_slot(active: &AtomicUsize, slots: usize) -> bool {
+    let mut current = active.load(Ordering::SeqCst);
+    while current < slots {
+        match active.compare_exchange_weak(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+    false
+}
+
 /// Run enabled tasks concurrently under `concurrency`, each under its own
 /// deadline. Results come back in declaration order regardless of completion
 /// order, so `tick --json` stays stable.
@@ -178,13 +190,7 @@ pub(super) fn run_tasks<V: TickTask + 'static>(
                             .unwrap_or_else(|_| Deadline::at(now));
                         match leases.try_hold(name) {
                             Err(error) => TaskResult::busy(wall, &format!("{holder}: {error}")),
-                            Ok(guard)
-                                if active
-                                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                                        (value < slots).then_some(value + 1)
-                                    })
-                                    .is_err() =>
-                            {
+                            Ok(guard) if !reserve_slot(&active, slots) => {
                                 drop(guard);
                                 TaskResult::busy(
                                     wall,

@@ -820,7 +820,7 @@ fn held_store_locks(state_root: &Path) -> Vec<String> {
             if !project.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
-            let Ok(directory) = Directory::open_anchor(project.path()) else {
+            let Ok(directory) = Directory::open_anchor(&project.path()) else {
                 continue;
             };
             let Ok(entries) = directory.entries() else {
@@ -859,7 +859,7 @@ fn held_store_locks(state_root: &Path) -> Vec<String> {
             if !attempt.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
-            let Ok(directory) = Directory::open_anchor(attempt.path()) else {
+            let Ok(directory) = Directory::open_anchor(&attempt.path()) else {
                 continue;
             };
             for name in ["writer.lock", "custody.lock", "settlement.lock"] {
