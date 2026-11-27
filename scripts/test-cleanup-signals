@@ -30,6 +30,7 @@ merge_sha = "$parent"
 prompt = "fixture"
 hidden_test_command = "true"
 split = "acceptance"
+family = "writer"
 EOF
 printf 'invalid patch\n' > "$tmp/repo/bench/tasks/task.patch"
 python3 -c 'import hashlib,sys; h=hashlib.sha256(); [(h.update(open(p,"rb").read()),h.update(b"\0")) for p in sys.argv[1:]]; print(h.hexdigest())' "$tmp/repo/bench/tasks/task.toml" "$tmp/repo/bench/tasks/task.patch" > "$tmp/repo/bench/tasks/task.toml.verified"
