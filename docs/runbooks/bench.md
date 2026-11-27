@@ -13,9 +13,14 @@ holds only the hidden tests, kept out of the task worktree until the run ends.
 2. `scripts/bench verify bench/tasks/TASK.toml` requires the tests to fail on
    the parent and pass on the merge, and writes a `.verified` receipt bound to
    the TOML and patch; editing either invalidates it.
-3. `scripts/bench run --route R [--split S] [--limit N]` replays verified tasks
-   of one split (default `acceptance`) in disposable worktrees and appends to
-   `<state-root>/bench.jsonl`. A `null` `pass` means the hidden test never ran
+3. `scripts/bench run --route R [--split S] [--limit N] [--repeats N]` replays
+   verified tasks of one split (default `acceptance`) in disposable worktrees
+   and appends to `<state-root>/bench.jsonl`. `--repeats N` (default 1) launches
+   each task N times in its own worktree and records one row per attempt with
+   its `repeat` index; use it to average out launch noise. Each row carries the
+   provider token categories from `telemetry stats` under `tokens` (`input`,
+   `cache_read`, `cache_write`, `output`, `reasoning`), which stay `null` when
+   the attempt did not complete. A `null` `pass` means the hidden test never ran
    (dispatch failed or the patch did not apply); it counts as neither pass nor
    failure.
 
