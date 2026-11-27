@@ -1563,9 +1563,10 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             .start(record.attempt_id, &Allowance, &|_, _| Ok(Vec::new()), &call);
     }
     let mut result = json!({"checkpoint":{"nodes":[{
-        "id":"parent", "advance_code":"preparation_refused",
+        "id":"parent", "advance_code":"route_refused",
         "advance_note":"The launch was refused before admission.",
-        "attempts":[{"attempt_ref": format!("{}/{attempt}", factory.context.identity.host)}]
+        "attempts":[{"attempt_ref": format!("{}/{attempt}", factory.context.identity.host),
+                     "outcome":{"preparation_refused":"route_resolution_refused"}}]
     }]}});
     factory.name_refusal_causes(&mut result);
     let message = result["checkpoint"]["nodes"][0]["advance_note"]
