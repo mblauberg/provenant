@@ -17,10 +17,12 @@ use provenant_os::{
     fs::{Directory, FileKind, FsError, ledger::Ledger},
 };
 use provenant_records::{
-    CommandResult, Outcome, StructuredPathWire,
+    CommandResult, Layer, Outcome, StructuredPathWire,
+    command_result::{NextStep, SettingRef},
     custody::{
         LandedEvidence, LandingPredicate, LandingSource, RemovalRecord, Subject, SubjectKind,
     },
+    warning::{Warning, WarningCode, detected_source, warn},
 };
 use serde::Serialize;
 use std::{
@@ -1119,40 +1121,63 @@ fn gc_uncollected(data: &GcData) -> Vec<crate::gc_support::UncollectedItem> {
 const GC_REPAIR: &str =
     "Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.";
 
+/// A bound stopped the pass after its cursor was saved. This is progress, not
+/// a failure: the exit table reserves `Error` for an operation that failed.
+const GC_BUDGET_STOP: WarningCode = WarningCode("GC_BUDGET_STOP");
+
 fn gc_failure<'a>(data: &'a GcData, message: &str, detailed: bool) -> CommandResult<GcOutput<'a>> {
     let mut result = CommandResult::new("gc", Outcome::Error, gc_result_data(data, detailed));
-    // Exit 3 must name the budget that stopped the pass and the way to raise
-    // it: a preview and an applied sweep have distinct, separately configured
-    // bounds and a single "retention incomplete" line cannot guide the operator.
-    let budget = if data.preview_budget_stopped {
-        format!(
-            "stopped at gc.preview_budget={}s (source: {}); raise gc.preview_budget in config.toml or rerun with `provenant gc --apply`",
-            data.preview_budget_seconds, data.preview_budget_source
-        )
-    } else if data.sweep_stopped {
-        format!(
-            "stopped at gc.sweep_budget={}s (source: {}); raise gc.sweep_budget in config.toml and rerun `provenant gc --apply`",
-            data.sweep_budget_seconds, data.sweep_budget_source
-        )
-    } else {
-        String::new()
-    };
-    let repair = if budget.is_empty() {
-        GC_REPAIR.to_owned()
-    } else {
-        format!("{GC_REPAIR} {budget}")
-    };
-    let message = if budget.is_empty() {
-        message.to_owned()
-    } else {
-        format!("{message}: {budget}")
-    };
     result.error = Some(provenant_records::CommandError::new(
         "GC",
         format!("{message}\n{}{GC_REPAIR}", gc_data_summary(data)),
         None,
-        repair.as_str(),
+        GC_REPAIR,
     ));
+    result
+}
+
+/// The budget that stopped a pass, with its configured value and source. A
+/// preview and an applied sweep have distinct, separately configured bounds.
+fn gc_budget_stop_key(data: &GcData) -> (&'static str, u64, &str) {
+    if data.preview_budget_stopped {
+        (
+            "gc.preview_budget",
+            data.preview_budget_seconds,
+            &data.preview_budget_source,
+        )
+    } else {
+        (
+            "gc.sweep_budget",
+            data.sweep_budget_seconds,
+            &data.sweep_budget_source,
+        )
+    }
+}
+
+fn gc_budget_stop<'a>(data: &'a GcData, detailed: bool) -> CommandResult<GcOutput<'a>> {
+    let (key, seconds, source) = gc_budget_stop_key(data);
+    let mut result = CommandResult::new("gc", Outcome::Ok, gc_result_data(data, detailed));
+    let step = NextStep::from_args(
+        &["provenant", "gc", "--apply"],
+        "resume the saved cursor on the next sweep",
+    );
+    let mut warning = Warning::new(
+        GC_BUDGET_STOP,
+        format!("{key}={seconds}s stopped the sweep; the cursor was saved and the next pass resumes from it"),
+        detected_source(GC_BUDGET_STOP),
+    )
+    .setting(SettingRef {
+        key: key.to_owned(),
+        value: seconds.to_string(),
+        layer: Layer::Host,
+        origin: source.to_owned(),
+    });
+    warning.next.push(step.clone());
+    // The binary edge drains the sink into the envelope, so raise it there as
+    // well as carrying it on the result for library callers.
+    warn(warning.clone());
+    result.warnings.push(warning);
+    result.next.push(step);
     result
 }
 
@@ -1162,11 +1187,11 @@ fn gc_result(data: &GcData, detailed: bool) -> CommandResult<GcOutput<'_>> {
         || !data.discard_archives.errors.is_empty()
         || !data.port_receipts.errors.is_empty()
         || !data.retention_errors.is_empty()
-        || !data.provider_state.payload.errors.is_empty()
-        || data.preview_budget_stopped
-        || data.sweep_stopped;
+        || !data.provider_state.payload.errors.is_empty();
     if failed {
         gc_failure(data, "retention incomplete", detailed)
+    } else if data.preview_budget_stopped || data.sweep_stopped {
+        gc_budget_stop(data, detailed)
     } else {
         CommandResult::new("gc", Outcome::Ok, gc_result_data(data, detailed))
     }
@@ -1322,6 +1347,10 @@ pub(crate) fn gc_for_peer(
     serde_json::to_value(&data).map_err(|error| error.to_string())
 }
 
+/// The compact view stays under 32 KiB; `--full` carries the per-candidate
+/// rows. Aggregate lines are grouped by class and reason before they are cut.
+const GC_AGGREGATE_LIMIT: usize = 30 * 1024;
+
 /// One line per kept class and reason. The default compact view shows this
 /// aggregate first so it survives the renderer's line clip; JSON and `--full`
 /// carry one row per candidate instead.
@@ -1335,16 +1364,28 @@ fn gc_uncollected_aggregate_lines(data: &GcData) -> Vec<String> {
         entry.0 += 1;
         entry.1 = entry.1.zip(item.bytes).map(|(sum, bytes)| sum + bytes);
     }
-    groups
-        .into_iter()
-        .map(|((class, reason), (count, bytes))| {
-            let bytes = bytes.map_or_else(
-                || "bytes unknown".to_owned(),
-                |bytes| format!("{bytes} bytes"),
-            );
-            format!("uncollected {class}: {count} item(s), {bytes}; kept: {reason}")
-        })
-        .collect()
+    let mut used = 0;
+    let mut lines = Vec::new();
+    let mut omitted = 0;
+    for ((class, reason), (count, bytes)) in groups {
+        let bytes = bytes.map_or_else(
+            || "bytes unknown".to_owned(),
+            |bytes| format!("{bytes} bytes"),
+        );
+        let line = format!("uncollected {class}: {count} item(s), {bytes}; kept: {reason}");
+        if used + line.len() + 1 > GC_AGGREGATE_LIMIT {
+            omitted += 1;
+            continue;
+        }
+        used += line.len() + 1;
+        lines.push(line);
+    }
+    if omitted > 0 {
+        lines.push(format!(
+            "uncollected aggregate: {omitted} class/reason group(s) omitted; rerun with --full"
+        ));
+    }
+    lines
 }
 
 fn gc_compact_summary(data: &GcData, full: bool) -> String {
@@ -1854,6 +1895,8 @@ enum GcOutput<'a> {
     Detailed {
         #[serde(flatten)]
         data: &'a GcData,
+        /// The sweep stopped at a budget and saved a cursor; exit stays zero.
+        partial: bool,
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         uncollected: Vec<crate::gc_support::UncollectedItem>,
         retention_bytes: Vec<provenant_config::RetentionBytes>,
@@ -1861,6 +1904,8 @@ enum GcOutput<'a> {
     },
     Summary {
         dry_run: bool,
+        /// The sweep stopped at a budget and saved a cursor; exit stays zero.
+        partial: bool,
         candidate_progress: &'a Option<GcCandidateProgress>,
         retention_bytes: Vec<provenant_config::RetentionBytes>,
         removal_records: Vec<RemovalRecord>,
@@ -1951,6 +1996,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
     if detailed {
         return GcOutput::Detailed {
             data,
+            partial: data.preview_budget_stopped || data.sweep_stopped,
             uncollected: gc_uncollected(data),
             retention_bytes: gc_retention_bytes(data),
             removal_records: gc_removal_records(data),
@@ -1958,6 +2004,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
     }
     GcOutput::Summary {
         dry_run: data.report.dry_run,
+        partial: data.preview_budget_stopped || data.sweep_stopped,
         candidate_progress: &data.candidate_progress,
         retention_bytes: gc_retention_bytes(data),
         removal_records: gc_removal_records(data),
@@ -3389,7 +3436,17 @@ fn gc(
     } else {
         provenant_config::RetentionTrigger::FullGc
     };
-    let classes = provenant_config::retention_schedule(trigger).collect::<Vec<_>>();
+    let mut classes = provenant_config::retention_schedule(trigger).collect::<Vec<_>>();
+    // Attempt scratch is the cheapest, highest-churn class: it moves first so
+    // a bounded pass always spends its budget on the work that frees the most
+    // space before it reaches the slower classes.
+    if let Some(index) = classes
+        .iter()
+        .position(|class| class.class == provenant_config::RetentionKind::AttemptScratch)
+    {
+        let first = classes.remove(index);
+        classes.insert(0, first);
+    }
     let resume_index = adapters.resume_cursor.as_ref().and_then(|cursor| {
         if cursor.class == "complete" {
             Some(classes.len())
