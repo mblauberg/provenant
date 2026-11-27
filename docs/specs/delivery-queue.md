@@ -187,12 +187,11 @@ A replacement must meet the same typed input/output and authority contracts. A
 composite override changes its constituent nodes, not unsupported leaf fields on
 the composite. No engine fork or custom JavaScript hook is needed.
 
-`graph::template::seal_queue_knobs` resolves the three queue knobs over
-`QUEUE_KNOB_PRECEDENCE` (default, host, project, launch), sealing the winning
-`Sourced<usize>` value with its layer and optional origin; an undeclared layer
-warns and is ignored. `seal_queue_knob` does the same for one knob. The host
-supplies candidates keyed by `domains.fabric.queue.*`; absent keys keep their
-shipped value and source. The `deliver` composite exposes `review_shape`
+`graph::template::seal_settings` resolves a set of settings by key over
+`SEALED_SETTINGS_PRECEDENCE` (default, host, project, launch), sealing the
+winning `Sourced<usize>` value with its layer and optional origin; an undeclared
+layer warns and is ignored. The host supplies candidates keyed by
+`domains.fabric.queue.*`; absent keys keep their shipped value and source. The `deliver` composite exposes `review_shape`
 (`single` default, or `panel`) with the matching `review_template`
 (`review` or `review-panel`), `ladder`, `max_ci_rounds`, `lenses`, and the
 `failing_head`/`failure_excerpt` repair inputs. `widen_final_rung_brief` and

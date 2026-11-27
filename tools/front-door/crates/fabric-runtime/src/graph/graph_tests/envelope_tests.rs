@@ -492,7 +492,7 @@ host_refused_before_acceptance: false,
                         outcome: Some(GraphAttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
                         input_cap: Some(usize::MAX),
-                        input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
+                        input_cap_source: Some(Layer::Detected),
                         input_manifest: Some(AttemptInputManifest {
                             extra: Default::default(), schema_version: 1,
                             source_commit: node.source.as_ref().map(|_| "a".repeat(64)),

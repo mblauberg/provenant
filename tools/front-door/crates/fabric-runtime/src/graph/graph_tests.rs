@@ -37,7 +37,7 @@ impl GraphJournal for MemoryJournal {
 struct FakeOwner {
     quota_redraw: bool,
     retry_limit: Option<u8>,
-    input_cap_source: Option<InputCapSource>,
+    input_cap_source: Option<provenant_records::Layer>,
     admission_policy: Option<provenant_records::policy::Policy>,
     retry_budgets: Vec<Option<u8>>,
     deliveries: usize,
@@ -168,9 +168,9 @@ impl AttemptOwner for FakeOwner {
                 family_group: Some("group-0".into()),
             }).collect() })
     }
-    fn input_cap_source(&self) -> InputCapSource {
+    fn input_cap_source(&self) -> provenant_records::Layer {
         self.input_cap_source
-            .unwrap_or(InputCapSource::EffectiveGraphLimits)
+            .unwrap_or(provenant_records::Layer::Detected)
     }
 
     fn retry_allowance(

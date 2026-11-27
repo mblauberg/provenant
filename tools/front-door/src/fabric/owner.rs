@@ -1815,7 +1815,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         })
     }
 
-    fn input_cap_source(&self) -> provenant_fabric_runtime::graph::InputCapSource {
+    fn input_cap_source(&self) -> provenant_records::Layer {
         self.factory.context.graph_prompt_limit_source
     }
 

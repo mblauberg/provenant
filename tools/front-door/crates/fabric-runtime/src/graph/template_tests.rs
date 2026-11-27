@@ -807,7 +807,7 @@ fn delivery_review_waits_on_the_single_ci_outcome_boundary() {
     assert_eq!(review.depends_on[0], "delivery--ci");
 }
 
-/// Sourced queue knobs resolve over the declared layers and seal the winning
+/// Sourced settings resolve over the declared layers and seal the winning
 /// value with its source; undeclared layers are ignored with a warning.
 #[test]
 fn delivery_queue_knobs_resolve_and_seal_with_sources() {
@@ -819,6 +819,17 @@ fn delivery_queue_knobs_resolve_and_seal_with_sources() {
             origin: Some(origin.into()),
         },
     };
+    let keys = [
+        QUEUE_MAX_PARALLEL_KEY,
+        QUEUE_CI_SLOTS_KEY,
+        QUEUE_PREP_RETRIES_KEY,
+    ];
+    let shipped = QueueKnobs::default();
+    let defaults = BTreeMap::from([
+        (QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel),
+        (QUEUE_CI_SLOTS_KEY, shipped.ci_slots),
+        (QUEUE_PREP_RETRIES_KEY, shipped.prep_retries),
+    ]);
     let overrides = BTreeMap::from([(
         QUEUE_MAX_PARALLEL_KEY,
         vec![
@@ -827,31 +838,70 @@ fn delivery_queue_knobs_resolve_and_seal_with_sources() {
             sourced(9, Layer::Project, ".provenant/config.toml"),
         ],
     )]);
-    let knobs = seal_queue_knobs(&overrides);
-    assert_eq!(knobs.max_parallel.value, 9);
-    assert_eq!(knobs.max_parallel.source.layer, Layer::Project);
+    let sealed = seal_settings(&keys, &defaults, &overrides);
+    let max_parallel = &sealed[QUEUE_MAX_PARALLEL_KEY];
+    assert_eq!(max_parallel.value, 9);
+    assert_eq!(max_parallel.source.layer, Layer::Project);
     assert_eq!(
-        knobs.max_parallel.source.origin.as_deref(),
+        max_parallel.source.origin.as_deref(),
         Some(".provenant/config.toml")
     );
     // Absent keys keep their shipped value and source.
-    assert_eq!(knobs.ci_slots.value, 1);
-    assert_eq!(knobs.ci_slots.source.layer, Layer::Default);
-    assert_eq!(knobs.prep_retries.value, 2);
-    assert!(knobs.validate().is_ok());
-    let launch = seal_queue_knobs(&BTreeMap::from([(
-        QUEUE_CI_SLOTS_KEY,
-        vec![sourced(3, Layer::Launch, "--ci-slots")],
-    )]));
-    assert_eq!(launch.ci_slots.value, 3);
-    assert_eq!(launch.ci_slots.source.layer, Layer::Launch);
-    assert_eq!(launch.ci_slots.source.origin.as_deref(), Some("--ci-slots"));
+    assert_eq!(sealed[QUEUE_CI_SLOTS_KEY].value, 1);
+    assert_eq!(sealed[QUEUE_CI_SLOTS_KEY].source.layer, Layer::Default);
+    assert_eq!(sealed[QUEUE_PREP_RETRIES_KEY].value, 2);
+    let launch = seal_settings(
+        &keys,
+        &defaults,
+        &BTreeMap::from([(
+            QUEUE_CI_SLOTS_KEY,
+            vec![sourced(3, Layer::Launch, "--ci-slots")],
+        )]),
+    );
+    assert_eq!(launch[QUEUE_CI_SLOTS_KEY].value, 3);
+    assert_eq!(launch[QUEUE_CI_SLOTS_KEY].source.layer, Layer::Launch);
+    assert_eq!(
+        launch[QUEUE_CI_SLOTS_KEY].source.origin.as_deref(),
+        Some("--ci-slots")
+    );
     // Zero CI slots disables the cap; zero max_parallel is refused.
+    let knobs = QueueKnobs {
+        max_parallel: max_parallel.clone(),
+        ci_slots: launch[QUEUE_CI_SLOTS_KEY].clone(),
+        prep_retries: sealed[QUEUE_PREP_RETRIES_KEY].clone(),
+    };
+    assert!(knobs.validate().is_ok());
     let mut invalid = knobs.clone();
     invalid.ci_slots.value = 0;
     assert!(invalid.validate().is_ok());
     invalid.max_parallel.value = 0;
     assert!(invalid.validate().is_err());
+}
+
+/// Graph setting origins use the shared provenance layer vocabulary, not a
+/// local setting-origin enum. The wire spelling is the layer's snake_case name.
+/// Spec: docs/specs/agent-native.md#33-error-and-warning-contract
+#[test]
+fn graph_setting_sources_use_the_provenance_layer() {
+    use provenant_records::Layer;
+    let timeout: DecideTimeout =
+        serde_json::from_value(json!({"seconds": 30, "source": "host"})).unwrap();
+    assert_eq!(timeout.source, Layer::Host);
+    assert_eq!(
+        serde_json::to_value(&timeout).unwrap(),
+        json!({"seconds": 30, "source": "host"})
+    );
+    let policy: CiFailedChecksPolicy = serde_json::from_value(json!({
+        "max_bytes": 150, "max_bytes_source": "template",
+        "max_checks": 2, "max_checks_source": "default"
+    }))
+    .unwrap();
+    assert_eq!(policy.max_bytes_source, Layer::Template);
+    assert_eq!(policy.max_checks_source, Layer::Default);
+    assert_eq!(
+        serde_json::to_value(Layer::Detected).unwrap(),
+        json!("detected")
+    );
 }
 
 /// The optional scope is a read-only planner whose result joins the writer

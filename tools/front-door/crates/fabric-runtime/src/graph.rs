@@ -223,7 +223,7 @@ mod file_tests;
 mod tests;
 pub use asks::{
     AskFiled, AskFiling, AskKind, AskLink, AskOption, AskReply, AskRequest, AskScope, DecideSpec,
-    DecideTimeout, DecideTimeoutSource, UnansweredDisposition, close_resolved_asks, loop_ask,
+    DecideTimeout, UnansweredDisposition, close_resolved_asks, loop_ask,
 };
 pub use composites::CompositeSpec;
 pub use land::{LandAuthority, LandObservation, LandRecord, LandRequest, LandSpec};
@@ -514,8 +514,8 @@ pub trait AttemptOwner {
     }
 
     /// Origin of the effective node prompt limit, sealed with the attempt.
-    fn input_cap_source(&self) -> InputCapSource {
-        InputCapSource::EffectiveGraphLimits
+    fn input_cap_source(&self) -> provenant_records::Layer {
+        provenant_records::Layer::Detected
     }
 
     /// Effective launch retry budget and timing, sealed before launch.
@@ -552,7 +552,7 @@ pub trait AttemptOwner {
     fn decide_timeout(&self) -> Result<DecideTimeout, Self::Error> {
         Ok(DecideTimeout {
             seconds: crate::config::DEFAULT_DECIDE_TIMEOUT_SECONDS,
-            source: DecideTimeoutSource::DomainDefault,
+            source: Layer::Default,
         })
     }
 

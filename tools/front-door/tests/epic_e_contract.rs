@@ -21,7 +21,7 @@ const _: () = {
     check(provenant_config::SCHEMA_PRECEDENCE.0);
     check(provenant_fabric_runtime::config::LAND_PRECEDENCE.0);
     check(provenant_fabric_runtime::config::ADMIN_PUBLICATION_PRECEDENCE.0);
-    check(provenant_fabric_runtime::graph::template::QUEUE_KNOB_PRECEDENCE.0);
+    check(provenant_fabric_runtime::graph::template::SEALED_SETTINGS_PRECEDENCE.0);
     check(provenant_fabric_runtime::graph::template::TEMPLATE_PRECEDENCE.0);
 };
 

@@ -1236,7 +1236,7 @@ pub(super) struct LaunchFacts {
     pub input_cap: usize,
     pub placement_host_id: Option<provenant_core::HostId>,
     pub launch_actor: String,
-    pub input_cap_source: InputCapSource,
+    pub input_cap_source: provenant_records::Layer,
     pub timing: Option<LaunchTiming>,
 }
 

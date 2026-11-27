@@ -35,8 +35,8 @@ pub struct Context {
     /// Verified owner for project-scoped worktree allocation.
     pub project_root: PathBuf,
     /// Origin captured with the effective graph configuration.
-    pub graph_prompt_limit_source: provenant_fabric_runtime::graph::InputCapSource,
-    pub graph_decide_timeout_source: provenant_fabric_runtime::graph::DecideTimeoutSource,
+    pub graph_prompt_limit_source: provenant_records::Layer,
+    pub graph_decide_timeout_source: provenant_records::Layer,
     /// Captured once from the host-set lane environment, never from arguments.
     pub in_lane: bool,
     pub(super) executor: SystemExecutor,
@@ -384,24 +384,22 @@ pub fn checkout_branch(roots: &Roots, path: &Path) -> Result<Option<String>, Edg
 
 fn decide_timeout_source(
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
-) -> provenant_fabric_runtime::graph::DecideTimeoutSource {
-    use provenant_fabric_runtime::graph::DecideTimeoutSource;
+) -> provenant_records::Layer {
+    use provenant_records::Layer;
     match origins.get("domains.fabric.graph.decide_timeout_seconds") {
-        Some(provenant_config::Origin::User { .. }) => DecideTimeoutSource::Configured,
-        Some(provenant_config::Origin::Compiled { .. }) | None => {
-            DecideTimeoutSource::DomainDefault
-        }
+        Some(provenant_config::Origin::User { .. }) => Layer::Host,
+        Some(provenant_config::Origin::Compiled { .. }) | None => Layer::Default,
     }
 }
 
 fn prompt_limit_source(
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
-) -> provenant_fabric_runtime::graph::InputCapSource {
-    use provenant_fabric_runtime::graph::InputCapSource;
+) -> provenant_records::Layer {
+    use provenant_records::Layer;
     match origins.get("domains.fabric.graph.limits.node_prompt_bytes") {
-        Some(provenant_config::Origin::Compiled { .. }) => InputCapSource::Default,
-        Some(provenant_config::Origin::User { .. }) => InputCapSource::Configured,
-        None => InputCapSource::EffectiveGraphLimits,
+        Some(provenant_config::Origin::Compiled { .. }) => Layer::Default,
+        Some(provenant_config::Origin::User { .. }) => Layer::Host,
+        None => Layer::Detected,
     }
 }
 
@@ -1715,7 +1713,7 @@ mod tests {
     #[test]
     fn graph_setting_origins_distinguish_domain_default_from_explicit_same_value()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{DecideTimeoutSource, InputCapSource};
+        use provenant_records::Layer;
         let temp = tempfile::tempdir()?;
         let mut inputs =
             provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("repo"));
@@ -1726,13 +1724,10 @@ mod tests {
             None,
             &crate::domains::SECTIONS,
         )?;
-        assert_eq!(
-            super::prompt_limit_source(&default.origins),
-            InputCapSource::Default
-        );
+        assert_eq!(super::prompt_limit_source(&default.origins), Layer::Default);
         assert_eq!(
             super::decide_timeout_source(&default.origins),
-            DecideTimeoutSource::DomainDefault
+            Layer::Default
         );
         let configured = b"schema_version = 1
 [domains.fabric.graph]
@@ -1749,14 +1744,8 @@ node_prompt_bytes = 262144
             resolved.domains.fabric.graph.limits.node_prompt_bytes,
             default.domains.fabric.graph.limits.node_prompt_bytes
         );
-        assert_eq!(
-            super::prompt_limit_source(&resolved.origins),
-            InputCapSource::Configured
-        );
-        assert_eq!(
-            super::decide_timeout_source(&resolved.origins),
-            DecideTimeoutSource::Configured
-        );
+        assert_eq!(super::prompt_limit_source(&resolved.origins), Layer::Host);
+        assert_eq!(super::decide_timeout_source(&resolved.origins), Layer::Host);
         Ok(())
     }
     #[test]

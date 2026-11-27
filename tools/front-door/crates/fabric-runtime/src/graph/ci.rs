@@ -383,15 +383,15 @@ pub(super) fn evaluate<O: AttemptOwner>(
         failed_checks_policy: Some(CiFailedChecksPolicy {
             max_bytes,
             max_bytes_source: if failed_checks_max_bytes.is_some() {
-                CiLimitSource::Condition
+                Layer::Template
             } else {
-                CiLimitSource::Default
+                Layer::Default
             },
             max_checks,
             max_checks_source: if max_failed_checks.is_some() {
-                CiLimitSource::Condition
+                Layer::Template
             } else {
-                CiLimitSource::Default
+                Layer::Default
             },
         }),
         first_observed_stamp: anchor,

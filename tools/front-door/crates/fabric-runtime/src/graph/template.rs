@@ -41,10 +41,10 @@ pub const FINAL_RUNG_SCOPE_BRIEF: &str = "At this final route rung you may widen
 /// Spec: docs/specs/delivery-queue.md#shared-contracts.
 pub const REPAIR_SWEEP_INSTRUCTION: &str = "Sweep the whole defect class, not only the failing case: check other tests, help text and documentation that assert the changed behaviour, fix the root cause wherever it appears, and report any copy you could not reach.";
 
-/// Precedence for sealing the delivery queue knobs. The shipped default is the
-/// floor; host, project and launch layers shadow it in that order. A candidate
-/// from a layer this family does not declare is warned and ignored.
-pub const QUEUE_KNOB_PRECEDENCE: Precedence =
+/// Precedence for sealed settings. The shipped default is the floor; host,
+/// project and launch layers shadow it in that order. A candidate from a layer
+/// this family does not declare is warned and ignored.
+pub const SEALED_SETTINGS_PRECEDENCE: Precedence =
     Precedence(&[Layer::Default, Layer::Host, Layer::Project, Layer::Launch]);
 
 /// A widened brief for the final rung: the base brief followed by the bounded
@@ -66,37 +66,28 @@ pub fn repair_brief(failing_head: &str, failure_excerpt: &str) -> String {
     )
 }
 
-/// Seal one queue knob from its layered candidates over the shipped default.
-/// The winner's source travels with its value so explain/status can name it.
-/// A candidate from an undeclared layer is warned, never silently dropped.
-pub fn seal_queue_knob(
-    default: usize,
-    candidates: impl IntoIterator<Item = Sourced<usize>>,
-) -> Sourced<usize> {
-    use provenant_records::warn_ignored;
-    let merge = QUEUE_KNOB_PRECEDENCE.merge_over_default(default, candidates);
-    warn_ignored(&merge.ignored, "delivery queue knob");
-    merge.winner
-}
-
-/// Resolve and seal all three queue knobs. `overrides` is keyed by the config
-/// keys in `model.rs` (`domains.fabric.queue.*`) and holds one candidate per
-/// declaring layer. Absent keys keep the shipped default and its source.
-/// TODO(#3972-s4): interface.rs supplies these candidates from the resolved
-/// config together with each knob's config origin; this slice owns the seal.
-pub fn seal_queue_knobs(overrides: &BTreeMap<&str, Vec<Sourced<usize>>>) -> QueueKnobs {
-    let shipped = QueueKnobs::default();
-    let seal = |key: &str, default: Sourced<usize>| {
-        seal_queue_knob(
-            default.value,
-            overrides.get(key).cloned().unwrap_or_default(),
-        )
-    };
-    QueueKnobs {
-        max_parallel: seal(QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel),
-        ci_slots: seal(QUEUE_CI_SLOTS_KEY, shipped.ci_slots),
-        prep_retries: seal(QUEUE_PREP_RETRIES_KEY, shipped.prep_retries),
+/// Seal a set of settings by key from their layered candidates over the shipped
+/// defaults. Every key resolves to a sourced value: the winner's layer and
+/// origin travel with it so explain/status can name them. A candidate from an
+/// undeclared layer is warned, never silently dropped. Keys absent from
+/// `candidates` keep their shipped default and its source.
+pub fn seal_settings<T: Clone>(
+    keys: &[&str],
+    defaults: &BTreeMap<&str, T>,
+    candidates: &BTreeMap<&str, Vec<Sourced<T>>>,
+) -> BTreeMap<String, Sourced<T>> {
+    let mut sealed = BTreeMap::new();
+    for key in keys {
+        let default = defaults
+            .get(key)
+            .cloned()
+            .expect("sealed setting has a shipped default");
+        let resolved = SEALED_SETTINGS_PRECEDENCE
+            .merge_over_default(default, candidates.get(key).cloned().unwrap_or_default());
+        provenant_records::warn_ignored(&resolved.ignored, *key);
+        sealed.insert((*key).to_owned(), resolved.winner);
     }
+    sealed
 }
 
 /// Ask the compiled schema whether a field is recognised, independently of its
