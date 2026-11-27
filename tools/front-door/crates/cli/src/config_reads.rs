@@ -217,10 +217,10 @@ mod tests {
             warnings[0].code.as_ref(),
             provenant_records::warning::CONFIG_KEY_IGNORED.as_str()
         );
-        assert_eq!(warnings[0].source.layer, Layer::Detected, "{warnings:?}");
+        assert_eq!(warnings[0].source.layer, Layer::Host, "{warnings:?}");
         assert_eq!(
             warnings[0].source.origin.as_deref(),
-            Some("warning:CONFIG_KEY_IGNORED"),
+            Some("adapter_capabilities[no-such-adapter]"),
             "{warnings:?}"
         );
     }
