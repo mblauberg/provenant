@@ -1718,18 +1718,18 @@ fn release_pin_keeps_a_release_that_pruning_would_remove() -> Result<(), Box<dyn
     )?;
     let pin = super::verify_release_pin(&state).map_err(std::io::Error::other)?;
     for n in 1..=4u8 {
-        let release = releases.join(format!("{n:064x}"));
+        let release = releases.join(format!("sha256:{n:064x}"));
         std::fs::create_dir(&release)?;
         std::fs::write(release.join("release.json"), b"fixture")?;
     }
-    let active = format!("{:064x}", 4u8);
-    let pinned_name = format!("{:064x}", 1u8);
+    let active = format!("sha256:{:064x}", 4u8);
+    let pinned_name = format!("sha256:{:064x}", 1u8);
     super::prune_release_directories(&releases, &active, &[])?;
     assert!(
         releases.join(&pinned_name).exists(),
         "a pinned release must survive"
     );
-    assert!(!releases.join(format!("{:064x}", 2u8)).exists());
+    assert!(!releases.join(format!("sha256:{:064x}", 2u8)).exists());
     drop(pin);
     Ok(())
 }
