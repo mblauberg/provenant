@@ -7,6 +7,7 @@ use provenant_core::{AttemptId, Deadline, DurationMicros, MonoTime, ProjectId, W
 use provenant_records::command_result::{ErrorClass, SettingRef};
 use provenant_records::custody::{
     Admit, Handover, LeaseObservation, LeaseState, Sharing, Subject, WorktreeLease, admit_writer,
+    default_sharing,
 };
 use provenant_records::{
     CommandError, CommandResult, Layer, Outcome, Source, Warning, WarningCode,
@@ -64,7 +65,7 @@ fn fake_wake_handover_and_error_render_share_the_contract() -> Result<(), Box<dy
     };
     let tree = Subject::worktree("/example", "generation");
     assert!(matches!(
-        admit_writer(&tree, Some(&observation), Sharing::Warn),
+        admit_writer(&tree, Some(&observation), &default_sharing()),
         Admit::Proceed { .. }
     ));
     let handover = Handover {

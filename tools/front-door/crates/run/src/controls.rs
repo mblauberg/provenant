@@ -3867,33 +3867,8 @@ impl RunStore {
             return Ok(owner);
         }
         if !matches!(holder.state, AttemptState::Terminal { .. }) {
-            let observation = provenant_records::custody::LeaseObservation {
-                lease: provenant_records::custody::WorktreeLease {
-                    holder: holder.attempt_id,
-                    since: holder.queued_at,
-                    sharing: provenant_records::custody::Sharing::Inherit,
-                },
-                state: provenant_records::custody::LeaseState::Live {
-                    attempt_state: Self::lease_holder_state(&holder.state),
-                },
-            };
-            let subject = provenant_records::custody::Subject::new(
-                provenant_records::custody::SubjectKind::Worktree,
-                tree.repo().root_path().display().to_string(),
-            );
-            if let provenant_records::custody::Admit::Proceed {
-                warning: Some(message),
-            } = provenant_records::custody::admit_writer(
-                &subject,
-                Some(&observation),
-                provenant_records::custody::Sharing::Warn,
-            ) {
-                warning::warn(Self::lease_warning(
-                    provenant_records::policy::WORKTREE_SHARED,
-                    message,
-                    holder.attempt_id,
-                ));
-            }
+            // Sharing and its warning are decided by the worktree custody
+            // guard, which resolves the setting and observes current custody.
             return Ok(owner);
         }
         self.take_lapsed_lease(record, &holder, tree, call)?;

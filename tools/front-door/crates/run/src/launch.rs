@@ -32,6 +32,17 @@ pub struct OwnCommit {
     pub paths: Vec<String>,
 }
 
+/// Exact source for a private-index commit. Path mode snapshots selected
+/// worktree files; patch mode applies the supplied diff to the expected tree.
+#[derive(Clone, Copy, Debug)]
+pub enum OwnCommitInput<'a> {
+    Paths(&'a [PathBuf]),
+    Patch {
+        bytes: &'a [u8],
+        paths: &'a [String],
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 enum CommitOwnError {
     #[error("git executable unavailable")]
@@ -66,17 +77,29 @@ fn git_own(
     timeout: Duration,
     operation: &'static str,
 ) -> Result<crate::worktree_carry::GitOutput, CommitOwnError> {
+    git_own_with_stdin(cwd, args, None, env, executor, cancel, timeout, operation)
+}
+
+fn git_own_with_stdin(
+    cwd: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    env: &[(OsString, OsString)],
+    executor: &dyn Executor,
+    cancel: &provenant_core::CancelToken,
+    timeout: Duration,
+    operation: &'static str,
+) -> Result<crate::worktree_carry::GitOutput, CommitOwnError> {
     let out =
-        crate::worktree_carry::git(cwd, args, env, executor, cancel, timeout).map_err(|error| {
-            match error {
+        crate::worktree_carry::git_with_stdin(cwd, args, stdin, env, executor, cancel, timeout)
+            .map_err(|error| match error {
                 crate::worktree_carry::CarryError::GitUnavailable => CommitOwnError::GitUnavailable,
                 crate::worktree_carry::CarryError::Exec(source) => CommitOwnError::Exec(source),
                 other => CommitOwnError::Git {
                     operation,
                     detail: other.to_string(),
                 },
-            }
-        })?;
+            })?;
     if out.timed_out {
         return Err(CommitOwnError::TimedOut { operation });
     }
@@ -103,16 +126,16 @@ fn retry_error(retries: u32, detail: &str) -> CommandError {
     .with_class(ErrorClass::Transient { retry_at: None })
 }
 
-/// Commit only `paths` from `worktree`, using a private index so a co-writer's
-/// index lock is not touched. The branch moves only through a compare-and-swap
-/// `update-ref`; a lost race or an index-lock conflict is retried up to
-/// `retries` times with a cancellable backoff, then reported as `Transient`.
+/// Commit selected worktree paths or an exact patch through a private index,
+/// leaving the shared index untouched. The branch moves only through a
+/// compare-and-swap `update-ref`; a lost race reapplies the same input to the
+/// new head, while index-lock contention retries with a cancellable backoff.
 pub fn commit_own_paths(
     worktree: &Path,
     git_dir: &Path,
     ref_name: &str,
     expected: provenant_core::GitOid,
-    paths: &[PathBuf],
+    input: OwnCommitInput<'_>,
     message: &str,
     retries: u32,
     env: &[(OsString, OsString)],
@@ -144,7 +167,93 @@ pub fn commit_own_paths(
             ),
         }
     };
-    if paths.is_empty() {
+    let (path_strings, pathspecs, patch) = match input {
+        OwnCommitInput::Paths(paths) => {
+            let path_strings = paths
+                .iter()
+                .map(|path| {
+                    use std::path::Component;
+
+                    let relative = if path.is_absolute() {
+                        path.strip_prefix(worktree).map_err(|_| {
+                            "commit path is outside the selected worktree".to_owned()
+                        })?
+                    } else {
+                        path.as_path()
+                    };
+                    if relative.as_os_str().is_empty()
+                        || path.to_str().is_some_and(|path| {
+                            path.split('/').any(|part| part == ".." || part == ".")
+                        })
+                        || relative.components().any(|component| {
+                            matches!(
+                                component,
+                                Component::CurDir
+                                    | Component::ParentDir
+                                    | Component::RootDir
+                                    | Component::Prefix(_)
+                            )
+                        })
+                    {
+                        return Err("commit path is not worktree-relative".to_owned());
+                    }
+                    relative
+                        .to_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| "commit path is not valid UTF-8".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let path_strings = path_strings.map_err(|detail| {
+                CommandError::new(
+                    "COMMIT_OWN_PATH_INVALID",
+                    "could not commit the lane's own paths",
+                    Some(detail.as_str()),
+                    "inspect the requested paths, then retry the launch",
+                )
+            })?;
+            let pathspecs = path_strings
+                .iter()
+                .map(|path| format!(":(literal){path}"))
+                .collect::<Vec<_>>();
+            (path_strings, pathspecs, None)
+        }
+        OwnCommitInput::Patch { bytes, paths } => {
+            let path_strings = paths
+                .iter()
+                .map(|path| {
+                    let relative = Path::new(path);
+                    if relative.as_os_str().is_empty()
+                        || relative.is_absolute()
+                        || path
+                            .split('/')
+                            .any(|part| part.is_empty() || part == "." || part == "..")
+                        || relative.components().any(|component| {
+                            matches!(
+                                component,
+                                std::path::Component::CurDir
+                                    | std::path::Component::ParentDir
+                                    | std::path::Component::RootDir
+                                    | std::path::Component::Prefix(_)
+                            )
+                        })
+                    {
+                        return Err("patch path is not worktree-relative".to_owned());
+                    }
+                    Ok(path.clone())
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|detail| {
+                    CommandError::new(
+                        "COMMIT_OWN_PATH_INVALID",
+                        "could not commit the lane's own paths",
+                        Some(detail.as_str()),
+                        "inspect the requested paths, then retry the launch",
+                    )
+                })?;
+            (path_strings, Vec::new(), Some(bytes))
+        }
+    };
+    if path_strings.is_empty() {
         return Ok(OwnCommit {
             head: expected,
             ref_name: ref_name.to_owned(),
@@ -199,22 +308,32 @@ pub fn commit_own_paths(
             }));
         }
 
-        let path_strings: Vec<String> = paths
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect();
-        let path_refs: Vec<&str> = path_strings.iter().map(String::as_str).collect();
-        let mut add_args = vec!["add", "--"];
-        add_args.extend(path_refs.iter().copied());
-        let add = git_own(
-            worktree, &add_args, &index_env, executor, cancel, timeout, "add",
-        )
+        let stage = match patch {
+            Some(bytes) => git_own_with_stdin(
+                worktree,
+                &["apply", "--cached"],
+                Some(bytes),
+                &index_env,
+                executor,
+                cancel,
+                timeout,
+                "apply cached patch",
+            ),
+            None => {
+                let path_refs: Vec<&str> = pathspecs.iter().map(String::as_str).collect();
+                let mut add_args = vec!["add", "--"];
+                add_args.extend(path_refs.iter().copied());
+                git_own(
+                    worktree, &add_args, &index_env, executor, cancel, timeout, "add",
+                )
+            }
+        }
         .map_err(to_error)?;
-        if !add.ok {
-            if index_contention(&add.stderr) {
+        if !stage.ok {
+            if index_contention(&stage.stderr) {
                 attempt += 1;
                 if attempt > retries {
-                    return Err(retry_error(retries, &add.stderr));
+                    return Err(retry_error(retries, &stage.stderr));
                 }
                 pause.wait(
                     DurationMicros::from_micros(5_000_u64 * u64::from(attempt)),
@@ -223,8 +342,12 @@ pub fn commit_own_paths(
                 continue;
             }
             return Err(to_error(CommitOwnError::Git {
-                operation: "add",
-                detail: add.stderr,
+                operation: if patch.is_some() {
+                    "apply cached patch"
+                } else {
+                    "add"
+                },
+                detail: stage.stderr,
             }));
         }
 
@@ -443,6 +566,16 @@ mod commit_own_tests {
             expected: provenant_core::GitOid,
             retries: u32,
         ) -> Result<OwnCommit, CommandError> {
+            let paths = [self.repo.join("own.txt")];
+            self.commit_input(expected, OwnCommitInput::Paths(&paths), retries)
+        }
+
+        fn commit_input(
+            &self,
+            expected: provenant_core::GitOid,
+            input: OwnCommitInput<'_>,
+            retries: u32,
+        ) -> Result<OwnCommit, CommandError> {
             let env = test_env();
             let executor = SystemExecutor::new(4).map_err(|e| {
                 CommandError::new("EXECUTOR", "executor unavailable", None, e.to_string())
@@ -453,7 +586,7 @@ mod commit_own_tests {
                 &self.git_dir(),
                 "refs/heads/main",
                 expected,
-                &[self.repo.join("own.txt")],
+                input,
                 "lane: own paths",
                 retries,
                 &env,
@@ -506,6 +639,47 @@ mod commit_own_tests {
         assert_ne!(committed.head.to_string(), current);
         let parent = git(&fixture.repo, &["rev-parse", "HEAD^"]);
         assert_eq!(parent, current);
+        Ok(())
+    }
+
+    #[test]
+    fn commit_own_patch_retries_from_new_head_without_staging_worktree_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.repo.join("extra.txt"), "branch change\n")?;
+        git(&fixture.repo, &["add", "extra.txt"]);
+        git(&fixture.repo, &["commit", "-qm", "branch change"]);
+        let current =
+            provenant_core::GitOid::parse(&git(&fixture.repo, &["rev-parse", "refs/heads/main"]))?;
+        fs::write(fixture.repo.join("base.txt"), "co-writer edit\n")?;
+        let patch = b"diff --git a/base.txt b/base.txt\n--- a/base.txt\n+++ b/base.txt\n@@ -1 +1 @@\n-base\n+generated\n";
+        let paths = ["base.txt".to_owned()];
+
+        let committed = fixture
+            .commit_input(
+                fixture.head,
+                OwnCommitInput::Patch {
+                    bytes: patch,
+                    paths: &paths,
+                },
+                1,
+            )
+            .map_err(|error| std::io::Error::other(error.message))?;
+        assert_ne!(committed.head, current);
+        assert_eq!(
+            git(&fixture.repo, &["rev-parse", "HEAD^"]),
+            current.to_string()
+        );
+        assert_eq!(git(&fixture.repo, &["show", "HEAD:base.txt"]), "generated");
+        assert_eq!(
+            git(&fixture.repo, &["show", "HEAD:extra.txt"]),
+            "branch change"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.repo.join("base.txt"))?,
+            "co-writer edit\n"
+        );
+        assert_eq!(git(&fixture.repo, &["show", ":base.txt"]), "base");
         Ok(())
     }
 

@@ -1488,60 +1488,54 @@ fn cache_writer_guard_under_gate(
 // destructive operation touches another lane's live work.
 
 use provenant_core::WallTime;
-use provenant_records::command_result::SettingRef;
 use provenant_records::custody::{
     Admit, LeaseObservation, LeaseState, Sharing, Subject as CustodySubject, WorktreeLease,
-    admit_writer as records_admit_writer, guard_destructive as records_guard_destructive,
+    admit_writer as records_admit_writer, default_sharing,
+    guard_destructive as records_guard_destructive,
 };
-use provenant_records::policy::{
-    DESTROYS_LIVE_WORK, LEASE_HOLDER_UNREACHABLE, WORKTREE_SHARED, WORKTREE_SHARING_REFUSED,
-};
-use provenant_records::provenance::Layer;
-use provenant_records::warning::{Warning, WarningCode, detected_source, warn};
+use provenant_records::policy::DESTROYS_LIVE_WORK;
+use provenant_records::provenance::Sourced;
+use provenant_records::warning::{CONFIG_UNAVAILABLE, Warning, detected_source, warn};
 
 /// The single setting that selects live-worktree sharing behaviour.
-pub const WORKTREE_SHARING_KEY: &str = "lanes.worktree.sharing";
+pub const WORKTREE_SHARING_KEY: &str = provenant_records::custody::WORKTREE_SHARING_KEY;
 
-/// Read the host-layer `lanes.worktree.sharing` knob. Project, launch and
-/// owning-lane overrides are passed explicitly by the caller so that one
-/// decision point resolves all four scopes. An absent or malformed knob reads
-/// as the specified `warn` default.
-pub fn configured_sharing(host_state: &Path) -> Sharing {
-    let Ok(text) = std::fs::read_to_string(host_state.join("config.toml")) else {
-        return Sharing::Warn;
+/// Read the resolved sharing knob, preserving the layer supplied by the
+/// configuration resolver. A failed read warns and uses the compiled default.
+pub fn configured_sharing(host_state: &Path, home: &Path, checkout: &Path) -> Sourced<Sharing> {
+    let fallback = default_sharing();
+    let mut inputs = provenant_core::RootInputs::new(home.to_path_buf(), checkout.to_path_buf());
+    inputs.state_dir = Some(host_state.to_path_buf());
+    let config = inputs
+        .resolve(&provenant_os::fs::SystemPathResolver)
+        .map_err(|error| error.to_string())
+        .and_then(|roots| provenant_config::read_knobs(&roots).map_err(|error| error.to_string()));
+    let config = match config {
+        Ok(config) => config,
+        Err(error) => {
+            warn(
+                Warning::new(
+                    CONFIG_UNAVAILABLE,
+                    format!(
+                        "{WORKTREE_SHARING_KEY} could not be resolved ({error}); using the default"
+                    ),
+                    detected_source(CONFIG_UNAVAILABLE),
+                )
+                .setting(provenant_records::custody::sharing_setting_ref(&fallback)),
+            );
+            return fallback;
+        }
     };
-    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
-        return Sharing::Warn;
-    };
-    let value = document
-        .get("lanes")
-        .and_then(|lanes| lanes.get("worktree"))
-        .and_then(|worktree| worktree.get("sharing"))
-        .and_then(|item| item.as_str());
-    match value {
-        Some("allow") => Sharing::Allow,
-        Some("refuse") => Sharing::Refuse,
-        Some("warn") | None => Sharing::Warn,
-        Some(_) => Sharing::Warn,
-    }
-}
-
-/// The `SettingRef` rendered alongside a sharing warning or refusal. The
-/// origin is the host config file; launch and owner overrides are named by
-/// their callers rather than invented here.
-fn sharing_setting(sharing: Sharing) -> SettingRef {
-    let value = match sharing {
-        Sharing::Inherit => "inherit",
-        Sharing::Allow => "allow",
-        Sharing::Warn => "warn",
-        Sharing::Refuse => "refuse",
-    };
-    SettingRef {
-        key: WORKTREE_SHARING_KEY.to_owned(),
-        value: value.to_owned(),
-        layer: Layer::Host,
-        origin: format!("config.toml#{WORKTREE_SHARING_KEY}"),
-    }
+    config
+        .knobs
+        .get(WORKTREE_SHARING_KEY)
+        .and_then(|knob| {
+            Some(Sourced {
+                value: knob.value.as_str()?.parse().ok()?,
+                source: knob.source.clone(),
+            })
+        })
+        .unwrap_or(fallback)
 }
 
 /// Build the lease observation consumed by the records admission seam. A
@@ -1580,7 +1574,7 @@ pub(crate) fn lease_observation(
 pub(crate) fn admit_shared_writer(
     tree: &CustodySubject,
     observation: Option<&LeaseObservation>,
-    configured: Sharing,
+    configured: &Sourced<Sharing>,
 ) -> Admit {
     records_admit_writer(tree, observation, configured)
 }
@@ -1588,36 +1582,14 @@ pub(crate) fn admit_shared_writer(
 /// Emit the typed warning carried by `Admit::Proceed`. The records policy has
 /// already decided that this is not a refusal; presentation is confinement's
 /// responsibility so the warning reaches the command's bounded sink.
-pub(crate) fn emit_admission_warning(admit: &Admit, tree: &CustodySubject, configured: Sharing) {
-    let Some(message) = (match admit {
-        Admit::Proceed { warning } => warning.as_deref(),
+pub(crate) fn emit_admission_warning(admit: &Admit) {
+    let Some(warning) = (match admit {
+        Admit::Proceed { warning } => warning.as_ref(),
         Admit::Refuse { .. } => None,
     }) else {
         return;
     };
-    let code = WarningCode(if message.starts_with(LEASE_HOLDER_UNREACHABLE) {
-        LEASE_HOLDER_UNREACHABLE
-    } else {
-        WORKTREE_SHARED
-    });
-    warn(
-        Warning::new(code, message.to_owned(), detected_source(code))
-            .subject(tree.to_string())
-            .setting(sharing_setting(configured)),
-    );
-}
-
-/// The refusal message for an owner or configured `refuse`. It names the
-/// setting, its source and the holder, satisfying the `Configured` error
-/// contract at the point where `WorktreeError` is the only available type.
-pub(crate) fn sharing_refusal_message(holder: Option<provenant_core::AttemptId>) -> String {
-    let holder = holder.map_or_else(
-        || "unknown attempt".to_owned(),
-        |attempt| attempt.to_string(),
-    );
-    format!(
-        "{WORKTREE_SHARING_REFUSED}: worktree is held by live attempt {holder}; {WORKTREE_SHARING_KEY} = refuse (config.toml); wait for the holder or launch with --destination new"
-    )
+    warn(warning.clone());
 }
 
 /// The owning lane's own `sharing = refuse`, stored in its worktree lease,
@@ -1633,18 +1605,17 @@ pub(crate) fn owner_lease_sharing(project_state: &Directory, path: &Path) -> Sha
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Sharing::Inherit;
     };
-    match value.get("sharing").and_then(|entry| entry.as_str()) {
-        Some("allow") => Sharing::Allow,
-        Some("warn") => Sharing::Warn,
-        Some("refuse") => Sharing::Refuse,
-        _ => Sharing::Inherit,
-    }
+    value
+        .get("sharing")
+        .and_then(|entry| entry.as_str())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(Sharing::Inherit)
 }
 
-/// Derive the live lease observation from the writer reservation that owns a
-/// worktree slot. The reservation's process observation classifies the lease as
-/// live, lapsed or unreachable; no sweeper and no stored state is involved.
-fn live_lease_observation(
+/// Classify the writer reservation associated with a worktree slot. This is a
+/// reservation-derived observation; B3's slot lease reader is not available on
+/// this base yet.
+fn reservation_observation(
     context: &WorktreeContext<'_>,
     path: &Path,
     owner_sharing: Sharing,
@@ -1673,63 +1644,63 @@ fn live_lease_observation(
     ))
 }
 
-/// Acquire writer exclusion under the live-sharing policy. A held lease no
+/// Acquire shared occupancy under the live-sharing policy. A held lease no
 /// longer maps unconditionally to `WriterBusy`: `allow`/`warn` proceed with a
-/// typed warning, bounded only by the transient lock wait, while `refuse`
-/// (configured or owner-set) is the sole source of a `WriterBusy` refusal.
-///
-/// A bare exclusion lock with no lease is ordinary contention, not a custody
-/// decision: its existing `WriterBusy`/`LockBusy` behaviour is preserved and
-/// `fallback_holder` names the known owner when one was resolved by the caller.
-pub(super) fn admitted_writer_guard(
+/// typed warning, while `refuse` returns the typed configured error. If slot
+/// lease evidence is absent, shared occupancy still applies and an unsettled
+/// reservation remains an unknown-custody refusal.
+pub fn admitted_writer_guard(
     context: &WorktreeContext<'_>,
     path: &Path,
-    fallback_holder: Option<provenant_core::AttemptId>,
 ) -> Result<LockGuard, WorktreeError> {
     let owner_sharing = owner_lease_sharing(context.project_state, path);
-    let Some(observation) = live_lease_observation(context, path, owner_sharing) else {
-        return cache_writer_guard(context.project_state, path).map_err(|state| match state {
-            Occupancy::Held => WorktreeError::WriterBusy {
-                holder: fallback_holder.or_else(|| writer_holder(context.project_state, path)),
+    let Some(observation) = reservation_observation(context, path, owner_sharing) else {
+        let directory = writer_directory(context.project_state, path)?;
+        let guard = provenant_supervisor::custody::lock_writer_occupancy(
+            &directory,
+            context.lock_budget,
+            &CancelToken::new(),
+            context.clock,
+        )
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => WorktreeError::WriterBusy {
+                holder: writer_holder(context.project_state, path),
             },
-            other => custody_refusal(other),
-        });
+            FsError::Cancelled { .. } => WorktreeError::Cancelled,
+            error => WorktreeError::Filesystem(error),
+        })?;
+        retained_import(&directory).map_err(|detail| WorktreeError::UnknownOccupancy {
+            path: path.to_path_buf(),
+            detail,
+        })?;
+        outstanding_reservation(&directory, path).map_err(custody_refusal)?;
+        return Ok(guard);
     };
     let tree = CustodySubject {
         kind: provenant_records::custody::SubjectKind::Worktree,
         id: path.to_string_lossy().into_owned(),
     };
     let host_state = context.host_state()?;
-    let effective = if owner_sharing == Sharing::Inherit {
-        configured_sharing(&host_state)
-    } else {
-        owner_sharing
-    };
-    let admit = admit_shared_writer(&tree, Some(&observation), effective);
-    emit_admission_warning(&admit, &tree, effective);
-    let holder = Some(observation.lease.holder);
-    if let Admit::Refuse { .. } = admit {
-        return Err(WorktreeError::CustodyRefused {
-            code: WORKTREE_SHARING_REFUSED,
-            message: sharing_refusal_message(holder),
-            cause: None,
-            holder,
-        });
+    let sharing = configured_sharing(&host_state, context.home, context.repo.root_path());
+    let admit = admit_shared_writer(&tree, Some(&observation), &sharing);
+    emit_admission_warning(&admit);
+    if let Admit::Refuse { error } = admit {
+        return Err(WorktreeError::CustodyCommand(error));
     }
     let directory = writer_directory(context.project_state, path)?;
-    let guard = directory
-        .lock_existing(
-            OsStr::new(WRITER_LOCK),
-            LockMode::Exclusive,
-            context.lock_budget,
-            &CancelToken::new(),
-            context.clock,
-        )
-        .map_err(|error| match error {
-            FsError::LockTimeout { .. } => WorktreeError::WriterBusy { holder },
-            FsError::Cancelled { .. } => WorktreeError::Cancelled,
-            error => WorktreeError::Filesystem(error),
-        })?;
+    let guard = provenant_supervisor::custody::lock_writer_occupancy(
+        &directory,
+        context.lock_budget,
+        &CancelToken::new(),
+        context.clock,
+    )
+    .map_err(|error| match error {
+        FsError::LockTimeout { .. } => WorktreeError::WriterBusy {
+            holder: writer_holder(context.project_state, path),
+        },
+        FsError::Cancelled { .. } => WorktreeError::Cancelled,
+        error => WorktreeError::Filesystem(error),
+    })?;
     // An unresolved import is an operation error regardless of sharing; a
     // reservation fence, however, is exactly what live sharing intentionally
     // coexists with, so it is not re-checked here.
@@ -1778,6 +1749,15 @@ pub(crate) fn guard_destructive_worktree(
 mod sharing_tests {
     use super::*;
     use provenant_core::AttemptId;
+    use provenant_records::policy::{LEASE_HOLDER_UNREACHABLE, WORKTREE_SHARING_REFUSED};
+    use provenant_records::provenance::{Layer, Source};
+
+    fn sharing(value: Sharing) -> Sourced<Sharing> {
+        Sourced {
+            value,
+            source: Source::at(Layer::Host, "config.toml#lanes.worktree.sharing"),
+        }
+    }
 
     fn holder(byte: u8) -> AttemptId {
         AttemptId::from_bytes([byte; 16])
@@ -1800,15 +1780,15 @@ mod sharing_tests {
         let observation =
             lease_observation(holder(1), clock(), Some(true), clock(), Sharing::Inherit);
         assert!(matches!(
-            admit_shared_writer(&tree, Some(&observation), Sharing::Warn),
+            admit_shared_writer(&tree, Some(&observation), &sharing(Sharing::Warn)),
             Admit::Proceed { warning: Some(_) }
         ));
         assert!(matches!(
-            admit_shared_writer(&tree, Some(&observation), Sharing::Allow),
+            admit_shared_writer(&tree, Some(&observation), &sharing(Sharing::Allow)),
             Admit::Proceed { warning: None }
         ));
         assert!(matches!(
-            admit_shared_writer(&tree, None, Sharing::Warn),
+            admit_shared_writer(&tree, None, &sharing(Sharing::Warn)),
             Admit::Proceed { warning: None }
         ));
     }
@@ -1819,7 +1799,7 @@ mod sharing_tests {
         let observation =
             lease_observation(holder(2), clock(), Some(false), clock(), Sharing::Inherit);
         assert!(matches!(
-            admit_shared_writer(&tree, Some(&observation), Sharing::Refuse),
+            admit_shared_writer(&tree, Some(&observation), &sharing(Sharing::Refuse)),
             Admit::Proceed { warning: None }
         ));
     }
@@ -1829,27 +1809,29 @@ mod sharing_tests {
         let tree = tree();
         let observation =
             lease_observation(holder(3), clock(), Some(true), clock(), Sharing::Refuse);
-        assert!(matches!(
-            admit_shared_writer(&tree, Some(&observation), Sharing::Allow),
-            Admit::Refuse { holder: Some(seen) } if seen == holder(3)
-        ));
-        let refusal = sharing_refusal_message(Some(holder(3)));
-        assert!(refusal.contains(WORKTREE_SHARING_REFUSED));
-        assert!(refusal.contains(WORKTREE_SHARING_KEY));
+        let Admit::Refuse { error } =
+            admit_shared_writer(&tree, Some(&observation), &sharing(Sharing::Allow))
+        else {
+            panic!("owner refusal should win over configured allow");
+        };
+        assert_eq!(error.code, WORKTREE_SHARING_REFUSED);
+        assert_eq!(error.setting.as_ref().unwrap().layer, Layer::Parent);
+        assert_eq!(error.setting.as_ref().unwrap().origin, "lease.json#sharing");
     }
 
     #[test]
     fn unreachable_holder_is_reported_even_under_warn() {
         let tree = tree();
         let observation = lease_observation(holder(4), clock(), None, clock(), Sharing::Inherit);
-        let admit = admit_shared_writer(&tree, Some(&observation), Sharing::Warn);
+        let admit = admit_shared_writer(&tree, Some(&observation), &sharing(Sharing::Warn));
         let Admit::Proceed {
-            warning: Some(message),
+            warning: Some(warning),
         } = admit
         else {
             panic!("unreachable holder should warn and proceed");
         };
-        assert!(message.starts_with(LEASE_HOLDER_UNREACHABLE));
+        assert_eq!(warning.code.as_ref(), LEASE_HOLDER_UNREACHABLE);
+        assert_eq!(warning.setting.as_ref().unwrap().layer, Layer::Host);
     }
 
     #[test]
@@ -1872,7 +1854,10 @@ mod sharing_tests {
     #[test]
     fn missing_host_config_defaults_to_warn() {
         let absent = std::path::Path::new("/provenant/no-such-host-state-fixture");
-        assert_eq!(configured_sharing(absent), Sharing::Warn);
+        assert_eq!(
+            configured_sharing(absent, Path::new("/provenant/home"), Path::new("/project")).value,
+            Sharing::Warn
+        );
     }
 }
 

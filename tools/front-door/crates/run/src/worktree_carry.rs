@@ -83,12 +83,25 @@ pub(crate) fn git(
     cancel: &CancelToken,
     timeout: Duration,
 ) -> Result<GitOutput, CarryError> {
+    git_with_stdin(cwd, args, None, env, executor, cancel, timeout)
+}
+
+pub(crate) fn git_with_stdin(
+    cwd: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    env: &[(OsString, OsString)],
+    executor: &dyn Executor,
+    cancel: &CancelToken,
+    timeout: Duration,
+) -> Result<GitOutput, CarryError> {
     let program = provenant_os::git::git_executable().ok_or(CarryError::GitUnavailable)?;
     let argv: Vec<OsString> = std::iter::once(program.into_os_string())
         .chain(args.iter().map(OsString::from))
         .collect();
     let mut options = ExecOptions::new(&argv, cwd, timeout);
     options.env = Some(env);
+    options.stdin = stdin;
     options.cancel = Some(cancel);
     let outcome = executor.execute(options)?;
     Ok(GitOutput {

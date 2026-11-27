@@ -148,6 +148,62 @@ pub(super) fn rehydrate<'a>(
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
 }
 
+/// Copy and verify every prompt blob for a graph into its retirement archive.
+/// The caller holds the graph journal lock for the whole operation.
+pub(super) fn archive(
+    directory: &Directory,
+    archive: &Directory,
+    id: &str,
+) -> Result<(), JournalError> {
+    let prefix = prefix(id);
+    for entry in directory.entries()? {
+        let name = entry?;
+        let Some(digest) = name.to_str().and_then(|name| name.strip_prefix(&prefix)) else {
+            continue;
+        };
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let text = read_text(directory, id, digest)?;
+        archive
+            .atomic_write(
+                &name,
+                ".graph-retired-prompt.",
+                text.as_bytes(),
+                PublishMode::NoReplace,
+            )?
+            .require_durable()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+    }
+    archive.sync().map_err(JournalError::DurabilityUnconfirmed)
+}
+
+/// Remove a graph's prompt blobs after their archive copy is durable.
+pub(super) fn remove(directory: &Directory, id: &str) -> Result<(), JournalError> {
+    let prefix = prefix(id);
+    let mut removed = false;
+    for entry in directory.entries()? {
+        let name = entry?;
+        if name.to_str().is_some_and(|name| {
+            name.strip_prefix(&prefix).is_some_and(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }) {
+            match directory.unlink(&name) {
+                Ok(()) => removed = true,
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    if removed {
+        directory
+            .sync()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+    }
+    Ok(())
+}
+
 /// Restore and verify references in an already parsed checkpoint.
 pub(super) fn rehydrate_value(
     directory: &Directory,

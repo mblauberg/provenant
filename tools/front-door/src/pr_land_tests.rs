@@ -2306,6 +2306,66 @@ pub(crate) fn pr_land_deletes_an_unregistered_branch_only_at_the_merged_head() -
     Ok(())
 }
 
+pub(crate) fn pr_land_refuses_branch_deletion_for_a_live_slot_lease() -> Result {
+    use provenant_core::{AttemptId, Clock, WaitBudget};
+    use provenant_os::fs::Directory;
+    use provenant_records::custody::{Scope, Sharing, WorktreeLease};
+    use provenant_supervisor::custody::WriterBinding;
+
+    let landing = landing()?;
+    let (roots, context) = super::worktree_tests::writer_context(&landing.rig)?;
+    let request = provenant_run::resolve_writer(
+        context.state_root.as_path(),
+        &landing.rig.project,
+        &landing.worktree,
+    )?;
+    let writer =
+        provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+    let binding = WriterBinding::from_verified(
+        writer.worktree.repo().root_dir(),
+        writer.worktree.repo().private_dir(),
+        writer.branch.as_str(),
+        provenant_core::GitOid::parse(&landing.head)?,
+    )?;
+    let slot = roots
+        .state
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(
+            &landing.worktree,
+        ));
+    let attempt = AttemptId::from_bytes([83; 16]);
+    let scope = Scope {
+        attempt,
+        generation: 1,
+    };
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+        Directory::open_anchor(&slot)?,
+        scope,
+        binding,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    fs::write(
+        slot.join("lease.json"),
+        serde_json::to_vec(&WorktreeLease {
+            holder: attempt,
+            since: clock.wall_now()?,
+            sharing: Sharing::Inherit,
+        })?,
+    )?;
+
+    let refused =
+        super::pr::land::guard_branch_lease(&landing.rig.state, &landing.rig.project, "feat");
+    assert!(refused.is_err(), "a live lease must guard its branch");
+    drop(lease);
+    Ok(())
+}
+
 pub(crate) fn pr_land_keeps_a_branch_held_by_a_paused_rebase() -> Result {
     // The rebase leaves its worktree on a detached HEAD, so only the rebase
     // state records that `feat` is still in use.

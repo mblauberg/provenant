@@ -1,7 +1,10 @@
 use super::*;
 use provenant_core::{Clock, ProjectId};
-use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
-use std::{convert::Infallible, os::unix::fs::PermissionsExt};
+use provenant_os::{
+    clock::SystemClock,
+    fs::{Directory, SystemPathResolver},
+};
+use std::{convert::Infallible, ffi::OsStr, os::unix::fs::PermissionsExt};
 struct Owner;
 
 fn collect_terminal(
@@ -78,6 +81,118 @@ fn stored_fixture() -> StoredCheckpoint {
         .join("graph-g-test.json");
     let bytes = std::fs::read(path).unwrap();
     decode_checkpoint_in(&journal.directory, &bytes, "g-test").unwrap()
+}
+
+#[test]
+fn graph_retirement_archives_prompt_blobs_before_finalization_and_clearing()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = crate::test_support::tempdir()?;
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+    let base = std::fs::canonicalize(temp.path())?;
+    let inputs = provenant_test_support::root_inputs(&base)?;
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver)?;
+    let project = ProjectId::from_bytes([8; 16]);
+    let graph_id = "retire-prompts";
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+    let prompt = format!("retirement prompt {}", "x".repeat(5000));
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": graph_id,
+        "nodes": [{
+            "id": "reader",
+            "prompt": prompt,
+            "access": "read_only",
+            "route": {"adapter": "fixture", "model": "fixture/model"}
+        }]
+    }))?;
+    let execution = GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+        requester_path: None,
+        extra: Default::default(),
+        bases: None,
+        directory: inputs.checkout,
+        document: document.clone(),
+    };
+    let mut journal = FileJournal::open(&root, project, graph_id, budget, &cancel, &clock)?;
+    journal.bind(execution)?;
+    let checkpoint = advance(&document, &mut Owner, &mut journal)?.checkpoint;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let graph_directory = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string());
+    let checkpoint_path = graph_directory.join(format!("graph-{graph_id}.json"));
+    let original_checkpoint = std::fs::read(&checkpoint_path)?;
+    let original_prompts = std::fs::read_dir(&graph_directory)?
+        .map(|entry| entry.unwrap())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("graph-{graph_id}.prompt-"))
+        })
+        .map(|entry| Ok((entry.file_name(), std::fs::read(entry.path())?)))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    assert!(
+        !original_prompts.is_empty(),
+        "the large prompt is externalised"
+    );
+
+    let failed = FileJournal::retire(&root, project, graph_id, budget, &cancel, &clock, |_| {
+        Err(std::io::Error::other("queue retirement failed").into())
+    });
+    assert!(failed.is_err());
+    assert_eq!(std::fs::read(&checkpoint_path)?, original_checkpoint);
+    for (name, bytes) in &original_prompts {
+        assert_eq!(std::fs::read(graph_directory.join(name))?, *bytes);
+    }
+
+    let archive =
+        FileJournal::retire(
+            &root,
+            project,
+            graph_id,
+            budget,
+            &cancel,
+            &clock,
+            |_| Ok(()),
+        )?
+        .expect("retirement archives the live graph");
+    assert!(!checkpoint_path.exists());
+    let archive_directory = Directory::open_anchor(&archive)?;
+    let archived_checkpoint = archive_directory.read_bounded(
+        OsStr::new(&format!("graph-{graph_id}.json")),
+        64 * 1024 * 1024,
+    )?;
+    let decoded = decode_checkpoint_in(&archive_directory, &archived_checkpoint, graph_id)?;
+    assert_eq!(decoded.execution.document.nodes[0].prompt, prompt);
+    for (name, bytes) in original_prompts {
+        assert_eq!(std::fs::read(archive.join(name))?, bytes);
+        assert!(!graph_directory.join(name).exists());
+    }
+
+    FileJournal::collect_terminal(
+        &root,
+        project,
+        i128::MAX,
+        &provenant_core::SweepControl {
+            cancel: cancel.clone(),
+            ..Default::default()
+        },
+        &clock,
+    )?;
+    let archive_directory = Directory::open_anchor(&archive)?;
+    let archived_checkpoint = archive_directory.read_bounded(
+        OsStr::new(&format!("graph-{graph_id}.json")),
+        64 * 1024 * 1024,
+    )?;
+    decode_checkpoint_in(&archive_directory, &archived_checkpoint, graph_id)?;
+    Ok(())
 }
 
 fn fixture_plan_digest(document: &GraphDocument) -> String {

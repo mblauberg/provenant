@@ -22,6 +22,12 @@ fn satisfied_source_pin_does_not_exclude_shared_holders_or_their_edits()
         &cancel(),
         context.clock,
     )?;
+    let sibling = provenant_supervisor::custody::lock_writer_occupancy(
+        &slot,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
     fs::write(info.path.join("keep"), "parent's uncommitted work")?;
     fast_forward(
         &context,
@@ -34,6 +40,7 @@ fn satisfied_source_pin_does_not_exclude_shared_holders_or_their_edits()
         fs::read_to_string(info.path.join("keep"))?,
         "parent's uncommitted work"
     );
+    drop(sibling);
     assert!(matches!(
         cache_writer_guard(context.project_state, &info.path),
         Err(Occupancy::Held)
