@@ -838,6 +838,14 @@ impl From<provenant_config::ForgeContextError> for RunError {
         }
     }
 }
+impl From<provenant_core::TimeError> for RunError {
+    fn from(error: provenant_core::TimeError) -> Self {
+        Self::Input {
+            kind: ErrorKind::Time,
+            message: error.to_string(),
+        }
+    }
+}
 impl From<provenant_confinement::worktrees::WorktreeError> for RunError {
     fn from(error: provenant_confinement::worktrees::WorktreeError) -> Self {
         use provenant_confinement::repo::RepoError;
@@ -1515,6 +1523,21 @@ mod diagnostic_projection_tests {
                 .detail
                 .unwrap()
                 .contains("/fixture/process-exit.json")
+        );
+    }
+
+    #[test]
+    fn clock_failure_is_a_typed_time_error_that_keeps_its_cause() {
+        let error = RunError::from(provenant_core::TimeError::HostClock);
+        assert_eq!(ErrorKind::from(&error), ErrorKind::Time);
+        let diagnostic = error.diagnostic(Destination::Local);
+        assert_eq!(diagnostic.code, ErrorKind::Time.code());
+        assert!(
+            diagnostic
+                .detail
+                .unwrap()
+                .contains("clock or boot identity cannot be read"),
+            "the host clock cause stays visible in the error contract"
         );
     }
 

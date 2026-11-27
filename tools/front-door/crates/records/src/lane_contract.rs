@@ -4,10 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use provenant_core::{AttemptId, ProjectId};
 use serde::{Deserialize, Serialize};
 
+/// Lane contracts carry the shared provenance wrapper. Re-export it here so
+/// readers of the lane-contract seam name one `Sourced`, not a second spelling.
+pub use crate::provenance::Sourced;
 use crate::{
     ExtraFields, PathWire, RecordHeader, WorkKey,
     handoff::{Handoff, WriteScopeReport},
-    provenance::{Source, Sourced},
+    provenance::Source,
 };
 
 /// A missing launch field is a default value from the compiled layer, not a

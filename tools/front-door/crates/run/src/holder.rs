@@ -9,7 +9,6 @@ use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock, OperationId, ProjectId, RootInputs, WallTime,
 };
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
-use provenant_records::Layer;
 #[cfg(test)]
 use provenant_records::Tokens;
 use provenant_supervisor::{
@@ -254,6 +253,7 @@ mod identity_policy_tests {
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
     fn incomplete_identity_evidence_respects_policy_and_conflicts_remain_fatal() {
+        use provenant_records::Layer;
         use provenant_records::settlement::IdentityPolicyEffect;
         for (strength, conflict) in [
             (Strength::Warn, false),

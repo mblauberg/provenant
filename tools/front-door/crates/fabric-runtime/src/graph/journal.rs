@@ -726,7 +726,7 @@ impl FileJournal {
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId.for_graph(graph_id).into());
         }
-        let journal = Self::open(root, project, graph_id, budget, cancel, clock)?;
+        let mut journal = Self::open(root, project, graph_id, budget, cancel, clock)?;
         let Some(checkpoint) = journal.load(graph_id)? else {
             return Ok(None);
         };
@@ -2725,8 +2725,8 @@ pub fn migrate_store(state_root: &std::path::Path) -> Result<Vec<String>, Journa
         let Some(project_name) = project.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let directory = Directory::open_anchor(project.path())?;
-        let names: Vec<OsString> = directory.entries().collect::<Result<Vec<_>, _>>()?;
+        let directory = Directory::open_anchor(&project.path())?;
+        let names: Vec<OsString> = directory.entries()?.collect::<Result<Vec<_>, _>>()?;
         for name in names {
             let Some(text) = name.to_str() else {
                 continue;

@@ -3750,7 +3750,11 @@ impl RunStore {
     /// Report `WRITER_HEAD_MOVED` for a continuation whose predecessor head
     /// moved forward. The re-pin itself keeps the original source pin; only the
     /// head pin is advanced to the current descendant.
-    fn warn_head_moved(previous: &AttemptRecord, pinned: GitOid, current: GitOid) {
+    fn warn_head_moved(
+        previous: &AttemptRecord,
+        pinned: provenant_core::GitOid,
+        current: provenant_core::GitOid,
+    ) {
         warning::warn(Self::lease_warning(
             provenant_records::policy::WRITER_HEAD_MOVED,
             format!(
@@ -3785,7 +3789,7 @@ impl RunStore {
                 .and_then(|request| request.task.head.clone())
                 .and_then(|head| provenant_core::GitOid::parse(&head).ok())
         });
-        let uncommitted = crate::writer::uncommitted_worktree_paths(tree)?;
+        let uncommitted = crate::writer::WriterLaunch::uncommitted_worktree_paths(tree)?;
         let at = call.clock.wall_now()?;
         let handover = provenant_records::custody::Handover {
             from: holder.attempt_id,

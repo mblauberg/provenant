@@ -7,7 +7,7 @@ use crate::{
     *,
 };
 use provenant_core::{ActorId, AttemptId, DurationMicros, OperationId, Pause};
-use provenant_os::exec::{ExecOptions, Executor, Termination};
+use provenant_os::exec::Executor;
 use provenant_records::CommandError;
 use provenant_records::command_result::ErrorClass;
 use provenant_records::custody::Scope;
@@ -76,7 +76,7 @@ fn git_own(
     cancel: &provenant_core::CancelToken,
     timeout: Duration,
     operation: &'static str,
-) -> Result<crate::worktree_carry::GitOutput, CommitOwnError> {
+) -> std::result::Result<crate::worktree_carry::GitOutput, CommitOwnError> {
     git_own_with_stdin(cwd, args, None, env, executor, cancel, timeout, operation)
 }
 
@@ -89,7 +89,7 @@ fn git_own_with_stdin(
     cancel: &provenant_core::CancelToken,
     timeout: Duration,
     operation: &'static str,
-) -> Result<crate::worktree_carry::GitOutput, CommitOwnError> {
+) -> std::result::Result<crate::worktree_carry::GitOutput, CommitOwnError> {
     let out =
         crate::worktree_carry::git_with_stdin(cwd, args, stdin, env, executor, cancel, timeout)
             .map_err(|error| match error {
@@ -143,7 +143,7 @@ pub fn commit_own_paths(
     cancel: &provenant_core::CancelToken,
     pause: &dyn Pause,
     timeout: Duration,
-) -> Result<OwnCommit, CommandError> {
+) -> std::result::Result<OwnCommit, CommandError> {
     let to_error = |error: CommitOwnError| -> CommandError {
         match error {
             CommitOwnError::GitUnavailable => CommandError::new(
@@ -202,7 +202,7 @@ pub fn commit_own_paths(
                         .map(str::to_owned)
                         .ok_or_else(|| "commit path is not valid UTF-8".to_owned())
                 })
-                .collect::<Result<Vec<_>, _>>();
+                .collect::<std::result::Result<Vec<_>, _>>();
             let path_strings = path_strings.map_err(|detail| {
                 CommandError::new(
                     "COMMIT_OWN_PATH_INVALID",
@@ -241,7 +241,7 @@ pub fn commit_own_paths(
                     }
                     Ok(path.clone())
                 })
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|detail| {
                     CommandError::new(
                         "COMMIT_OWN_PATH_INVALID",
@@ -279,10 +279,11 @@ pub fn commit_own_paths(
             OsString::from("GIT_INDEX_FILE"),
             private.0.as_os_str().to_owned(),
         ));
+        let expected_text = expected.to_string();
 
         let read = git_own(
             worktree,
-            &["read-tree", expected.as_str()],
+            &["read-tree", expected_text.as_str()],
             &index_env,
             executor,
             cancel,
@@ -373,7 +374,7 @@ pub fn commit_own_paths(
             "commit-tree",
             &tree_oid,
             "-p",
-            expected.as_str(),
+            expected_text.as_str(),
             "-m",
             message,
         ];
@@ -395,10 +396,16 @@ pub fn commit_own_paths(
         }
         let new = provenant_core::GitOid::parse(made.stdout.trim())
             .map_err(|_| to_error(CommitOwnError::InvalidOid(made.stdout.trim().to_owned())))?;
+        let new_text = new.to_string();
 
         let update = git_own(
             worktree,
-            &["update-ref", ref_name, new.as_str(), expected.as_str()],
+            &[
+                "update-ref",
+                ref_name,
+                new_text.as_str(),
+                expected_text.as_str(),
+            ],
             env,
             executor,
             cancel,
@@ -481,7 +488,7 @@ mod commit_own_tests {
     }
 
     impl Fixture {
-        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        fn new() -> std::result::Result<Self, Box<dyn std::error::Error>> {
             let temp = tempfile::tempdir()?;
             let repo = temp.path().join("lane");
             fs::create_dir(&repo)?;
@@ -505,7 +512,7 @@ mod commit_own_tests {
             &self,
             expected: provenant_core::GitOid,
             retries: u32,
-        ) -> Result<OwnCommit, CommandError> {
+        ) -> std::result::Result<OwnCommit, CommandError> {
             let paths = [self.repo.join("own.txt")];
             self.commit_input(expected, OwnCommitInput::Paths(&paths), retries)
         }
@@ -515,7 +522,7 @@ mod commit_own_tests {
             expected: provenant_core::GitOid,
             input: OwnCommitInput<'_>,
             retries: u32,
-        ) -> Result<OwnCommit, CommandError> {
+        ) -> std::result::Result<OwnCommit, CommandError> {
             let env = test_env();
             let executor = SystemExecutor::new(4).map_err(|e| {
                 CommandError::new("EXECUTOR", "executor unavailable", None, e.to_string())
@@ -540,7 +547,7 @@ mod commit_own_tests {
 
     #[test]
     fn commit_own_stages_only_claimed_paths_and_cas_updates_the_branch()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
         fs::write(fixture.repo.join("own.txt"), "own\n")?;
         fs::write(fixture.repo.join("other.txt"), "other\n")?;
@@ -564,7 +571,7 @@ mod commit_own_tests {
     }
 
     #[test]
-    fn commit_own_cas_retries_on_race() -> Result<(), Box<dyn std::error::Error>> {
+    fn commit_own_cas_retries_on_race() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
         // Move the branch on from `fixture.head`, so a CAS against the stale
         // head loses the race exactly once.
@@ -584,7 +591,7 @@ mod commit_own_tests {
 
     #[test]
     fn commit_own_patch_retries_from_new_head_without_staging_worktree_bytes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
         fs::write(fixture.repo.join("extra.txt"), "branch change\n")?;
         git(&fixture.repo, &["add", "extra.txt"]);
@@ -624,7 +631,8 @@ mod commit_own_tests {
     }
 
     #[test]
-    fn index_lock_race_retries_then_transient() -> Result<(), Box<dyn std::error::Error>> {
+    fn index_lock_race_retries_then_transient()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
         fs::write(fixture.repo.join("own.txt"), "own\n")?;
         // Pre-lock the private index for both attempts. The first two

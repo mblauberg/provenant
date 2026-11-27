@@ -122,7 +122,8 @@ pub fn migrate_store(state_root: &Path) -> Result<Vec<String>, MigrationError> {
             if AttemptId::parse(&name).is_err() {
                 continue;
             }
-            let directory = Directory::open_anchor(entry.path())?;
+            let directory = Directory::open_anchor(&entry.path())
+                .map_err(|error| MigrationError::new(error.to_string()))?;
             let _lock = directory
                 .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
                 .map_err(|error| {
@@ -154,7 +155,8 @@ pub fn migrate_store(state_root: &Path) -> Result<Vec<String>, MigrationError> {
                         entry.path().display()
                     ))
                 })?;
-                let slot_directory = Directory::open_anchor(&slot)?;
+                let slot_directory = Directory::open_anchor(&slot)
+                    .map_err(|error| MigrationError::new(error.to_string()))?;
                 let _slot_lock = slot_directory
                     .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
                     .map_err(|error| {

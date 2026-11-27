@@ -4247,7 +4247,7 @@ pub(crate) fn seal_worktree_lease(
         })
         .unwrap_or_default();
     let since = worktrees::load_owner(tree)?
-        .map_or_else(provenant_core::WallTime::MAX, |owner| owner.created_at);
+        .map_or_else(|| provenant_core::WallTime::MAX, |owner| owner.created_at);
     let lease = provenant_records::custody::WorktreeLease {
         holder: scope.attempt,
         since,

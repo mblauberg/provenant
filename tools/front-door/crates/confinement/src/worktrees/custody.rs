@@ -1553,6 +1553,7 @@ pub fn configured_sharing(host_state: &Path, home: &Path, checkout: &Path) -> So
 /// holder whose process is present owns a live lease, one whose process is
 /// gone has a lapsed lease, and one that cannot be observed is unreachable
 /// until `retry_at`.
+#[cfg(test)]
 pub(crate) fn lease_observation(
     holder: provenant_core::AttemptId,
     since: WallTime,

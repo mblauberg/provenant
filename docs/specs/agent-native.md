@@ -195,6 +195,7 @@ pub struct CommandError { pub code, pub message, pub cause: Option<String>, pub 
   - Callers: `status`, `wait`, `run`, `upgrade --verify` and queue parks.
   - The selection in `install_report.rs` is deleted.
 - **Forge quota.** `pr::observer::ObserveError::RateLimited{reset}` becomes `Transient{retry_at}`. `run review --pr` reports `FORGE_QUOTA_EXHAUSTED` instead of `INVALID_INPUT`.
+- **Host clock.** A clock read failure during a run-store call converts into `RunError::Input` with `ErrorKind::Time`, so it reaches the CLI as a stable `TIME` code with its leaf cause instead of failing the error conversion.
 - **#3777.** These setting-origin enums and structs are deleted in favour of `provenance::{Layer, Sourced}`. Each is verified on origin/main:
   - `policy::Source` (`records/src/policy.rs:54`);
   - `PacingSettingSource` and `PortSettingSource` (`records/src/diagnostic.rs:314,340`);
