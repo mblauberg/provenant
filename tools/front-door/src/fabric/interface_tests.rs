@@ -2758,7 +2758,7 @@ fn writer_controls_preserve_new_branch_and_refuse_conflicting_access() -> Result
 }
 
 #[test]
-fn plain_read_only_task_pins_fetched_upstream_and_live_source_is_honoured() -> Result {
+fn plain_read_only_task_uses_live_default_and_explicit_live_is_honoured() -> Result {
     let rig = TestRig::new()?;
     let remote = rig.root.join("remote.git");
     let remote = remote.to_str().ok_or("remote path")?;
@@ -2808,15 +2808,20 @@ fn plain_read_only_task_pins_fetched_upstream_and_live_source_is_honoured() -> R
         factory.graph_document(input, budget, &cancel)
     };
 
-    let pinned = submit(None)?;
-    let node = &pinned["document"]["nodes"][0];
-    assert_eq!(node["source"]["commit"], json!(default), "{node}");
-    let warnings = pinned["warnings"].as_array().ok_or("warnings")?;
+    let live_default = submit(None)?;
+    let node = &live_default["document"]["nodes"][0];
     assert!(
-        warnings.iter().any(|warning| warning
-            .as_str()
-            .is_some_and(|text| text.contains("origin") && text.contains(&default))),
-        "the launch must name the source ref it used: {warnings:?}"
+        node["source"].is_null(),
+        "live default keeps the checkout: {node}"
+    );
+    assert_eq!(live_default["read_source"]["value"], "live");
+    assert!(live_default["read_source"]["commit"].is_null());
+    let warnings = live_default["warnings"].as_array().ok_or("warnings")?;
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|text| text.contains(&default))),
+        "a live default must not report an upstream pin: {warnings:?}"
     );
 
     // An explicit live source keeps the stale checkout as the subject.
@@ -3279,15 +3284,18 @@ fn default_branch_pins_the_forge_default_not_the_feature_upstream() -> Result {
             "the tracking upstream is not the default branch: {chosen}"
         );
     }
-    // With no source setting the admission subject pins this level checkout.
+    // The configured default is live. Admission still records the observed
+    // checkout head as the subject, while the task reads the live tree.
     let automatic = submit(None, None)?;
     assert_eq!(
-        automatic["document"]["nodes"][0]["source"]["commit"],
-        json!(feature),
-        "automatic admission pins the observed checkout subject: {automatic}"
+        automatic["document"]["nodes"][0]["source"],
+        Value::Null,
+        "the default live source leaves the task unpinned: {automatic}"
     );
     assert_eq!(automatic["subject"]["head"], json!(feature));
     assert_eq!(automatic["subject"]["origin"]["name"], "feature");
+    assert_eq!(automatic["read_source"]["value"], "live");
+    assert!(automatic["read_source"]["commit"].is_null());
     Ok(())
 }
 
@@ -5468,7 +5476,16 @@ fn launch_flags_reach_the_host_as_launch_layer_settings() -> Result {
         "refuse"
     );
 
-    let isolated = launch(json!({"isolated":true, "sandbox":"on"}))?;
+    let prepared = super::launch_input(&json!({"isolated":true}))?;
+    assert_eq!(prepared["attempt"]["sandbox"], "on");
+    assert_eq!(prepared["attempt"]["checks_mode"], "strict");
+    let override_input = super::launch_input(&json!({
+        "isolated":true, "checks_mode":"off", "attempt":{"sandbox":"off"}
+    }))?;
+    assert_eq!(override_input["attempt"]["sandbox"], "off");
+    assert_eq!(override_input["attempt"]["checks_mode"], "off");
+
+    let isolated = launch(json!({"isolated":true}))?;
     for key in [
         "lanes.access",
         "lanes.sandbox",

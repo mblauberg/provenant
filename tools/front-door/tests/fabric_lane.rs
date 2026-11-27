@@ -60,11 +60,16 @@ fn a_snapshot_lane_resolves_its_project_through_the_declared_binding() -> Result
         format!("{}\n", rig.project.join(".git/objects").display()),
     )?;
     let project = std::mem::replace(&mut rig.project, view.clone());
-    // Outside a lane, discovery from the view still refuses its alternates.
-    let refused = failure(&rig, &["fabric", "identity", "--json"])?;
+    // Outside a lane, discovery uses the view and warns about its alternates.
+    let discovered = host(&rig, &["fabric", "identity", "--json"])?;
+    assert_ne!(discovered["data"]["project"], bound["data"]["project"]);
     assert!(
-        refused.to_string().contains("alternate Git object stores"),
-        "{refused}"
+        discovered["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .iter()
+            .any(|warning| warning["code"] == "REPO_REJECT_ALTERNATES_DATA_INTEGRITY"),
+        "{discovered}"
     );
     rig.project = project;
     lane_environment(&mut rig, AttemptId::from_bytes([21; 16]))?;
@@ -637,9 +642,13 @@ fn child_relay_preserves_a_configured_allowance_above_default() -> Result {
     let refused: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(refused["error"]["code"], "writer_lock_busy", "{refused}");
     assert!(
-        refused["error"]["next"]
-            .as_str()
-            .is_some_and(|next| next.contains("retry")),
+        refused["error"]["next"].as_array().is_some_and(|steps| {
+            steps.iter().any(|step| {
+                step["why"]
+                    .as_str()
+                    .is_some_and(|why| why.contains("retry"))
+            })
+        }),
         "{refused}"
     );
     Ok(())

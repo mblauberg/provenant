@@ -1989,12 +1989,11 @@ fn fetch_read_source(remote: &provenant_config::RemoteName, repo: &Path) -> bool
         .unwrap_or(false)
 }
 
-/// The one resolver for a read-only lane's source. The compiled default pins
-/// the fetched upstream when the checkout is behind it, and pins the observed
-/// checkout HEAD otherwise, so a commit after admission cannot move the tree a
-/// read-only lane reads; `live` keeps the local tree, `default_branch` the
-/// fetched default, and any other value an explicit ref. `fetch_first` fetches
-/// first; unusable Git evidence is advisory, never fatal.
+/// The one resolver for a read-only lane's source. The compiled `live` default
+/// keeps the local tree; `auto` pins the fetched upstream when the checkout is
+/// behind it, and pins the observed checkout HEAD otherwise. `default_branch`
+/// pins the fetched default, and any other value is an explicit ref.
+/// `fetch_first` fetches first; unusable Git evidence is advisory, never fatal.
 pub(in crate::run) fn resolve_read_source(
     state: &Path,
     source: &Path,

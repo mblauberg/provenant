@@ -1322,6 +1322,12 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         &Default::default(),
     )?;
     drop(journal);
+    let before = graph::FileJournal::read_checkpoint(
+        &fixture.roots.state,
+        fixture.settled.project_id,
+        "owner",
+    )?
+    .ok_or("owner")?;
     fixture.settled.launch = Some(provenant_run::HostLaunchContext {
         graph_directory: None,
         configuration_root: fixture.rig.state.clone(),
@@ -1349,7 +1355,7 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         report
             .errors
             .iter()
-            .any(|error| error.contains("/owner:") && error.contains("corrupt")),
+            .any(|error| error.contains("/owner:") && error.contains("WAKE_ADVANCE_FAILED")),
         "{:?}",
         report.errors
     );
@@ -1359,7 +1365,10 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         "owner",
     )?
     .ok_or("owner")?;
-    assert_ne!(after.nodes[0].state, graph::NodeState::Succeeded);
+    assert_eq!(
+        serde_json::to_value(&after.nodes[0])?,
+        serde_json::to_value(&before.nodes[0])?
+    );
     assert!(fixture.worktree.exists());
     Ok(())
 }

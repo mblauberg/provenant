@@ -445,9 +445,11 @@ mod tests {
         );
         let mut timed_out = data.clone();
         timed_out["timed_out"] = json!(true);
-        assert_eq!(response_outcome("run", &timed_out), Outcome::Waiting);
+        assert_eq!(timed_out["status"], "pending");
+        let timed_out_outcome = response_outcome("run", &timed_out);
+        assert_eq!(timed_out_outcome, Outcome::Timeout);
         assert_eq!(
-            launch_error_node(&timed_out, Outcome::Waiting).map(|node| &node["id"]),
+            launch_error_node(&timed_out, timed_out_outcome).map(|node| &node["id"]),
             Some(&json!("writer"))
         );
     }
@@ -461,16 +463,18 @@ mod tests {
                  "advance_note":"bounded launch refused", "advance_code":code,
                  "advance_owner_code":"writer_lock_busy"}
             ]}});
-            assert_eq!(response_outcome("run", &data), Outcome::Waiting);
-            let node = launch_error_node(&data, Outcome::Waiting).unwrap();
+            assert_eq!(data["status"], "pending");
+            let outcome = response_outcome("run", &data);
+            assert_eq!(outcome, Outcome::Timeout);
+            let node = launch_error_node(&data, outcome).unwrap();
             assert_eq!(node["id"], "writer");
             assert_eq!(node["advance_owner_code"], "writer_lock_busy");
             let mut retrying = data.clone();
             retrying["checkpoint"]["nodes"][1]["advance_code"] = json!("retrying");
-            assert!(launch_error_node(&retrying, Outcome::Waiting).is_none());
+            assert!(launch_error_node(&retrying, outcome).is_none());
             let mut launched = data.clone();
             launched["checkpoint"]["nodes"][1]["attempts"] = json!([{}]);
-            assert!(launch_error_node(&launched, Outcome::Waiting).is_none());
+            assert!(launch_error_node(&launched, outcome).is_none());
         }
     }
 
@@ -597,7 +601,10 @@ mod tests {
             "{announced}"
         );
         assert_eq!(step.argv, ["provenant", "wait", "fix-2"]);
-        assert!(announced.is_empty(), "{announced}");
+        assert_eq!(
+            announced,
+            "— fix-2 · - · - · read-only, checkout · 0 warnings\n"
+        );
         let replay = json!({"status":"complete", "outcome":"failed", "named":{"graph":"fix", "replayed":true}});
         assert_eq!(response_outcome("run", &replay), Outcome::Ok);
         let fresh = json!({"status":"complete", "outcome":"failed"});
