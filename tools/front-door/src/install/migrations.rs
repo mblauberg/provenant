@@ -11,7 +11,7 @@
 //! state path and the install proceeds; the id stays unrecorded so the next
 //! install retries the idempotent step.
 use provenant_config::PortEvidenceError;
-use provenant_os::fs::{Directory, FsError, PublishMode};
+use provenant_os::fs::{Directory, ForeignLock, FsError, LockMode, PublishMode};
 use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
 use provenant_records::warning::{self, MIGRATION_STEP_FAILED, Warning};
 use provenant_records::{InstallReceipt, Limits};
@@ -35,17 +35,17 @@ pub(crate) fn migrating_marker(to: u64) -> String {
     format!("migrating-{to}")
 }
 
-/// Stub for the batch cut-over's quiesce gate. It fails closed until the tick,
-/// graph, queue and lease locks are wired into install.
-#[allow(dead_code)]
-pub(crate) fn quiesce_stub() -> Result<(), MigrationError> {
-    Err(MigrationError::new(
-        "store migration quiesce has not been wired",
-    ))
-}
+/// Default bounded wait for the store cut-over's quiesce gate. The owner can
+/// override it at `domains.install.quiesce_seconds`.
+const DEFAULT_QUIESCE_SECONDS: u64 = 300;
+/// Version written by the config knob cut-over; the graph and run stores own
+/// their own markers beside their records.
+const CONFIG_KNOB_VERSION: u64 = 4;
 
 /// Ordered steps for this release. Steps are deleted in the release after the
-/// one that ships them.
+/// one that ships them. The store cut-over runs last: it quiesces every store
+/// once, then applies the graph, run and config transforms in that order so a
+/// resumed pass never sees half-migrated shapes.
 const STEPS: &[&dyn Migration] = &[
     &HostProjectDirs,
     &AttemptScratchMove,
@@ -54,6 +54,7 @@ const STEPS: &[&dyn Migration] = &[
     &RetireWarningMarkers,
     &UsageLedgerV4,
     &ProjectGrantKeys,
+    &StoreCutover,
 ];
 
 /// `builtin` was the old spelling of the compiled-default layer. The shared
@@ -711,6 +712,300 @@ impl Migration for UsageLedgerV4 {
     }
 }
 
+/// The bounded wait comes from `domains.install.quiesce_seconds`; an absent or
+/// malformed value keeps the 300 second default.
+fn quiesce_seconds(state_root: &Path) -> u64 {
+    let Ok(text) = std::fs::read_to_string(state_root.join("config.toml")) else {
+        return DEFAULT_QUIESCE_SECONDS;
+    };
+    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
+        return DEFAULT_QUIESCE_SECONDS;
+    };
+    document
+        .get("domains")
+        .and_then(|item| item.get("install"))
+        .and_then(|item| item.get("quiesce_seconds"))
+        .and_then(toml_edit::Item::as_integer)
+        .filter(|seconds| *seconds >= 0)
+        .map(|seconds| seconds as u64)
+        .unwrap_or(DEFAULT_QUIESCE_SECONDS)
+}
+
+/// Every store lock a cut-over must see drain. `try_flock_foreign` observes an
+/// existing lock through a read-only descriptor: it never creates a lock file
+/// for an idle store, so a quiescence check changes nothing. The bounded loop
+/// in [`quiesce`] does the waiting.
+fn held_store_locks(state_root: &Path) -> Vec<String> {
+    let mut held = Vec::new();
+    let graphs = state_root.join("fabric").join("graphs");
+    if let Ok(projects) = std::fs::read_dir(&graphs) {
+        for project in projects.flatten() {
+            if !project.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Ok(directory) = Directory::open_anchor(project.path()) else {
+                continue;
+            };
+            let Ok(entries) = directory.entries() else {
+                continue;
+            };
+            for name in entries.flatten() {
+                let Some(text) = name.to_str() else { continue };
+                // Probe the lock file itself: a pending graph holds its lock
+                // before any checkpoint exists, so deriving names from
+                // `graph-*.json` would miss it.
+                if !text.ends_with(".lock") {
+                    continue;
+                }
+                if matches!(
+                    directory.try_flock_foreign(OsStr::new(text), LockMode::Exclusive),
+                    Ok(ForeignLock::Held)
+                ) {
+                    held.push(format!("{} {text}", project.file_name().to_string_lossy()));
+                }
+            }
+        }
+    }
+    if let Ok(directory) = Directory::open_anchor(state_root.join("queue")) {
+        if matches!(
+            directory.try_flock_foreign(OsStr::new("registry.lock"), LockMode::Exclusive),
+            Ok(ForeignLock::Held)
+        ) {
+            held.push("queue registry.lock".to_owned());
+        }
+    }
+    if let Ok(attempts) = std::fs::read_dir(state_root.join("attempts")) {
+        for attempt in attempts.flatten() {
+            if !attempt.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Ok(directory) = Directory::open_anchor(attempt.path()) else {
+                continue;
+            };
+            for name in ["writer.lock", "custody.lock", "settlement.lock"] {
+                if matches!(
+                    directory.try_flock_foreign(OsStr::new(name), LockMode::Exclusive),
+                    Ok(ForeignLock::Held)
+                ) {
+                    held.push(format!("{} {name}", attempt.file_name().to_string_lossy()));
+                }
+            }
+        }
+    }
+    held.sort();
+    held.dedup();
+    held
+}
+
+/// A cut-over migrates nothing until the graph, queue and lease locks drain.
+/// A holder that outlives the window is named in `UPGRADE_NOT_QUIESCENT`, and
+/// every store step returns before touching a record.
+fn quiesce(state_root: &Path, seconds: u64) -> Result<(), MigrationError> {
+    // An explicit real-time boundary: use the OS monotonic coordinate and its
+    // bounded pause rather than sampling std time or sleeping directly.
+    let deadline = provenant_os::sys::monotonic_now()
+        .as_micros()
+        .saturating_add(seconds.saturating_mul(1_000_000));
+    loop {
+        let holders = held_store_locks(state_root);
+        if holders.is_empty() {
+            return Ok(());
+        }
+        if provenant_os::sys::monotonic_now().as_micros() >= deadline {
+            return Err(MigrationError::new(format!(
+                "UPGRADE_NOT_QUIESCENT: store locks are still held: {}",
+                holders.join(", ")
+            )));
+        }
+        provenant_os::sys::wait_pause(std::time::Duration::from_millis(50));
+    }
+}
+
+fn old_source_replacement(text: &str) -> Option<&'static str> {
+    match text {
+        "shipped_default" | "bundled" | "builtin" => Some("default"),
+        "dispatch" => Some("launch"),
+        _ => None,
+    }
+}
+
+/// Rewrite persisted source tags in one TOML table and every nested table.
+/// Only keys that name a source are touched, so an unrelated value that happens
+/// to spell `builtin` is left alone.
+fn rewrite_toml_sources(table: &mut dyn toml_edit::TableLike) -> bool {
+    let mut changed = false;
+    let names: Vec<String> = table.iter().map(|(name, _)| name.to_owned()).collect();
+    for name in names {
+        let Some(item) = table.get_mut(&name) else {
+            continue;
+        };
+        let is_source = name == "source" || name.ends_with("_source");
+        if let Some(value) = item.as_value_mut() {
+            if is_source && value.as_str().and_then(old_source_replacement).is_some() {
+                let replacement = value
+                    .as_str()
+                    .and_then(old_source_replacement)
+                    .expect("checked above");
+                *value = toml_edit::Value::from(replacement);
+                changed = true;
+            }
+        } else if let Some(child) = item.as_table_like_mut() {
+            changed |= rewrite_toml_sources(child);
+        }
+    }
+    changed
+}
+
+/// The batch 1 config transform. `lanes.isolation` becomes `lanes.read_source`
+/// (`shared` pins a checkout, `private` is dropped because destination rules
+/// replace it); `lanes.pr = never` set by the owner is deliberately kept.
+fn rewrite_config_knobs(document: &mut toml_edit::DocumentMut) -> bool {
+    let mut changed = false;
+    if let Some(lanes) = document
+        .get_mut("lanes")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        let isolation = lanes
+            .get("isolation")
+            .and_then(toml_edit::Item::as_str)
+            .map(str::to_owned);
+        match isolation.as_deref() {
+            Some("shared") => {
+                lanes.remove("isolation");
+                lanes.insert("read_source", toml_edit::value("checkout"));
+                changed = true;
+            }
+            Some("private") => {
+                lanes.remove("isolation");
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+    changed |= rewrite_toml_sources(document.as_table_mut());
+    changed
+}
+
+/// Edit one config file structurally, preserving comments and unrelated keys,
+/// and publish it atomically at mode 0600 like a normal config write.
+fn rewrite_config_file(path: &Path) -> Result<bool, MigrationError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| MigrationError::new(format!("{}: no parent", path.display())))?;
+    let directory = Directory::open_anchor(parent)
+        .map_err(|error| MigrationError::new(format!("{}: {error}", parent.display())))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| MigrationError::new(format!("{}: no file name", path.display())))?;
+    let bytes = directory
+        .read_stable(name, Limits::CONFIG.max_bytes)
+        .map_err(|error| MigrationError::new(format!("{}: {error}", path.display())))?;
+    let text = String::from_utf8(bytes).map_err(|error| {
+        MigrationError::new(format!("{}: invalid UTF-8: {error}", path.display()))
+    })?;
+    let mut document: toml_edit::DocumentMut = text.parse().map_err(|error| {
+        MigrationError::new(format!("{}: invalid TOML: {error}", path.display()))
+    })?;
+    if !rewrite_config_knobs(&mut document) {
+        return Ok(false);
+    }
+    directory
+        .atomic_write_with_permissions(
+            name,
+            ".config-migrate.",
+            document.to_string().as_bytes(),
+            0o600,
+            PublishMode::Replace,
+        )
+        .map_err(|error| MigrationError::new(format!("{}: {error}", path.display())))?
+        .require_durable()
+        .map_err(|error| MigrationError::new(format!("{}: {error}", path.display())))?;
+    Ok(true)
+}
+
+/// Config-store transform: host and project config files, behind a marker so
+/// an interrupted pass resumes. Each file reads as a no-op on a second run.
+struct ConfigKnobRewrite;
+
+impl Migration for ConfigKnobRewrite {
+    fn id(&self) -> &'static str {
+        "config-knob-rewrite"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        let mut paths = vec![state_root.join("config.toml")];
+        if let Ok(projects) = std::fs::read_dir(state_root.join("projects")) {
+            for project in projects {
+                let path = project?.path().join("config.toml");
+                if path.exists() {
+                    paths.push(path);
+                }
+            }
+        }
+        let marker = state_root.join(migrating_marker(CONFIG_KNOB_VERSION));
+        std::fs::write(&marker, b"")?;
+        for path in paths {
+            if !path.exists() {
+                continue;
+            }
+            match rewrite_config_file(&path) {
+                Ok(true) => report.changed.push(path.display().to_string()),
+                Ok(false) => {}
+                Err(error) => report.warnings.push(
+                    Warning::new(
+                        MIGRATION_STEP_FAILED,
+                        format!(
+                            "config knobs could not be migrated in {}: {error}",
+                            path.display()
+                        ),
+                        provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
+                    )
+                    .subject(path.display().to_string())
+                    .repair(format!(
+                        "repair {}, then rerun `provenant install`; the step is idempotent",
+                        path.display()
+                    )),
+                ),
+            }
+        }
+        if report.warnings.is_empty() {
+            std::fs::remove_file(&marker)?;
+        }
+        report.changed.sort();
+        Ok(report)
+    }
+}
+
+/// The one batch 1 cut-over. Quiesce once, then migrate graph, run store and
+/// config in that order. A failure in any store leaves its marker and stops
+/// the sequence; a later install resumes from the first unchanged record.
+struct StoreCutover;
+
+impl Migration for StoreCutover {
+    fn id(&self) -> &'static str {
+        "batch1-store-cutover"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        quiesce(state_root, quiesce_seconds(state_root))?;
+        let graph = provenant_fabric_runtime::graph::migrate_store(state_root)
+            .map_err(|error| MigrationError::new(format!("graph store cut-over: {error}")))?;
+        report.changed.extend(graph);
+        let run = provenant_run::lease_migrate::migrate_store(state_root)
+            .map_err(|error| MigrationError::new(format!("run store cut-over: {error}")))?;
+        report.changed.extend(run);
+        // The queue registry's batch 2 transform slots in here, before config;
+        // this batch owns only the three stores it can migrate to final shapes.
+        let config = ConfigKnobRewrite.apply(state_root)?;
+        report.changed.extend(config.changed);
+        report.warnings.extend(config.warnings);
+        report.changed.sort();
+        Ok(report)
+    }
+}
+
 /// Run every pending step against the state root and return every recorded id.
 pub(super) fn run(state_root: &Path) -> Vec<String> {
     run_steps(state_root, STEPS)
@@ -852,13 +1147,15 @@ fn read_receipt(state_root: &Path) -> Result<Option<InstallReceipt>, String> {
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::{
-        AttemptScratchMove, PortConfigSourceSpellings, PortSourceSpellings, ProjectGrantKeys,
-        read_receipt, run_steps,
+        AttemptScratchMove, ConfigKnobRewrite, PortConfigSourceSpellings, PortSourceSpellings,
+        ProjectGrantKeys, StoreCutover, held_store_locks, quiesce_seconds, read_receipt, run_steps,
     };
+    use provenant_os::fs::{Directory, LockMode};
     use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
     use provenant_records::warning::{MIGRATION_STEP_FAILED, Warning, capture};
     use provenant_records::{AbsolutePath, FileDigest, InstallReceipt, SourceDigest};
     use serde_json::{Value, json};
+    use std::ffi::OsStr;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1516,5 +1813,145 @@ grants = ["postgres"]
             value["build"]["leaf_sources"]["build.offload"],
             json!("host")
         );
+    }
+
+    /// Spec: docs/specs/agent-native.md#3.10-store-migrations
+    #[test]
+    fn config_knob_rewrite_maps_isolation_and_source_tags_once() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = root.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"[lanes]
+isolation = "shared"
+pr = "never"
+
+[domains.install]
+quiesce_seconds = 0
+
+[domains.lanes.projects.writer]
+source = "builtin"
+leaf_source = "dispatch"
+"#,
+        )
+        .expect("write config");
+
+        let report = ConfigKnobRewrite.apply(root.path()).expect("apply once");
+        assert_eq!(report.id, "config-knob-rewrite");
+        assert_eq!(report.changed, [config.display().to_string()]);
+        assert!(report.warnings.is_empty(), "{report:?}");
+        let text = std::fs::read_to_string(&config).expect("read config");
+        let document: toml_edit::DocumentMut = text.parse().expect("parse config");
+        let lanes = document["lanes"].as_table_like().expect("lanes table");
+        assert!(!lanes.contains_key("isolation"), "{text}");
+        assert_eq!(
+            lanes.get("read_source").and_then(toml_edit::Item::as_str),
+            Some("checkout")
+        );
+        assert_eq!(
+            lanes.get("pr").and_then(toml_edit::Item::as_str),
+            Some("never"),
+            "an owner-set lanes.pr is kept"
+        );
+        let writer = document["domains"]["lanes"]["projects"]["writer"]
+            .as_table_like()
+            .expect("writer project");
+        assert_eq!(
+            writer.get("source").and_then(toml_edit::Item::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            writer.get("leaf_source").and_then(toml_edit::Item::as_str),
+            Some("launch")
+        );
+        assert_eq!(quiesce_seconds(root.path()), 0);
+        assert!(
+            !root.path().join("migrating-4").exists(),
+            "marker removed after a complete pass"
+        );
+
+        let again = ConfigKnobRewrite.apply(root.path()).expect("apply twice");
+        assert!(again.changed.is_empty(), "second pass changes nothing");
+        assert!(again.warnings.is_empty(), "{again:?}");
+    }
+
+    /// Spec: docs/specs/agent-native.md#3.10-store-migrations
+    #[test]
+    fn config_knob_rewrite_drops_private_isolation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = root.path().join("config.toml");
+        std::fs::write(&config, "[lanes]\nisolation = \"private\"\n").expect("write config");
+        let report = ConfigKnobRewrite.apply(root.path()).expect("apply");
+        assert_eq!(report.changed, [config.display().to_string()]);
+        let text = std::fs::read_to_string(&config).expect("read config");
+        assert!(!text.contains("isolation"), "{text}");
+        assert!(!text.contains("read_source"), "{text}");
+    }
+
+    /// Spec: docs/specs/agent-native.md#3.10-store-migrations
+    #[test]
+    fn store_cutover_records_its_id_and_resumes_a_marker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path();
+        write_receipt(path, Vec::new());
+        std::fs::write(
+            path.join("config.toml"),
+            "[lanes]\nisolation = \"shared\"\n[domains.install]\nquiesce_seconds = 0\n",
+        )
+        .expect("write config");
+        // An interrupted pass left the config marker behind. The cut-over
+        // resumes instead of refusing to start.
+        std::fs::write(path.join("migrating-4"), b"").expect("marker");
+
+        let (applied, warnings) = capture(|| run_steps(path, &[&StoreCutover]));
+        assert_eq!(applied, ["batch1-store-cutover"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!path.join("migrating-4").exists());
+        let text = std::fs::read_to_string(path.join("config.toml")).expect("read config");
+        assert!(text.contains("read_source"), "{text}");
+        let receipt = read_receipt(path).expect("read").expect("receipt");
+        assert_eq!(receipt.migrations, ["batch1-store-cutover"]);
+
+        let (again, warnings) = capture(|| run_steps(path, &[&StoreCutover]));
+        assert_eq!(again, ["batch1-store-cutover"], "recorded step is skipped");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// Spec: docs/specs/agent-native.md#3.10-store-migrations
+    #[test]
+    fn not_quiescent_migrates_nothing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path();
+        let config = path.join("config.toml");
+        std::fs::write(
+            &config,
+            "[lanes]\nisolation = \"shared\"\n[domains.install]\nquiesce_seconds = 0\n",
+        )
+        .expect("write config");
+        let id = provenant_core::AttemptId::from_bytes([4; 16]);
+        let attempt = path.join("attempts").join(id.to_string());
+        std::fs::create_dir_all(&attempt).expect("attempt dir");
+        let directory = Directory::open_anchor(&attempt).expect("attempt anchor");
+        let _holder = directory
+            .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
+            .expect("hold writer lock");
+        assert!(
+            held_store_locks(path)
+                .iter()
+                .any(|name| name.contains("writer.lock")),
+            "the held lock is visible to the gate"
+        );
+
+        let error = StoreCutover.apply(path).expect_err("not quiescent");
+        assert!(
+            error.to_string().contains("UPGRADE_NOT_QUIESCENT"),
+            "{error}"
+        );
+        let text = std::fs::read_to_string(&config).expect("read config");
+        assert!(
+            text.contains("isolation"),
+            "no config was rewritten: {text}"
+        );
+        assert!(!path.join("migrating-4").exists(), "no marker was written");
     }
 }

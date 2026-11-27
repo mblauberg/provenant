@@ -2860,10 +2860,86 @@ fn v2_checkpoint_migrates_and_is_published_under_the_journal_lock() {
         Some("waiting")
     );
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(saved["schema_version"], 3);
+    assert_eq!(saved["schema_version"], CHECKPOINT_SCHEMA_VERSION);
     assert!(
         saved["checkpoint"]["nodes"][0]
             .get("advance_error_code")
             .is_none()
     );
+}
+
+/// Spec: docs/specs/agent-native.md#3.10-store-migrations
+#[test]
+fn v3_checkpoint_cut_over_types_warnings_and_renames_sealed_settings() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    drop(FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap());
+    let path = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+
+    let mut value = serde_json::to_value(stored_fixture()).unwrap();
+    assert_eq!(value["schema_version"], CHECKPOINT_SCHEMA_VERSION);
+    value["schema_version"] = 3.into();
+    value["checkpoint"]["nodes"][0]["warnings"] = serde_json::json!(["legacy note"]);
+    value["execution"]["accept_inconclusive_without_blocking"] = true.into();
+    value["execution"]["lanes.isolation"] = "shared".into();
+    value["execution"]["source"] = "builtin".into();
+    std::fs::write(&path, CanonicalV1::bytes(&value).unwrap().as_bytes()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let changed = migrate_store(root.as_path()).unwrap();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert!(
+        !root
+            .as_path()
+            .join("fabric/graphs")
+            .join(format!("migrating-{CHECKPOINT_SCHEMA_VERSION}"))
+            .exists(),
+        "marker removed after a complete cut-over"
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["schema_version"], CHECKPOINT_SCHEMA_VERSION);
+    let warning = &saved["checkpoint"]["nodes"][0]["warnings"][0];
+    assert_eq!(warning["code"], "LEGACY_WARNING");
+    assert_eq!(warning["message"], "legacy note");
+    assert_eq!(warning["source"]["layer"], "default");
+    let execution = &saved["execution"];
+    assert!(
+        execution
+            .get("accept_inconclusive_without_blocking")
+            .is_none()
+    );
+    assert_eq!(execution["accept_below"], "blocking");
+    assert!(execution.get("lanes.isolation").is_none());
+    assert_eq!(execution["lanes.read_source"], "checkout");
+    assert_eq!(execution["source"], "default");
+
+    let mut off_value = serde_json::to_value(stored_fixture()).unwrap();
+    off_value["schema_version"] = 3.into();
+    off_value["execution"]["accept_inconclusive_without_blocking"] = false.into();
+    let off = migrate(3, CHECKPOINT_SCHEMA_VERSION, off_value).unwrap();
+    assert_eq!(off["execution"]["accept_below"], "off");
+
+    let again = migrate_store(root.as_path()).unwrap();
+    assert!(again.is_empty(), "resumed pass is idempotent: {again:?}");
+}
+
+/// The strict reader is what makes a mixed-version deployment transient: an
+/// old binary sees a newer store and refuses instead of guessing a shape.
+#[test]
+fn a_newer_store_version_is_refused_by_the_reader() {
+    let mut value = serde_json::to_value(stored_fixture()).unwrap();
+    value["schema_version"] = (CHECKPOINT_SCHEMA_VERSION + 1).into();
+    let bytes = CanonicalV1::bytes(&value).unwrap().as_bytes().to_vec();
+    assert!(decode_checkpoint(&bytes, "g-test").is_err());
 }

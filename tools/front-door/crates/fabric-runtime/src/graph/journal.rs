@@ -1,7 +1,9 @@
 use super::*;
 
 /// Stored execution/checkpoint contract; older duplicate-pin records are rejected.
-pub(super) const CHECKPOINT_SCHEMA_VERSION: u64 = 3;
+/// Version 4 typed progress warnings and renamed sealed settings; the pure
+/// transform lives in [`migrate`] and runs once under the store's lock.
+pub(super) const CHECKPOINT_SCHEMA_VERSION: u64 = 4;
 
 /// Digest of a validated plan. Writers and readers share the domain and version.
 pub(super) fn plan_digest(plan: &PlannedGraph) -> Result<provenant_core::Digest, CanonicalError> {
@@ -2354,8 +2356,9 @@ pub(super) fn decode_checkpoint_in(
     decode_checkpoint_limited(&bytes, graph_id, bytes.len() as u64)
 }
 
-// This is the sole reader of the v2 checkpoint envelope. Validate its original
-// digest before moving any keys, then validate the resulting v3 checkpoint.
+// The sole reader of older checkpoint envelopes. A v2 record is digest-checked
+// before its keys move; each step is idempotent, so a record already at the
+// current version is returned untouched and a resumed cut-over changes nothing.
 fn migrate_checkpoint_bytes(bytes: &[u8]) -> Result<Vec<u8>, JournalError> {
     let value: serde_json::Value = provenant_records::decode(
         bytes,
@@ -2365,24 +2368,36 @@ fn migrate_checkpoint_bytes(bytes: &[u8]) -> Result<Vec<u8>, JournalError> {
             max_members: MAX_CHECKPOINT_MEMBERS,
         },
     )?;
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64);
+    if version == Some(CHECKPOINT_SCHEMA_VERSION) || !matches!(version, Some(2) | Some(3)) {
+        // Current records pass through; unknown versions are left for the
+        // strict decoder to reject with their own version error.
+        return Ok(bytes.to_vec());
+    }
+    let mut value = value;
+    if version == Some(2) {
+        let checkpoint = value.get("checkpoint").ok_or(JournalError::BadEnvelope)?;
+        let execution = value.get("execution").ok_or(JournalError::BadEnvelope)?;
+        let digest =
+            CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &(checkpoint, execution))?;
+        if value.get("digest").and_then(serde_json::Value::as_str)
+            != Some(digest.to_string().as_str())
+        {
+            return Err(JournalError::BadDigest);
+        }
+        value = migrate_checkpoint_2_3(value)?;
+    }
     if value
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
-        != Some(2)
+        == Some(3)
     {
-        return Ok(bytes.to_vec());
+        value = migrate(3, CHECKPOINT_SCHEMA_VERSION, value)?;
     }
-    let checkpoint = value.get("checkpoint").ok_or(JournalError::BadEnvelope)?;
-    let execution = value.get("execution").ok_or(JournalError::BadEnvelope)?;
-    let digest =
-        CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &(checkpoint, execution))?;
-    if value.get("digest").and_then(serde_json::Value::as_str) != Some(digest.to_string().as_str())
-    {
-        return Err(JournalError::BadDigest);
-    }
-    let migrated_value = migrate_checkpoint_2_3(value)?;
     let mut stored: StoredCheckpoint =
-        serde_json::from_value(migrated_value).map_err(|_| JournalError::BadEnvelope)?;
+        serde_json::from_value(value).map_err(|_| JournalError::BadEnvelope)?;
     stored.digest = checkpoint_digest(&stored.checkpoint, &stored.execution)?.to_string();
     let migrated = CanonicalV1::bytes(&stored)?.as_bytes().to_vec();
     decode_checkpoint_limited(
@@ -2437,12 +2452,16 @@ pub fn migrate(
         return Err(JournalError::BadEnvelope);
     }
 
-    let nodes = record
-        .pointer_mut("/checkpoint/nodes")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or(JournalError::BadEnvelope)?;
-    for node in nodes {
-        if let Some(warnings) = node.get_mut("warnings") {
+    // A string warning is only converted on a progress record. Other fields
+    // also named `warnings` (for example a result projection) are plain text
+    // by contract and must keep their strings.
+    fn type_progress_warnings(progress: &mut serde_json::Value) -> Result<(), JournalError> {
+        let nodes = progress.as_array_mut().ok_or(JournalError::BadEnvelope)?;
+        for node in nodes {
+            let node = node.as_object_mut().ok_or(JournalError::BadEnvelope)?;
+            let Some(warnings) = node.get_mut("warnings") else {
+                continue;
+            };
             let warnings = warnings.as_array_mut().ok_or(JournalError::BadEnvelope)?;
             for warning in warnings {
                 if let Some(message) = warning.as_str() {
@@ -2452,6 +2471,22 @@ pub fn migrate(
                         "source": { "layer": "default" }
                     });
                 }
+            }
+        }
+        Ok(())
+    }
+    let nodes = record
+        .pointer_mut("/checkpoint/nodes")
+        .ok_or(JournalError::BadEnvelope)?;
+    type_progress_warnings(nodes)?;
+    if let Some(expansions) = record.pointer_mut("/checkpoint/expansions") {
+        let expansions = expansions.as_array_mut().ok_or(JournalError::BadEnvelope)?;
+        for expansion in expansions {
+            if let Some(nodes) = expansion.pointer_mut("/nodes") {
+                type_progress_warnings(nodes)?;
+            }
+            if let Some(progress) = expansion.pointer_mut("/retired/progress") {
+                type_progress_warnings(progress)?;
             }
         }
     }
@@ -2501,16 +2536,83 @@ pub fn migrate(
             _ => {}
         }
     }
-    let execution = record
-        .get_mut("execution")
-        .ok_or(JournalError::BadEnvelope)?;
-    rewrite_sealed_values(execution);
+    // Sealed settings and persisted source tags live in both the checkpoint
+    // and the execution side of the envelope, so rewrite the whole record.
+    rewrite_sealed_values(&mut record);
 
     let mut stored: StoredCheckpoint =
         serde_json::from_value(record).map_err(|_| JournalError::BadEnvelope)?;
     stored.schema_version = to;
     stored.digest = checkpoint_digest(&stored.checkpoint, &stored.execution)?.to_string();
     serde_json::to_value(stored).map_err(|_| JournalError::BadEnvelope)
+}
+
+/// One cut-over for the graph store. Each checkpoint is transformed under its
+/// own journal lock. The marker makes an interrupted pass resumable, and a
+/// record already at `to` is skipped without a write.
+pub fn migrate_store(state_root: &std::path::Path) -> Result<Vec<String>, JournalError> {
+    let graphs = state_root.join("fabric").join("graphs");
+    let mut changed = Vec::new();
+    let entries = match std::fs::read_dir(&graphs) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(changed),
+        Err(error) => return Err(error.into()),
+    };
+    let marker = graphs.join(format!("migrating-{CHECKPOINT_SCHEMA_VERSION}"));
+    std::fs::write(&marker, b"")?;
+    let result = (|| -> Result<(), JournalError> {
+        for project in entries {
+            let project = project?;
+            if !project.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(project_name) = project.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let directory = Directory::open_anchor(project.path())?;
+            let names: Vec<OsString> = directory.entries().collect::<Result<Vec<_>, _>>()?;
+            for name in names {
+                let Some(text) = name.to_str() else { continue };
+                let Some(id) = text
+                    .strip_prefix("graph-")
+                    .and_then(|rest| rest.strip_suffix(".json"))
+                else {
+                    continue;
+                };
+                let lock_name = format!("graph-{id}.lock");
+                let _lock = directory.try_lock(OsStr::new(&lock_name), LockMode::Exclusive)?;
+                let Some(bytes) = read_checkpoint_bytes(&directory, id)? else {
+                    continue;
+                };
+                let inline = prompt_store::rehydrate(&directory, id, &bytes)?;
+                let migrated = migrate_checkpoint_bytes(&inline)?;
+                if migrated.as_slice() == &*inline {
+                    continue;
+                }
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&migrated).map_err(|_| JournalError::BadEnvelope)?;
+                prompt_store::externalise(&directory, id, &mut value)?;
+                let compact = CanonicalV1::bytes(&value)?;
+                if compact.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
+                    return Err(JournalError::TooLarge);
+                }
+                directory
+                    .atomic_write(
+                        &checkpoint_file_name(id),
+                        ".graph-migrate.",
+                        compact.as_bytes(),
+                        PublishMode::Replace,
+                    )?
+                    .require_durable()
+                    .map_err(JournalError::DurabilityUnconfirmed)?;
+                changed.push(format!("{project_name}/{text}"));
+            }
+        }
+        Ok(())
+    })();
+    result?;
+    std::fs::remove_file(&marker)?;
+    Ok(changed)
 }
 
 // Called only after acquiring the graph writer lock.

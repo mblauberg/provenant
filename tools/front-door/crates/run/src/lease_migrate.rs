@@ -1,0 +1,211 @@
+//! Batch 1 run-store cut-over: sealed writer ownership becomes a worktree
+//! lease. The lease state (live or lapsed) is derived from the holder's attempt
+//! state on every read, so no sweeper runs and a crash leaves no stale lease.
+//!
+//! The transform is pure and deterministic; [`migrate_store`] is the only
+//! file-touching path and it runs under each attempt's writer lock.
+
+use crate::writer::WriterOwnership;
+use provenant_core::AttemptId;
+use provenant_os::fs::{Directory, LockMode};
+use provenant_records::custody::{Sharing, WorktreeLease};
+use provenant_records::migrate::MigrationError;
+use std::ffi::OsStr;
+use std::path::Path;
+
+/// A sealed `writer-owned.json` record is version 1. The replacement lease
+/// store is version 2; the marker names this target so an interrupted pass is
+/// resumed by the next install.
+pub const WRITER_OWNERSHIP_VERSION: u64 = 1;
+pub const LEASE_STORE_VERSION: u64 = 2;
+
+/// Pure transform of one sealed ownership record. A record that is not owned
+/// by a lane has no lease; a record already at the target version is left as
+/// it was. The caller removes the old record and publishes the new one under
+/// the attempt's writer lock.
+pub(crate) fn migrate(
+    from: u64,
+    to: u64,
+    record: &WriterOwnership,
+) -> Result<Option<WorktreeLease>, MigrationError> {
+    if from == to {
+        return Ok(None);
+    }
+    if (from, to) != (WRITER_OWNERSHIP_VERSION, LEASE_STORE_VERSION) {
+        return Err(MigrationError::new(format!(
+            "unsupported writer ownership migration {from} -> {to}"
+        )));
+    }
+    if !record.lane_owned {
+        return Ok(None);
+    }
+    let Some(owner) = record.owner.as_ref() else {
+        return Ok(None);
+    };
+    let Some(holder) = owner.attempt_id else {
+        // An adopted human checkout has no attempt to hold a lease.
+        return Ok(None);
+    };
+    Ok(Some(WorktreeLease {
+        holder,
+        since: owner.created_at,
+        sharing: Sharing::Inherit,
+    }))
+}
+
+/// One cut-over for the run store. Every attempt's sealed ownership record is
+/// rewritten under that attempt's writer lock. A `migrating-<to>` marker makes
+/// an interrupted pass resumable, and records already converted are skipped.
+pub fn migrate_store(state_root: &Path) -> Result<Vec<String>, MigrationError> {
+    let attempts = state_root.join("attempts");
+    let mut changed = Vec::new();
+    let entries = match std::fs::read_dir(&attempts) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(changed),
+        Err(error) => return Err(error.into()),
+    };
+    let marker = attempts.join(format!("migrating-{LEASE_STORE_VERSION}"));
+    std::fs::write(&marker, b"")?;
+    let result = (|| -> Result<(), MigrationError> {
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if AttemptId::parse(&name).is_err() {
+                continue;
+            }
+            let directory = Directory::open_anchor(entry.path())?;
+            let _lock = directory
+                .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
+                .map_err(|error| {
+                    MigrationError::new(format!("{}: writer lock: {error}", entry.path().display()))
+                })?;
+            let Some(raw) =
+                crate::artifacts::read_sealed(&directory, "writer-owned.json", crate::RECORD_LIMIT)
+                    .map_err(|error| MigrationError::new(error.to_string()))?
+            else {
+                continue;
+            };
+            let ownership: WriterOwnership =
+                crate::db::decode(&raw).map_err(|error| MigrationError::new(error.to_string()))?;
+            if ownership.schema_version != WRITER_OWNERSHIP_VERSION {
+                // A future writer, or a record already handled by a resumed
+                // pass, is never rewritten.
+                continue;
+            }
+            let lease = migrate(WRITER_OWNERSHIP_VERSION, LEASE_STORE_VERSION, &ownership)?;
+            // Publish the replacement before removing the old record: a
+            // failure here must leave the ownership evidence for a resumed
+            // pass, never an attempt with neither record.
+            if let Some(lease) = lease {
+                let bytes = serde_json::to_vec(&lease)
+                    .map_err(|error| MigrationError::new(error.to_string()))?;
+                crate::artifacts::seal(&directory, "lease.json", &bytes, crate::RECORD_LIMIT)
+                    .map_err(|error| MigrationError::new(error.to_string()))?;
+                changed.push(entry.path().join("lease.json").display().to_string());
+            }
+            directory
+                .unlink(OsStr::new("writer-owned.json"))
+                .map_err(|error| MigrationError::new(error.to_string()))?;
+            changed.push(entry.path().join("writer-owned.json").display().to_string());
+        }
+        Ok(())
+    })();
+    result?;
+    std::fs::remove_file(&marker)?;
+    Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_confinement::worktrees::{WorktreeOrigin, WorktreeOwner};
+    use provenant_core::{HostId, WallTime};
+
+    fn owner(holder: Option<AttemptId>) -> WorktreeOwner {
+        WorktreeOwner {
+            attempt_id: holder,
+            operation_id: None,
+            branch: "slice/E1-33".to_owned(),
+            base: "origin/main".to_owned(),
+            host: HostId::from_bytes([3; 16]),
+            created_at: WallTime::from_unix_seconds(1_700_000_000).expect("wall time"),
+            origin: WorktreeOrigin::Lane,
+            label: None,
+            reference: None,
+        }
+    }
+
+    fn write_ownership(directory: &Directory, lane_owned: bool, holder: Option<AttemptId>) {
+        let record = WriterOwnership {
+            extra: Default::default(),
+            schema_version: WRITER_OWNERSHIP_VERSION,
+            lane_owned,
+            owner: Some(owner(holder)),
+        };
+        let bytes = crate::db::bytes(&record).expect("encode ownership");
+        crate::artifacts::seal(directory, "writer-owned.json", &bytes, crate::RECORD_LIMIT)
+            .expect("seal ownership");
+    }
+
+    #[test]
+    fn writer_owned_reads_as_lease() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let holder = AttemptId::from_bytes([7; 16]);
+        let attempt = root.path().join("attempts").join(holder.to_string());
+        std::fs::create_dir_all(&attempt).expect("attempt dir");
+        let directory = Directory::open_anchor(&attempt).expect("attempt anchor");
+        write_ownership(&directory, true, Some(holder));
+
+        let changed = migrate_store(root.path()).expect("migrate");
+        assert!(changed.iter().any(|path| path.ends_with("lease.json")));
+        assert!(
+            !attempt.join("writer-owned.json").exists(),
+            "old ownership record was replaced"
+        );
+        let bytes = crate::artifacts::read_sealed(&directory, "lease.json", crate::RECORD_LIMIT)
+            .expect("read lease")
+            .expect("lease exists");
+        let lease: WorktreeLease = serde_json::from_slice(&bytes).expect("decode lease");
+        assert_eq!(lease.holder, holder);
+        assert_eq!(lease.since, owner(Some(holder)).created_at);
+        assert_eq!(lease.sharing, Sharing::Inherit);
+        assert!(
+            !root.path().join("attempts").join("migrating-2").exists(),
+            "marker removed after the cut-over"
+        );
+
+        let again = migrate_store(root.path()).expect("migrate twice");
+        assert!(again.is_empty(), "second pass changes nothing: {again:?}");
+    }
+
+    #[test]
+    fn unowned_record_has_no_lease() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let id = AttemptId::from_bytes([8; 16]);
+        let attempt = root.path().join("attempts").join(id.to_string());
+        std::fs::create_dir_all(&attempt).expect("attempt dir");
+        let directory = Directory::open_anchor(&attempt).expect("attempt anchor");
+        write_ownership(&directory, false, Some(id));
+
+        migrate_store(root.path()).expect("migrate");
+        assert!(!attempt.join("writer-owned.json").exists());
+        assert!(!attempt.join("lease.json").exists());
+    }
+
+    #[test]
+    fn unsupported_version_pair_is_refused() {
+        let record = WriterOwnership {
+            extra: Default::default(),
+            schema_version: WRITER_OWNERSHIP_VERSION,
+            lane_owned: true,
+            owner: Some(owner(Some(AttemptId::from_bytes([9; 16])))),
+        };
+        assert!(migrate(1, 3, &record).is_err());
+        assert!(migrate(2, 1, &record).is_err());
+    }
+}
