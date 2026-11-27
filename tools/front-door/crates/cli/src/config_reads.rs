@@ -161,13 +161,9 @@ pub fn capability_overlay(roots: &Roots) -> provenant_records::CapabilityOverlay
         Some(roots.checkout()),
     );
     for warning in warnings {
-        provenant_records::warning::warn(provenant_records::warning::Warning::new(
-            provenant_records::warning::CONFIG_KEY_IGNORED,
-            warning.to_string(),
-            provenant_records::warning::detected_source(
-                provenant_records::warning::CONFIG_KEY_IGNORED,
-            ),
-        ));
+        provenant_records::warning::warn(
+            warning.into_typed(provenant_records::warning::CONFIG_KEY_IGNORED),
+        );
     }
     overlay
 }
@@ -308,6 +304,39 @@ mod tests {
             config.origins.get("domains.wait.local_interval_ms"),
             Some(provenant_config::Origin::Compiled { .. })
         ));
+    }
+
+    // A skipped entry warns with the config layer and key that caused it; a
+    // valid entry in the same table still applies.
+    #[test]
+    fn invalid_capability_overlay_entry_warns_with_its_layer_and_key_without_refusing() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version = 1\n\
+             [[adapter_capabilities]]\n\
+             adapter = 'codex'\n\
+             disable = ['write']\n\
+             [[adapter_capabilities]]\n\
+             adapter = 'not-an-adapter'\n",
+        )
+        .unwrap();
+        let (overlay, warnings) =
+            provenant_records::warning::capture(|| capability_overlay(&roots));
+        assert_eq!(overlay.entries.len(), 1, "{overlay:?}");
+        assert_eq!(overlay.entries[0].adapter, "codex");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            warnings[0].code.as_ref(),
+            provenant_records::warning::CONFIG_KEY_IGNORED.as_str()
+        );
+        assert_eq!(warnings[0].source.layer, Layer::Host);
+        assert_eq!(
+            warnings[0].source.origin.as_deref(),
+            Some("adapter_capabilities[not-an-adapter]")
+        );
     }
 
     #[test]

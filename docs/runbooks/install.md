@@ -154,7 +154,10 @@ once and applied to every smoke node. Adding `--dry-run` previews it without
 upgrading.
 The preview runs the currently installed binary's own `run smoke --explain`, not
 the candidate, so it shows the graph shape and route resolution that binary
-would launch; the candidate's graph is exercised only after it installs. The
+would launch; the candidate's graph is exercised only after it installs. It
+passes the same writer branch and base as the real verify, so the previewed
+writer starts from the fixture rather than falling back to the caller checkout.
+The
 scratch fixture commits a base and a fixture change, and both verification modes
 bind that commit as the review nodes' `diff_base`, so the review nodes have a
 non-empty range; its write node runs in a worktree the verification creates on a
@@ -175,7 +178,10 @@ launch with no writer skips review with a sourced reason. Supply
 `--set diff_base=BASE` to override the review base; its source is shown in the
 warnings.
 The scratch
-project's host binding is removed when the verification ends, including on
+project is built under a home-relative state path rather than the system
+temporary directory, so a peer can project it as a cross-host project and the
+remote smoke reaches its reader; the `--dry-run` preview uses the same root.
+Its host binding is removed when the verification ends, including on
 failure, so the deleted fixture never
 becomes a registered project. The human view leads with one status line per host
 (`upgraded`, `verified` or `failed - reason`), the smoke host prints its graph
