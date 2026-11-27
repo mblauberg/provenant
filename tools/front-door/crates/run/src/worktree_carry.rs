@@ -313,21 +313,6 @@ pub fn apply(
     ))
 }
 
-/// Snapshot `source` and apply it to `target` in one step.
-pub fn carry(
-    source: &Path,
-    target: &Path,
-    mode: CarryMode,
-    env: &[(OsString, OsString)],
-    executor: &dyn Executor,
-    cancel: &CancelToken,
-    timeout: Duration,
-) -> Result<(CarrySnapshot, Option<GitOid>), CarryError> {
-    let snapshot = snapshot(source, mode, env, executor, cancel, timeout)?;
-    let commit = apply(target, &snapshot, env, executor, cancel, timeout)?;
-    Ok((snapshot, commit))
-}
-
 /// Path of a carried snapshot's private index, kept beside the worktree so a
 /// crash cannot leave a stale file in the chair's tree.
 pub(crate) fn private_index_path(git_dir: &Path, tag: &str) -> PathBuf {
@@ -396,73 +381,6 @@ mod tests {
             fs::write(self.source.join("untracked.txt"), "new\n")?;
             Ok(())
         }
-    }
-
-    #[test]
-    fn carry_tracked_only_without_base() -> Result<(), Box<dyn std::error::Error>> {
-        let fixture = Fixture::new()?;
-        fixture.edit()?;
-        let env = test_env();
-        let executor = SystemExecutor::new(4)?;
-        let cancel = CancelToken::new();
-
-        let (tracked, commit) = carry(
-            &fixture.source,
-            &fixture.target,
-            CarryMode::Tracked,
-            &env,
-            &executor,
-            &cancel,
-            CARRY_TIMEOUT,
-        )?;
-        assert!(tracked.stash.is_some());
-        assert!(tracked.paths.iter().any(|p| p == "tracked.txt"));
-        assert!(!tracked.paths.iter().any(|p| p == "untracked.txt"));
-        let commit = commit.ok_or("carry made no commit")?;
-        let seen = git_at(
-            &fixture.target,
-            &[
-                "show",
-                "--pretty=format:%s",
-                "--name-only",
-                &commit.to_string(),
-            ],
-        );
-        assert!(seen.contains("wip: carried from chair"), "{seen}");
-        assert!(seen.contains("tracked.txt"), "{seen}");
-        assert!(!seen.contains("untracked.txt"), "{seen}");
-        Ok(())
-    }
-
-    #[test]
-    fn carry_all_includes_untracked_non_ignored() -> Result<(), Box<dyn std::error::Error>> {
-        let fixture = Fixture::new()?;
-        fixture.edit()?;
-        let env = test_env();
-        let executor = SystemExecutor::new(4)?;
-        let cancel = CancelToken::new();
-        let (snapshot, commit) = carry(
-            &fixture.source,
-            &fixture.target,
-            CarryMode::All,
-            &env,
-            &executor,
-            &cancel,
-            CARRY_TIMEOUT,
-        )?;
-        assert!(snapshot.paths.iter().any(|p| p == "untracked.txt"));
-        let commit = commit.ok_or("carry made no commit")?;
-        let seen = git_at(
-            &fixture.target,
-            &[
-                "show",
-                "--pretty=format:",
-                "--name-only",
-                &commit.to_string(),
-            ],
-        );
-        assert!(seen.contains("untracked.txt"), "{seen}");
-        Ok(())
     }
 
     #[test]

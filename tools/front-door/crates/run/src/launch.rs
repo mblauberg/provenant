@@ -449,66 +449,6 @@ pub fn commit_own_paths(
     }
 }
 
-/// Timing breakdown for one lane launch, in milliseconds.
-///
-/// Spec: docs/specs/agent-native.md#4-a-lane-as-a-native-sub-agent (#3348)
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LaunchTimings {
-    pub admission_ms: u64,
-    pub census_ms: u64,
-    pub git_ms: u64,
-    pub worktree_ms: u64,
-    pub prepare_ms: u64,
-    pub total_ms: u64,
-}
-
-/// One phase a launch records a duration for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LaunchPhase {
-    Admission,
-    Census,
-    Git,
-    Worktree,
-    Prepare,
-}
-
-/// Accumulates caller-sampled phase durations. The caller owns the monotonic
-/// clock, so no ambient time is read inside the run crate.
-#[derive(Debug, Default)]
-pub struct LaunchTimer {
-    timings: LaunchTimings,
-}
-
-impl LaunchTimer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add one phase's elapsed time.
-    pub fn record(&mut self, phase: LaunchPhase, elapsed: DurationMicros) {
-        let millis = elapsed.as_micros() / 1_000;
-        match phase {
-            LaunchPhase::Admission => self.timings.admission_ms += millis,
-            LaunchPhase::Census => self.timings.census_ms += millis,
-            LaunchPhase::Git => self.timings.git_ms += millis,
-            LaunchPhase::Worktree => self.timings.worktree_ms += millis,
-            LaunchPhase::Prepare => self.timings.prepare_ms += millis,
-        }
-    }
-
-    /// The recorded breakdown with the total recomputed from its phases.
-    pub fn finish(&self) -> LaunchTimings {
-        let mut timings = self.timings.clone();
-        timings.total_ms = timings
-            .admission_ms
-            .saturating_add(timings.census_ms)
-            .saturating_add(timings.git_ms)
-            .saturating_add(timings.worktree_ms)
-            .saturating_add(timings.prepare_ms);
-        timings
-    }
-}
-
 #[cfg(test)]
 mod commit_own_tests {
     use super::*;
@@ -701,20 +641,6 @@ mod commit_own_tests {
         assert_eq!(error.code, "INDEX_LOCK_RETRY_EXHAUSTED");
         assert!(matches!(error.class, ErrorClass::Transient { .. }));
         Ok(())
-    }
-
-    #[test]
-    fn launch_timer_sums_phases() {
-        let mut timer = LaunchTimer::new();
-        timer.record(LaunchPhase::Admission, DurationMicros::from_micros(1_500));
-        timer.record(LaunchPhase::Census, DurationMicros::from_micros(2_000));
-        timer.record(LaunchPhase::Git, DurationMicros::from_micros(3_000));
-        timer.record(LaunchPhase::Worktree, DurationMicros::from_micros(4_000));
-        timer.record(LaunchPhase::Prepare, DurationMicros::from_micros(5_000));
-        let timings = timer.finish();
-        assert_eq!(timings.admission_ms, 1);
-        assert_eq!(timings.census_ms, 2);
-        assert_eq!(timings.total_ms, 15);
     }
 }
 

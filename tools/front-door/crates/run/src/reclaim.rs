@@ -1,12 +1,9 @@
-//! Deadline-aware interface for resumable cleanup work.
+//! Page cursor and report for resumable cleanup work.
 //!
-//! One owner (a retention class) is driven at a time. The owner decides which
-//! candidates are ranked and what applying them means; this module owns the
-//! deadline checks, the page cursor and the rule that a resume finishes the
+//! This module owns the page cursor and the rule that a resume finishes the
 //! open page before it advances. A cursor is persisted by the caller so a
 //! restart never loses a candidate that was ranked but not yet applied.
 
-use provenant_core::Deadline;
 use serde::{Deserialize, Serialize};
 
 /// Where a resumable sweep stopped. Candidates are ranked by a stable sequence
@@ -133,52 +130,9 @@ where
     ReclaimPage { cursor, candidates }
 }
 
-/// A bounded cleanup owner. Implementations keep their own candidate policy;
-/// the shared driver owns deadline checks and cursor persistence.
-#[allow(dead_code)]
-pub trait Reclaimable {
-    type Plan;
-    type Error;
-
-    fn class(&self) -> &'static str;
-
-    fn scan(
-        &mut self,
-        cursor: Option<&ReclaimCursor>,
-        deadline: &Deadline,
-    ) -> Result<(Self::Plan, ReclaimReport), Self::Error>;
-
-    fn apply(
-        &mut self,
-        plan: Self::Plan,
-        deadline: &Deadline,
-    ) -> Result<ReclaimReport, Self::Error>;
-}
-
-/// Drive one owner for a bounded pass. `save` receives the cursor to persist;
-/// `None` means the owner is complete and any saved cursor can be cleared.
-/// Scan and apply share the one deadline, so time spent selecting candidates
-/// is charged against the same budget as applying them.
-pub fn drive<R: Reclaimable>(
-    owner: &mut R,
-    cursor: Option<&ReclaimCursor>,
-    deadline: &Deadline,
-    mut save: impl FnMut(Option<&ReclaimCursor>),
-) -> Result<ReclaimReport, R::Error> {
-    let (plan, mut report) = owner.scan(cursor, deadline)?;
-    report.merge(owner.apply(plan, deadline)?);
-    if report.complete {
-        save(None);
-    } else {
-        save(report.cursor.as_ref());
-    }
-    Ok(report)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{DurationMicros, MonoTime};
 
     fn candidates() -> [&'static str; 7] {
         ["a", "b", "c", "d", "e", "f", "g"]
@@ -245,81 +199,5 @@ mod tests {
         }
         assert_eq!(applied, ["a", "b", "c", "d", "e", "f", "g"]);
         assert_eq!(saved.map(|cursor| cursor.page_end_seq), Some(8));
-    }
-
-    struct FakeOwner {
-        pages: usize,
-    }
-
-    impl Reclaimable for FakeOwner {
-        type Plan = u64;
-        type Error = String;
-
-        fn class(&self) -> &'static str {
-            "Fixture"
-        }
-
-        fn scan(
-            &mut self,
-            cursor: Option<&ReclaimCursor>,
-            _deadline: &Deadline,
-        ) -> Result<(Self::Plan, ReclaimReport), Self::Error> {
-            let seq = cursor.map_or(0, |cursor| cursor.page_end_seq);
-            if seq >= self.pages {
-                return Ok((
-                    seq,
-                    ReclaimReport {
-                        complete: true,
-                        ..ReclaimReport::default()
-                    },
-                ));
-            }
-            Ok((seq, ReclaimReport::default()))
-        }
-
-        fn apply(
-            &mut self,
-            plan: Self::Plan,
-            _deadline: &Deadline,
-        ) -> Result<ReclaimReport, Self::Error> {
-            Ok(ReclaimReport {
-                scanned: 1,
-                reclaimed: 1,
-                complete: plan + 1 >= self.pages,
-                cursor: Some(ReclaimCursor::next_page(plan, 1)),
-            })
-        }
-    }
-
-    #[test]
-    fn drive_merges_scan_and_apply_and_persists_the_cursor() {
-        let deadline = Deadline::at(MonoTime::from_micros(10_000));
-        let mut owner = FakeOwner { pages: 3 };
-        let mut saved: Option<ReclaimCursor> = None;
-        let mut final_report = None;
-        for _ in 0..2 {
-            final_report = Some(
-                drive(&mut owner, saved.as_ref(), &deadline, |cursor| {
-                    saved = cursor.cloned();
-                })
-                .unwrap(),
-            );
-        }
-        let report = final_report.unwrap();
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.reclaimed, 1);
-        assert!(!report.complete);
-        assert_eq!(saved, Some(ReclaimCursor::next_page(1, 1)));
-
-        let deadline = Deadline::after(
-            MonoTime::from_micros(10_000),
-            DurationMicros::from_micros(100),
-        )
-        .unwrap();
-        let report = drive(&mut owner, saved.as_ref(), &deadline, |cursor| {
-            assert!(cursor.is_none(), "a complete owner clears its cursor");
-        })
-        .unwrap();
-        assert!(report.complete);
     }
 }

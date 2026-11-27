@@ -101,18 +101,6 @@ fn forge_quota_error(reset: jiff::Timestamp, pr: Option<u64>, cause: Option<&str
     error
 }
 
-impl ObserveError {
-    /// A rate limit becomes a typed transient error; other read failures keep
-    /// their own classification and are not silently turned into quota.
-    #[allow(dead_code, reason = "readers adopt this projection as they migrate")]
-    pub(crate) fn command_error(&self, pr: u64) -> Option<CommandError> {
-        match self {
-            Self::RateLimited { reset } => Some(forge_quota_error(*reset, Some(pr), None)),
-            _ => None,
-        }
-    }
-}
-
 /// What GitHub reports about a pull request's ability to merge. UNKNOWN is a
 /// real reading: GitHub has not finished computing mergeability for the head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2951,14 +2939,6 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             error.next[0].display_text().contains(&reset.to_string()),
             "the next step names the reset"
         );
-        let projected = ObserveError::RateLimited {
-            reset: timestamp(reset),
-        }
-        .command_error(7)
-        .expect("quota projection");
-        assert_eq!(projected.code, "FORGE_QUOTA_EXHAUSTED");
-        assert_eq!(projected.subject.and_then(|subject| subject.pr), Some(7));
-        assert!(ObserveError::Expired.command_error(7).is_none());
     }
 
     /// Spec: docs/specs/agent-native.md#39-delivery-queue-absorbs-the-fleet-3972-residue-3510

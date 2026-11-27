@@ -27,11 +27,9 @@ mod git_context;
 mod holder;
 mod identity;
 mod launch;
-pub use launch::{
-    LaunchPhase, LaunchTimer, LaunchTimings, OwnCommit, OwnCommitInput, commit_own_paths,
-};
+pub use launch::{OwnCommit, OwnCommitInput, commit_own_paths};
 pub mod worktree_carry;
-pub use worktree_carry::{CarryError, CarrySnapshot, carry};
+pub use worktree_carry::{CarryError, CarrySnapshot};
 pub mod lease_migrate;
 mod ledger;
 mod objects;
